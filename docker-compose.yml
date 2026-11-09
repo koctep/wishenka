@@ -1,0 +1,21 @@
+services:
+  wishenka:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wishenka-app
+    ports:
+      - "8000:8000"
+    environment:
+      - WISHENKA_DATABASE_URL=sqlite+aiosqlite:////app/data/wishenka.db
+      - WISHENKA_ENVIRONMENT=development
+      - WISHENKA_DEBUG=1
+      - WISHENKA_BOT_TOKEN=${BOT_TOKEN:-dummy_bot_token}
+    volumes:
+      - sqlite_data:/app/data
+      - ./wishenka:/app/wishenka:ro
+    restart: unless-stopped
+
+volumes:
+  sqlite_data:
+    driver: local
