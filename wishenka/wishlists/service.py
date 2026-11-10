@@ -5,7 +5,9 @@ import secrets
 from datetime import UTC, datetime, timedelta
 
 from wishenka.auth.models import AuthenticatedUser
+from wishenka.items.models import ItemPriority
 from wishenka.wishlists.exceptions import (
+    CannotReduceQuantityBelowReservedError,
     InsufficientQuantityError,
     InvalidInviteTokenError,
     ItemNotFoundError,
@@ -51,14 +53,16 @@ class WishlistService:
 
     async def create_wishlist(
         self,
-        owner: AuthenticatedUser,
-        title: str,
+        owner: AuthenticatedUser | None = None,
+        title: str = "",
         description: str | None = None,
         event_title: str | None = None,
         event_date: datetime | None = None,
         invite_token_expires_in: timedelta | None = None,
+        owner_id: int | None = None,
     ) -> Wishlist:
         """Create a new personal wishlist with cryptographically secure tokens."""
+        effective_owner_id = owner.telegram_id if owner is not None else (owner_id or 0)
         self._next_wishlist_id += 1
         public_token = secrets.token_urlsafe(16)
         invite_token = secrets.token_urlsafe(24)
@@ -67,7 +71,7 @@ class WishlistService:
 
         wishlist = Wishlist(
             id=self._next_wishlist_id,
-            owner_id=owner.telegram_id,
+            owner_id=effective_owner_id,
             title=title,
             description=description,
             event_title=event_title,
@@ -95,11 +99,11 @@ class WishlistService:
         logger.info(
             "Wishlist %s created by user %s",
             wishlist.id,
-            owner.telegram_id,
+            effective_owner_id,
             extra={
                 "event": "wishlist_created",
                 "wishlist_id": wishlist.id,
-                "owner_id": owner.telegram_id,
+                "owner_id": effective_owner_id,
                 "format": format_type,
                 "time_type": time_type,
                 "event_date": event_date.isoformat() if event_date is not None else None,
@@ -177,10 +181,15 @@ class WishlistService:
                         title=item.title,
                         description=item.description,
                         link=item.link,
+                        image_url=item.image_url,
                         price=item.price,
                         currency=item.currency,
+                        store_name=item.store_name,
+                        store_icon_url=item.store_icon_url,
                         quantity=item.quantity,
                         received_quantity=item.received_quantity,
+                        priority=item.priority,
+                        category=item.category,
                         is_archived=item.is_archived,
                         recipient_name=item.recipient_name,
                         is_recipient=True,
@@ -205,14 +214,19 @@ class WishlistService:
                         title=item.title,
                         description=item.description,
                         link=item.link,
+                        image_url=item.image_url,
                         price=item.price,
                         currency=item.currency,
+                        store_name=item.store_name,
+                        store_icon_url=item.store_icon_url,
                         quantity=item.quantity,
                         received_quantity=item.received_quantity,
                         available_quantity=available_qty,
                         is_fully_reserved=(available_qty == 0),
                         is_reserved_by_me=(my_reserved_qty > 0),
                         my_reserved_quantity=my_reserved_qty,
+                        priority=item.priority,
+                        category=item.category,
                         is_archived=item.is_archived,
                         recipient_name=item.recipient_name,
                         is_recipient=False,
@@ -616,6 +630,11 @@ class WishlistService:
         quantity: int = 1,
         recipient_user_id: int | None = None,
         recipient_name: str | None = None,
+        image_url: str | None = None,
+        store_name: str | None = None,
+        store_icon_url: str | None = None,
+        priority: ItemPriority = ItemPriority.MEDIUM,
+        category: str | None = None,
     ) -> WishItem:
         """Add a new wish item to the wishlist."""
         wl = await self.get_wishlist_by_id(wishlist_id)
@@ -670,6 +689,11 @@ class WishlistService:
             currency=currency,
             quantity=quantity,
             received_quantity=0,
+            image_url=image_url,
+            store_name=store_name,
+            store_icon_url=store_icon_url,
+            priority=priority,
+            category=category,
             is_archived=False,
             recipient_user_id=recipient_user_id,
             recipient_name=recipient_name,
@@ -688,6 +712,146 @@ class WishlistService:
                 "wishlist_id": wl.id,
                 "actor_id": actor.telegram_id,
                 "recipient_user_id": recipient_user_id,
+                "quantity": item.quantity,
+            },
+        )
+        return item
+
+    async def update_wish_item(
+        self,
+        item_id: int,
+        actor: AuthenticatedUser,
+        title: str | None = None,
+        description: str | None = None,
+        link: str | None = None,
+        image_url: str | None = None,
+        price: int | None = None,
+        currency: str | None = None,
+        quantity: int | None = None,
+        priority: ItemPriority | None = None,
+        category: str | None = None,
+        recipient_user_id: int | None = None,
+        recipient_name: str | None = None,
+    ) -> WishItem:
+        """Update wish item properties enforcing multi-quantity lock invariants."""
+        if item_id not in self._items:
+            logger.warning(
+                "Item lookup failed: id %s not found",
+                item_id,
+                extra={
+                    "event": "item_not_found",
+                    "item_id": item_id,
+                    "actor_id": actor.telegram_id,
+                },
+            )
+            raise ItemNotFoundError(f"Item {item_id} not found")
+
+        item = self._items[item_id]
+        wl = item.wishlist
+        if wl is not None:
+            if wl.status == WishlistStatus.ARCHIVED:
+                logger.warning(
+                    "Attempted to edit item in archived wishlist %s by actor %s",
+                    wl.id,
+                    actor.telegram_id,
+                    extra={
+                        "event": "item_mutation_blocked_archived",
+                        "item_id": item.id,
+                        "wishlist_id": wl.id,
+                        "actor_id": actor.telegram_id,
+                    },
+                )
+                raise WishlistArchivedError(f"Wishlist {wl.id} is archived")
+            if wl.status == WishlistStatus.DELETED:
+                logger.warning(
+                    "Attempted to edit item in deleted wishlist %s by actor %s",
+                    wl.id,
+                    actor.telegram_id,
+                    extra={
+                        "event": "item_mutation_blocked_deleted",
+                        "item_id": item.id,
+                        "wishlist_id": wl.id,
+                        "actor_id": actor.telegram_id,
+                    },
+                )
+                raise WishlistDeletedError(f"Wishlist {wl.id} is deleted")
+
+            ctx = WishlistAccessPolicy.resolve_context(actor, wl)
+            if not WishlistAccessPolicy.can_add_or_edit_item(ctx, wl):
+                logger.warning(
+                    "Actor %s denied permission to edit item %s in wishlist %s",
+                    actor.telegram_id,
+                    item.id,
+                    wl.id,
+                    extra={
+                        "event": "access_denied",
+                        "actor_id": actor.telegram_id,
+                        "wishlist_id": wl.id,
+                        "item_id": item.id,
+                        "action": "edit_item",
+                    },
+                )
+                raise PermissionDeniedError("Actor cannot edit this item")
+
+        quantity_delta = 0
+        if quantity is not None:
+            active_locked = item.reserved_quantity + item.received_quantity
+            if quantity < active_locked:
+                logger.warning(
+                    "Item %s quantity reduction rejected: requested %s, locked %s",
+                    item.id,
+                    quantity,
+                    active_locked,
+                    extra={
+                        "event": "item_quantity_reduction_rejected",
+                        "item_id": item.id,
+                        "wishlist_id": wl.id if wl else None,
+                        "actor_id": actor.telegram_id,
+                        "requested_quantity": quantity,
+                        "locked_quantity": active_locked,
+                    },
+                )
+                raise CannotReduceQuantityBelowReservedError(
+                    f"Cannot reduce quantity to {quantity}: {active_locked} units already locked"
+                )
+            quantity_delta = quantity - item.quantity
+            item.quantity = quantity
+
+        if title is not None:
+            item.title = title
+        if description is not None:
+            item.description = description
+        if link is not None:
+            item.link = link
+        if image_url is not None:
+            item.image_url = image_url
+        if price is not None:
+            item.price = price
+        if currency is not None:
+            item.currency = currency
+        if priority is not None:
+            item.priority = priority
+        if category is not None:
+            item.category = category
+        if recipient_user_id is not None:
+            item.recipient_user_id = recipient_user_id
+        if recipient_name is not None:
+            item.recipient_name = recipient_name
+
+        item.updated_at = datetime.now(UTC)
+        logger.info(
+            "Item %s updated by actor %s (delta=%s, new_qty=%s)",
+            item.id,
+            actor.telegram_id,
+            quantity_delta,
+            item.quantity,
+            extra={
+                "event": "item_updated",
+                "item_id": item.id,
+                "wishlist_id": wl.id if wl else None,
+                "actor_id": actor.telegram_id,
+                "quantity": item.quantity,
+                "quantity_delta": quantity_delta,
             },
         )
         return item

@@ -1,6 +1,7 @@
 """Wishlists domain package providing roles, permissions, lifecycle, and projections."""
 
 from wishenka.wishlists.exceptions import (
+    CannotReduceQuantityBelowReservedError,
     InsufficientQuantityError,
     InvalidInviteTokenError,
     ItemNotFoundError,
@@ -37,6 +38,7 @@ from wishenka.wishlists.schemas import (
 from wishenka.wishlists.service import WishlistService
 
 __all__ = [
+    "CannotReduceQuantityBelowReservedError",
     "InsufficientQuantityError",
     "InvalidInviteTokenError",
     "ItemNotFoundError",

@@ -4,6 +4,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from wishenka.items.models import ItemPriority
 from wishenka.wishlists.models import WishlistRole, WishlistStatus
 
 
@@ -19,10 +20,15 @@ class WishItemRecipientViewDTO(BaseModel):
     title: str
     description: str | None = None
     link: str | None = None
+    image_url: str | None = None
     price: int | None = None
     currency: str = "RUB"
+    store_name: str | None = None
+    store_icon_url: str | None = None
     quantity: int = 1
     received_quantity: int = 0
+    priority: ItemPriority = ItemPriority.MEDIUM
+    category: str | None = None
     is_archived: bool = False
     recipient_name: str | None = None
     is_recipient: bool = True
@@ -40,14 +46,19 @@ class WishItemGifterViewDTO(BaseModel):
     title: str
     description: str | None = None
     link: str | None = None
+    image_url: str | None = None
     price: int | None = None
     currency: str = "RUB"
+    store_name: str | None = None
+    store_icon_url: str | None = None
     quantity: int = 1
     received_quantity: int = 0
     available_quantity: int
     is_fully_reserved: bool
     is_reserved_by_me: bool
     my_reserved_quantity: int
+    priority: ItemPriority = ItemPriority.MEDIUM
+    category: str | None = None
     is_archived: bool = False
     recipient_name: str | None = None
     is_recipient: bool = False

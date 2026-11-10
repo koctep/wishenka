@@ -32,10 +32,12 @@
   - В интерфейсе используются раздельные Jinja2 макросы для владельца и дарителя.
   - Детальная документация ролевой модели, DTO и инвариантов представлена в [`doc/dev/wishlists.md`](wishlists.md).
 
-### 2.2. Предотвращение овербукинга
+### 2.2. Предотвращение овербукинга и штучный учет
 Суммарное количество забронированных штук не может превышать требуемое:
 - `sum(active_reservations.quantity) <= wish_item.quantity`
-- Контролируется транзакцией в SQLite при бронировании.
+- Доступный остаток: `available_quantity = max(0, quantity - received_quantity - reserved_quantity)`
+- Запрет уменьшения желаемого количества ниже уже заблокированного (`reserved + fulfilled`).
+- Контролируется доменными инвариантами и транзакциями в SQLite при бронировании (см. [`doc/dev/items.md`](items.md)).
 
 ### 2.3. Аутентификация в Telegram Mini App
 1. TMA при открытии передает `window.Telegram.WebApp.initData`.
@@ -63,5 +65,6 @@
 ## 4. Документация подсистем и доменов
 
 - [`doc/dev/wishlists.md`](wishlists.md) — Домен вишлистов: ролевая модель (RBAC/ABAC), жизненный цикл, Surprise Invariant, бронирование и токены шеринга.
+- [`doc/dev/items.md`](items.md) — Домен элементов желаний: универсальный ввод (текст, ссылки, шеринг), каскадный парсинг метаданных (JSON-LD, OpenGraph, Microdata), graceful fallback при антибот-защите и штучный учет подарков.
 - [`doc/dev/auth.md`](auth.md) — Аутентификация Telegram Mini App, валидация initData и сессионные токены.
 - [`doc/dev/infrastructure.md`](infrastructure.md) — Окружение разработки, Makefile, линтеры, форматирование и CI.

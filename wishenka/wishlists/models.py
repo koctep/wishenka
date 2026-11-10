@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 
+from wishenka.items.models import ItemPriority
+
 
 class WishlistRole(StrEnum):
     """Membership roles within a collaborative wishlist."""
@@ -82,6 +84,11 @@ class WishItem:
     currency: str = "RUB"
     quantity: int = 1
     received_quantity: int = 0
+    image_url: str | None = None
+    store_name: str | None = None
+    store_icon_url: str | None = None
+    priority: ItemPriority = ItemPriority.MEDIUM
+    category: str | None = None
     is_archived: bool = False
     recipient_user_id: int | None = None
     recipient_name: str | None = None
@@ -89,6 +96,34 @@ class WishItem:
     reservations: list[Reservation] = field(default_factory=list)
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    @property
+    def reserved_quantity(self) -> int:
+        """Sum of reserved quantity across all active reservations."""
+        return sum(r.quantity for r in self.reservations if r.status == ReservationStatus.ACTIVE)
+
+    @property
+    def available_quantity(self) -> int:
+        """Available quantity remaining to be reserved by gifters."""
+        return max(0, self.quantity - self.received_quantity - self.reserved_quantity)
+
+    @property
+    def desired_quantity(self) -> int:
+        """Alias for quantity."""
+        return self.quantity
+
+    @desired_quantity.setter
+    def desired_quantity(self, val: int) -> None:
+        self.quantity = val
+
+    @property
+    def fulfilled_quantity(self) -> int:
+        """Alias for received_quantity."""
+        return self.received_quantity
+
+    @fulfilled_quantity.setter
+    def fulfilled_quantity(self, val: int) -> None:
+        self.received_quantity = val
 
 
 @dataclass
@@ -122,6 +157,7 @@ from wishenka.wishlists.schemas import (  # noqa: E402
 )
 
 __all__ = [
+    "ItemPriority",
     "Reservation",
     "ReservationStatus",
     "WishItem",
