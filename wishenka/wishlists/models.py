@@ -1,0 +1,139 @@
+"""Domain models, enumerations, and dataclasses for wishlists."""
+
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from enum import StrEnum
+
+
+class WishlistRole(StrEnum):
+    """Membership roles within a collaborative wishlist."""
+
+    OWNER = "owner"
+    ADMIN = "admin"
+    MEMBER = "member"
+
+
+class WishlistStatus(StrEnum):
+    """Lifecycle status of a wishlist."""
+
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+    DELETED = "deleted"
+
+
+class ReservationStatus(StrEnum):
+    """Lifecycle status of an item reservation."""
+
+    ACTIVE = "active"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+
+class WishlistFormat(StrEnum):
+    """Participation format of a wishlist."""
+
+    PERSONAL = "personal"
+    COLLABORATIVE = "collaborative"
+
+
+class WishlistTimeType(StrEnum):
+    """Time regime of a wishlist."""
+
+    ONGOING = "ongoing"
+    EVENT = "event"
+
+
+@dataclass
+class WishlistMember:
+    """Collaborator member record within a wishlist."""
+
+    id: int = 0
+    wishlist_id: int = 0
+    user_id: int = 0
+    role: WishlistRole = WishlistRole.MEMBER
+    joined_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    wishlist: "Wishlist | None" = None
+
+
+@dataclass
+class Reservation:
+    """Gifter reservation record for wish item quantities."""
+
+    id: int = 0
+    wish_item_id: int = 0
+    user_id: int = 0
+    quantity: int = 1
+    status: ReservationStatus = ReservationStatus.ACTIVE
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    wish_item: "WishItem | None" = None
+
+
+@dataclass
+class WishItem:
+    """Individual wish item within a wishlist."""
+
+    id: int = 0
+    wishlist_id: int = 0
+    title: str = ""
+    description: str | None = None
+    link: str | None = None
+    price: int | None = None
+    currency: str = "RUB"
+    quantity: int = 1
+    received_quantity: int = 0
+    is_archived: bool = False
+    recipient_user_id: int | None = None
+    recipient_name: str | None = None
+    wishlist: "Wishlist | None" = None
+    reservations: list[Reservation] = field(default_factory=list)
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+
+@dataclass
+class Wishlist:
+    """Wishlist aggregate root entity."""
+
+    id: int = 0
+    owner_id: int = 0
+    title: str = ""
+    description: str | None = None
+    event_title: str | None = None
+    event_date: datetime | None = None
+    is_collaborative: bool = False
+    status: WishlistStatus = WishlistStatus.ACTIVE
+    public_token: str = ""
+    invite_token: str = ""
+    invite_token_expires_at: datetime | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    members: list[WishlistMember] = field(default_factory=list)
+    items: list[WishItem] = field(default_factory=list)
+
+
+# Re-export schemas for convenience
+from wishenka.wishlists.schemas import (  # noqa: E402
+    WishItemGifterViewDTO,
+    WishItemRecipientViewDTO,
+    WishItemViewDTO,
+    WishlistDetailViewDTO,
+    WishlistViewDTO,
+)
+
+__all__ = [
+    "Reservation",
+    "ReservationStatus",
+    "WishItem",
+    "WishItemGifterViewDTO",
+    "WishItemRecipientViewDTO",
+    "WishItemViewDTO",
+    "Wishlist",
+    "WishlistDetailViewDTO",
+    "WishlistFormat",
+    "WishlistMember",
+    "WishlistRole",
+    "WishlistStatus",
+    "WishlistTimeType",
+    "WishlistViewDTO",
+]

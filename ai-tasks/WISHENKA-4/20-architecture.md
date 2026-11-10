@@ -277,7 +277,9 @@ class TelegramUser(BaseModel):
     first_name: str = Field(description="User's first name")
     last_name: str | None = Field(default=None, description="User's last name if provided")
     username: str | None = Field(default=None, description="Telegram username without @")
-    language_code: str | None = Field(default=None, description="User language code (e.g. 'ru', 'en')")
+    language_code: str | None = Field(
+        default=None, description="User language code (e.g. 'ru', 'en')"
+    )
     is_premium: bool = Field(default=False, description="Whether user has Telegram Premium")
 
 

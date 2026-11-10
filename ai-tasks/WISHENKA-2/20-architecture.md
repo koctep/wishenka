@@ -553,18 +553,22 @@ class WishItemBaseDTO(BaseModel):
     sort_order: int
     status: str
 
+
 class WishItemRecipientViewDTO(WishItemBaseDTO):
     """
     Модель для получателя подарка.
     Принципиально отсутствуют любые упоминания о бронированиях!
     """
+
     is_recipient: Literal[True] = True
+
 
 class WishItemGifterViewDTO(WishItemBaseDTO):
     """
     Модель для дарителей и третьих лиц.
     Включает доступный остаток и статус собственной брони текущего пользователя.
     """
+
     is_recipient: Literal[False] = False
     available_count: int
     my_reservation_id: int | None = None
