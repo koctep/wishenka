@@ -11,6 +11,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 
 from wishenka.config import Settings
 from wishenka.logging import configure_logging
+from wishenka.web.routes.auth import router as auth_router
 
 logger = logging.getLogger("wishenka.web")
 
@@ -92,8 +93,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         debug=settings.debug,
         lifespan=lifespan,
     )
+    app.state.settings = settings
 
     app.add_middleware(RequestLoggingMiddleware)
+    app.include_router(auth_router)
 
     @app.get("/healthz")
     async def healthcheck() -> dict[str, Any]:
