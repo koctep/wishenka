@@ -27,8 +27,9 @@ class ReservationStatus(StrEnum):
     """Lifecycle status of an item reservation."""
 
     ACTIVE = "active"
-    COMPLETED = "completed"
+    PURCHASED = "purchased"
     CANCELLED = "cancelled"
+    COMPLETED = "completed"
 
 
 class WishlistFormat(StrEnum):
@@ -99,8 +100,12 @@ class WishItem:
 
     @property
     def reserved_quantity(self) -> int:
-        """Sum of reserved quantity across all active reservations."""
-        return sum(r.quantity for r in self.reservations if r.status == ReservationStatus.ACTIVE)
+        """Sum of reserved quantity across all active and purchased reservations."""
+        return sum(
+            r.quantity
+            for r in self.reservations
+            if r.status in (ReservationStatus.ACTIVE, ReservationStatus.PURCHASED)
+        )
 
     @property
     def available_quantity(self) -> int:
@@ -132,6 +137,7 @@ class Wishlist:
 
     id: int = 0
     owner_id: int = 0
+    owner_name: str = ""
     title: str = ""
     description: str | None = None
     event_title: str | None = None

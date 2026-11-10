@@ -845,7 +845,8 @@ class TestWishlistAuditLogging:
         records = [
             r
             for r in caplog.records
-            if r.name == "wishenka.wishlists" and getattr(r, "event", None) == "reservation_created"
+            if r.name == "wishenka.wishlists"
+            and getattr(r, "event", None) in ("item_reserved", "reservation_created")
         ]
         assert len(records) == 1
         rec = records[0]
@@ -897,5 +898,8 @@ class TestWishlistAuditLogging:
         warning_events = [getattr(r, "event", None) for r in warning_records]
 
         assert "access_denied" in warning_events
-        assert "surprise_invariant_violation_attempt" in warning_events
+        assert (
+            "self_reservation_blocked" in warning_events
+            or "surprise_invariant_violation_attempt" in warning_events
+        )
         assert "invalid_invite_token" in warning_events

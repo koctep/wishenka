@@ -1,5 +1,6 @@
 """Wishlists domain package providing roles, permissions, lifecycle, and projections."""
 
+from wishenka.wishlists.concurrency import ItemConcurrencyCoordinator
 from wishenka.wishlists.exceptions import (
     CannotReduceQuantityBelowReservedError,
     InsufficientQuantityError,
@@ -7,6 +8,7 @@ from wishenka.wishlists.exceptions import (
     ItemNotFoundError,
     PermissionDeniedError,
     ReservationError,
+    ReservationNotFoundError,
     SelfReservationError,
     WishlistArchivedError,
     WishlistDeletedError,
@@ -29,6 +31,8 @@ from wishenka.wishlists.policy import (
     WishlistAccessPolicy,
 )
 from wishenka.wishlists.schemas import (
+    MyReservationItemDTO,
+    UserReservationsSummaryDTO,
     WishItemGifterViewDTO,
     WishItemRecipientViewDTO,
     WishItemViewDTO,
@@ -41,12 +45,16 @@ __all__ = [
     "CannotReduceQuantityBelowReservedError",
     "InsufficientQuantityError",
     "InvalidInviteTokenError",
+    "ItemConcurrencyCoordinator",
     "ItemNotFoundError",
+    "MyReservationItemDTO",
     "PermissionDeniedError",
     "Reservation",
     "ReservationError",
+    "ReservationNotFoundError",
     "ReservationStatus",
     "SelfReservationError",
+    "UserReservationsSummaryDTO",
     "UserWishlistContext",
     "WishItem",
     "WishItemGifterViewDTO",

@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.items.models import ItemPriority
+from wishenka.wishlists.concurrency import ItemConcurrencyCoordinator
 from wishenka.wishlists.exceptions import (
     CannotReduceQuantityBelowReservedError,
     InsufficientQuantityError,
@@ -13,6 +14,7 @@ from wishenka.wishlists.exceptions import (
     ItemNotFoundError,
     PermissionDeniedError,
     ReservationError,
+    ReservationNotFoundError,
     SelfReservationError,
     WishlistArchivedError,
     WishlistDeletedError,
@@ -31,6 +33,8 @@ from wishenka.wishlists.models import (
 )
 from wishenka.wishlists.policy import WishlistAccessPolicy
 from wishenka.wishlists.schemas import (
+    MyReservationItemDTO,
+    UserReservationsSummaryDTO,
     WishItemGifterViewDTO,
     WishItemRecipientViewDTO,
     WishlistDetailViewDTO,
@@ -46,10 +50,16 @@ class WishlistService:
         self._wishlists: dict[int, Wishlist] = {}
         self._items: dict[int, WishItem] = {}
         self._reservations: dict[int, Reservation] = {}
+        self._concurrency_coordinator = ItemConcurrencyCoordinator()
         self._next_wishlist_id: int = 0
         self._next_member_id: int = 0
         self._next_item_id: int = 0
         self._next_reservation_id: int = 0
+
+    @property
+    def concurrency_coordinator(self) -> ItemConcurrencyCoordinator:
+        """Expose item concurrency coordinator."""
+        return self._concurrency_coordinator
 
     async def create_wishlist(
         self,
@@ -63,6 +73,7 @@ class WishlistService:
     ) -> Wishlist:
         """Create a new personal wishlist with cryptographically secure tokens."""
         effective_owner_id = owner.telegram_id if owner is not None else (owner_id or 0)
+        effective_owner_name = owner.first_name if owner is not None else ""
         self._next_wishlist_id += 1
         public_token = secrets.token_urlsafe(16)
         invite_token = secrets.token_urlsafe(24)
@@ -72,6 +83,7 @@ class WishlistService:
         wishlist = Wishlist(
             id=self._next_wishlist_id,
             owner_id=effective_owner_id,
+            owner_name=effective_owner_name,
             title=title,
             description=description,
             event_title=event_title,
@@ -196,18 +208,25 @@ class WishlistService:
                     )
                 )
             else:
-                active_reservations = [
-                    r for r in item.reservations if r.status == ReservationStatus.ACTIVE
+                active_or_purchased = [
+                    r
+                    for r in item.reservations
+                    if r.status in (ReservationStatus.ACTIVE, ReservationStatus.PURCHASED)
                 ]
-                reserved_qty = sum(r.quantity for r in active_reservations)
+                reserved_qty = sum(r.quantity for r in active_or_purchased)
                 available_qty = max(0, item.quantity - item.received_quantity - reserved_qty)
                 my_reserved_qty = 0
+                my_reservation_status: ReservationStatus | None = None
+                my_reservation_id: int | None = None
                 if current_user is not None:
-                    my_reserved_qty = sum(
-                        r.quantity
-                        for r in active_reservations
-                        if r.user_id == current_user.telegram_id
-                    )
+                    user_reservations = [
+                        r for r in active_or_purchased if r.user_id == current_user.telegram_id
+                    ]
+                    my_reserved_qty = sum(r.quantity for r in user_reservations)
+                    if user_reservations:
+                        my_res = user_reservations[-1]
+                        my_reservation_status = my_res.status
+                        my_reservation_id = my_res.id
                 item_views.append(
                     WishItemGifterViewDTO(
                         id=item.id,
@@ -225,6 +244,8 @@ class WishlistService:
                         is_fully_reserved=(available_qty == 0),
                         is_reserved_by_me=(my_reserved_qty > 0),
                         my_reserved_quantity=my_reserved_qty,
+                        my_reservation_status=my_reservation_status,
+                        my_reservation_id=my_reservation_id,
                         priority=item.priority,
                         category=item.category,
                         is_archived=item.is_archived,
@@ -548,7 +569,7 @@ class WishlistService:
         wl.updated_at = datetime.now(UTC)
         for item in wl.items:
             for res in item.reservations:
-                if res.status == ReservationStatus.ACTIVE:
+                if res.status in (ReservationStatus.ACTIVE, ReservationStatus.PURCHASED):
                     res.status = ReservationStatus.CANCELLED
                     res.updated_at = datetime.now(UTC)
         logger.info(
@@ -864,125 +885,132 @@ class WishlistService:
     ) -> Reservation:
         """Reserve quantity units of an item on behalf of a gifter."""
         gifter_id = user.telegram_id if user is not None else 0
-        if item_id not in self._items:
-            logger.warning(
-                "Reservation failed: item %s not found",
-                item_id,
-                extra={
-                    "event": "item_not_found",
-                    "item_id": item_id,
-                    "gifter_id": gifter_id,
-                },
-            )
-            raise ItemNotFoundError(f"Item {item_id} not found")
-
-        item = self._items[item_id]
-        wl = item.wishlist
-        if wl is not None:
-            if wl.status == WishlistStatus.ARCHIVED:
+        async with self._concurrency_coordinator.acquire(item_id):
+            if item_id not in self._items:
                 logger.warning(
-                    "Reservation blocked on archived wishlist %s for item %s by gifter %s",
-                    wl.id,
+                    "Reservation failed: item %s not found",
                     item_id,
-                    gifter_id,
                     extra={
-                        "event": "reservation_blocked_archived",
-                        "wishlist_id": wl.id,
+                        "event": "item_not_found",
                         "item_id": item_id,
                         "gifter_id": gifter_id,
                     },
                 )
-                raise WishlistArchivedError(f"Cannot reserve: wishlist {wl.id} is archived")
-            if wl.status == WishlistStatus.DELETED:
+                raise ItemNotFoundError(f"Item {item_id} not found")
+
+            item = self._items[item_id]
+            wl = item.wishlist
+            if wl is not None:
+                if wl.status == WishlistStatus.ARCHIVED:
+                    logger.warning(
+                        "Reservation blocked on archived wishlist %s for item %s by gifter %s",
+                        wl.id,
+                        item_id,
+                        gifter_id,
+                        extra={
+                            "event": "reservation_blocked_archived",
+                            "wishlist_id": wl.id,
+                            "item_id": item_id,
+                            "gifter_id": gifter_id,
+                        },
+                    )
+                    raise WishlistArchivedError(f"Cannot reserve: wishlist {wl.id} is archived")
+                if wl.status == WishlistStatus.DELETED:
+                    logger.warning(
+                        "Reservation blocked on deleted wishlist %s for item %s by gifter %s",
+                        wl.id,
+                        item_id,
+                        gifter_id,
+                        extra={
+                            "event": "reservation_blocked_deleted",
+                            "wishlist_id": wl.id,
+                            "item_id": item_id,
+                            "gifter_id": gifter_id,
+                        },
+                    )
+                    raise WishlistDeletedError(f"Cannot reserve: wishlist {wl.id} is deleted")
+            if item.is_archived:
                 logger.warning(
-                    "Reservation blocked on deleted wishlist %s for item %s by gifter %s",
-                    wl.id,
+                    "Reservation blocked on archived item %s by gifter %s",
                     item_id,
                     gifter_id,
                     extra={
-                        "event": "reservation_blocked_deleted",
-                        "wishlist_id": wl.id,
+                        "event": "reservation_blocked_archived_item",
                         "item_id": item_id,
                         "gifter_id": gifter_id,
                     },
                 )
-                raise WishlistDeletedError(f"Cannot reserve: wishlist {wl.id} is deleted")
-        if item.is_archived:
-            logger.warning(
-                "Reservation blocked on archived item %s by gifter %s",
-                item_id,
-                gifter_id,
-                extra={
-                    "event": "reservation_blocked_archived_item",
-                    "item_id": item_id,
-                    "gifter_id": gifter_id,
-                },
-            )
-            raise WishlistArchivedError(f"Cannot reserve: item {item_id} is archived")
+                raise WishlistArchivedError(f"Cannot reserve: item {item_id} is archived")
 
-        ctx = WishlistAccessPolicy.resolve_context(user, wl) if wl is not None else None
-        if ctx is not None and not WishlistAccessPolicy.can_reserve_item(user, ctx, item):
-            logger.warning(
-                "Surprise Invariant trigger: recipient %s attempted self-reservation on item %s",
-                gifter_id,
-                item_id,
-                extra={
-                    "event": "surprise_invariant_violation_attempt",
-                    "gifter_id": gifter_id,
-                    "item_id": item_id,
-                    "recipient_user_id": item.recipient_user_id,
-                },
-            )
-            raise SelfReservationError("Recipient cannot reserve an item designated for themselves")
+            ctx = WishlistAccessPolicy.resolve_context(user, wl) if wl is not None else None
+            if ctx is not None and not WishlistAccessPolicy.can_reserve_item(user, ctx, item):
+                logger.warning(
+                    "Self-reservation blocked: recipient %s cannot reserve item %s",
+                    gifter_id,
+                    item_id,
+                    extra={
+                        "event": "self_reservation_blocked",
+                        "wishlist_id": wl.id if wl else None,
+                        "item_id": item_id,
+                        "user_id": gifter_id,
+                        "gifter_id": gifter_id,
+                        "recipient_user_id": item.recipient_user_id,
+                    },
+                )
+                raise SelfReservationError(
+                    "Recipient cannot reserve an item designated for themselves"
+                )
 
-        active_reservations = [r for r in item.reservations if r.status == ReservationStatus.ACTIVE]
-        reserved_qty = sum(r.quantity for r in active_reservations)
-        available_qty = item.quantity - item.received_quantity - reserved_qty
-        if quantity > available_qty:
-            logger.warning(
-                "Reservation failed: requested %s units of item %s, available %s (gifter %s)",
+            available_qty = item.available_quantity
+            if quantity > available_qty:
+                logger.warning(
+                    "Reservation blocked: requested %s units of item %s, available %s (gifter %s)",
+                    quantity,
+                    item_id,
+                    available_qty,
+                    gifter_id,
+                    extra={
+                        "event": "insufficient_quantity_blocked",
+                        "wishlist_id": wl.id if wl else None,
+                        "item_id": item_id,
+                        "user_id": gifter_id,
+                        "gifter_id": gifter_id,
+                        "requested_quantity": quantity,
+                        "available_quantity": available_qty,
+                    },
+                )
+                raise InsufficientQuantityError(
+                    f"Cannot reserve {quantity} units, available: {available_qty}"
+                )
+
+            self._next_reservation_id += 1
+            res = Reservation(
+                id=self._next_reservation_id,
+                wish_item_id=item.id,
+                user_id=gifter_id,
+                quantity=quantity,
+                status=ReservationStatus.ACTIVE,
+                wish_item=item,
+            )
+            item.reservations.append(res)
+            self._reservations[res.id] = res
+            logger.info(
+                "Reservation %s created for item %s (quantity=%s) by gifter %s",
+                res.id,
+                item.id,
                 quantity,
-                item_id,
-                available_qty,
                 gifter_id,
                 extra={
-                    "event": "insufficient_quantity",
-                    "item_id": item_id,
-                    "requested_quantity": quantity,
-                    "available_quantity": available_qty,
+                    "event": "item_reserved",
+                    "wishlist_id": wl.id if wl else None,
+                    "reservation_id": res.id,
+                    "item_id": item.id,
+                    "quantity": quantity,
+                    "user_id": gifter_id,
                     "gifter_id": gifter_id,
                 },
             )
-            raise InsufficientQuantityError(
-                f"Cannot reserve {quantity} units, available: {available_qty}"
-            )
-
-        self._next_reservation_id += 1
-        res = Reservation(
-            id=self._next_reservation_id,
-            wish_item_id=item.id,
-            user_id=gifter_id,
-            quantity=quantity,
-            status=ReservationStatus.ACTIVE,
-            wish_item=item,
-        )
-        item.reservations.append(res)
-        self._reservations[res.id] = res
-        logger.info(
-            "Reservation %s created for item %s (quantity=%s) by gifter %s",
-            res.id,
-            item.id,
-            quantity,
-            gifter_id,
-            extra={
-                "event": "reservation_created",
-                "reservation_id": res.id,
-                "item_id": item.id,
-                "quantity": quantity,
-                "gifter_id": gifter_id,
-            },
-        )
-        return res
+            return res
 
     async def get_reservation_status(self, reservation_id: int) -> ReservationStatus:
         """Query the lifecycle status of a reservation."""
@@ -995,8 +1023,465 @@ class WishlistService:
                     "reservation_id": reservation_id,
                 },
             )
-            raise ReservationError(f"Reservation {reservation_id} not found")
+            raise ReservationNotFoundError(f"Reservation {reservation_id} not found")
         return self._reservations[reservation_id].status
+
+    async def mark_reservation_purchased(
+        self,
+        reservation_id: int,
+        user: AuthenticatedUser,
+    ) -> Reservation:
+        """Transition reservation from ACTIVE to PURCHASED."""
+        if reservation_id not in self._reservations:
+            logger.warning(
+                "Mark reservation purchased failed: id %s not found",
+                reservation_id,
+                extra={
+                    "event": "reservation_not_found",
+                    "reservation_id": reservation_id,
+                    "actor_id": user.telegram_id,
+                },
+            )
+            raise ReservationNotFoundError(f"Reservation {reservation_id} not found")
+
+        res = self._reservations[reservation_id]
+        if res.user_id != user.telegram_id:
+            logger.warning(
+                "Actor %s denied permission to mark reservation %s as purchased",
+                user.telegram_id,
+                reservation_id,
+                extra={
+                    "event": "access_denied",
+                    "actor_id": user.telegram_id,
+                    "reservation_id": reservation_id,
+                    "action": "mark_reservation_purchased",
+                },
+            )
+            raise PermissionDeniedError("Actor is not reservation owner")
+
+        if res.status != ReservationStatus.ACTIVE:
+            logger.warning(
+                "Invalid reservation transition to PURCHASED from status %s for reservation %s",
+                res.status,
+                reservation_id,
+                extra={
+                    "event": "invalid_reservation_transition",
+                    "reservation_id": reservation_id,
+                    "from_status": res.status,
+                    "to_status": ReservationStatus.PURCHASED,
+                },
+            )
+            raise ReservationError(f"Cannot mark reservation in status {res.status} as purchased")
+
+        async with self._concurrency_coordinator.acquire(res.wish_item_id):
+            res.status = ReservationStatus.PURCHASED
+            res.updated_at = datetime.now(UTC)
+
+        logger.info(
+            "Reservation %s marked as PURCHASED by actor %s",
+            reservation_id,
+            user.telegram_id,
+            extra={
+                "event": "reservation_purchased",
+                "wishlist_id": res.wish_item.wishlist_id if res.wish_item else None,
+                "reservation_id": reservation_id,
+                "item_id": res.wish_item_id,
+                "wish_item_id": res.wish_item_id,
+                "user_id": user.telegram_id,
+                "actor_id": user.telegram_id,
+                "quantity": res.quantity,
+            },
+        )
+        return res
+
+    async def revert_reservation_to_active(
+        self,
+        reservation_id: int,
+        user: AuthenticatedUser,
+    ) -> Reservation:
+        """Transition reservation from PURCHASED back to ACTIVE."""
+        if reservation_id not in self._reservations:
+            logger.warning(
+                "Revert reservation failed: id %s not found",
+                reservation_id,
+                extra={
+                    "event": "reservation_not_found",
+                    "reservation_id": reservation_id,
+                    "actor_id": user.telegram_id,
+                    "user_id": user.telegram_id,
+                },
+            )
+            raise ReservationNotFoundError(f"Reservation {reservation_id} not found")
+
+        res = self._reservations[reservation_id]
+        if res.user_id != user.telegram_id:
+            logger.warning(
+                "Actor %s denied permission to revert reservation %s to active",
+                user.telegram_id,
+                reservation_id,
+                extra={
+                    "event": "access_denied",
+                    "actor_id": user.telegram_id,
+                    "user_id": user.telegram_id,
+                    "reservation_id": reservation_id,
+                    "action": "revert_reservation_to_active",
+                },
+            )
+            raise PermissionDeniedError("Actor is not reservation owner")
+
+        if res.status != ReservationStatus.PURCHASED:
+            logger.warning(
+                "Invalid reservation transition to ACTIVE from status %s for reservation %s",
+                res.status,
+                reservation_id,
+                extra={
+                    "event": "invalid_reservation_transition",
+                    "reservation_id": reservation_id,
+                    "from_status": res.status,
+                    "to_status": ReservationStatus.ACTIVE,
+                },
+            )
+            raise ReservationError(f"Cannot revert reservation in status {res.status} to active")
+
+        async with self._concurrency_coordinator.acquire(res.wish_item_id):
+            res.status = ReservationStatus.ACTIVE
+            res.updated_at = datetime.now(UTC)
+
+        logger.info(
+            "Reservation %s reverted to ACTIVE by actor %s",
+            reservation_id,
+            user.telegram_id,
+            extra={
+                "event": "reservation_reverted",
+                "wishlist_id": res.wish_item.wishlist_id if res.wish_item else None,
+                "reservation_id": reservation_id,
+                "item_id": res.wish_item_id,
+                "wish_item_id": res.wish_item_id,
+                "user_id": user.telegram_id,
+                "actor_id": user.telegram_id,
+                "quantity": res.quantity,
+            },
+        )
+        return res
+
+    mark_reservation_unpurchased = revert_reservation_to_active
+
+    async def cancel_reservation(
+        self,
+        reservation_id: int,
+        user: AuthenticatedUser,
+    ) -> Reservation:
+        """Cancel reservation and immediately restock available inventory balance."""
+        if reservation_id not in self._reservations:
+            logger.warning(
+                "Cancel reservation failed: id %s not found",
+                reservation_id,
+                extra={
+                    "event": "reservation_not_found",
+                    "reservation_id": reservation_id,
+                    "actor_id": user.telegram_id,
+                    "user_id": user.telegram_id,
+                },
+            )
+            raise ReservationNotFoundError(f"Reservation {reservation_id} not found")
+
+        res = self._reservations[reservation_id]
+        if res.user_id != user.telegram_id:
+            logger.warning(
+                "Actor %s denied permission to cancel reservation %s",
+                user.telegram_id,
+                reservation_id,
+                extra={
+                    "event": "access_denied",
+                    "actor_id": user.telegram_id,
+                    "user_id": user.telegram_id,
+                    "reservation_id": reservation_id,
+                    "action": "cancel_reservation",
+                },
+            )
+            raise PermissionDeniedError("Actor is not reservation owner")
+
+        if res.status == ReservationStatus.CANCELLED:
+            logger.warning(
+                "Attempt to cancel already cancelled reservation %s by actor %s",
+                reservation_id,
+                user.telegram_id,
+                extra={
+                    "event": "reservation_already_cancelled",
+                    "reservation_id": reservation_id,
+                    "actor_id": user.telegram_id,
+                    "user_id": user.telegram_id,
+                },
+            )
+            raise ReservationError("Reservation is already cancelled")
+
+        async with self._concurrency_coordinator.acquire(res.wish_item_id):
+            res.status = ReservationStatus.CANCELLED
+            res.updated_at = datetime.now(UTC)
+
+        logger.info(
+            "Reservation %s cancelled by actor %s",
+            reservation_id,
+            user.telegram_id,
+            extra={
+                "event": "reservation_cancelled",
+                "wishlist_id": res.wish_item.wishlist_id if res.wish_item else None,
+                "reservation_id": reservation_id,
+                "item_id": res.wish_item_id,
+                "wish_item_id": res.wish_item_id,
+                "user_id": user.telegram_id,
+                "actor_id": user.telegram_id,
+                "quantity": res.quantity,
+            },
+        )
+        return res
+
+    async def update_reservation_quantity(
+        self,
+        reservation_id: int,
+        user: AuthenticatedUser,
+        new_quantity: int,
+    ) -> Reservation:
+        """Adjust reserved quantity up or down with inventory bounds verification."""
+        if reservation_id not in self._reservations:
+            logger.warning(
+                "Update reservation quantity failed: id %s not found",
+                reservation_id,
+                extra={
+                    "event": "reservation_not_found",
+                    "reservation_id": reservation_id,
+                    "actor_id": user.telegram_id,
+                    "user_id": user.telegram_id,
+                },
+            )
+            raise ReservationNotFoundError(f"Reservation {reservation_id} not found")
+
+        res = self._reservations[reservation_id]
+        if res.user_id != user.telegram_id:
+            logger.warning(
+                "Actor %s denied permission to update quantity of reservation %s",
+                user.telegram_id,
+                reservation_id,
+                extra={
+                    "event": "access_denied",
+                    "actor_id": user.telegram_id,
+                    "user_id": user.telegram_id,
+                    "reservation_id": reservation_id,
+                    "action": "update_reservation_quantity",
+                },
+            )
+            raise PermissionDeniedError("Actor is not reservation owner")
+
+        if res.status not in (ReservationStatus.ACTIVE, ReservationStatus.PURCHASED):
+            logger.warning(
+                "Cannot update quantity for reservation %s in terminal status %s",
+                reservation_id,
+                res.status,
+                extra={
+                    "event": "reservation_update_blocked",
+                    "reservation_id": reservation_id,
+                    "status": res.status,
+                },
+            )
+            raise ReservationError(f"Cannot update reservation in status {res.status}")
+
+        if new_quantity < 1:
+            raise ValueError("Reservation quantity must be at least 1")
+
+        async with self._concurrency_coordinator.acquire(res.wish_item_id):
+            item = self._items[res.wish_item_id]
+            delta = new_quantity - res.quantity
+            if delta > 0 and delta > item.available_quantity:
+                logger.warning(
+                    "Cannot increase reservation %s by %s: %s available",
+                    reservation_id,
+                    delta,
+                    item.available_quantity,
+                    extra={
+                        "event": "insufficient_quantity_blocked",
+                        "wishlist_id": item.wishlist_id if item else None,
+                        "item_id": res.wish_item_id,
+                        "reservation_id": reservation_id,
+                        "user_id": user.telegram_id,
+                        "actor_id": user.telegram_id,
+                        "requested_quantity": new_quantity,
+                        "delta": delta,
+                        "available_quantity": item.available_quantity,
+                    },
+                )
+                raise InsufficientQuantityError(
+                    f"Cannot increase reservation by {delta}: {item.available_quantity} available"
+                )
+
+            old_quantity = res.quantity
+            res.quantity = new_quantity
+            res.updated_at = datetime.now(UTC)
+
+        logger.info(
+            "Reservation %s quantity updated to %s by actor %s",
+            reservation_id,
+            new_quantity,
+            user.telegram_id,
+            extra={
+                "event": "reservation_quantity_updated",
+                "wishlist_id": res.wish_item.wishlist_id if res.wish_item else None,
+                "reservation_id": reservation_id,
+                "item_id": res.wish_item_id,
+                "wish_item_id": res.wish_item_id,
+                "user_id": user.telegram_id,
+                "actor_id": user.telegram_id,
+                "quantity": new_quantity,
+                "old_quantity": old_quantity,
+                "new_quantity": new_quantity,
+            },
+        )
+        return res
+
+    async def get_user_reservations(
+        self,
+        user_id: int,
+    ) -> list[MyReservationItemDTO]:
+        """Fetch all active and purchased reservations for a gifter."""
+        results: list[MyReservationItemDTO] = []
+        for res in self._reservations.values():
+            if res.user_id == user_id and res.status in (
+                ReservationStatus.ACTIVE,
+                ReservationStatus.PURCHASED,
+            ):
+                item = self._items.get(res.wish_item_id)
+                if item is None:
+                    continue
+                wl = item.wishlist
+                recipient_name = item.recipient_name or (wl.owner_name if wl else "") or "Recipient"
+                results.append(
+                    MyReservationItemDTO(
+                        reservation_id=res.id,
+                        wish_item_id=item.id,
+                        wishlist_id=item.wishlist_id,
+                        wishlist_title=wl.title if wl else "",
+                        recipient_name=recipient_name,
+                        item_title=item.title,
+                        item_link=item.link,
+                        item_image_url=item.image_url,
+                        item_price=item.price,
+                        currency=item.currency,
+                        reserved_quantity=res.quantity,
+                        status=res.status,
+                        event_title=wl.event_title if wl else None,
+                        event_date=wl.event_date if wl else None,
+                        is_item_archived=item.is_archived,
+                        is_wishlist_archived=(
+                            wl.status == WishlistStatus.ARCHIVED if wl else False
+                        ),
+                        created_at=res.created_at,
+                        updated_at=res.updated_at,
+                    )
+                )
+        return results
+
+    async def get_user_reservations_summary(
+        self,
+        user_id: int,
+    ) -> UserReservationsSummaryDTO:
+        """Fetch summary counts for the user's reservations badge."""
+        active_res = [
+            res
+            for res in self._reservations.values()
+            if res.user_id == user_id
+            and res.status in (ReservationStatus.ACTIVE, ReservationStatus.PURCHASED)
+        ]
+        distinct_items = {res.wish_item_id for res in active_res}
+        return UserReservationsSummaryDTO(
+            user_id=user_id,
+            total_active_reservations=len(active_res),
+            total_distinct_items=len(distinct_items),
+        )
+
+    async def record_item_fulfillment(
+        self,
+        item_id: int,
+        actor: AuthenticatedUser,
+        received_quantity: int,
+    ) -> WishItem:
+        """Record partial or full receipt of a gift by list author."""
+        if item_id not in self._items:
+            logger.warning(
+                "Record fulfillment failed: item %s not found",
+                item_id,
+                extra={
+                    "event": "item_not_found",
+                    "item_id": item_id,
+                    "actor_id": actor.telegram_id,
+                    "user_id": actor.telegram_id,
+                },
+            )
+            raise ItemNotFoundError(f"Item {item_id} not found")
+
+        item = self._items[item_id]
+        wl = item.wishlist
+        if wl is not None:
+            ctx = WishlistAccessPolicy.resolve_context(actor, wl)
+            if not WishlistAccessPolicy.can_add_or_edit_item(ctx, wl):
+                logger.warning(
+                    "Actor %s denied permission to fulfill item %s in wishlist %s",
+                    actor.telegram_id,
+                    item_id,
+                    wl.id,
+                    extra={
+                        "event": "access_denied",
+                        "actor_id": actor.telegram_id,
+                        "user_id": actor.telegram_id,
+                        "wishlist_id": wl.id,
+                        "item_id": item_id,
+                        "action": "record_item_fulfillment",
+                    },
+                )
+                raise PermissionDeniedError("Actor cannot fulfill items in this wishlist")
+
+        if received_quantity < 1:
+            raise ValueError("Received quantity must be at least 1")
+
+        async with self._concurrency_coordinator.acquire(item_id):
+            remaining_unfulfilled = item.quantity - item.received_quantity
+            if received_quantity > remaining_unfulfilled:
+                logger.warning(
+                    "Fulfillment quantity %s exceeds remaining unfulfilled %s for item %s",
+                    received_quantity,
+                    remaining_unfulfilled,
+                    item_id,
+                    extra={
+                        "event": "fulfillment_quantity_exceeded",
+                        "item_id": item_id,
+                        "wishlist_id": wl.id if wl else None,
+                        "user_id": actor.telegram_id,
+                        "received_quantity": received_quantity,
+                        "remaining_unfulfilled": remaining_unfulfilled,
+                    },
+                )
+                raise ValueError(
+                    f"Received quantity {received_quantity} exceeds "
+                    f"remaining unfulfilled {remaining_unfulfilled}"
+                )
+            item.received_quantity += received_quantity
+            item.updated_at = datetime.now(UTC)
+
+        logger.info(
+            "Item %s fulfillment recorded: %s units by user %s",
+            item_id,
+            received_quantity,
+            actor.telegram_id,
+            extra={
+                "event": "item_fulfilled",
+                "wishlist_id": wl.id if wl else None,
+                "item_id": item.id,
+                "user_id": actor.telegram_id,
+                "actor_id": actor.telegram_id,
+                "quantity": received_quantity,
+                "received_quantity": item.received_quantity,
+                "total_quantity": item.quantity,
+            },
+        )
+        return item
 
     async def join_by_invite(
         self,

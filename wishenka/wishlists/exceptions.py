@@ -37,6 +37,10 @@ class ReservationError(WishlistError):
     """Base exception for reservation failures."""
 
 
+class ReservationNotFoundError(ReservationError):
+    """Raised when requested reservation is not found."""
+
+
 class CannotReduceQuantityBelowReservedError(WishlistError):
     """Raised when attempting to reduce desired quantity below active reserved + fulfilled units."""
 
