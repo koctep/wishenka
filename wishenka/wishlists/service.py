@@ -1,8 +1,14 @@
 """Wishlist service providing lifecycle management, access enforcement, and projections."""
 
+from __future__ import annotations
+
 import logging
 import secrets
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from functools import wraps
+from inspect import iscoroutinefunction
+from typing import TYPE_CHECKING, Any
 
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.items.models import ItemPriority
@@ -42,11 +48,27 @@ from wishenka.wishlists.schemas import (
 
 logger = logging.getLogger("wishenka.wishlists")
 
+if TYPE_CHECKING:
+    from wishenka.wishlists.store import WishlistStore
+
+
+def _transactional[T](method: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
+    """Run a public domain operation in its configured persistent unit of work."""
+
+    @wraps(method)
+    async def invoke(self: WishlistService, *args: Any, **kwargs: Any) -> T:
+        if self._store is None:
+            return await method(self, *args, **kwargs)
+        return await self._store.execute(lambda service: method(service, *args, **kwargs))
+
+    return invoke
+
 
 class WishlistService:
     """Domain service managing wishlists, members, items, and role-aware projections."""
 
-    def __init__(self) -> None:
+    def __init__(self, store: WishlistStore | None = None) -> None:
+        self._store = store
         self._wishlists: dict[int, Wishlist] = {}
         self._items: dict[int, WishItem] = {}
         self._reservations: dict[int, Reservation] = {}
@@ -60,6 +82,22 @@ class WishlistService:
     def concurrency_coordinator(self) -> ItemConcurrencyCoordinator:
         """Expose item concurrency coordinator."""
         return self._concurrency_coordinator
+
+    @staticmethod
+    def _ensure_reservation_writable(reservation: Reservation) -> None:
+        item = reservation.wish_item
+        wishlist = item.wishlist if item is not None else None
+        if wishlist is not None and wishlist.status == WishlistStatus.ARCHIVED:
+            raise WishlistArchivedError("Cannot modify a reservation on an archived wishlist")
+        if wishlist is not None and wishlist.status == WishlistStatus.DELETED:
+            raise WishlistDeletedError("Cannot modify a reservation on a deleted wishlist")
+
+    @staticmethod
+    def _ensure_wishlist_active(wishlist: Wishlist) -> None:
+        if wishlist.status == WishlistStatus.ARCHIVED:
+            raise WishlistArchivedError("Cannot modify an archived wishlist")
+        if wishlist.status == WishlistStatus.DELETED:
+            raise WishlistDeletedError("Cannot modify a deleted wishlist")
 
     async def create_wishlist(
         self,
@@ -162,7 +200,7 @@ class WishlistService:
                     "event": "public_token_not_found",
                 },
             )
-            raise WishlistNotFoundError(f"Wishlist with token '{public_token}' not found")
+            raise WishlistNotFoundError("Wishlist not found")
         if wl.status == WishlistStatus.DELETED:
             logger.warning(
                 "Public token lookup failed: wishlist %s is deleted",
@@ -381,6 +419,7 @@ class WishlistService:
     ) -> None:
         """Remove a collaborator from the wishlist."""
         wl = await self.get_wishlist_by_id(wishlist_id)
+        self._ensure_wishlist_active(wl)
         ctx = WishlistAccessPolicy.resolve_context(actor, wl)
         if not WishlistAccessPolicy.can_manage_members(ctx, wl) and actor.telegram_id != user_id:
             logger.warning(
@@ -467,6 +506,7 @@ class WishlistService:
     ) -> Wishlist:
         """Archive an active wishlist, locking items and reservations."""
         wl = await self.get_wishlist_by_id(wishlist_id)
+        self._ensure_wishlist_active(wl)
         ctx = WishlistAccessPolicy.resolve_context(actor, wl)
         if not WishlistAccessPolicy.can_archive(ctx, wl):
             logger.warning(
@@ -549,6 +589,7 @@ class WishlistService:
     ) -> None:
         """Soft delete a wishlist and cancel all active reservations."""
         wl = await self.get_wishlist_by_id(wishlist_id)
+        self._ensure_wishlist_active(wl)
         ctx = WishlistAccessPolicy.resolve_context(actor, wl)
         if not WishlistAccessPolicy.can_delete(ctx, wl):
             logger.warning(
@@ -1074,6 +1115,7 @@ class WishlistService:
             raise ReservationError(f"Cannot mark reservation in status {res.status} as purchased")
 
         async with self._concurrency_coordinator.acquire(res.wish_item_id):
+            self._ensure_reservation_writable(res)
             res.status = ReservationStatus.PURCHASED
             res.updated_at = datetime.now(UTC)
 
@@ -1144,6 +1186,7 @@ class WishlistService:
             raise ReservationError(f"Cannot revert reservation in status {res.status} to active")
 
         async with self._concurrency_coordinator.acquire(res.wish_item_id):
+            self._ensure_reservation_writable(res)
             res.status = ReservationStatus.ACTIVE
             res.updated_at = datetime.now(UTC)
 
@@ -1216,6 +1259,7 @@ class WishlistService:
             raise ReservationError("Reservation is already cancelled")
 
         async with self._concurrency_coordinator.acquire(res.wish_item_id):
+            self._ensure_reservation_writable(res)
             res.status = ReservationStatus.CANCELLED
             res.updated_at = datetime.now(UTC)
 
@@ -1289,6 +1333,7 @@ class WishlistService:
             raise ValueError("Reservation quantity must be at least 1")
 
         async with self._concurrency_coordinator.acquire(res.wish_item_id):
+            self._ensure_reservation_writable(res)
             item = self._items[res.wish_item_id]
             delta = new_quantity - res.quantity
             if delta > 0 and delta > item.available_quantity:
@@ -1512,6 +1557,7 @@ class WishlistService:
                 },
             )
             raise WishlistDeletedError(f"Wishlist {wl.id} is deleted")
+        self._ensure_wishlist_active(wl)
         if wl.invite_token_expires_at is not None and wl.invite_token_expires_at < datetime.now(
             UTC
         ):
@@ -1562,6 +1608,7 @@ class WishlistService:
     ) -> str:
         """Revoke existing public token and generate a new one."""
         wl = await self.get_wishlist_by_id(wishlist_id)
+        self._ensure_wishlist_active(wl)
         ctx = WishlistAccessPolicy.resolve_context(actor, wl)
         if not (ctx.is_owner or ctx.is_admin):
             logger.warning(
@@ -1578,6 +1625,12 @@ class WishlistService:
             raise PermissionDeniedError("Actor cannot regenerate public token")
 
         new_token = secrets.token_urlsafe(16)
+        for _ in range(4):
+            if new_token != wl.public_token:
+                break
+            new_token = secrets.token_urlsafe(16)
+        if new_token == wl.public_token:
+            raise RuntimeError("Unable to generate a new public token")
         wl.public_token = new_token
         wl.updated_at = datetime.now(UTC)
         logger.info(
@@ -1601,6 +1654,7 @@ class WishlistService:
     ) -> str:
         """Revoke existing invite token and generate a new one."""
         wl = await self.get_wishlist_by_id(wishlist_id)
+        self._ensure_wishlist_active(wl)
         ctx = WishlistAccessPolicy.resolve_context(actor, wl)
         if not (ctx.is_owner or ctx.is_admin):
             logger.warning(
@@ -1633,3 +1687,11 @@ class WishlistService:
             },
         )
         return new_token
+
+
+# Wrap every public async domain operation so callers of the configured service share
+# the same transaction boundary as HTTP. Plain WishlistService() remains available
+# as an explicitly in-memory test implementation.
+for _method_name, _method in tuple(vars(WishlistService).items()):
+    if not _method_name.startswith("_") and iscoroutinefunction(_method):
+        setattr(WishlistService, _method_name, _transactional(_method))

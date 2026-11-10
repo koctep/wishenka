@@ -39,6 +39,77 @@ It manages personal and collaborative wishlists, enforces role-based access cont
 
 ---
 
+## HTTP API and persistent storage
+
+The FastAPI wishlist routes in
+[`wishenka.web.routes.wishlists`](../../wishenka/web/routes/wishlists.py) use the session
+authentication described in [Authentication](auth.md). Authenticated routes require an active
+session; the public route also accepts anonymous callers. A request with an invalid session may be
+rejected by the optional authentication dependency.
+
+- `POST /api/wishlists`: Authenticated user creates a list; returns 201.
+
+- `GET /api/wishlists`: Lists the caller's active memberships. Set `include_archived=true` to
+  include archived lists.
+
+- `GET /api/wishlists/{id}`: Reads a list for a member, including archived lists.
+
+- `PATCH /api/wishlists/{id}`: Owner or admin updates an active list.
+
+- `POST /api/wishlists/{id}/archive`: Owner or admin archives an active list.
+
+- `POST /api/wishlists/{id}/restore`: Owner or admin restores an archived list.
+
+- `POST /api/wishlists/{id}/share/reset`: Owner or admin rotates the public link on an active list.
+
+- `GET /api/public/wishlists/{token}`: Reads the public projection, including archived lists.
+
+
+Create and patch accept a JSON object with optional `name`, `description`, `event_title`, and
+`event_date`. The HTTP representation includes list details and items; member responses include
+`role`, and owner/admin responses include `share_token`. The public projection uses an explicit
+allowlist and omits membership, tokens and reservation-derived fields. It is returned even when an
+authenticated caller uses the public URL. Unknown, deleted or inaccessible lists return 404;
+operations incompatible with the archived state return 409. Archive is read-only until restored.
+There is no HTTP delete route in this API; domain soft deletion remains a separate operation.
+
+A sharing token is a bearer capability. Rotation invalidates the old public link, and the persistent
+issued-token registry prevents reuse. Do not put tokens in application logs, issue reports or
+analytics. The application redacts public paths in request and Uvicorn access logs and sanitizes
+storage exceptions. Configure reverse proxies and other infrastructure separately to avoid logging
+capability URLs.
+
+The legacy `WishlistService.get_wishlist_by_public_token` domain projection can expose gifter fields
+for an anonymous caller. Use the HTTP public projection for anonymous reads; do not expose that
+domain projection directly as a public response. Follow-up work is tracked in
+[WISHENKA-63](https://pypost.atlassian.net/browse/WISHENKA-63).
+
+### Storage and configuration
+
+The application factory creates one `WishlistStore` and exposes a store-backed `WishlistService` as
+`app.state.domain_service`. Use that service for application domain operations. A bare
+`WishlistService()` is in-memory and independent; it is useful in tests but bypasses persistent app
+state. The HTTP router uses the same store. For tests only, `app.state.wishlist_service` can
+override the router's service.
+
+`WISHENKA_DATABASE_URL` selects the SQLite database and defaults to
+`sqlite+aiosqlite:///data/wishenka.db`. The application initializes the schema and WAL mode during
+lifespan startup, creates parent directories for a file database, and disposes the engine at
+shutdown. `WISHENKA_SQLITE_DB_PATH` is a separate setting and does not configure this store. All
+workers must point to the same database file to share state. The store applies a five-second SQLite
+busy timeout and serializes each operation with `BEGIN IMMEDIATE`; it loads and rewrites the
+aggregate graph even for reads. This favors correctness over scale and makes reads contend for the
+writer lock. The schema currently uses unversioned JSON payloads and application-maintained ID
+counters; migrations and more targeted access are tracked in
+[WISHENKA-48](https://pypost.atlassian.net/browse/WISHENKA-48).
+
+If startup reports `Unable to initialize wishlist storage`, verify the database URL, directory
+permissions and SQLite availability. A generic `Wishlist storage operation failed` indicates a
+sanitized database failure; inspect storage health and contention without logging SQL parameters or
+tokens. If a shared link returns 404, check whether it was rotated or the list was deleted; request
+a new link from an owner or admin. A 409 on modification indicates an archived list or an invalid
+state transition.
+
 ## Architecture & Domain Models
 
 The domain models are defined in [`wishenka.wishlists.models`](../../wishenka/wishlists/models.py) and pure access policies in [`wishenka.wishlists.policy`](../../wishenka/wishlists/policy.py).
@@ -285,7 +356,7 @@ Wishlists use two distinct cryptographic token schemas generated using Python's 
 1. Public Sharing Token (Gifter Access)
    - Generation: secrets.token_urlsafe(16)
    - Entropy: 128 bits (~22 URL-safe characters)
-   - Scope: Read-only access to wishlist & reservations
+   - Scope: Read-only access to the public wishlist projection
    - URL: https://t.me/WishenkaBot/app?startapp=w_<public_token>
 
 2. Invite Token (Collaborator Onboarding)

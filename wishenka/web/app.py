@@ -12,8 +12,22 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from wishenka.config import Settings
 from wishenka.logging import configure_logging
 from wishenka.web.routes.auth import router as auth_router
+from wishenka.web.routes.wishlists import router as wishlist_router
+from wishenka.wishlists.service import WishlistService
+from wishenka.wishlists.store import WishlistStore
 
 logger = logging.getLogger("wishenka.web")
+
+
+class ShareTokenAccessFilter(logging.Filter):
+    """Remove public capability tokens from Uvicorn access records."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple) and len(record.args) == 5:
+            client, method, path, version, status = record.args
+            if isinstance(path, str) and path.startswith("/api/public/wishlists/"):
+                record.args = (client, method, "/api/public/wishlists/{token}", version, status)
+        return True
 
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
@@ -21,11 +35,14 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         start_time = time.perf_counter()
+        path = request.url.path
+        if path.startswith("/api/public/wishlists/"):
+            path = "/api/public/wishlists/{token}"
         logger.debug(
             "HTTP request started: %s %s",
             request.method,
-            request.url.path,
-            extra={"method": request.method, "path": request.url.path},
+            path,
+            extra={"method": request.method, "path": path},
         )
         try:
             response = await call_next(request)
@@ -33,12 +50,12 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             logger.info(
                 "HTTP request completed: %s %s status=%d duration=%.2fms",
                 request.method,
-                request.url.path,
+                path,
                 response.status_code,
                 duration_ms,
                 extra={
                     "method": request.method,
-                    "path": request.url.path,
+                    "path": path,
                     "status_code": response.status_code,
                     "duration_ms": round(duration_ms, 2),
                 },
@@ -49,11 +66,11 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             logger.exception(
                 "HTTP request unhandled exception: %s %s duration=%.2fms",
                 request.method,
-                request.url.path,
+                path,
                 duration_ms,
                 extra={
                     "method": request.method,
-                    "path": request.url.path,
+                    "path": path,
                     "duration_ms": round(duration_ms, 2),
                 },
             )
@@ -73,9 +90,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings = Settings()
 
     configure_logging(log_level=settings.log_level, json_logs=settings.log_json)
+    access_logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(item, ShareTokenAccessFilter) for item in access_logger.filters):
+        access_logger.addFilter(ShareTokenAccessFilter())
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        await app.state.wishlist_store.initialize()
         logger.info(
             "Wishenka web application starting up",
             extra={
@@ -86,6 +107,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         )
         yield
+        await app.state.wishlist_store.engine.dispose()
         logger.info("Wishenka web application shutting down")
 
     app = FastAPI(
@@ -94,9 +116,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
+    app.state.wishlist_store = WishlistStore(settings.database_url)
+    app.state.domain_service = WishlistService(store=app.state.wishlist_store)
 
     app.add_middleware(RequestLoggingMiddleware)
     app.include_router(auth_router)
+    app.include_router(wishlist_router)
 
     @app.get("/healthz")
     async def healthcheck() -> dict[str, Any]:
