@@ -69,8 +69,13 @@ def _transactional[T](method: Callable[..., Awaitable[T]]) -> Callable[..., Awai
 class WishlistService:
     """Domain service managing wishlists, members, items, and role-aware projections."""
 
-    def __init__(self, store: WishlistStore | None = None) -> None:
+    def __init__(
+        self,
+        store: WishlistStore | None = None,
+        default_invite_ttl: timedelta | None = None,
+    ) -> None:
         self._store = store
+        self._default_invite_ttl = default_invite_ttl or timedelta(days=7)
         self._wishlists: dict[int, Wishlist] = {}
         self._items: dict[int, WishItem] = {}
         self._reservations: dict[int, Reservation] = {}
@@ -120,7 +125,11 @@ class WishlistService:
         self._next_wishlist_id += 1
         public_token = secrets.token_urlsafe(16)
         invite_token = secrets.token_urlsafe(24)
-        ttl = invite_token_expires_in if invite_token_expires_in is not None else timedelta(days=7)
+        ttl = (
+            invite_token_expires_in
+            if invite_token_expires_in is not None
+            else self._default_invite_ttl
+        )
         invite_token_expires_at = datetime.now(UTC) + ttl
 
         wishlist = Wishlist(
@@ -1683,7 +1692,7 @@ class WishlistService:
         if new_token in {wl.invite_token, wl.public_token}:
             raise RuntimeError("Unable to generate a new invitation token")
         wl.invite_token = new_token
-        ttl = expires_in if expires_in is not None else timedelta(days=7)
+        ttl = expires_in if expires_in is not None else self._default_invite_ttl
         wl.invite_token_expires_at = datetime.now(UTC) + ttl
         wl.updated_at = datetime.now(UTC)
         logger.info(

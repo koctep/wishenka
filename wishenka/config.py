@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     csrf_secret_key: str = "wishenka_csrf_default_change_in_prod"
     telegram_bot_username: str = ""
     telegram_app_short_name: str = ""
+    invite_token_ttl_seconds: int = 7 * 86400
+    wishlist_retention_days: int = 30
+    background_cleanup_interval_seconds: int = 3600
+    background_cleanup_enabled: bool = True
 
     model_config = SettingsConfigDict(
         env_prefix="WISHENKA_",

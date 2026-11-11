@@ -2,7 +2,7 @@
 
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -143,12 +143,16 @@ def projection(
 @router.post("/api/wishlists", status_code=201)
 async def create_wishlist(request: Request, body: WishlistInput, user: User) -> dict[str, Any]:
     async def action(service: WishlistService) -> dict[str, Any]:
+        settings = getattr(request.app.state, "settings", None)
+        ttl_seconds = getattr(settings, "invite_token_ttl_seconds", None)
+        expires_in = timedelta(seconds=ttl_seconds) if ttl_seconds is not None else None
         wl = await service.create_wishlist(
             owner=user,
             title=body.name or "",
             description=body.description,
             event_title=body.event_title,
             event_date=body.event_date,
+            invite_token_expires_in=expires_in,
         )
         logger.info(
             "Wishlist created: id=%s by user=%s",
@@ -701,7 +705,10 @@ async def reset_invite(request: Request, wishlist_id: int, user: User) -> dict[s
                 },
             )
             raise HTTPException(status_code=409, detail="Wishlist is archived")
-        token = await service.regenerate_invite_token(wishlist_id, user)
+        settings = getattr(request.app.state, "settings", None)
+        ttl_seconds = getattr(settings, "invite_token_ttl_seconds", None)
+        expires_in = timedelta(seconds=ttl_seconds) if ttl_seconds is not None else None
+        token = await service.regenerate_invite_token(wishlist_id, user, expires_in=expires_in)
         logger.info(
             "Invite token reset for wishlist %s by user %s",
             wishlist_id,

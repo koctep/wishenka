@@ -734,5 +734,25 @@ class WishlistStore:
                 await conn.rollback()
                 raise
 
+    async def cleanup_expired_tokens(self, now: datetime | None = None) -> int:
+        """Revoke expired invite tokens across all wishlists."""
+        async with self.engine.begin() as conn:
+            await conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+            await conn.exec_driver_sql("PRAGMA busy_timeout = 5000")
+            repo = WishlistRepository(conn)
+            return await repo.cleanup_expired_tokens(now)
+
+    async def purge_archived_wishlists(self, threshold: datetime) -> int:
+        """Permanently purge soft-deleted wishlists older than threshold."""
+        async with self.engine.begin() as conn:
+            await conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+            await conn.exec_driver_sql("PRAGMA busy_timeout = 5000")
+            repo = WishlistRepository(conn)
+            return await repo.purge_archived_wishlists(threshold)
+
+    async def purge_deleted_wishlists(self, threshold: datetime) -> int:
+        """Alias for purge_archived_wishlists."""
+        return await self.purge_archived_wishlists(threshold)
+
 
 __all__ = ["TokenCollision", "WishlistRepository", "WishlistStore"]

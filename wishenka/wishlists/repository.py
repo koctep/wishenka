@@ -610,3 +610,109 @@ class WishlistRepository:
                 "user_id": user_id,
             },
         )
+
+    async def cleanup_expired_tokens(self, now: datetime | None = None) -> int:
+        """Revoke expired invite tokens and remove them from wl_invite_tokens."""
+        if now is None:
+            now = datetime.now(UTC)
+        now_str = _format_dt(now)
+
+        stmt_select = text(
+            "SELECT invite_token FROM wl_lists "
+            "WHERE invite_token_expires_at IS NOT NULL "
+            "AND invite_token_expires_at <= :now"
+        )
+        rows = (await self.conn.execute(stmt_select, {"now": now_str})).fetchall()
+        if not rows:
+            return 0
+
+        stmt_del_invites = text(
+            "DELETE FROM wl_invite_tokens "
+            "WHERE token IN ("
+            "  SELECT invite_token FROM wl_lists "
+            "  WHERE invite_token_expires_at IS NOT NULL "
+            "  AND invite_token_expires_at <= :now"
+            ")"
+        )
+        await self.conn.execute(stmt_del_invites, {"now": now_str})
+
+        stmt_update = text(
+            "UPDATE wl_lists "
+            "SET invite_token = CASE "
+            "  WHEN invite_token LIKE 'revoked:%' THEN invite_token "
+            "  ELSE 'revoked:' || invite_token "
+            "END, "
+            "invite_token_expires_at = NULL "
+            "WHERE invite_token_expires_at IS NOT NULL "
+            "AND invite_token_expires_at <= :now"
+        )
+        res = await self.conn.execute(stmt_update, {"now": now_str})
+        cleaned_count = (
+            res.rowcount if res.rowcount is not None and res.rowcount >= 0 else len(rows)
+        )
+
+        logger.info(
+            "Wishlist repository mutation: cleanup %s expired invite tokens",
+            cleaned_count,
+            extra={
+                "event": "wishlist_repo_mutation",
+                "entity": "invite_token",
+                "operation": "cleanup_expired",
+                "count": cleaned_count,
+            },
+        )
+        return cleaned_count
+
+    async def purge_archived_wishlists(self, threshold: datetime) -> int:
+        """Permanently purge soft-deleted wishlists older than threshold."""
+        threshold_str = _format_dt(threshold)
+        stmt_select = text(
+            "SELECT id FROM wl_lists WHERE status = 'deleted' AND updated_at <= :threshold"
+        )
+        rows = (await self.conn.execute(stmt_select, {"threshold": threshold_str})).fetchall()
+        if not rows:
+            return 0
+
+        await self.conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+
+        stmt_del_tokens = text(
+            "DELETE FROM wl_tokens "
+            "WHERE wishlist_id IN ("
+            "  SELECT id FROM wl_lists "
+            "  WHERE status = 'deleted' AND updated_at <= :threshold"
+            ")"
+        )
+        await self.conn.execute(stmt_del_tokens, {"threshold": threshold_str})
+
+        stmt_del_invites = text(
+            "DELETE FROM wl_invite_tokens "
+            "WHERE token IN ("
+            "  SELECT invite_token FROM wl_lists "
+            "  WHERE status = 'deleted' AND updated_at <= :threshold"
+            ")"
+        )
+        await self.conn.execute(stmt_del_invites, {"threshold": threshold_str})
+
+        stmt_del_lists = text(
+            "DELETE FROM wl_lists WHERE status = 'deleted' AND updated_at <= :threshold"
+        )
+        res = await self.conn.execute(stmt_del_lists, {"threshold": threshold_str})
+        purged_count = res.rowcount if res.rowcount is not None and res.rowcount >= 0 else len(rows)
+
+        logger.info(
+            "Wishlist repository mutation: purge %s archived wishlists older than %s",
+            purged_count,
+            threshold_str,
+            extra={
+                "event": "wishlist_repo_mutation",
+                "entity": "wishlist",
+                "operation": "purge_archived",
+                "count": purged_count,
+                "threshold": threshold_str,
+            },
+        )
+        return purged_count
+
+    async def purge_deleted_wishlists(self, threshold: datetime) -> int:
+        """Alias for purge_archived_wishlists."""
+        return await self.purge_archived_wishlists(threshold)

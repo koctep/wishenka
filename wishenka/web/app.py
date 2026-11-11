@@ -1,9 +1,11 @@
 """FastAPI application factory."""
 
+import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,7 @@ from wishenka.web.routes.auth import router as auth_router
 from wishenka.web.routes.miniapp import router as miniapp_router
 from wishenka.web.routes.wishlists import router as wishlist_router
 from wishenka.web.security import BrowserSecurityMiddleware
+from wishenka.wishlists.cleanup import background_cleanup_worker
 from wishenka.wishlists.service import WishlistService
 from wishenka.wishlists.store import WishlistStore
 
@@ -105,6 +108,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await app.state.wishlist_store.initialize()
         await app.state.user_store.initialize()
+
+        if settings.background_cleanup_enabled:
+            cleanup_task = asyncio.create_task(
+                background_cleanup_worker(app.state.wishlist_store, settings),
+                name="background_cleanup_worker",
+            )
+            app.state.background_cleanup_task = cleanup_task
+            app.state.cleanup_task = cleanup_task
+        else:
+            app.state.background_cleanup_task = None
+            app.state.cleanup_task = None
+
         logger.info(
             "Wishenka web application starting up",
             extra={
@@ -115,6 +130,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         )
         yield
+
+        running_task: asyncio.Task[None] | None = getattr(
+            app.state, "background_cleanup_task", None
+        ) or getattr(app.state, "cleanup_task", None)
+        if running_task is not None:
+            running_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await running_task
+
         await app.state.wishlist_store.engine.dispose()
         await app.state.user_store.dispose()
         logger.info("Wishenka web application shutting down")
@@ -127,7 +151,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.wishlist_store = WishlistStore(settings.database_url)
     app.state.user_store = UserStore(settings.database_url)
-    app.state.domain_service = WishlistService(store=app.state.wishlist_store)
+    default_invite_ttl = timedelta(seconds=settings.invite_token_ttl_seconds)
+    app.state.domain_service = WishlistService(
+        store=app.state.wishlist_store,
+        default_invite_ttl=default_invite_ttl,
+    )
+    app.state.background_cleanup_task = None
+    app.state.cleanup_task = None
 
     app.add_middleware(RequestLoggingMiddleware)
     app.add_middleware(BrowserSecurityMiddleware)

@@ -752,6 +752,25 @@ granular async operations over an active SQLAlchemy `AsyncConnection`.
 - `record_view(entry)`: Uses `INSERT ... ON CONFLICT DO UPDATE SET viewed_at = excluded.viewed_at`.
 - `clear_view_history(user_id: int)`: Deletes viewing history for a single user.
 
+#### Maintenance & Cleanup Methods
+- `cleanup_expired_tokens(now: datetime | None = None) -> int`:
+  Revokes invite tokens whose expiration timestamp has passed (`invite_token_expires_at <= now`).
+  Removes token from `wl_invite_tokens`, prepends `'revoked:'` to `invite_token` in `wl_lists`,
+  and sets `invite_token_expires_at = NULL`. Returns the count of cleaned tokens.
+- `purge_archived_wishlists(threshold: datetime) -> int`:
+  Permanently purges soft-deleted wishlists (`status = 'deleted'`) whose `updated_at <= threshold`.
+  Deletes capability tokens from `wl_tokens` and `wl_invite_tokens`, then deletes the rows from
+  `wl_lists` with `PRAGMA foreign_keys = ON`. Foreign key cascades automatically remove child
+  members (`wl_members`), items (`wl_items`), reservations (`wl_reservations`), favorites
+  (`wl_favorites`), and history entries (`wl_view_history`). Returns the number of purged wishlists.
+- `purge_deleted_wishlists(threshold: datetime) -> int`:
+  Semantic alias forwarding directly to `purge_archived_wishlists`.
+
+`WishlistStore` exposes matching async helper methods `cleanup_expired_tokens(now)` and
+`purge_archived_wishlists(threshold)` (alias `purge_deleted_wishlists(threshold)`) that execute
+repository operations inside dedicated write transactions (`BEGIN IMMEDIATE`) with foreign keys
+and busy timeout configured.
+
 #### Entity Converters
 Bidirectional entity converters decouple database row representations from pure domain dataclasses:
 - `_row_to_wishlist(row: Row[Any]) -> Wishlist`
@@ -844,15 +863,133 @@ Wishlists use two cryptographic token schemas generated via Python's `secrets.to
    - Generation: secrets.token_urlsafe(24)
    - Entropy: 192 bits (~32 URL-safe characters)
    - Scope: Join as co-author with MEMBER role
-   - Expiration: invite_token_expires_at (default TTL: 7 days)
+   - Expiration: invite_token_expires_at (TTL configured by invite_token_ttl_seconds,
+     defaulting to 7 days / 604,800 seconds)
    - URL: https://t.me/WishenkaBot/app?startapp=i_<invite_token>
 ```
+
+---
+
+## Background Cleanup & Data Retention
+
+The `wishenka.wishlists.cleanup` module implements asynchronous maintenance routines to enforce
+collaborator token expirations and retention windows for soft-deleted wishlists without blocking
+regular web request handling.
+
+### Architecture & Components
+
+```
++-----------------------------------------------------------------------------------------+
+|                  FastAPI Lifespan (wishenka.web.app.create_app)                         |
+|  - Checks settings.background_cleanup_enabled                                           |
+|  - Spawns background_cleanup_worker task on startup; cancels & awaits on shutdown       |
++-----------------------------------------------------------------------------------------+
+                                             |
+                                             v
++-----------------------------------------------------------------------------------------+
+|            Background Worker Loop: background_cleanup_worker                            |
+|  - Runs indefinitely while awaiting stop_event or cancellation                         |
+|  - Wakes up every settings.background_cleanup_interval_seconds (default: 3600s)         |
++-----------------------------------------------------------------------------------------+
+                                             |
+                                             v
++-----------------------------------------------------------------------------------------+
+|                Cleanup Cycle Runner: run_cleanup_cycle                                  |
+|  1. store.cleanup_expired_tokens(now) -> revokes expired collaborator invite tokens     |
+|  2. cutoff = now - timedelta(days=settings.wishlist_retention_days)                     |
+|  3. store.purge_archived_wishlists(cutoff) -> permanently cascades soft-deleted lists   |
+|  4. Captures execution duration and returns CleanupStats(duration_ms, ...)              |
++-----------------------------------------------------------------------------------------+
+```
+
+### Module Functions & Data Structures
+
+#### `CleanupStats`
+Dataclass capturing operational metrics for a single execution cycle:
+- `expired_tokens_cleaned: int`: Count of expired collaborator invite tokens revoked.
+- `wishlists_purged: int`: Count of soft-deleted wishlists permanently removed past retention.
+- `duration_ms: float`: Execution duration of the cycle in milliseconds.
+- `started_at: datetime`: UTC timestamp when the cycle began.
+- `finished_at: datetime`: UTC timestamp when the cycle completed.
+
+#### `run_cleanup_cycle`
+```python
+async def run_cleanup_cycle(
+    store: WishlistStore,
+    settings: Settings,
+    now: datetime | None = None,
+) -> CleanupStats
+```
+- Performs a complete cleanup cycle: revokes expired tokens and purges deleted wishlists older
+  than `settings.wishlist_retention_days`.
+- Traps operational exceptions gracefully to prevent background loop termination, logging
+  `background_cleanup_failed` with `exc_info=True`.
+- Emits structured audit log `background_cleanup_completed` on success.
+
+#### `background_cleanup_worker`
+```python
+async def background_cleanup_worker(
+    store: WishlistStore,
+    settings: Settings,
+    stop_event: asyncio.Event | None = None,
+) -> None
+```
+- Continuous background loop executing `run_cleanup_cycle` at the configured interval
+  (`settings.background_cleanup_interval_seconds`, default: 3600s / 1h).
+- Monitors optional `stop_event` or catches `asyncio.CancelledError` for graceful shutdown.
+- Emits `background_worker_started` and `background_worker_stopped` structured logs.
+
+### Application Lifecycle & Testing
+
+#### Lifespan Integration
+In `wishenka.web.app.create_app`:
+- When `settings.background_cleanup_enabled` is `True`, an `asyncio.create_task` is scheduled
+  during lifespan startup and stored on `app.state.background_cleanup_task`
+  (and `app.state.cleanup_task`).
+- During lifespan shutdown, the background task is cancelled via `task.cancel()` and awaited
+  with `asyncio.CancelledError` suppressed.
+
+#### Disabling Background Worker in Tests
+In automated test suites and lightweight test environments, the background worker should be
+disabled to prevent uncoordinated database mutations or test isolation leaks:
+
+```python
+settings = Settings(
+    database_url="sqlite+aiosqlite:///:memory:",
+    background_cleanup_enabled=False,
+)
+app = create_app(settings)
+```
+Or set the environment variable:
+```bash
+export WISHENKA_BACKGROUND_CLEANUP_ENABLED=false
+```
+When `background_cleanup_enabled = False`, `app.state.background_cleanup_task` is initialized
+to `None`, and no recurring loop is started. Test suites can invoke
+`run_cleanup_cycle(store, settings)` directly with custom timestamps (`now=...`) to test
+retention and expiration deterministically.
 
 ---
 
 ## Configuration & Audit Logging
 
 Structured logging is managed under the `wishenka.wishlists` logger namespace.
+
+### Configuration Parameters
+
+Settings in `wishenka.config.Settings` (prefixed with `WISHENKA_` in environment):
+
+- **`invite_token_ttl_seconds`** (`int`, default: `604800` / 7 days):
+  Colleague invite token lifetime. Environment: `WISHENKA_INVITE_TOKEN_TTL_SECONDS`.
+- **`wishlist_retention_days`** (`int`, default: `30` days):
+  Retention window before permanently purging soft-deleted wishlists.
+  Environment: `WISHENKA_WISHLIST_RETENTION_DAYS`.
+- **`background_cleanup_interval_seconds`** (`int`, default: `3600` / 1 hour):
+  Sleep interval between background cleanup runs.
+  Environment: `WISHENKA_BACKGROUND_CLEANUP_INTERVAL_SECONDS`.
+- **`background_cleanup_enabled`** (`bool`, default: `True`):
+  Master flag to spawn cleanup worker in lifespan. Set `False` in test environments.
+  Environment: `WISHENKA_BACKGROUND_CLEANUP_ENABLED`.
 
 ### Security Invariant
 
@@ -887,7 +1024,11 @@ Structured logging is managed under the `wishenka.wishlists` logger namespace.
 | `view_history_cleared` | `INFO` | History cleared | `user_id` |
 | `wishlist_store_read` | `INFO` | State read | `wishlists_count` |
 | `wishlist_store_write` | `INFO` | Changes committed | `wishlists_count` |
-| `wishlist_repo_mutation` | `INFO` | Repo mutation | `entity`, `operation` |
+| `wishlist_repo_mutation` | `INFO` | Repo mutation | `entity`, `operation`, `count` |
+| `background_worker_started` | `INFO` | Worker loop started | `interval_seconds` |
+| `background_worker_stopped` | `INFO` | Worker loop stopped | None |
+| `background_cleanup_completed` | `INFO` | Cleanup ok | `expired_tokens_cleaned`, `purged` |
+| `background_cleanup_failed` | `ERROR` | Cleanup failed | `error`, `duration_ms` |
 
 ---
 
