@@ -30,6 +30,7 @@ class SessionTokenService:
         first_name: str,
         username: str | None = None,
         ttl_seconds: int | None = None,
+        user_id: int | None = None,
     ) -> str:
         """Issue a signed session token.
 
@@ -38,6 +39,7 @@ class SessionTokenService:
             first_name: User's first name
             username: User's Telegram username without @
             ttl_seconds: Optional TTL override in seconds
+            user_id: Optional internal database user ID
 
         Returns:
             URL-safe token string in format '<payload_b64>.<sig_b64>'
@@ -48,6 +50,7 @@ class SessionTokenService:
             telegram_id=telegram_id,
             first_name=first_name,
             username=username,
+            user_id=user_id,
             iat=now,
             exp=now + ttl,
         )

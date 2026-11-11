@@ -59,6 +59,7 @@ class SessionClaims(BaseModel):
     telegram_id: int = Field(description="Telegram numeric user ID")
     first_name: str = Field(description="User first name")
     username: str | None = Field(default=None, description="Telegram username")
+    user_id: int | None = Field(default=None, description="Internal database user ID")
     iat: int = Field(description="Issued at timestamp")
     exp: int = Field(description="Expiration timestamp")
 
@@ -71,6 +72,7 @@ class AuthenticatedUser:
     first_name: str
     username: str | None = None
     auth_method: str = "cookie"
+    user_id: int | None = None
 
 
 class TelegramAuthRequest(BaseModel):
@@ -84,3 +86,4 @@ class AuthResponse(BaseModel):
 
     token: str = Field(description="Signed session token")
     user: TelegramUser = Field(description="Verified Telegram user profile")
+    user_id: int | None = Field(default=None, description="Internal database user ID")

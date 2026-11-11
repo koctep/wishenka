@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from wishenka.auth.dependencies import (
     get_current_user,
     get_settings,
+    get_user_store,
 )
 from wishenka.auth.init_data import validate_telegram_init_data
 from wishenka.auth.models import (
@@ -22,6 +23,7 @@ from wishenka.auth.session import (
     set_session_cookie,
 )
 from wishenka.config import Settings
+from wishenka.users.store import UserStore
 from wishenka.web.security import csrf_value
 
 logger = logging.getLogger("wishenka.auth")
@@ -34,6 +36,7 @@ async def auth_telegram(
     payload: TelegramAuthRequest,
     response: Response,
     settings: Annotated[Settings, Depends(get_settings)],
+    user_store: Annotated[UserStore, Depends(get_user_store)],
 ) -> AuthResponse:
     """Exchange Telegram WebApp initData for signed session token and cookie."""
     try:
@@ -48,6 +51,8 @@ async def auth_telegram(
             detail=f"Invalid initData: {err}",
         ) from err
 
+    user_record = await user_store.upsert_user(user)
+
     service = SessionTokenService(
         secret_key=settings.secret_key,
         default_ttl_seconds=settings.session_ttl_seconds,
@@ -56,6 +61,7 @@ async def auth_telegram(
         telegram_id=user.id,
         first_name=user.first_name,
         username=user.username,
+        user_id=user_record.id,
     )
 
     set_session_cookie(response=response, token=token, settings=settings)
@@ -65,10 +71,11 @@ async def auth_telegram(
         extra={
             "telegram_id": user.id,
             "username": user.username,
+            "user_id": user_record.id,
             "event": "auth_success",
         },
     )
-    return AuthResponse(token=token, user=user)
+    return AuthResponse(token=token, user=user, user_id=user_record.id)
 
 
 @router.post("/logout")
@@ -129,6 +136,7 @@ async def get_me(
         "first_name": current_user.first_name,
         "username": current_user.username,
         "auth_method": current_user.auth_method,
+        "user_id": current_user.user_id,
     }
 
 

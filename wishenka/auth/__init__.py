@@ -4,6 +4,7 @@ from wishenka.auth.dependencies import (
     get_current_user,
     get_optional_current_user,
     get_settings,
+    get_user_store,
 )
 from wishenka.auth.init_data import (
     TelegramInitDataValidator,
@@ -45,6 +46,7 @@ __all__ = [
     "get_current_user",
     "get_optional_current_user",
     "get_settings",
+    "get_user_store",
     "parse_telegram_init_data",
     "set_session_cookie",
     "validate_telegram_init_data",

@@ -13,6 +13,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 
 from wishenka.config import Settings
 from wishenka.logging import configure_logging
+from wishenka.users.store import UserStore
 from wishenka.web.routes.auth import router as auth_router
 from wishenka.web.routes.miniapp import router as miniapp_router
 from wishenka.web.routes.wishlists import router as wishlist_router
@@ -103,6 +104,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await app.state.wishlist_store.initialize()
+        await app.state.user_store.initialize()
         logger.info(
             "Wishenka web application starting up",
             extra={
@@ -114,6 +116,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         yield
         await app.state.wishlist_store.engine.dispose()
+        await app.state.user_store.dispose()
         logger.info("Wishenka web application shutting down")
 
     app = FastAPI(
@@ -123,6 +126,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     app.state.wishlist_store = WishlistStore(settings.database_url)
+    app.state.user_store = UserStore(settings.database_url)
     app.state.domain_service = WishlistService(store=app.state.wishlist_store)
 
     app.add_middleware(RequestLoggingMiddleware)

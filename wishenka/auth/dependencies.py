@@ -11,6 +11,7 @@ from wishenka.auth.models import (
 )
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
+from wishenka.users.store import UserStore
 
 logger = logging.getLogger("wishenka.auth")
 
@@ -21,6 +22,15 @@ def get_settings(request: Request) -> Settings:
     if isinstance(app_settings, Settings):
         return app_settings
     return Settings()
+
+
+def get_user_store(request: Request) -> UserStore:
+    """Retrieve UserStore from application state or create default instance."""
+    store = getattr(request.app.state, "user_store", None)
+    if isinstance(store, UserStore):
+        return store
+    settings = getattr(request.app.state, "settings", None) or Settings()
+    return UserStore(settings.database_url)
 
 
 async def get_optional_current_user(
@@ -99,6 +109,7 @@ async def get_optional_current_user(
         first_name=claims.first_name,
         username=claims.username,
         auth_method=auth_method,
+        user_id=claims.user_id,
     )
 
 
