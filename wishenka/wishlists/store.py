@@ -1,6 +1,7 @@
 """Transactional storage for the wishlist domain service."""
 
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import fields
 from datetime import datetime
@@ -25,6 +26,9 @@ from wishenka.wishlists.service import WishlistService
 
 T = TypeVar("T")
 
+# aiosqlite DEBUG logs include SQL bound parameters, including capabilities.
+logging.getLogger("aiosqlite").setLevel(logging.WARNING)
+
 
 def _dump(obj: Any, excluded: set[str]) -> str:
     values = {f.name: getattr(obj, f.name) for f in fields(obj) if f.name not in excluded}
@@ -46,6 +50,10 @@ def _load[T](model: type[T], payload: str) -> T:
         if model is cls and name in values:
             values[name] = enum_type(values[name])
     return model(**values)
+
+
+class TokenCollision(Exception):
+    """A generated capability was previously used for either access purpose."""
 
 
 class WishlistStore:
@@ -86,6 +94,7 @@ class WishlistStore:
                 "item_id INTEGER NOT NULL REFERENCES wl_items(id), payload TEXT NOT NULL)",
                 "CREATE TABLE IF NOT EXISTS wl_tokens (token TEXT PRIMARY KEY, "
                 "wishlist_id INTEGER NOT NULL, active INTEGER NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS wl_invite_tokens (token TEXT PRIMARY KEY)",
                 "CREATE TABLE IF NOT EXISTS wl_counters "
                 "(name TEXT PRIMARY KEY, value INTEGER NOT NULL)",
                 "CREATE UNIQUE INDEX IF NOT EXISTS wl_member_identity "
@@ -166,8 +175,14 @@ class WishlistStore:
         for attempt in range(5):
             try:
                 return await self._execute_once(operation)
+            except TokenCollision:
+                if attempt < 4:
+                    continue
+                message = "Unable to allocate a unique capability"
             except IntegrityError as exc:
-                if "wl_tokens.token" not in str(exc.orig):
+                if not any(
+                    name in str(exc.orig) for name in ("wl_tokens.token", "wl_invite_tokens.token")
+                ):
                     message = "Wishlist storage operation failed"
                 elif attempt < 4:
                     continue
@@ -189,10 +204,33 @@ class WishlistStore:
             try:
                 service = await self._read(conn)
                 previous = {wl.id: wl.public_token for wl in service._wishlists.values()}
+                prior_invites = {wl.id: wl.invite_token for wl in service._wishlists.values()}
+                for token in prior_invites.values():
+                    await conn.execute(
+                        text("INSERT OR IGNORE INTO wl_invite_tokens VALUES (:token)"),
+                        {"token": token},
+                    )
                 result = await operation(service)
                 for wl in service._wishlists.values():
+                    if prior_invites.get(wl.id) != wl.invite_token:
+                        matching_public = await conn.scalar(
+                            text("SELECT 1 FROM wl_tokens WHERE token=:token"),
+                            {"token": wl.invite_token},
+                        )
+                        if matching_public or wl.invite_token == wl.public_token:
+                            raise TokenCollision
+                        await conn.execute(
+                            text("INSERT INTO wl_invite_tokens VALUES (:token)"),
+                            {"token": wl.invite_token},
+                        )
                     old = previous.get(wl.id)
                     if old != wl.public_token:
+                        matching_invite = await conn.scalar(
+                            text("SELECT 1 FROM wl_invite_tokens WHERE token=:token"),
+                            {"token": wl.public_token},
+                        )
+                        if matching_invite:
+                            raise TokenCollision
                         await conn.execute(
                             text("UPDATE wl_tokens SET active=0 WHERE wishlist_id=:id"),
                             {"id": wl.id},

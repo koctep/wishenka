@@ -1544,7 +1544,7 @@ class WishlistService:
                     "user_id": user.telegram_id,
                 },
             )
-            raise InvalidInviteTokenError(f"Invalid invite token: {invite_token}")
+            raise InvalidInviteTokenError("Invalid invite token")
         if wl.status == WishlistStatus.DELETED:
             logger.warning(
                 "User %s attempted to join deleted wishlist %s",
@@ -1671,6 +1671,12 @@ class WishlistService:
             raise PermissionDeniedError("Actor cannot regenerate invite token")
 
         new_token = secrets.token_urlsafe(24)
+        for _ in range(4):
+            if new_token != wl.invite_token and new_token != wl.public_token:
+                break
+            new_token = secrets.token_urlsafe(24)
+        if new_token in {wl.invite_token, wl.public_token}:
+            raise RuntimeError("Unable to generate a new invitation token")
         wl.invite_token = new_token
         ttl = expires_in if expires_in is not None else timedelta(days=7)
         wl.invite_token_expires_at = datetime.now(UTC) + ttl

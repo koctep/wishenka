@@ -151,7 +151,9 @@ def test_auth_endpoint_exchange() -> None:
     user_payload = {"id": 424242, "first_name": "Carol", "username": "carol"}
     init_data = create_test_init_data(user_payload, bot_token=TEST_BOT_TOKEN)
 
-    response = client.post("/api/auth/telegram", json={"init_data": init_data})
+    response = client.post(
+        "/api/auth/telegram", json={"init_data": init_data}, headers={"Origin": "http://testserver"}
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -187,7 +189,9 @@ def test_protected_endpoint_requires_auth() -> None:
     assert unauth_resp.status_code == 401
 
     # 2. Authenticate to obtain token and session cookie
-    auth_resp = client.post("/api/auth/telegram", json={"init_data": init_data})
+    auth_resp = client.post(
+        "/api/auth/telegram", json={"init_data": init_data}, headers={"Origin": "http://testserver"}
+    )
     assert auth_resp.status_code == 200
     token = auth_resp.json()["token"]
 
@@ -231,7 +235,9 @@ def test_optional_auth_resolution() -> None:
     # 2. Authenticate and call with cookie
     user_payload = {"id": 888111, "first_name": "Eve", "username": "eve"}
     init_data = create_test_init_data(user_payload, bot_token=TEST_BOT_TOKEN)
-    auth_resp = client.post("/api/auth/telegram", json={"init_data": init_data})
+    auth_resp = client.post(
+        "/api/auth/telegram", json={"init_data": init_data}, headers={"Origin": "http://testserver"}
+    )
     token = auth_resp.json()["token"]
 
     auth_client = TestClient(app, cookies={"session_id": token})
@@ -250,7 +256,11 @@ def test_auth_logging_success(caplog: pytest.LogCaptureFixture) -> None:
     init_data = create_test_init_data(user_payload, bot_token=TEST_BOT_TOKEN)
 
     with caplog.at_level(logging.INFO, logger="wishenka.auth"):
-        response = client.post("/api/auth/telegram", json={"init_data": init_data})
+        response = client.post(
+            "/api/auth/telegram",
+            json={"init_data": init_data},
+            headers={"Origin": "http://testserver"},
+        )
 
     assert response.status_code == 200
     matching_records = [
@@ -276,7 +286,11 @@ def test_auth_logging_invalid_signature_warning(caplog: pytest.LogCaptureFixture
     tampered_data = create_test_init_data(user_payload, bot_token=TEST_BOT_TOKEN, tampered=True)
 
     with caplog.at_level(logging.WARNING, logger="wishenka.auth"):
-        response = client.post("/api/auth/telegram", json={"init_data": tampered_data})
+        response = client.post(
+            "/api/auth/telegram",
+            json={"init_data": tampered_data},
+            headers={"Origin": "http://testserver"},
+        )
 
     assert response.status_code == 401
     matching_records = [
@@ -300,12 +314,17 @@ def test_auth_logging_logout(caplog: pytest.LogCaptureFixture) -> None:
     user_payload = {"id": 1234569, "first_name": "Bob", "username": "bob"}
     init_data = create_test_init_data(user_payload, bot_token=TEST_BOT_TOKEN)
 
-    auth_resp = client.post("/api/auth/telegram", json={"init_data": init_data})
+    auth_resp = client.post(
+        "/api/auth/telegram", json={"init_data": init_data}, headers={"Origin": "http://testserver"}
+    )
     token = auth_resp.json()["token"]
 
     auth_client = TestClient(app, cookies={"session_id": token})
     with caplog.at_level(logging.INFO, logger="wishenka.auth"):
-        logout_resp = auth_client.post("/api/auth/logout")
+        csrf = auth_client.get("/api/auth/csrf").json()["csrf_token"]
+        logout_resp = auth_client.post(
+            "/api/auth/logout", headers={"Origin": "http://testserver", "X-CSRF-Token": csrf}
+        )
 
     assert logout_resp.status_code == 200
     matching_records = [
@@ -334,7 +353,11 @@ def test_auth_logging_expired_warning(caplog: pytest.LogCaptureFixture) -> None:
     )
 
     with caplog.at_level(logging.WARNING, logger="wishenka.auth"):
-        response = client.post("/api/auth/telegram", json={"init_data": expired_data})
+        response = client.post(
+            "/api/auth/telegram",
+            json={"init_data": expired_data},
+            headers={"Origin": "http://testserver"},
+        )
 
     assert response.status_code == 401
     matching_records = [
@@ -356,7 +379,11 @@ def test_auth_logging_malformed_warning(caplog: pytest.LogCaptureFixture) -> Non
     client = TestClient(app)
 
     with caplog.at_level(logging.WARNING, logger="wishenka.auth"):
-        response = client.post("/api/auth/telegram", json={"init_data": "invalid=query_string"})
+        response = client.post(
+            "/api/auth/telegram",
+            json={"init_data": "invalid=query_string"},
+            headers={"Origin": "http://testserver"},
+        )
 
     assert response.status_code == 401
     matching_records = [

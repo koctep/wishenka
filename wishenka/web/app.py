@@ -4,15 +4,19 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request, Response
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 from wishenka.config import Settings
 from wishenka.logging import configure_logging
 from wishenka.web.routes.auth import router as auth_router
+from wishenka.web.routes.miniapp import router as miniapp_router
 from wishenka.web.routes.wishlists import router as wishlist_router
+from wishenka.web.security import BrowserSecurityMiddleware
 from wishenka.wishlists.service import WishlistService
 from wishenka.wishlists.store import WishlistStore
 
@@ -27,6 +31,8 @@ class ShareTokenAccessFilter(logging.Filter):
             client, method, path, version, status = record.args
             if isinstance(path, str) and path.startswith("/api/public/wishlists/"):
                 record.args = (client, method, "/api/public/wishlists/{token}", version, status)
+            elif isinstance(path, str) and "?" in path:
+                record.args = (client, method, path.split("?", 1)[0], version, status)
         return True
 
 
@@ -120,6 +126,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.domain_service = WishlistService(store=app.state.wishlist_store)
 
     app.add_middleware(RequestLoggingMiddleware)
+    app.add_middleware(BrowserSecurityMiddleware)
+    app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+    app.include_router(miniapp_router)
     app.include_router(auth_router)
     app.include_router(wishlist_router)
 

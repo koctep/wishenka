@@ -68,5 +68,9 @@
 - [`doc/dev/wishlists.md`](wishlists.md) — Домен вишлистов: ролевая модель (RBAC/ABAC), жизненный цикл, Surprise Invariant, бронирование и токены шеринга.
 - [`doc/dev/reservations.md`](reservations.md) — Домен бронирования подарков: жизненный цикл броней (ACTIVE, PURCHASED, CANCELLED, FULFILLED), гарантия Surprise Invariant, координатор конкурентного доступа (KeyedMutex), штучный учет и личный кабинет дарителя «Мои бронирования».
 - [`doc/dev/items.md`](items.md) — Домен элементов желаний: универсальный ввод (текст, ссылки, шеринг), каскадный парсинг метаданных (JSON-LD, OpenGraph, Microdata), graceful fallback при антибот-защите и штучный учет подарков.
-- [`doc/dev/auth.md`](auth.md) — Аутентификация Telegram Mini App, валидация initData и сессионные токены.
-- [`doc/dev/infrastructure.md`](infrastructure.md) — Окружение разработки, Makefile, линтеры, форматирование и CI.
+- [`doc/dev/auth.md`](auth.md) — Аутентификация Telegram Mini App, валидация initData и
+  сессионные токены.
+- [`doc/dev/miniapp.md`](miniapp.md) — Telegram Mini App (TMA): интерфейс управления вишлистами,
+  администрирование участников, флоу инвайтов, шеринг и CSRF-защита.
+- [`doc/dev/infrastructure.md`](infrastructure.md) — Окружение разработки, Makefile, линтеры,
+  форматирование и CI.

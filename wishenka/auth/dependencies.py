@@ -40,7 +40,9 @@ async def get_optional_current_user(
 
     # 1. Prioritize Authorization: Bearer header
     auth_header = request.headers.get("Authorization")
-    if auth_header and auth_header.startswith("Bearer "):
+    if auth_header:
+        if not auth_header.startswith("Bearer ") or not auth_header[7:].strip():
+            raise HTTPException(status_code=401, detail="Invalid authorization header")
         token = auth_header[7:].strip()
         auth_method = "bearer"
 

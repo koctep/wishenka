@@ -22,6 +22,7 @@ from wishenka.auth.session import (
     set_session_cookie,
 )
 from wishenka.config import Settings
+from wishenka.web.security import csrf_value
 
 logger = logging.getLogger("wishenka.auth")
 
@@ -129,3 +130,34 @@ async def get_me(
         "username": current_user.username,
         "auth_method": current_user.auth_method,
     }
+
+
+@router.get("/csrf")
+async def get_csrf(
+    request: Request,
+    response: Response,
+    current_user: Annotated[AuthenticatedUser, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, str]:
+    """Issue a CSRF value bound to the verified session cookie."""
+    cookie = request.cookies.get(settings.session_cookie_name)
+    if not cookie or current_user.auth_method != "cookie":
+        logger.warning(
+            "CSRF token request rejected: cookie session required for user %s",
+            current_user.telegram_id,
+            extra={
+                "event": "csrf_cookie_missing",
+                "telegram_id": current_user.telegram_id,
+            },
+        )
+        raise HTTPException(status_code=401, detail="Cookie session required")
+    response.headers["Cache-Control"] = "no-store"
+    logger.info(
+        "CSRF token issued for user %s",
+        current_user.telegram_id,
+        extra={
+            "event": "csrf_token_issued",
+            "telegram_id": current_user.telegram_id,
+        },
+    )
+    return {"csrf_token": csrf_value(settings.csrf_secret_key, cookie)}

@@ -1,0 +1,8 @@
+:root { font: 16px system-ui, sans-serif; color: #29222b; background: #fff9fa; }
+body { margin: auto; padding: 1rem; max-width: 42rem; }
+section, form { margin: 1rem 0; padding: 1rem; background: white; border-radius: .7rem; }
+button, input { box-sizing: border-box; font: inherit; min-height: 44px; margin: .25rem; }
+button { border: 1px solid #74283f; border-radius: .5rem; background: #fff; padding: .5rem; }
+input { max-width: 100%; width: 100%; border: 1px solid #888; border-radius: .3rem; }
+label { display: block; margin: .5rem 0; }
+#status { min-height: 1.5rem; font-weight: 600; }

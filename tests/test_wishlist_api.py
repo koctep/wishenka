@@ -65,7 +65,9 @@ def test_storage_error_traceback_does_not_expose_tokens(
     owner = {"Authorization": f"Bearer {sessions.create_token(101, 'Owner')}"}
     app = create_app(settings)
     token = "storage-failure-secret-token"
-    monkeypatch.setattr(secrets, "token_urlsafe", lambda _: token)
+    monkeypatch.setattr(
+        secrets, "token_urlsafe", lambda size: token if size == 16 else token + "-invite"
+    )
 
     async def fail_write(*args: object) -> None:
         raise IntegrityError("INSERT", {"token": token}, ValueError(f"sensitive {token}"))

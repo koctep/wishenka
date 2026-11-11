@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     session_cookie_samesite: str = "none"
     session_cookie_domain: str | None = None
     telegram_auth_max_age_seconds: int = 86400
+    application_origin: str = "http://testserver"
+    csrf_secret_key: str = "wishenka_csrf_default_change_in_prod"
+    telegram_bot_username: str = ""
+    telegram_app_short_name: str = ""
 
     model_config = SettingsConfigDict(
         env_prefix="WISHENKA_",

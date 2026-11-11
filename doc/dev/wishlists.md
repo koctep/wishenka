@@ -62,15 +62,29 @@ rejected by the optional authentication dependency.
 
 - `POST /api/wishlists/{id}/share/reset`: Owner or admin rotates the public link on an active list.
 
+- `POST /api/wishlists/{id}/invite/reset`: Owner or admin rotates the collaborator invite token.
+
+- `GET /api/wishlists/{id}/members`: Lists active members and their roles.
+
+- `PATCH /api/wishlists/{id}/members/{user_id}/role`: Owner promotes or demotes a member.
+
+- `DELETE /api/wishlists/{id}/members/{user_id}`: Owner or admin removes a member.
+
+- `GET /api/invitations/preview`: Previews invitation details via `X-Invite-Token` header.
+
+- `POST /api/invitations/accept`: Authenticated user joins wishlist via `X-Invite-Token` header.
+
 - `GET /api/public/wishlists/{token}`: Reads the public projection, including archived lists.
 
 
 Create and patch accept a JSON object with optional `name`, `description`, `event_title`, and
 `event_date`. The HTTP representation includes list details and items; member responses include
-`role`, and owner/admin responses include `share_token`. The public projection uses an explicit
-allowlist and omits membership, tokens and reservation-derived fields. It is returned even when an
-authenticated caller uses the public URL. Unknown, deleted or inaccessible lists return 404;
-operations incompatible with the archived state return 409. Archive is read-only until restored.
+`role` and `members`, and owner/admin responses also include `share_token` and `invite_token`.
+The public projection uses an explicit allowlist and omits membership, tokens and
+reservation-derived fields. It is returned even when an authenticated caller uses the public URL.
+Unknown, deleted or inaccessible lists return 404; operations incompatible with the archived
+state return 409. Archive is read-only until restored. State-changing requests from browser
+sessions are protected by CSRF tokens and origin validation — see [miniapp.md](miniapp.md).
 There is no HTTP delete route in this API; domain soft deletion remains a separate operation.
 
 A sharing token is a bearer capability. Rotation invalidates the old public link, and the persistent

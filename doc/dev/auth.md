@@ -54,8 +54,9 @@ wishenka/
 │   ├── session.py           # Signed session tokens and cookie helpers
 │   └── dependencies.py      # FastAPI security dependencies
 └── web/
-    └── routes/
-        └── auth.py          # Endpoints: /api/auth/telegram, /logout, /me
+    ├── routes/
+    │   └── auth.py          # Endpoints: /api/auth/telegram, /logout, /me, /csrf
+    └── security.py          # CSRF and Origin verification (see doc/dev/miniapp.md)
 ```
 
 ### 1. `wishenka.auth.init_data`
@@ -193,6 +194,14 @@ Telegram Mini Apps frequently run in cross-site iframes (e.g. `https://web.teleg
 
 > [!NOTE]
 > In local development environments operating over plain HTTP (`http://localhost`), set `session_cookie_secure: False` and `session_cookie_samesite: "lax"` or `"none"`.
+
+### CSRF Protection for Cookie Sessions
+
+Because `SameSite=None` allows cookies to be sent across origins, all state-changing browser
+requests (`POST`, `PATCH`, `DELETE`) are protected by `BrowserSecurityMiddleware` and require:
+1. An `Origin` header matching `WISHENKA_APPLICATION_ORIGIN`.
+2. A session-bound CSRF token obtained via `GET /api/auth/csrf` and passed in `X-CSRF-Token`.
+For full details, see [miniapp.md](miniapp.md).
 
 ---
 
