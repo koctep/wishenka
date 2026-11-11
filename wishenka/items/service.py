@@ -6,22 +6,17 @@ import time
 import httpx
 
 from wishenka.items.classifier import UniversalInputClassifier
+from wishenka.items.exceptions import (
+    InvalidUrlSchemeError,
+    ResponseBodyTooLargeError,
+    SSRFBlockedError,
+)
+from wishenka.items.fetcher import DEFAULT_HEADERS, DEFAULT_TIMEOUT, UrlMetadataService
 from wishenka.items.models import InputType
 from wishenka.items.parser import HtmlMetadataExtractor, derive_store_name, extract_domain
 from wishenka.items.schemas import ItemPreviewDTO
 
 logger = logging.getLogger("wishenka.items")
-
-DEFAULT_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
-        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-}
-
-DEFAULT_TIMEOUT = httpx.Timeout(4.0, connect=2.0)
 
 CHALLENGE_SIGNATURES = [
     "_cf_chl_opt",
@@ -38,6 +33,14 @@ CHALLENGE_SIGNATURES = [
 
 class ItemPreviewService:
     """Orchestrates link scraping, universal classification, and graceful degradation."""
+
+    def __init__(
+        self,
+        url_metadata_service: UrlMetadataService | None = None,
+    ) -> None:
+        self.url_metadata_service = url_metadata_service or UrlMetadataService(
+            timeout=DEFAULT_TIMEOUT
+        )
 
     async def preview(
         self,
@@ -78,21 +81,93 @@ class ItemPreviewService:
         store_name = derive_store_name(target_url)
 
         try:
-            if client is not None:
-                response = await client.get(
-                    target_url,
-                    headers=DEFAULT_HEADERS,
-                    follow_redirects=True,
-                )
-            else:
-                async with httpx.AsyncClient(
-                    timeout=DEFAULT_TIMEOUT,
-                    follow_redirects=True,
-                ) as local_client:
-                    response = await local_client.get(
-                        target_url,
-                        headers=DEFAULT_HEADERS,
-                    )
+            html_text, response_url = await self.url_metadata_service._fetch_html(
+                target_url,
+                client=client,
+            )
+        except SSRFBlockedError as exc:
+            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            logger.warning(
+                "SSRF blocked for domain %s (host=%s, ip=%s, reason=%s): %s",
+                url_domain,
+                exc.host,
+                exc.ip_address,
+                exc.reason,
+                exc,
+                extra={
+                    "event": "item_preview_ssrf_blocked",
+                    "url": target_url,
+                    "url_domain": url_domain,
+                    "host": exc.host,
+                    "ip": exc.ip_address,
+                    "reason": exc.reason,
+                    "input_type": classification.input_type.value,
+                    "duration_ms": duration_ms,
+                    "fallback_reason": "ssrf_blocked",
+                },
+            )
+            return ItemPreviewDTO(
+                input_type=classification.input_type,
+                url=target_url,
+                store_name=store_name,
+                title=classification.residual_text,
+                is_fallback=True,
+                fallback_reason="ssrf_blocked",
+            )
+        except InvalidUrlSchemeError as exc:
+            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            logger.warning(
+                "Invalid URL scheme '%s' for %s: %s",
+                exc.scheme,
+                target_url,
+                exc,
+                extra={
+                    "event": "item_preview_invalid_scheme",
+                    "url": target_url,
+                    "url_domain": url_domain,
+                    "scheme": exc.scheme,
+                    "reason": "invalid_scheme",
+                    "input_type": classification.input_type.value,
+                    "duration_ms": duration_ms,
+                    "fallback_reason": "ssrf_blocked",
+                },
+            )
+            return ItemPreviewDTO(
+                input_type=classification.input_type,
+                url=target_url,
+                store_name=store_name,
+                title=classification.residual_text,
+                is_fallback=True,
+                fallback_reason="ssrf_blocked",
+            )
+        except ResponseBodyTooLargeError as exc:
+            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            logger.warning(
+                "Response body too large for domain %s (%s bytes, limit %s bytes): %s",
+                url_domain,
+                exc.content_length,
+                exc.max_allowed,
+                exc,
+                extra={
+                    "event": "item_preview_response_too_large",
+                    "url": target_url,
+                    "url_domain": url_domain,
+                    "content_length": exc.content_length,
+                    "max_allowed": exc.max_allowed,
+                    "reason": "response_too_large",
+                    "input_type": classification.input_type.value,
+                    "duration_ms": duration_ms,
+                    "fallback_reason": "response_too_large",
+                },
+            )
+            return ItemPreviewDTO(
+                input_type=classification.input_type,
+                url=target_url,
+                store_name=store_name,
+                title=classification.residual_text,
+                is_fallback=True,
+                fallback_reason="response_too_large",
+            )
         except httpx.TimeoutException:
             duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
             logger.warning(
@@ -115,6 +190,64 @@ class ItemPreviewService:
                 is_fallback=True,
                 fallback_reason="timeout",
             )
+        except httpx.HTTPStatusError as exc:
+            response = exc.response
+            response_url = str(response.url) if response.url else target_url
+            response_domain = extract_domain(response_url) or url_domain
+            effective_store = derive_store_name(response_url) or store_name
+
+            if response.status_code in (403, 429) or self._is_challenge(response.text):
+                reason = (
+                    "anti_bot_challenge"
+                    if (response.status_code == 403 or self._is_challenge(response.text))
+                    else "http_error"
+                )
+                duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+                logger.info(
+                    "Anti-bot or restricted response (%s) for domain %s; degrading gracefully",
+                    response.status_code,
+                    response_domain,
+                    extra={
+                        "event": "anti_bot_challenge_detected",
+                        "status_code": response.status_code,
+                        "url_domain": response_domain,
+                        "input_type": classification.input_type.value,
+                        "duration_ms": duration_ms,
+                        "fallback_reason": reason,
+                    },
+                )
+                return ItemPreviewDTO(
+                    input_type=classification.input_type,
+                    url=target_url,
+                    store_name=effective_store,
+                    title=classification.residual_text,
+                    is_fallback=True,
+                    fallback_reason=reason,
+                )
+
+            if response.status_code >= 400:
+                duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+                logger.warning(
+                    "Link preview HTTP error (%s) for domain %s; degrading gracefully",
+                    response.status_code,
+                    response_domain,
+                    extra={
+                        "event": "item_preview_http_error",
+                        "status_code": response.status_code,
+                        "url_domain": response_domain,
+                        "input_type": classification.input_type.value,
+                        "duration_ms": duration_ms,
+                        "fallback_reason": "http_error",
+                    },
+                )
+                return ItemPreviewDTO(
+                    input_type=classification.input_type,
+                    url=target_url,
+                    store_name=effective_store,
+                    title=classification.residual_text,
+                    is_fallback=True,
+                    fallback_reason="http_error",
+                )
         except (httpx.HTTPError, Exception) as exc:
             duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
             logger.warning(
@@ -138,29 +271,20 @@ class ItemPreviewService:
                 fallback_reason="http_error",
             )
 
-        response_url = str(response.url) if response.url else target_url
         response_domain = extract_domain(response_url) or url_domain
         effective_store = derive_store_name(response_url) or store_name
 
-        # Check anti-bot challenges or HTTP errors
-        if response.status_code in (403, 429) or self._is_challenge(response.text):
-            reason = (
-                "anti_bot_challenge"
-                if (response.status_code == 403 or self._is_challenge(response.text))
-                else "http_error"
-            )
+        if self._is_challenge(html_text):
             duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
             logger.info(
-                "Anti-bot or restricted response (%s) for domain %s; degrading gracefully",
-                response.status_code,
+                "Anti-bot or restricted response for domain %s; degrading gracefully",
                 response_domain,
                 extra={
                     "event": "anti_bot_challenge_detected",
-                    "status_code": response.status_code,
                     "url_domain": response_domain,
                     "input_type": classification.input_type.value,
                     "duration_ms": duration_ms,
-                    "fallback_reason": reason,
+                    "fallback_reason": "anti_bot_challenge",
                 },
             )
             return ItemPreviewDTO(
@@ -169,36 +293,11 @@ class ItemPreviewService:
                 store_name=effective_store,
                 title=classification.residual_text,
                 is_fallback=True,
-                fallback_reason=reason,
+                fallback_reason="anti_bot_challenge",
             )
 
-        if response.status_code >= 400:
-            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
-            logger.warning(
-                "Link preview HTTP error (%s) for domain %s; degrading gracefully",
-                response.status_code,
-                response_domain,
-                extra={
-                    "event": "item_preview_http_error",
-                    "status_code": response.status_code,
-                    "url_domain": response_domain,
-                    "input_type": classification.input_type.value,
-                    "duration_ms": duration_ms,
-                    "fallback_reason": "http_error",
-                },
-            )
-            return ItemPreviewDTO(
-                input_type=classification.input_type,
-                url=target_url,
-                store_name=effective_store,
-                title=classification.residual_text,
-                is_fallback=True,
-                fallback_reason="http_error",
-            )
-
-        # 200 OK: extract rich metadata
         try:
-            extracted = HtmlMetadataExtractor.extract(response.text, base_url=response_url)
+            extracted = HtmlMetadataExtractor.extract(html_text, base_url=response_url)
             duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
             logger.info(
                 "Link preview successfully generated for domain %s in %sms",
@@ -257,4 +356,8 @@ class ItemPreviewService:
         return any(sig in lowered for sig in CHALLENGE_SIGNATURES)
 
 
-__all__ = ["ItemPreviewService"]
+__all__ = [
+    "DEFAULT_HEADERS",
+    "DEFAULT_TIMEOUT",
+    "ItemPreviewService",
+]
