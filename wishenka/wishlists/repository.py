@@ -93,6 +93,7 @@ def _row_to_item(row: Row[Any]) -> WishItem:
         store_icon_url=str(row.store_icon_url) if row.store_icon_url is not None else None,
         priority=ItemPriority(row.priority),
         category=str(row.category) if row.category is not None else None,
+        display_order=int(getattr(row, "display_order", 0) or 0),
         is_archived=bool(row.is_archived),
         created_at=created,
         updated_at=updated,
@@ -147,9 +148,9 @@ class WishlistRepository:
         i_stmt = text(
             "SELECT id, wishlist_id, recipient_user_id, recipient_name, title, "
             "description, link, price, currency, quantity, received_quantity, "
-            "image_url, store_name, store_icon_url, priority, category, is_archived, "
-            "created_at, updated_at "
-            "FROM wl_items WHERE wishlist_id = :id ORDER BY id ASC"
+            "image_url, store_name, store_icon_url, priority, category, "
+            "display_order, is_archived, created_at, updated_at "
+            "FROM wl_items WHERE wishlist_id = :id ORDER BY display_order ASC, id ASC"
         )
         i_rows = (await self.conn.execute(i_stmt, {"id": wishlist_id})).all()
         items_map: dict[int, WishItem] = {}
@@ -311,8 +312,8 @@ class WishlistRepository:
         stmt = text(
             "SELECT id, wishlist_id, recipient_user_id, recipient_name, title, "
             "description, link, price, currency, quantity, received_quantity, "
-            "image_url, store_name, store_icon_url, priority, category, is_archived, "
-            "created_at, updated_at FROM wl_items WHERE id = :id"
+            "image_url, store_name, store_icon_url, priority, category, "
+            "display_order, is_archived, created_at, updated_at FROM wl_items WHERE id = :id"
         )
         row = (await self.conn.execute(stmt, {"id": item_id})).one_or_none()
         if row is None:
@@ -348,6 +349,7 @@ class WishlistRepository:
             "store_icon_url": item.store_icon_url,
             "priority": item.priority.value,
             "category": item.category,
+            "display_order": item.display_order,
             "is_archived": 1 if item.is_archived else 0,
             "created_at": _format_dt(item.created_at),
             "updated_at": _format_dt(item.updated_at),
@@ -363,18 +365,20 @@ class WishlistRepository:
                 "price = :price, currency = :currency, quantity = :quantity, "
                 "received_quantity = :received_quantity, image_url = :image_url, "
                 "store_name = :store_name, store_icon_url = :store_icon_url, "
-                "priority = :priority, category = :category, is_archived = :is_archived, "
+                "priority = :priority, category = :category, "
+                "display_order = :display_order, is_archived = :is_archived, "
                 "updated_at = :updated_at WHERE id = :id"
             )
         else:
             stmt = text(
                 "INSERT INTO wl_items (id, wishlist_id, recipient_user_id, recipient_name, "
                 "title, description, link, price, currency, quantity, received_quantity, "
-                "image_url, store_name, store_icon_url, priority, category, is_archived, "
-                "created_at, updated_at) VALUES (:id, :wishlist_id, :recipient_user_id, "
+                "image_url, store_name, store_icon_url, priority, category, "
+                "display_order, is_archived, created_at, updated_at) "
+                "VALUES (:id, :wishlist_id, :recipient_user_id, "
                 ":recipient_name, :title, :description, :link, :price, :currency, "
                 ":quantity, :received_quantity, :image_url, :store_name, :store_icon_url, "
-                ":priority, :category, :is_archived, :created_at, :updated_at)"
+                ":priority, :category, :display_order, :is_archived, :created_at, :updated_at)"
             )
         await self.conn.execute(stmt, params)
         logger.info(

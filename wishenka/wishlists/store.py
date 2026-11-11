@@ -171,6 +171,7 @@ class WishlistStore:
                     store_icon_url TEXT,
                     priority TEXT NOT NULL DEFAULT 'medium',
                     category TEXT,
+                    display_order INTEGER NOT NULL DEFAULT 0,
                     is_archived INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -243,6 +244,17 @@ class WishlistStore:
             for statement in ddl_statements:
                 await conn.exec_driver_sql(statement)
 
+            cursor_items = await conn.execute(text("PRAGMA table_info(wl_items)"))
+            cols_items = [r[1] for r in cursor_items.fetchall()]
+            if cols_items and "display_order" not in cols_items:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE wl_items ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0"
+                )
+            await conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS idx_wl_items_order "
+                "ON wl_items(wishlist_id, display_order)"
+            )
+
     async def _read(self, conn: AsyncConnection) -> tuple[WishlistService, _StorageSnapshot]:
         service = WishlistService()
 
@@ -294,13 +306,19 @@ class WishlistStore:
         i_stmt = text(
             "SELECT id, wishlist_id, recipient_user_id, recipient_name, title, "
             "description, link, price, currency, quantity, received_quantity, "
-            "image_url, store_name, store_icon_url, priority, category, is_archived, "
-            "created_at, updated_at FROM wl_items ORDER BY id ASC"
+            "image_url, store_name, store_icon_url, priority, category, "
+            "display_order, is_archived, created_at, updated_at "
+            "FROM wl_items ORDER BY display_order ASC, id ASC"
         )
         i_rows = (await conn.execute(i_stmt)).all()
         for ir in i_rows:
             rec_uid = int(ir.recipient_user_id) if ir.recipient_user_id is not None else None
             price = int(ir.price) if ir.price is not None else None
+            disp_order = (
+                int(ir.display_order)
+                if hasattr(ir, "display_order") and ir.display_order is not None
+                else 0
+            )
             item = WishItem(
                 id=int(ir.id),
                 wishlist_id=int(ir.wishlist_id),
@@ -318,6 +336,7 @@ class WishlistStore:
                 store_icon_url=str(ir.store_icon_url) if ir.store_icon_url is not None else None,
                 priority=ItemPriority(ir.priority),
                 category=str(ir.category) if ir.category is not None else None,
+                display_order=disp_order,
                 is_archived=bool(ir.is_archived),
                 created_at=_parse_dt(ir.created_at) or datetime.now(UTC),
                 updated_at=_parse_dt(ir.updated_at) or datetime.now(UTC),
@@ -505,6 +524,7 @@ class WishlistStore:
                 "store_icon_url": item.store_icon_url,
                 "priority": item.priority.value,
                 "category": item.category,
+                "display_order": item.display_order,
                 "is_archived": 1 if item.is_archived else 0,
                 "created_at": _format_dt(item.created_at),
                 "updated_at": _format_dt(item.updated_at),
@@ -517,18 +537,20 @@ class WishlistStore:
                     "price = :price, currency = :currency, quantity = :quantity, "
                     "received_quantity = :received_quantity, image_url = :image_url, "
                     "store_name = :store_name, store_icon_url = :store_icon_url, "
-                    "priority = :priority, category = :category, is_archived = :is_archived, "
+                    "priority = :priority, category = :category, "
+                    "display_order = :display_order, is_archived = :is_archived, "
                     "updated_at = :updated_at WHERE id = :id"
                 )
             else:
                 i_stmt = text(
                     "INSERT INTO wl_items (id, wishlist_id, recipient_user_id, recipient_name, "
                     "title, description, link, price, currency, quantity, received_quantity, "
-                    "image_url, store_name, store_icon_url, priority, category, is_archived, "
-                    "created_at, updated_at) VALUES (:id, :wishlist_id, :recipient_user_id, "
+                    "image_url, store_name, store_icon_url, priority, category, "
+                    "display_order, is_archived, created_at, updated_at) "
+                    "VALUES (:id, :wishlist_id, :recipient_user_id, "
                     ":recipient_name, :title, :description, :link, :price, :currency, "
                     ":quantity, :received_quantity, :image_url, :store_name, :store_icon_url, "
-                    ":priority, :category, :is_archived, :created_at, :updated_at)"
+                    ":priority, :category, :display_order, :is_archived, :created_at, :updated_at)"
                 )
             await conn.execute(i_stmt, i_params)
 

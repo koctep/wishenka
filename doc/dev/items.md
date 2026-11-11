@@ -1,8 +1,8 @@
-# Items Domain: Input Parsing, Metadata Extraction, Preview Service, Marketplace Normalization, Piece Accounting, and Network Security
+# Items Domain: Input Parsing, Metadata Extraction, Preview Service, Marketplace Normalization, REST CRUD API, Piece Accounting, Safe Archiving, and Network Security
 
 ## Overview
 
-The `wishenka.items` package and its integration with `wishenka.wishlists` implement universal wish creation, marketplace URL sanitization, rich asynchronous metadata extraction, resilient anti-bot degradation, enterprise-grade SSRF defense, streaming DoS payload limits, and piece-by-piece inventory accounting for the **Wishlist Service («Вишенка»)** Telegram Mini App.
+The `wishenka.items` package and its integration with `wishenka.wishlists` implement universal wish creation, marketplace URL sanitization, rich asynchronous metadata extraction, resilient anti-bot degradation, enterprise-grade SSRF defense, streaming DoS payload limits, RESTful CRUD lifecycle endpoints, piece-by-piece inventory accounting, atomic reordering, safe archiving, and collaborative gift targeting for the **Wishlist Service («Вишенка»)** Telegram Mini App.
 
 ```text
 +----------------------------------------------------------------------------------------------------+
@@ -110,12 +110,22 @@ The `wishenka.items` package and its integration with `wishenka.wishlists` imple
      $$\text{available} = \max(0, \text{desired} - \text{reserved} - \text{fulfilled})$$
    - **Reduction Lock Invariant**: A user cannot reduce `desired` quantity below already locked units ($\text{reserved} + \text{fulfilled}$). Attempting to do so raises [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L40-L42).
    - **Surprise Invariant**: Gift recipients receive [`WishItemRecipientViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L14-L35) strictly devoid of reservation statuses, gifter identities, or booked quantities.
+8. **RESTful Wish Items CRUD API & Atomic Reordering**:
+   - Complete endpoint suite mounted at `/api/wishlists/{wishlist_id}/items` supporting item creation, listing, detail reading, patch updating, atomic reordering, safe archiving, and restoring.
+   - Reordering enforces strict 1:1 active permutation integrity: the request must include all active item IDs with zero duplicates, contiguous display indexing ($0, 1, \dots, N-1$), and transactional commit.
+9. **Collaborative Wishlist Targeting & Dual-Role Projections**:
+   - Items can be designated for specific members via `recipient_user_id` or descriptive `recipient_name`.
+   - Access control verifies `recipient_user_id` belongs to the wishlist's active members.
+   - Dual-role projection: recipients see clean recipient views (`WishItemRecipientViewDTO`), while collaborators and gifters see full booking and availability states (`WishItemGifterViewDTO`).
+10. **Safe Archiving & End-of-List Restoration**:
+    - Archiving acts as a non-destructive soft-delete (`is_archived = True`), preserving all active reservations in the database while immediately hiding the item from default listings and blocking new bookings.
+    - Restoring reactivates the item (`is_archived = False`) and safely appends it to the tail of the active display order (`display_order = max(active_orders) + 1`).
 
 ---
 
 ## Architecture & Components
 
-The items subsystem consists of seven core architectural building blocks:
+The items subsystem consists of nine core architectural building blocks:
 
 ### 1. [`UniversalInputClassifier`](file:///home/src/wishenka/items/classifier.py#L24-L105)
 
@@ -246,44 +256,116 @@ Asynchronous facade orchestrating input classification, URL cleaning, secure fet
   - Other network / HTTP errors: `fallback_reason="http_error"`.
 - Prevents unhandled 500 errors and ensures Telegram Mini App users always retain access to a functional manual wish entry form with extracted residual title and clean URL.
 
-### 7. Multi-Quantity Integration in [`wishenka.wishlists`](file:///home/src/wishenka/wishlists/service.py#L1-L320)
+### 7. Wish Items Domain Service & Piece Accounting ([`wishenka.wishlists.service`](file:///home/src/wishenka/wishlists/service.py))
 
-Located in [`wishenka/wishlists/models.py`](file:///home/src/wishenka/wishlists/models.py) and [`wishenka/wishlists/service.py`](file:///home/src/wishenka/wishlists/service.py):
-- Extends [`WishItem`](file:///home/src/wishenka/wishlists/models.py#L78-L127) with dynamic properties:
-  - `reserved_quantity`: Sum of `quantity` across all active reservations.
-  - `available_quantity`: `max(0, quantity - received_quantity - reserved_quantity)`.
+Located in [`wishenka/wishlists/service.py`](file:///home/src/wishenka/wishlists/service.py) and [`wishenka/wishlists/models.py`](file:///home/src/wishenka/wishlists/models.py).
+
+Provides transactional domain operations for item lifecycle, piece-by-piece inventory accounting, atomic reordering, safe archiving, and role-based view projection:
+
+- **Piece Accounting Invariants on [`WishItem`](file:///home/src/wishenka/wishlists/models.py)**:
+  - `reserved_quantity`: Sum of `quantity` across all reservations in `ACTIVE` or `PURCHASED` status.
+  - `available_quantity`: $\max(0, \text{quantity} - \text{received\_quantity} - \text{reserved\_quantity})$.
   - `desired_quantity` / `fulfilled_quantity`: Explicit business aliases for `quantity` and `received_quantity`.
-- [`WishlistService.update_wish_item`](file:///home/src/wishenka/wishlists/service.py#L158-L260): Enforces the reduction invariant `quantity >= reserved_quantity + received_quantity`, raising [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L40-L42) if violated.
-- Projection views strictly separate recipient visibility ([`WishItemRecipientViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L14-L35)) from gifter visibility ([`WishItemGifterViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L38-L62)).
+- **Item Creation ([`add_wish_item`](file:///home/src/wishenka/wishlists/service.py#L733))**:
+  - Verifies parent wishlist state (mutations blocked on `ARCHIVED` or `DELETED` wishlists via [`WishlistArchivedError`](file:///home/src/wishenka/wishlists/exceptions.py#L18) and [`WishlistDeletedError`](file:///home/src/wishenka/wishlists/exceptions.py#L22)).
+  - Checks actor permissions via [`WishlistAccessPolicy.can_add_or_edit_item`](file:///home/src/wishenka/wishlists/service.py#L779).
+  - Validates collaborative recipient targeting: if `recipient_user_id` is specified, verifies it exists in active wishlist membership (`{owner_id} | {m.user_id for m in members}`).
+  - Automatically calculates next contiguous `display_order = max([it.display_order for it in wl.items], default=-1) + 1`.
+  - Emits structured event `item_created`.
+- **Item Updates & Reduction Lock Invariant ([`update_wish_item`](file:///home/src/wishenka/wishlists/service.py#L845))**:
+  - Row-level concurrency coordination via `async with self._concurrency_coordinator.acquire(item_id):`.
+  - Rejects mutations on archived items ([`WishlistArchivedError`](file:///home/src/wishenka/wishlists/exceptions.py#L18)).
+  - Enforces the **Reduction Lock Invariant**:
+    $$\text{requested\_quantity} \ge \text{reserved\_quantity} + \text{received\_quantity}$$
+    If violated, raises [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L40) and logs `item_quantity_reduction_rejected`.
+  - Computes `quantity_delta` and records modified fields list in structured event `item_updated`.
+- **Atomic Reordering Protocol ([`reorder_wish_items`](file:///home/src/wishenka/wishlists/service.py#L1044))**:
+  - Verifies active wishlist state and caller permissions.
+  - Enforces strict 1:1 active permutation integrity:
+    1. Zero duplicate IDs allowed (`len(item_ids) == len(set(item_ids))`).
+    2. Set equality with active items: `set(item_ids) == {it.id for it in wl.items if not it.is_archived}`.
+  - Re-indexes active items contiguously: `item.display_order = order` for `order, it_id in enumerate(item_ids)`.
+  - Emits structured event `items_reordered`.
+- **Safe Archiving ([`archive_wish_item`](file:///home/src/wishenka/wishlists/service.py#L1130))**:
+  - Sets `is_archived = True` and updates `updated_at`.
+  - Preserves all active reservations in the database without modification.
+  - Hides item from default listings and rejects new reservation or edit attempts.
+  - Emits structured event `item_archived` with `active_reservations_count`.
+- **Restoration Semantics ([`restore_wish_item`](file:///home/src/wishenka/wishlists/service.py#L1186))**:
+  - Sets `is_archived = False`.
+  - Re-inserts item at the end of the active list: `display_order = max(active_orders, default=-1) + 1`.
+  - Emits structured event `item_restored`.
+- **Surprise Invariant Projections ([`project_wish_item`](file:///home/src/wishenka/wishlists/service.py#L69))**:
+  - Strictly distinguishes recipient from gifter contexts using [`WishlistAccessPolicy.is_recipient`](file:///home/src/wishenka/wishlists/service.py#L74).
+  - Recipient caller receives [`WishItemRecipientViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L11-L37) with `is_recipient=True` and all reservation/buyer fields stripped.
+  - Non-recipient caller receives [`WishItemGifterViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L39-L71) containing `available_quantity`, `is_fully_reserved`, `is_reserved_by_me`, `my_reserved_quantity`, `my_reservation_status`, and `my_reservation_id`.
+
+### 8. RESTful Wish Items Controller ([`wishenka.web.routes.items`](file:///home/src/wishenka/web/routes/items.py))
+
+Located in [`wishenka/web/routes/items.py`](file:///home/src/wishenka/web/routes/items.py).
+
+FastAPI APIRouter mounted at `/api/wishlists/{wishlist_id}/items` providing HTTP endpoints for item CRUD, reordering, and archiving:
+
+- **Authentication Injections**:
+  - `User = Annotated[AuthenticatedUser, Depends(get_current_user)]`: Enforces authenticated session for mutations (`POST`, `PUT`, `PATCH`).
+  - `OptionalUser = Annotated[AuthenticatedUser | None, Depends(get_optional_current_user)]`: Allows anonymous access for public wishlist views while extracting caller credentials for personalized gifter badges when logged in.
+- **Transactional Execution Wrapper ([`execute`](file:///home/src/wishenka/web/routes/items.py#L33-L74))**:
+  - Executes operations against persistent `request.app.state.wishlist_store.execute` or test-injected domain service `request.app.state.wishlist_service`.
+  - Maps domain exceptions to standard HTTP error responses:
+    - [`WishlistNotFoundError`](file:///home/src/wishenka/wishlists/exceptions.py#L10), [`WishlistDeletedError`](file:///home/src/wishenka/wishlists/exceptions.py#L22), [`ItemNotFoundError`](file:///home/src/wishenka/wishlists/exceptions.py#L36) $\rightarrow$ **`404 Not Found`** (`event="item_not_found"`).
+    - [`PermissionDeniedError`](file:///home/src/wishenka/wishlists/exceptions.py#L26) $\rightarrow$ **`403 Forbidden`** (`event="item_permission_denied"`).
+    - [`WishlistArchivedError`](file:///home/src/wishenka/wishlists/exceptions.py#L18), [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L40) $\rightarrow$ **`409 Conflict`** (`event="item_conflict"`).
+    - `ValueError` (whitespace titles, invalid reorder permutations) $\rightarrow$ **`400 Bad Request`** (`event="item_validation_error"`).
+
+### 9. Relational Persistence & Ordering Index ([`wl_items`](file:///home/src/wishenka/wishlists/store.py))
+
+Located in [`wishenka/wishlists/db_models.py`](file:///home/src/wishenka/wishlists/db_models.py), [`wishenka/wishlists/store.py`](file:///home/src/wishenka/wishlists/store.py), and [`wishenka/wishlists/repository.py`](file:///home/src/wishenka/wishlists/repository.py):
+
+- **Column**: `display_order INTEGER NOT NULL DEFAULT 0` on table `wl_items`.
+- **Index**: `CREATE INDEX IF NOT EXISTS idx_wl_items_order ON wl_items(wishlist_id, display_order)`.
+- **Dynamic Schema Migration**: On startup, `WishlistStore._init_db` inspects `PRAGMA table_info(wl_items)` and executes `ALTER TABLE wl_items ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0` if absent, followed by creating `idx_wl_items_order`.
+- **Deterministic Ordering**: Repository selects sort by `ORDER BY display_order ASC, id ASC`.
 
 ---
 
 ## Domain Exceptions & Hierarchy
 
-Located in [`wishenka/items/exceptions.py`](file:///home/src/wishenka/items/exceptions.py).
+Located in [`wishenka/items/exceptions.py`](file:///home/src/wishenka/items/exceptions.py) and [`wishenka/wishlists/exceptions.py`](file:///home/src/wishenka/wishlists/exceptions.py).
 
 ```text
 WishlistError
-  └── ItemError
-        ├── InvalidItemDataError
-        └── ItemParsingError
-              ├── ResponseBodyTooLargeError
-              └── SSRFError
-                    ├── SSRFBlockedError
-                    └── InvalidUrlSchemeError
+  ├── ItemError
+  │     ├── InvalidItemDataError
+  │     └── ItemParsingError
+  │           ├── ResponseBodyTooLargeError
+  │           └── SSRFError
+  │                 ├── SSRFBlockedError
+  │                 └── InvalidUrlSchemeError
+  ├── ItemNotFoundError
+  ├── CannotReduceQuantityBelowReservedError
+  ├── WishlistNotFoundError
+  ├── WishlistArchivedError
+  ├── WishlistDeletedError
+  └── PermissionDeniedError
 ```
 
 ### Exception Reference
 
-| Exception | Base Class | Key Attributes | Trigger Condition |
-| --- | --- | --- | --- |
-| [`ItemError`](file:///home/src/wishenka/items/exceptions.py#L10) | `WishlistError` | None | Base exception for all item domain errors. |
-| [`InvalidItemDataError`](file:///home/src/wishenka/items/exceptions.py#L14) | `ItemError` | None | Validation failures in item payloads (e.g. quantity $< 1$ or $> 1000$). |
-| [`ItemParsingError`](file:///home/src/wishenka/items/exceptions.py#L18) | `ItemError` | None | Base exception for parsing, URL extraction, and network fetch limits. |
-| [`SSRFError`](file:///home/src/wishenka/items/exceptions.py#L22) | `ItemParsingError` | None | Base exception for SSRF blocks and URL security violations. |
-| [`SSRFBlockedError`](file:///home/src/wishenka/items/exceptions.py#L26) | `SSRFError` | `ip_address`, `host`, `reason` | Host or IP resolves to private, loopback, link-local, cloud metadata, or reserved range. |
-| [`InvalidUrlSchemeError`](file:///home/src/wishenka/items/exceptions.py#L43) | `SSRFError` | `scheme` | URL scheme is not `http` or `https` (e.g. `file://`, `ftp://`). |
-| [`ResponseBodyTooLargeError`](file:///home/src/wishenka/items/exceptions.py#L56) | `ItemParsingError` | `content_length`, `max_allowed` | Response exceeds 2 MB (`Content-Length` header or streaming chunk limit). |
+| Exception | Base Class | Key Attributes | HTTP Status | Trigger Condition |
+| --- | --- | --- | :---: | --- |
+| [`ItemError`](file:///home/src/wishenka/items/exceptions.py#L10) | `WishlistError` | None | `400` | Base exception for all item domain errors. |
+| [`InvalidItemDataError`](file:///home/src/wishenka/items/exceptions.py#L14) | `ItemError` | None | `400` | Validation failures in item payloads (e.g. quantity $< 1$ or $> 1000$). |
+| [`ItemParsingError`](file:///home/src/wishenka/items/exceptions.py#L18) | `ItemError` | None | `400` | Base exception for parsing, URL extraction, and network fetch limits. |
+| [`SSRFError`](file:///home/src/wishenka/items/exceptions.py#L22) | `ItemParsingError` | None | `400` | Base exception for SSRF blocks and URL security violations. |
+| [`SSRFBlockedError`](file:///home/src/wishenka/items/exceptions.py#L26) | `SSRFError` | `ip_address`, `host`, `reason` | `400` | Host or IP resolves to private, loopback, link-local, cloud metadata, or reserved range. |
+| [`InvalidUrlSchemeError`](file:///home/src/wishenka/items/exceptions.py#L43) | `SSRFError` | `scheme` | `400` | URL scheme is not `http` or `https` (e.g. `file://`, `ftp://`). |
+| [`ResponseBodyTooLargeError`](file:///home/src/wishenka/items/exceptions.py#L56) | `ItemParsingError` | `content_length`, `max_allowed` | `400` | Response exceeds 2 MB (`Content-Length` header or streaming chunk limit). |
+| [`ItemNotFoundError`](file:///home/src/wishenka/wishlists/exceptions.py#L36) | `WishlistError` | None | `404` | Target `item_id` does not exist or does not belong to the specified wishlist. |
+| [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L40) | `WishlistError` | None | `409` | Invariant violation: attempting to set `quantity < reserved_quantity + received_quantity`. |
+| [`WishlistNotFoundError`](file:///home/src/wishenka/wishlists/exceptions.py#L10) | `WishlistError` | None | `404` | Parent wishlist ID does not exist. |
+| [`WishlistArchivedError`](file:///home/src/wishenka/wishlists/exceptions.py#L18) | `WishlistError` | None | `409` | Attempting to mutate an item in an archived wishlist or edit an archived item. |
+| [`WishlistDeletedError`](file:///home/src/wishenka/wishlists/exceptions.py#L22) | `WishlistError` | None | `404` | Parent wishlist is marked as deleted. |
+| [`PermissionDeniedError`](file:///home/src/wishenka/wishlists/exceptions.py#L26) | `WishlistError` | None | `403` | Caller lacks `can_add_or_edit_item` privilege for the wishlist. |
 
 ---
 
@@ -295,10 +377,71 @@ WishlistError
 | [`ItemPriority`](file:///home/src/wishenka/items/models.py#L16-L21) | `wishenka.items.models` | Enum: `low`, `medium`, `high`. |
 | [`InputClassificationResult`](file:///home/src/wishenka/items/models.py#L24-L31) | `wishenka.items.models` | Result dataclass with `input_type`, `normalized_url`, `residual_text`, `raw_input`. |
 | [`ExtractedMetadata`](file:///home/src/wishenka/items/models.py#L34-L46) | `wishenka.items.models` | Raw parsed fields: `title`, `description`, `image_url`, `price`, `currency`, `store_name`, `store_icon_url`, `raw_html_title`. |
-| [`ItemPreviewDTO`](file:///home/src/wishenka/items/schemas.py#L11-L24) | `wishenka.items.schemas` | Pydantic DTO for client preview rendering, including `is_fallback` and `fallback_reason` (`ssrf_blocked`, `response_too_large`, `anti_bot_challenge`, `timeout`, `http_error`). |
+| [`ItemPreviewDTO`](file:///home/src/wishenka/items/schemas.py#L11-L24) | `wishenka.items.schemas` | Pydantic DTO for client preview rendering, including `is_fallback` and `fallback_reason`. |
 | [`MarketplaceRule`](file:///home/src/wishenka/items/marketplaces.py#L83-L97) | `wishenka.items.marketplaces` | Runtime-checkable Protocol for marketplace URL cleaning and store resolution. |
-| [`CreateItemDTO`](file:///home/src/wishenka/items/schemas.py#L27-L44) | `wishenka.items.schemas` | Pydantic DTO for creating new items with $1 \le \text{quantity} \le 1000$ validation. |
-| [`UpdateItemDTO`](file:///home/src/wishenka/items/schemas.py#L47-L64) | `wishenka.items.schemas` | Pydantic DTO for item mutations with $1 \le \text{quantity} \le 1000$ validation. |
+| [`CreateItemDTO`](file:///home/src/wishenka/items/schemas.py#L26-L49) | `wishenka.items.schemas` | Pydantic DTO for creating items: non-whitespace title, $1 \le \text{quantity} \le 1000$, optional `recipient_user_id` and `recipient_name`. |
+| [`UpdateItemDTO`](file:///home/src/wishenka/items/schemas.py#L51-L74) | `wishenka.items.schemas` | Pydantic DTO for updating items: non-whitespace title, $1 \le \text{quantity} \le 1000$, optional recipient overrides. |
+| [`ReorderItemsDTO`](file:///home/src/wishenka/items/schemas.py#L76-L82) | `wishenka.items.schemas` | Pydantic DTO for atomic reordering containing `item_ids: list[int]`. |
+| [`WishItemRecipientViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L11-L37) | `wishenka.wishlists/schemas` | Surprise Invariant view for the recipient: omits all reservation status and gifter details. |
+| [`WishItemGifterViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L39-L71) | `wishenka.wishlists/schemas` | View for gifters and non-recipient collaborators: includes `available_quantity`, `is_fully_reserved`, `my_reserved_quantity`, and `my_reservation_id`. |
+
+---
+
+## Business Invariants & Operational Rules
+
+### 1. Piece Accounting & Reduction Lock Invariant
+
+- **Quantity Bounds**: $1 \le \text{quantity} \le 1000$. Enforced at schema level ([`CreateItemDTO`](file:///home/src/wishenka/items/schemas.py#L37), [`UpdateItemDTO`](file:///home/src/wishenka/items/schemas.py#L62)) and domain level.
+- **Availability Formula**:
+  $$\text{available\_quantity} = \max(0, \text{quantity} - \text{received\_quantity} - \text{reserved\_quantity})$$
+- **Reduction Lock**: A wishlist creator or editor cannot reduce the `quantity` of an item below units that are already promised or delivered:
+  $$\text{requested\_quantity} \ge \text{reserved\_quantity} + \text{received\_quantity}$$
+  Attempting to reduce below this threshold raises [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L40) and returns HTTP 409 Conflict. This prevents race conditions where a creator reduces an item quantity while a gifter is purchasing it.
+
+### 2. Reordering Protocol & 1:1 Active Permutation Integrity
+
+- **Contiguous Zero-Indexed Ordering**: Item positions in a wishlist are defined by `display_order` ($0, 1, 2, \dots$).
+- **Auto-Increment on Creation**: Newly created items receive `display_order = max(active_display_orders, default=-1) + 1`.
+- **1:1 Active Permutation**: When invoking `PUT /api/wishlists/{wishlist_id}/items/reorder`:
+  1. The payload `item_ids` must contain no duplicates (`len(item_ids) == len(set(item_ids))`).
+  2. The set of `item_ids` must match **exactly** the set of all active (non-archived) items belonging to that wishlist:
+     $$\text{set}(item\_ids) == \{i.id \mid i \in \text{items}, \neg i.is\_archived\}$$
+  3. If any active item is missing, or an extra/archived item ID is provided, the operation raises `ValueError` (HTTP 400 Bad Request) and logs `item_reorder_invalid`.
+  4. On success, items are contiguously re-indexed to $0, 1, \dots, N-1$ matching the list order.
+
+### 3. Safe Archiving & Restore Semantics
+
+- **Non-Destructive Soft-Delete**: Archiving an item (`POST /api/wishlists/{wishlist_id}/items/{item_id}/archive`) marks `is_archived = True`.
+- **Reservation Preservation**: Active and purchased reservations on the archived item remain intact in the database. Gifters who committed to a gift do not lose their reservation history or booking records.
+- **Booking & Mutation Freeze**: Archived items cannot be booked or edited; attempting to modify an archived item raises [`WishlistArchivedError`](file:///home/src/wishenka/wishlists/exceptions.py#L18) (HTTP 409 Conflict).
+- **Listing Exclusion**: Archived items are hidden from default item listings (`include_archived=False`) and excluded from active reordering permutations.
+- **Tail Restoration**: Restoring an item (`POST /api/wishlists/{wishlist_id}/items/{item_id}/restore`) unsets `is_archived = False` and sets its `display_order` to `max(active_orders, default=-1) + 1`, appending it cleanly to the end of the active list.
+
+### 4. Collaborative Wishlist Targeting & Surprise Invariant
+
+- **Target Recipients**: In collaborative wishlists, an item can be designated for a specific recipient via `recipient_user_id` or descriptive `recipient_name`.
+- **Membership Check**: `recipient_user_id` must belong to the wishlist's active members (`owner_id` or enrolled members). Non-member recipient IDs are rejected with `ValueError` (HTTP 400 Bad Request).
+- **Dual-Role Projections ([`project_wish_item`](file:///home/src/wishenka/wishlists/service.py#L69))**:
+  - **Recipient View ([`WishItemRecipientViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L11))**: Returned when `WishlistAccessPolicy.is_recipient(current_user, item)` is true (i.e. caller is the designated recipient, or caller is the wishlist owner if no recipient is set). Completely omits `available_quantity`, `is_fully_reserved`, and all reservation details.
+  - **Gifter View ([`WishItemGifterViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L39))**: Returned to all other callers (collaborators and gifters). Displays `available_quantity`, whether the item is fully reserved, and the caller's personal reservation status (`is_reserved_by_me`, `my_reserved_quantity`, `my_reservation_id`).
+
+---
+
+## REST API Reference
+
+All endpoints are mounted at `/api/wishlists/{wishlist_id}/items`.
+
+| Method | Endpoint Path | Auth Required | Request Body | Response DTO | Status Codes | Description |
+| :---: | :--- | :---: | :--- | :--- | :---: | :--- |
+| `POST` | `/api/wishlists/{wishlist_id}/items` | **Yes** | [`CreateItemDTO`](file:///home/src/wishenka/items/schemas.py#L26) | Recipient or Gifter DTO | `201`, `400`, `403`, `404`, `409` | Create new wish item with auto-incremented `display_order`. |
+| `GET` | `/api/wishlists/{wishlist_id}/items` | Optional | None | `list[Recipient or Gifter DTO]` | `200`, `404` | List items sorted by `display_order ASC`. Query param `include_archived=bool`. |
+| `PUT` | `/api/wishlists/{wishlist_id}/items/reorder` | **Yes** | [`ReorderItemsDTO`](file:///home/src/wishenka/items/schemas.py#L76) | `list[Recipient or Gifter DTO]` | `200`, `400`, `403`, `404`, `409` | Atomically reorder active items enforcing 1:1 permutation integrity. |
+| `GET` | `/api/wishlists/{wishlist_id}/items/{item_id}` | Optional | None | Recipient or Gifter DTO | `200`, `404` | Retrieve single item projected for the caller. |
+| `PATCH` | `/api/wishlists/{wishlist_id}/items/{item_id}` | **Yes** | [`UpdateItemDTO`](file:///home/src/wishenka/items/schemas.py#L51) | Recipient or Gifter DTO | `200`, `400`, `403`, `404`, `409` | Update item properties enforcing Reduction Lock Invariant. |
+| `POST` | `/api/wishlists/{wishlist_id}/items/{item_id}/archive` | **Yes** | None | Recipient or Gifter DTO | `200`, `403`, `404`, `409` | Safely archive item, preserving reservations and blocking new bookings. |
+| `POST` | `/api/wishlists/{wishlist_id}/items/{item_id}/restore` | **Yes** | None | Recipient or Gifter DTO | `200`, `403`, `404`, `409` | Restore archived item, placing it at the end of the active list. |
+
+---
 
 ---
 
@@ -487,47 +630,177 @@ except SSRFBlockedError as exc:
     print(f"Hostname blocked: {exc.host} resolves to {exc.ip_address}")
 ```
 
-### 7. Managing Multi-Quantity Items in Wishlists
+### 7. Managing Wish Items and Piece Accounting via Domain Service
 
-Items are created and updated through [`WishlistService`](file:///home/src/wishenka/wishlists/service.py#L17-L320):
+Items are managed through [`WishlistService`](file:///home/src/wishenka/wishlists/service.py#L144):
 
 ```python
-from wishenka.wishlists.exceptions import CannotReduceQuantityBelowReservedError
+from wishenka.auth.models import AuthenticatedUser
+from wishenka.items.models import ItemPriority
+from wishenka.wishlists.exceptions import (
+    CannotReduceQuantityBelowReservedError,
+    PermissionDeniedError,
+    WishlistArchivedError,
+)
 from wishenka.wishlists.models import TelegramUser
-from wishenka.wishlists.service import WishlistService
+from wishenka.wishlists.service import WishlistService, project_wish_item
 
 service = WishlistService()
-owner = TelegramUser(telegram_id=101, username="alice")
-gifter = TelegramUser(telegram_id=202, username="bob")
+owner = AuthenticatedUser(telegram_id=101, username="alice")
+gifter = AuthenticatedUser(telegram_id=202, username="bob")
 
-# Create wishlist and item with desired quantity = 5
-wishlist = service.create_wishlist(owner_id=owner.telegram_id, title="Birthday Wishlist")
-item = service.add_wish_item(
+# 1. Create a wishlist and an item with piece quantity = 5
+wishlist = await service.create_wishlist(owner_id=owner.telegram_id, title="Birthday Wishlist")
+item1 = await service.add_wish_item(
     actor=owner,
     wishlist_id=wishlist.id,
     title="Board Game Sets",
     quantity=5,
     price=2500,
+    priority=ItemPriority.HIGH,
 )
+assert item1.display_order == 0
+assert item1.desired_quantity == 5
+assert item1.available_quantity == 5
 
-assert item.desired_quantity == 5
-assert item.available_quantity == 5
+# Add a second item - display_order auto-increments
+item2 = await service.add_wish_item(
+    actor=owner,
+    wishlist_id=wishlist.id,
+    title="Wireless Headphones",
+    quantity=1,
+    price=12000,
+)
+assert item2.display_order == 1
 
-# Gifter reserves 2 units
-service.reserve_item(actor=gifter, item_id=item.id, quantity=2)
-assert item.reserved_quantity == 2
-assert item.available_quantity == 3
+# 2. Gifter reserves 2 units of item1
+await service.create_reservation(item_id=item1.id, user=gifter, quantity=2)
+assert item1.reserved_quantity == 2
+assert item1.available_quantity == 3
 
-# Attempting to reduce quantity below reserved (e.g. to 1) raises exception
+# 3. Reduction Lock Invariant: Reducing desired quantity below locked (2) is rejected
 try:
-    service.update_wish_item(actor=owner, item_id=item.id, quantity=1)
+    await service.update_wish_item(item_id=item1.id, actor=owner, quantity=1)
 except CannotReduceQuantityBelowReservedError as exc:
-    print(f"Validation rejected: {exc}")
+    print(f"Reduction blocked: {exc}")
 
-# Valid update: increase or reduce down to locked threshold
-service.update_wish_item(actor=owner, item_id=item.id, quantity=3)
-assert item.desired_quantity == 3
-assert item.available_quantity == 1
+# Valid update: reduce to exactly locked threshold (2) or higher (3)
+await service.update_wish_item(item_id=item1.id, actor=owner, quantity=3)
+assert item1.quantity == 3
+assert item1.available_quantity == 1
+
+# 4. Atomic Reordering: Swap item2 and item1
+reordered = await service.reorder_wish_items(
+    wishlist_id=wishlist.id,
+    actor=owner,
+    item_ids=[item2.id, item1.id],
+)
+assert reordered[0].id == item2.id
+assert reordered[0].display_order == 0
+assert reordered[1].id == item1.id
+assert reordered[1].display_order == 1
+
+# 5. Safe Archiving: Soft-deletes item1 while preserving the reservation
+archived_view = await service.archive_wish_item(
+    wishlist_id=wishlist.id,
+    item_id=item1.id,
+    actor=owner,
+)
+assert archived_view.is_archived is True
+# Reservations remain safely intact:
+assert len([r for r in item1.reservations if r.status.value == "active"]) == 1
+
+# Editing archived item is rejected
+try:
+    await service.update_wish_item(item_id=item1.id, actor=owner, title="New Title")
+except WishlistArchivedError:
+    print("Archived item cannot be modified")
+
+# 6. Restoration: Unarchives and appends item1 to the end of the active list
+restored_view = await service.restore_wish_item(
+    wishlist_id=wishlist.id,
+    item_id=item1.id,
+    actor=owner,
+)
+assert restored_view.is_archived is False
+assert restored_view.display_order == 1  # item2 is 0, so restored item takes 1
+
+# 7. Surprise Invariant Projections
+recipient_view = project_wish_item(item1, current_user=owner)
+assert recipient_view.is_recipient is True
+assert not hasattr(recipient_view, "available_quantity")  # Zero reservation leakage
+
+gifter_view = project_wish_item(item1, current_user=gifter)
+assert gifter_view.is_recipient is False
+assert gifter_view.available_quantity == 1
+assert gifter_view.is_reserved_by_me is True
+assert gifter_view.my_reserved_quantity == 2
+```
+
+### 8. Invoking the REST API via HTTP Client
+
+Using `httpx.AsyncClient` to perform CRUD operations against `/api/wishlists/{wishlist_id}/items`:
+
+```python
+import httpx
+
+headers = {"Authorization": "Bearer <alice-session-token>"}
+
+async with httpx.AsyncClient(base_url="https://api.wishenka.app") as client:
+    # 1. Create item
+    res = await client.post(
+        "/api/wishlists/42/items",
+        headers=headers,
+        json={
+            "title": "Mechanical Keyboard",
+            "quantity": 2,
+            "price": 15000,
+            "priority": "high",
+            "category": "Electronics",
+        },
+    )
+    assert res.status_code == 201
+    created_item = res.json()
+    item_id = created_item["id"]
+
+    # 2. List items
+    res = await client.get("/api/wishlists/42/items", headers=headers)
+    assert res.status_code == 200
+    items = res.json()
+
+    # 3. Update item
+    res = await client.patch(
+        f"/api/wishlists/42/items/{item_id}",
+        headers=headers,
+        json={"price": 14000, "description": "Cherry MX Blue switches"},
+    )
+    assert res.status_code == 200
+
+    # 4. Reorder items (must supply exact active ID permutation)
+    active_ids = [it["id"] for it in items]
+    reversed_ids = list(reversed(active_ids))
+    res = await client.put(
+        "/api/wishlists/42/items/reorder",
+        headers=headers,
+        json={"item_ids": reversed_ids},
+    )
+    assert res.status_code == 200
+
+    # 5. Archive item
+    res = await client.post(
+        f"/api/wishlists/42/items/{item_id}/archive",
+        headers=headers,
+    )
+    assert res.status_code == 200
+    assert res.json()["is_archived"] is True
+
+    # 6. Restore item
+    res = await client.post(
+        f"/api/wishlists/42/items/{item_id}/restore",
+        headers=headers,
+    )
+    assert res.status_code == 200
+    assert res.json()["is_archived"] is False
 ```
 
 ---
@@ -573,10 +846,29 @@ The following subnets are hard-blocked from outbound connections:
 
 ### Structured Audit and Operational Logging
 
-All events are logged via structured extra dictionaries under logger name `"wishenka.items"`:
+All events are logged via structured extra dictionaries under logger names `"wishenka.items"` (URL parsing and preview pipeline), `"wishenka.wishlists"` (domain service lifecycle), and `"wishenka.web.items"` (REST API layer):
+
+#### 1. Wish Items Lifecycle & Accounting Events (`wishenka.wishlists`, `wishenka.web.items`)
 
 | Event Name | Level | Key Context Fields | Trigger Condition |
-| --- | --- | --- | --- |
+| :--- | :---: | :--- | :--- |
+| `item_created` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `recipient_user_id`, `quantity`, `display_order`, `has_recipient` | Wish item successfully added to wishlist with auto-incremented `display_order`. |
+| `item_updated` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `updated_fields`, `quantity`, `quantity_delta` | Wish item properties updated within reduction limits. |
+| `item_archived` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `active_reservations_count` | Item safely soft-deleted while retaining all active reservations. |
+| `item_restored` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `display_order`, `new_display_order` | Archived item restored and appended to the tail of the active list. |
+| `items_reordered` | `INFO` | `wishlist_id`, `actor_id`, `item_count`, `count`, `item_ids` | Active items display order atomically permuted. |
+| `item_quantity_reduction_rejected` | `WARNING` | `wishlist_id`, `item_id`, `actor_id`, `requested_quantity`, `locked_quantity`, `reason` | Invariant violation: attempt to reduce quantity below reserved + fulfilled units. |
+| `item_reorder_invalid` | `WARNING` | `wishlist_id`, `actor_id`, `reason` | Permutation integrity violation: duplicate IDs or set mismatch against active items. |
+| `item_access_denied` | `WARNING` | `wishlist_id`, `actor_id`, `action`, `role`, `item_id` | Unauthorized actor denied permission to create, edit, reorder, archive, or restore items. |
+| `item_not_found` | `WARNING` | `operation`, `item_id`, `actor_id` | HTTP route caught `ItemNotFoundError` or `WishlistNotFoundError` (returns 404). |
+| `item_permission_denied` | `WARNING` | `operation` | HTTP route caught `PermissionDeniedError` (returns 403). |
+| `item_conflict` | `WARNING` | `operation` | HTTP route caught `CannotReduceQuantityBelowReservedError` or `WishlistArchivedError` (returns 409). |
+| `item_validation_error` | `WARNING` | `operation` | HTTP route caught `ValueError` on whitespace titles or invalid reorder permutations (returns 400). |
+
+#### 2. Input Parsing, Preview & SSRF Telemetry Events (`wishenka.items`)
+
+| Event Name | Level | Key Context Fields | Trigger Condition |
+| :--- | :---: | :--- | :--- |
 | `marketplace_url_cleaned` | `INFO` | `url_domain`, `removed_params_count`, `removed_keys` | Stripped marketing tracking parameters from URL before fetch. |
 | `marketplace_rule_matched` | `DEBUG` | `store_name`, `url_domain` | Target URL matched a registered marketplace rule. |
 | `jsonld_graph_traversal` | `DEBUG` | `graph_items_count` | Found and traversing JSON-LD `@graph` container. |
@@ -606,10 +898,11 @@ All events are logged via structured extra dictionaries under logger name `"wish
 ### Privacy & Data Protection Guarantees
 
 In accordance with security requirements:
+- **Zero Capability Token Leaks**: Wishlist capability tokens (`public_token`, `invite_token`) are strictly omitted from item logs and exceptions.
+- **Zero Authentication Secret Leaks**: Telegram `init_data`, session cookies, and authorization bearer tokens are completely excluded from log attributes.
 - **No Payload Leaks**: Raw HTML bodies, full upstream responses, and long user notes are never dumped into logs.
 - **Tracking Parameter Value Isolation**: URL tracking removal logs list sanitized key names only (`removed_keys=["utm_source"]`), strictly omitting query parameter values that might contain sensitive affiliate IDs or campaign tokens.
 - **No Internal IP Leak to Clients**: Client-facing DTOs (`ItemPreviewDTO`) receive generic `fallback_reason="ssrf_blocked"`; internal IP details remain isolated to server audit logs.
-- **No Token/Credential Leaks**: URL query parameters with authorization tokens or session cookies are excluded.
 - **Clean Domains**: Domains are extracted without ports or query parameters (`url_domain`) for clean metric aggregation.
 
 ---
@@ -650,3 +943,28 @@ In accordance with security requirements:
 - **Symptom**: `ItemPreviewDTO` returns with `is_fallback=True` and `fallback_reason="timeout"`, and `item_preview_timeout` is logged.
 - **Cause**: The remote server failed to respond within `2.0s` connect or `4.0s` total timeout.
 - **Resolution**: Check external internet connectivity and upstream store availability. The service will never hang or block the TMA event loop.
+
+### 8. Quantity Reduction Rejection (`CannotReduceQuantityBelowReservedError` / HTTP 409 Conflict)
+- **Symptom**: `PATCH /api/wishlists/{wishlist_id}/items/{item_id}` returns `409 Conflict` with detail `"Cannot reduce quantity to X: Y units already locked"`.
+- **Cause**: The user attempted to reduce `quantity` below already committed reservations plus fulfilled units ($\text{reserved\_quantity} + \text{received\_quantity}$).
+- **Resolution**: The item quantity cannot be reduced below the locked count while active reservations exist. If the reservations are no longer valid, gifters must cancel their reservations first. Alternatively, the creator can archive the entire item.
+
+### 9. Reorder Permutation Validation Failure (`ValueError` / HTTP 400 Bad Request)
+- **Symptom**: `PUT /api/wishlists/{wishlist_id}/items/reorder` returns `400 Bad Request` with detail `"Reorder list must contain exactly all active item IDs for this wishlist"` or `"Duplicate item IDs in reorder request"`.
+- **Cause**: The submitted `item_ids` array contains duplicates, omits one or more active items, or includes archived/foreign item IDs.
+- **Resolution**: Retrieve the current list of active items using `GET /api/wishlists/{wishlist_id}/items` and supply the complete set of IDs in the desired order.
+
+### 10. Modifying or Booking Archived Items (`WishlistArchivedError` / HTTP 409 Conflict)
+- **Symptom**: `PATCH /api/wishlists/{wishlist_id}/items/{item_id}` returns `409 Conflict` with `"Cannot edit archived item"`.
+- **Cause**: The target item has `is_archived = True`.
+- **Resolution**: Archived items are frozen to preserve integrity. Restore the item first via `POST /api/wishlists/{wishlist_id}/items/{item_id}/restore` before applying modifications.
+
+### 11. Target Recipient Membership Validation Failure (`ValueError` / HTTP 400 Bad Request)
+- **Symptom**: `POST` or `PATCH` on an item returns `400 Bad Request` with `"Recipient user X is not a member of wishlist Y"`.
+- **Cause**: The provided `recipient_user_id` does not correspond to the wishlist owner or any active collaborator member.
+- **Resolution**: Ensure the intended recipient has accepted an invite token to become an official member of the wishlist, or supply `recipient_name` as a textual note without setting `recipient_user_id`.
+
+### 12. Unauthorized Action on Item (`PermissionDeniedError` / HTTP 403 Forbidden)
+- **Symptom**: Item mutations or reordering return `403 Forbidden`.
+- **Cause**: The caller lacks the `can_add_or_edit_item` privilege on the target wishlist (e.g. viewer role or non-member).
+- **Resolution**: Wishlist administrators must promote the user to `editor` or `admin` via `PATCH /api/wishlists/{id}/members/{user_id}/role`.

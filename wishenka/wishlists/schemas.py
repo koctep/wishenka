@@ -29,7 +29,9 @@ class WishItemRecipientViewDTO(BaseModel):
     received_quantity: int = 0
     priority: ItemPriority = ItemPriority.MEDIUM
     category: str | None = None
+    display_order: int = 0
     is_archived: bool = False
+    recipient_user_id: int | None = None
     recipient_name: str | None = None
     is_recipient: bool = True
 
@@ -61,7 +63,9 @@ class WishItemGifterViewDTO(BaseModel):
     my_reservation_id: int | None = None
     priority: ItemPriority = ItemPriority.MEDIUM
     category: str | None = None
+    display_order: int = 0
     is_archived: bool = False
+    recipient_user_id: int | None = None
     recipient_name: str | None = None
     is_recipient: bool = False
 

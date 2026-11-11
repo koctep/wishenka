@@ -110,6 +110,7 @@ class WishItem:
     priority: ItemPriority = ItemPriority.MEDIUM
     category: str | None = None
     is_archived: bool = False
+    display_order: int = 0
     recipient_user_id: int | None = None
     recipient_name: str | None = None
     wishlist: "Wishlist | None" = None

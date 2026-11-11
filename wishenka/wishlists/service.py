@@ -66,6 +66,81 @@ def _transactional[T](method: Callable[..., Awaitable[T]]) -> Callable[..., Awai
     return invoke
 
 
+def project_wish_item(
+    item: WishItem,
+    current_user: AuthenticatedUser | None = None,
+) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
+    """Project a WishItem into Recipient or Gifter view based on Surprise Invariant."""
+    is_recip = WishlistAccessPolicy.is_recipient(current_user, item)
+    if is_recip:
+        return WishItemRecipientViewDTO(
+            id=item.id,
+            title=item.title,
+            description=item.description,
+            link=item.link,
+            image_url=item.image_url,
+            price=item.price,
+            currency=item.currency,
+            store_name=item.store_name,
+            store_icon_url=item.store_icon_url,
+            quantity=item.quantity,
+            received_quantity=item.received_quantity,
+            priority=item.priority,
+            category=item.category,
+            display_order=item.display_order,
+            is_archived=item.is_archived,
+            recipient_user_id=item.recipient_user_id,
+            recipient_name=item.recipient_name,
+            is_recipient=True,
+        )
+
+    active_or_purchased = [
+        r
+        for r in item.reservations
+        if r.status in (ReservationStatus.ACTIVE, ReservationStatus.PURCHASED)
+    ]
+    reserved_qty = sum(r.quantity for r in active_or_purchased)
+    available_qty = max(0, item.quantity - item.received_quantity - reserved_qty)
+    my_reserved_qty = 0
+    my_reservation_status: ReservationStatus | None = None
+    my_reservation_id: int | None = None
+    if current_user is not None:
+        user_reservations = [
+            r for r in active_or_purchased if r.user_id == current_user.telegram_id
+        ]
+        my_reserved_qty = sum(r.quantity for r in user_reservations)
+        if user_reservations:
+            my_res = user_reservations[-1]
+            my_reservation_status = my_res.status
+            my_reservation_id = my_res.id
+    return WishItemGifterViewDTO(
+        id=item.id,
+        title=item.title,
+        description=item.description,
+        link=item.link,
+        image_url=item.image_url,
+        price=item.price,
+        currency=item.currency,
+        store_name=item.store_name,
+        store_icon_url=item.store_icon_url,
+        quantity=item.quantity,
+        received_quantity=item.received_quantity,
+        available_quantity=available_qty,
+        is_fully_reserved=(available_qty == 0),
+        is_reserved_by_me=(my_reserved_qty > 0),
+        my_reserved_quantity=my_reserved_qty,
+        my_reservation_status=my_reservation_status,
+        my_reservation_id=my_reservation_id,
+        priority=item.priority,
+        category=item.category,
+        display_order=item.display_order,
+        is_archived=item.is_archived,
+        recipient_user_id=item.recipient_user_id,
+        recipient_name=item.recipient_name,
+        is_recipient=False,
+    )
+
+
 class WishlistService:
     """Domain service managing wishlists, members, items, and role-aware projections."""
 
@@ -235,76 +310,13 @@ class WishlistService:
         """Project wishlist and items applying Surprise Invariant rules."""
         wl = await self.get_wishlist_by_id(wishlist_id)
 
-        item_views: list[WishItemRecipientViewDTO | WishItemGifterViewDTO] = []
-        for item in wl.items:
-            is_recip = WishlistAccessPolicy.is_recipient(current_user, item)
-            if is_recip:
-                item_views.append(
-                    WishItemRecipientViewDTO(
-                        id=item.id,
-                        title=item.title,
-                        description=item.description,
-                        link=item.link,
-                        image_url=item.image_url,
-                        price=item.price,
-                        currency=item.currency,
-                        store_name=item.store_name,
-                        store_icon_url=item.store_icon_url,
-                        quantity=item.quantity,
-                        received_quantity=item.received_quantity,
-                        priority=item.priority,
-                        category=item.category,
-                        is_archived=item.is_archived,
-                        recipient_name=item.recipient_name,
-                        is_recipient=True,
-                    )
-                )
-            else:
-                active_or_purchased = [
-                    r
-                    for r in item.reservations
-                    if r.status in (ReservationStatus.ACTIVE, ReservationStatus.PURCHASED)
-                ]
-                reserved_qty = sum(r.quantity for r in active_or_purchased)
-                available_qty = max(0, item.quantity - item.received_quantity - reserved_qty)
-                my_reserved_qty = 0
-                my_reservation_status: ReservationStatus | None = None
-                my_reservation_id: int | None = None
-                if current_user is not None:
-                    user_reservations = [
-                        r for r in active_or_purchased if r.user_id == current_user.telegram_id
-                    ]
-                    my_reserved_qty = sum(r.quantity for r in user_reservations)
-                    if user_reservations:
-                        my_res = user_reservations[-1]
-                        my_reservation_status = my_res.status
-                        my_reservation_id = my_res.id
-                item_views.append(
-                    WishItemGifterViewDTO(
-                        id=item.id,
-                        title=item.title,
-                        description=item.description,
-                        link=item.link,
-                        image_url=item.image_url,
-                        price=item.price,
-                        currency=item.currency,
-                        store_name=item.store_name,
-                        store_icon_url=item.store_icon_url,
-                        quantity=item.quantity,
-                        received_quantity=item.received_quantity,
-                        available_quantity=available_qty,
-                        is_fully_reserved=(available_qty == 0),
-                        is_reserved_by_me=(my_reserved_qty > 0),
-                        my_reserved_quantity=my_reserved_qty,
-                        my_reservation_status=my_reservation_status,
-                        my_reservation_id=my_reservation_id,
-                        priority=item.priority,
-                        category=item.category,
-                        is_archived=item.is_archived,
-                        recipient_name=item.recipient_name,
-                        is_recipient=False,
-                    )
-                )
+        active_items = sorted(
+            [item for item in wl.items if not item.is_archived],
+            key=lambda it: (it.display_order, it.id),
+        )
+        item_views: list[WishItemRecipientViewDTO | WishItemGifterViewDTO] = [
+            project_wish_item(item, current_user) for item in active_items
+        ]
 
         ctx = WishlistAccessPolicy.resolve_context(current_user, wl)
         can_edit = WishlistAccessPolicy.can_edit_settings(ctx, wl)
@@ -770,14 +782,23 @@ class WishlistService:
                 actor.telegram_id,
                 wishlist_id,
                 extra={
-                    "event": "access_denied",
+                    "event": "item_access_denied",
                     "actor_id": actor.telegram_id,
                     "wishlist_id": wishlist_id,
                     "action": "add_item",
+                    "role": ctx.role.value if ctx.role else None,
                 },
             )
             raise PermissionDeniedError("Actor cannot add items to this wishlist")
 
+        if recipient_user_id is not None:
+            member_uids = {wl.owner_id} | {m.user_id for m in wl.members}
+            if recipient_user_id not in member_uids:
+                raise ValueError(
+                    f"Recipient user {recipient_user_id} is not a member of wishlist {wishlist_id}"
+                )
+
+        next_order = max([it.display_order for it in wl.items], default=-1) + 1
         self._next_item_id += 1
         item = WishItem(
             id=self._next_item_id,
@@ -794,6 +815,7 @@ class WishlistService:
             store_icon_url=store_icon_url,
             priority=priority,
             category=category,
+            display_order=next_order,
             is_archived=False,
             recipient_user_id=recipient_user_id,
             recipient_name=recipient_name,
@@ -801,6 +823,7 @@ class WishlistService:
         )
         wl.items.append(item)
         self._items[item.id] = item
+        has_recip = recipient_user_id is not None or bool(recipient_name and recipient_name.strip())
         logger.info(
             "Item %s added to wishlist %s by actor %s",
             item.id,
@@ -813,6 +836,8 @@ class WishlistService:
                 "actor_id": actor.telegram_id,
                 "recipient_user_id": recipient_user_id,
                 "quantity": item.quantity,
+                "display_order": item.display_order,
+                "has_recipient": has_recip,
             },
         )
         return item
@@ -832,129 +857,392 @@ class WishlistService:
         category: str | None = None,
         recipient_user_id: int | None = None,
         recipient_name: str | None = None,
+        wishlist_id: int | None = None,
     ) -> WishItem:
         """Update wish item properties enforcing multi-quantity lock invariants."""
-        if item_id not in self._items:
-            logger.warning(
-                "Item lookup failed: id %s not found",
-                item_id,
+        async with self._concurrency_coordinator.acquire(item_id):
+            if item_id not in self._items:
+                logger.warning(
+                    "Item lookup failed: id %s not found",
+                    item_id,
+                    extra={
+                        "event": "item_not_found",
+                        "item_id": item_id,
+                        "actor_id": actor.telegram_id,
+                    },
+                )
+                raise ItemNotFoundError(f"Item {item_id} not found")
+
+            item = self._items[item_id]
+            if wishlist_id is not None and item.wishlist_id != wishlist_id:
+                raise ItemNotFoundError(f"Item {item_id} not found in wishlist {wishlist_id}")
+
+            if item.is_archived:
+                raise WishlistArchivedError(f"Cannot edit archived item {item_id}")
+
+            wl = item.wishlist
+            if wl is not None:
+                if wl.status == WishlistStatus.ARCHIVED:
+                    logger.warning(
+                        "Attempted to edit item in archived wishlist %s by actor %s",
+                        wl.id,
+                        actor.telegram_id,
+                        extra={
+                            "event": "item_mutation_blocked_archived",
+                            "item_id": item.id,
+                            "wishlist_id": wl.id,
+                            "actor_id": actor.telegram_id,
+                        },
+                    )
+                    raise WishlistArchivedError(f"Wishlist {wl.id} is archived")
+                if wl.status == WishlistStatus.DELETED:
+                    logger.warning(
+                        "Attempted to edit item in deleted wishlist %s by actor %s",
+                        wl.id,
+                        actor.telegram_id,
+                        extra={
+                            "event": "item_mutation_blocked_deleted",
+                            "item_id": item.id,
+                            "wishlist_id": wl.id,
+                            "actor_id": actor.telegram_id,
+                        },
+                    )
+                    raise WishlistDeletedError(f"Wishlist {wl.id} is deleted")
+
+                ctx = WishlistAccessPolicy.resolve_context(actor, wl)
+                if not WishlistAccessPolicy.can_add_or_edit_item(ctx, wl):
+                    logger.warning(
+                        "Actor %s denied permission to edit item %s in wishlist %s",
+                        actor.telegram_id,
+                        item.id,
+                        wl.id,
+                        extra={
+                            "event": "item_access_denied",
+                            "actor_id": actor.telegram_id,
+                            "wishlist_id": wl.id,
+                            "item_id": item.id,
+                            "action": "edit_item",
+                            "role": ctx.role.value if ctx.role else None,
+                        },
+                    )
+                    raise PermissionDeniedError("Actor cannot edit this item")
+
+                if recipient_user_id is not None:
+                    member_uids = {wl.owner_id} | {m.user_id for m in wl.members}
+                    if recipient_user_id not in member_uids:
+                        raise ValueError(
+                            f"Recipient user {recipient_user_id} is not a member "
+                            f"of wishlist {wl.id}"
+                        )
+
+            quantity_delta = 0
+            updated_fields: list[str] = []
+            if quantity is not None:
+                active_locked = item.reserved_quantity + item.received_quantity
+                if quantity < active_locked:
+                    reason = (
+                        f"Cannot reduce quantity to {quantity}: "
+                        f"{active_locked} units already locked"
+                    )
+                    logger.warning(
+                        "Item %s quantity reduction rejected: requested %s, locked %s",
+                        item.id,
+                        quantity,
+                        active_locked,
+                        extra={
+                            "event": "item_quantity_reduction_rejected",
+                            "item_id": item.id,
+                            "wishlist_id": wl.id if wl else None,
+                            "actor_id": actor.telegram_id,
+                            "requested_quantity": quantity,
+                            "locked_quantity": active_locked,
+                            "reason": reason,
+                        },
+                    )
+                    raise CannotReduceQuantityBelowReservedError(reason)
+                quantity_delta = quantity - item.quantity
+                item.quantity = quantity
+                updated_fields.append("quantity")
+
+            if title is not None:
+                item.title = title
+                updated_fields.append("title")
+            if description is not None:
+                item.description = description
+                updated_fields.append("description")
+            if link is not None:
+                item.link = link
+                updated_fields.append("link")
+            if image_url is not None:
+                item.image_url = image_url
+                updated_fields.append("image_url")
+            if price is not None:
+                item.price = price
+                updated_fields.append("price")
+            if currency is not None:
+                item.currency = currency
+                updated_fields.append("currency")
+            if priority is not None:
+                item.priority = priority
+                updated_fields.append("priority")
+            if category is not None:
+                item.category = category
+                updated_fields.append("category")
+            if recipient_user_id is not None:
+                item.recipient_user_id = recipient_user_id
+                updated_fields.append("recipient_user_id")
+            if recipient_name is not None:
+                item.recipient_name = recipient_name
+                updated_fields.append("recipient_name")
+
+            item.updated_at = datetime.now(UTC)
+            logger.info(
+                "Item %s updated by actor %s (delta=%s, new_qty=%s)",
+                item.id,
+                actor.telegram_id,
+                quantity_delta,
+                item.quantity,
                 extra={
-                    "event": "item_not_found",
-                    "item_id": item_id,
+                    "event": "item_updated",
+                    "item_id": item.id,
+                    "wishlist_id": wl.id if wl else None,
                     "actor_id": actor.telegram_id,
+                    "updated_fields": sorted(updated_fields),
+                    "quantity": item.quantity,
+                    "quantity_delta": quantity_delta,
                 },
             )
+            return item
+
+    async def get_wish_item(
+        self,
+        wishlist_id: int,
+        item_id: int,
+        actor: AuthenticatedUser | None = None,
+    ) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
+        """Retrieve a single wish item projected according to caller's context."""
+        wl = await self.get_wishlist_by_id(wishlist_id)
+        if item_id not in self._items:
             raise ItemNotFoundError(f"Item {item_id} not found")
-
         item = self._items[item_id]
-        wl = item.wishlist
-        if wl is not None:
-            if wl.status == WishlistStatus.ARCHIVED:
-                logger.warning(
-                    "Attempted to edit item in archived wishlist %s by actor %s",
-                    wl.id,
-                    actor.telegram_id,
-                    extra={
-                        "event": "item_mutation_blocked_archived",
-                        "item_id": item.id,
-                        "wishlist_id": wl.id,
-                        "actor_id": actor.telegram_id,
-                    },
-                )
-                raise WishlistArchivedError(f"Wishlist {wl.id} is archived")
-            if wl.status == WishlistStatus.DELETED:
-                logger.warning(
-                    "Attempted to edit item in deleted wishlist %s by actor %s",
-                    wl.id,
-                    actor.telegram_id,
-                    extra={
-                        "event": "item_mutation_blocked_deleted",
-                        "item_id": item.id,
-                        "wishlist_id": wl.id,
-                        "actor_id": actor.telegram_id,
-                    },
-                )
-                raise WishlistDeletedError(f"Wishlist {wl.id} is deleted")
+        if item.wishlist_id != wl.id:
+            raise ItemNotFoundError(f"Item {item_id} not found in wishlist {wishlist_id}")
+        return project_wish_item(item, actor)
 
-            ctx = WishlistAccessPolicy.resolve_context(actor, wl)
-            if not WishlistAccessPolicy.can_add_or_edit_item(ctx, wl):
-                logger.warning(
-                    "Actor %s denied permission to edit item %s in wishlist %s",
-                    actor.telegram_id,
-                    item.id,
-                    wl.id,
-                    extra={
-                        "event": "access_denied",
-                        "actor_id": actor.telegram_id,
-                        "wishlist_id": wl.id,
-                        "item_id": item.id,
-                        "action": "edit_item",
-                    },
-                )
-                raise PermissionDeniedError("Actor cannot edit this item")
+    async def list_wish_items(
+        self,
+        wishlist_id: int,
+        actor: AuthenticatedUser | None = None,
+        include_archived: bool = False,
+    ) -> list[WishItemRecipientViewDTO | WishItemGifterViewDTO]:
+        """List wishlist items projected according to caller's context and archive filter."""
+        wl = await self.get_wishlist_by_id(wishlist_id)
+        filtered = [item for item in wl.items if include_archived or not item.is_archived]
+        sorted_items = sorted(filtered, key=lambda it: (it.display_order, it.id))
+        return [project_wish_item(it, actor) for it in sorted_items]
 
-        quantity_delta = 0
-        if quantity is not None:
-            active_locked = item.reserved_quantity + item.received_quantity
-            if quantity < active_locked:
-                logger.warning(
-                    "Item %s quantity reduction rejected: requested %s, locked %s",
-                    item.id,
-                    quantity,
-                    active_locked,
-                    extra={
-                        "event": "item_quantity_reduction_rejected",
-                        "item_id": item.id,
-                        "wishlist_id": wl.id if wl else None,
-                        "actor_id": actor.telegram_id,
-                        "requested_quantity": quantity,
-                        "locked_quantity": active_locked,
-                    },
-                )
-                raise CannotReduceQuantityBelowReservedError(
-                    f"Cannot reduce quantity to {quantity}: {active_locked} units already locked"
-                )
-            quantity_delta = quantity - item.quantity
-            item.quantity = quantity
+    async def reorder_wish_items(
+        self,
+        wishlist_id: int,
+        actor: AuthenticatedUser,
+        item_ids: list[int],
+    ) -> list[WishItemRecipientViewDTO | WishItemGifterViewDTO]:
+        """Atomically reorder active items in a wishlist enforcing 1:1 permutation integrity."""
+        wl = await self.get_wishlist_by_id(wishlist_id)
+        if wl.status == WishlistStatus.ARCHIVED:
+            raise WishlistArchivedError(f"Wishlist {wishlist_id} is archived")
+        if wl.status == WishlistStatus.DELETED:
+            raise WishlistDeletedError(f"Wishlist {wishlist_id} is deleted")
 
-        if title is not None:
-            item.title = title
-        if description is not None:
-            item.description = description
-        if link is not None:
-            item.link = link
-        if image_url is not None:
-            item.image_url = image_url
-        if price is not None:
-            item.price = price
-        if currency is not None:
-            item.currency = currency
-        if priority is not None:
-            item.priority = priority
-        if category is not None:
-            item.category = category
-        if recipient_user_id is not None:
-            item.recipient_user_id = recipient_user_id
-        if recipient_name is not None:
-            item.recipient_name = recipient_name
+        ctx = WishlistAccessPolicy.resolve_context(actor, wl)
+        if not WishlistAccessPolicy.can_add_or_edit_item(ctx, wl):
+            logger.warning(
+                "Actor %s denied permission to reorder items in wishlist %s",
+                actor.telegram_id,
+                wl.id,
+                extra={
+                    "event": "item_access_denied",
+                    "actor_id": actor.telegram_id,
+                    "wishlist_id": wl.id,
+                    "action": "reorder_items",
+                    "role": ctx.role.value if ctx.role else None,
+                },
+            )
+            raise PermissionDeniedError("Actor cannot reorder items in this wishlist")
 
-        item.updated_at = datetime.now(UTC)
+        active_items = [it for it in wl.items if not it.is_archived]
+        if len(item_ids) != len(set(item_ids)):
+            reason = "Duplicate item IDs in reorder request"
+            logger.warning(
+                "Invalid reorder request for wishlist %s by actor %s: %s",
+                wl.id,
+                actor.telegram_id,
+                reason,
+                extra={
+                    "event": "item_reorder_invalid",
+                    "wishlist_id": wl.id,
+                    "actor_id": actor.telegram_id,
+                    "reason": reason,
+                },
+            )
+            raise ValueError(reason)
+
+        active_ids_set = {it.id for it in active_items}
+        if set(item_ids) != active_ids_set:
+            reason = "Reorder list must contain exactly all active item IDs for this wishlist"
+            logger.warning(
+                "Invalid reorder request for wishlist %s by actor %s: %s",
+                wl.id,
+                actor.telegram_id,
+                reason,
+                extra={
+                    "event": "item_reorder_invalid",
+                    "wishlist_id": wl.id,
+                    "actor_id": actor.telegram_id,
+                    "reason": reason,
+                },
+            )
+            raise ValueError(reason)
+
+        item_map = {it.id: it for it in active_items}
+        for order, it_id in enumerate(item_ids):
+            item = item_map[it_id]
+            item.display_order = order
+            item.updated_at = datetime.now(UTC)
+
+        wl.items.sort(key=lambda it: (it.display_order, it.id))
         logger.info(
-            "Item %s updated by actor %s (delta=%s, new_qty=%s)",
-            item.id,
+            "Items in wishlist %s reordered by actor %s (count=%s)",
+            wl.id,
             actor.telegram_id,
-            quantity_delta,
-            item.quantity,
+            len(item_ids),
             extra={
-                "event": "item_updated",
-                "item_id": item.id,
-                "wishlist_id": wl.id if wl else None,
+                "event": "items_reordered",
+                "wishlist_id": wl.id,
                 "actor_id": actor.telegram_id,
-                "quantity": item.quantity,
-                "quantity_delta": quantity_delta,
+                "item_count": len(item_ids),
+                "count": len(item_ids),
+                "item_ids": item_ids,
             },
         )
-        return item
+        return [project_wish_item(item_map[it_id], actor) for it_id in item_ids]
+
+    async def archive_wish_item(
+        self,
+        wishlist_id: int,
+        item_id: int,
+        actor: AuthenticatedUser,
+    ) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
+        """Safely archive a wish item, preserving reservations and blocking new ones."""
+        wl = await self.get_wishlist_by_id(wishlist_id)
+        if wl.status == WishlistStatus.ARCHIVED:
+            raise WishlistArchivedError(f"Wishlist {wishlist_id} is archived")
+        if wl.status == WishlistStatus.DELETED:
+            raise WishlistDeletedError(f"Wishlist {wishlist_id} is deleted")
+
+        ctx = WishlistAccessPolicy.resolve_context(actor, wl)
+        if not WishlistAccessPolicy.can_add_or_edit_item(ctx, wl):
+            logger.warning(
+                "Actor %s denied permission to archive item %s in wishlist %s",
+                actor.telegram_id,
+                item_id,
+                wl.id,
+                extra={
+                    "event": "item_access_denied",
+                    "actor_id": actor.telegram_id,
+                    "wishlist_id": wl.id,
+                    "item_id": item_id,
+                    "action": "archive_item",
+                    "role": ctx.role.value if ctx.role else None,
+                },
+            )
+            raise PermissionDeniedError("Actor cannot archive items in this wishlist")
+
+        if item_id not in self._items:
+            raise ItemNotFoundError(f"Item {item_id} not found")
+        item = self._items[item_id]
+        if item.wishlist_id != wl.id:
+            raise ItemNotFoundError(f"Item {item_id} not found in wishlist {wishlist_id}")
+
+        item.is_archived = True
+        item.updated_at = datetime.now(UTC)
+        logger.info(
+            "Item %s archived in wishlist %s by actor %s",
+            item.id,
+            wl.id,
+            actor.telegram_id,
+            extra={
+                "event": "item_archived",
+                "item_id": item.id,
+                "wishlist_id": wl.id,
+                "actor_id": actor.telegram_id,
+                "active_reservations_count": len(
+                    [r for r in item.reservations if r.status == ReservationStatus.ACTIVE]
+                ),
+            },
+        )
+        return project_wish_item(item, actor)
+
+    async def restore_wish_item(
+        self,
+        wishlist_id: int,
+        item_id: int,
+        actor: AuthenticatedUser,
+    ) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
+        """Restore an archived wish item to the end of the active display order."""
+        wl = await self.get_wishlist_by_id(wishlist_id)
+        if wl.status == WishlistStatus.ARCHIVED:
+            raise WishlistArchivedError(f"Wishlist {wishlist_id} is archived")
+        if wl.status == WishlistStatus.DELETED:
+            raise WishlistDeletedError(f"Wishlist {wishlist_id} is deleted")
+
+        ctx = WishlistAccessPolicy.resolve_context(actor, wl)
+        if not WishlistAccessPolicy.can_add_or_edit_item(ctx, wl):
+            logger.warning(
+                "Actor %s denied permission to restore item %s in wishlist %s",
+                actor.telegram_id,
+                item_id,
+                wl.id,
+                extra={
+                    "event": "item_access_denied",
+                    "actor_id": actor.telegram_id,
+                    "wishlist_id": wl.id,
+                    "item_id": item_id,
+                    "action": "restore_item",
+                    "role": ctx.role.value if ctx.role else None,
+                },
+            )
+            raise PermissionDeniedError("Actor cannot restore items in this wishlist")
+
+        if item_id not in self._items:
+            raise ItemNotFoundError(f"Item {item_id} not found")
+        item = self._items[item_id]
+        if item.wishlist_id != wl.id:
+            raise ItemNotFoundError(f"Item {item_id} not found in wishlist {wishlist_id}")
+
+        item.is_archived = False
+        active_orders = [
+            it.display_order for it in wl.items if not it.is_archived and it.id != item.id
+        ]
+        item.display_order = max(active_orders, default=-1) + 1
+        item.updated_at = datetime.now(UTC)
+        wl.items.sort(key=lambda it: (it.display_order, it.id))
+        logger.info(
+            "Item %s restored in wishlist %s by actor %s (new_display_order=%s)",
+            item.id,
+            wl.id,
+            actor.telegram_id,
+            item.display_order,
+            extra={
+                "event": "item_restored",
+                "item_id": item.id,
+                "wishlist_id": wl.id,
+                "actor_id": actor.telegram_id,
+                "display_order": item.display_order,
+                "new_display_order": item.display_order,
+            },
+        )
+        return project_wish_item(item, actor)
 
     async def create_reservation(
         self,

@@ -1,6 +1,6 @@
 """Pydantic v2 schemas and DTOs for item preview, creation, and update."""
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from wishenka.items.models import InputType, ItemPriority
 
@@ -40,6 +40,13 @@ class CreateItemDTO(BaseModel):
     recipient_user_id: int | None = None
     recipient_name: str | None = Field(default=None, max_length=100)
 
+    @field_validator("title")
+    @classmethod
+    def validate_title_not_whitespace(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Title cannot be empty or whitespace only")
+        return v
+
 
 class UpdateItemDTO(BaseModel):
     """Payload for updating wish item attributes with multi-quantity constraints."""
@@ -58,9 +65,25 @@ class UpdateItemDTO(BaseModel):
     recipient_user_id: int | None = None
     recipient_name: str | None = Field(default=None, max_length=100)
 
+    @field_validator("title")
+    @classmethod
+    def validate_title_not_whitespace(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError("Title cannot be empty or whitespace only")
+        return v
+
+
+class ReorderItemsDTO(BaseModel):
+    """Payload for updating item display order in a wishlist."""
+
+    model_config = ConfigDict(frozen=True)
+
+    item_ids: list[int] = Field(..., min_length=1)
+
 
 __all__ = [
     "CreateItemDTO",
     "ItemPreviewDTO",
+    "ReorderItemsDTO",
     "UpdateItemDTO",
 ]

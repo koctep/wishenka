@@ -17,6 +17,7 @@ from wishenka.config import Settings
 from wishenka.logging import configure_logging
 from wishenka.users.store import UserStore
 from wishenka.web.routes.auth import router as auth_router
+from wishenka.web.routes.items import router as items_router
 from wishenka.web.routes.miniapp import router as miniapp_router
 from wishenka.web.routes.sharing import router as sharing_router
 from wishenka.web.routes.wishlists import router as wishlist_router
@@ -177,6 +178,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
     app.include_router(miniapp_router)
     app.include_router(auth_router)
+    app.include_router(items_router)
     app.include_router(wishlist_router)
     app.include_router(sharing_router)
 

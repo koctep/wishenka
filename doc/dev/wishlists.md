@@ -97,6 +97,8 @@ rejected by the optional authentication dependency.
 
 - `DELETE /api/history`: Clears all viewing history for caller.
 
+- `Wish Items API` (`/api/wishlists/{wishlist_id}/items`): Full REST CRUD lifecycle suite for wish items, including atomic reordering (`PUT /reorder`), safe archiving (`POST /{item_id}/archive`), end-of-list restore (`POST /{item_id}/restore`), piece accounting ($1 \le Q \le 1000$), Reduction Lock invariant, collaborative member addressing, and zero-leak Surprise Invariant projections. Detailed specification, request/response models, and telemetry events are documented in [Items Domain Documentation](items.md).
+
 Create and patch accept a JSON object with optional `name`, `description`, `event_title`, and
 `event_date`. The HTTP representation includes list details and items; member responses include
 `role` and `members`, and owner/admin responses also include `share_token` and `invite_token`.
@@ -819,12 +821,14 @@ CREATE TABLE IF NOT EXISTS wl_items (
     store_icon_url TEXT,
     priority TEXT NOT NULL DEFAULT 'medium',
     category TEXT,
+    display_order INTEGER NOT NULL DEFAULT 0,
     is_archived INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_wl_items_wishlist ON wl_items(wishlist_id);
 CREATE INDEX IF NOT EXISTS idx_wl_items_recipient ON wl_items(recipient_user_id);
+CREATE INDEX IF NOT EXISTS idx_wl_items_order ON wl_items(wishlist_id, display_order);
 
 -- 4. Item Reservations
 CREATE TABLE IF NOT EXISTS wl_reservations (
