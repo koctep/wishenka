@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block title %}{{ wishlist.title|safe }} — Wishenka{% endblock %}
+
+{% block content %}
+<div class="wishlist-public-view">
+    <header class="wishlist-header mb-6 pb-4 border-b">
+        <h1 class="text-2xl font-bold">{{ wishlist.title|safe }}</h1>
+        {% if wishlist.owner_name %}
+        <p class="text-sm text-gray-500 mt-1">
+            Автор: <span class="font-medium text-gray-700">{{ wishlist.owner_name|safe }}</span>
+        </p>
+        {% endif %}
+        {% if wishlist.description %}
+        <p class="text-gray-600 mt-2">{{ wishlist.description }}</p>
+        {% endif %}
+        {% if wishlist.event_title or wishlist.event_date %}
+        <div class="event-info mt-2 text-xs text-gray-400">
+            {% if wishlist.event_title %}<span>{{ wishlist.event_title }}</span>{% endif %}
+            {% if wishlist.event_date %}
+            <span> — {{ wishlist.event_date.strftime('%d.%m.%Y') }}</span>
+            {% endif %}
+        </div>
+        {% endif %}
+    </header>
+
+    <section class="wishlist-items" id="items-list">
+        {% if wishlist.items %}
+            {% for item in wishlist.items %}
+                {% include "partials/item_card.html" %}
+            {% endfor %}
+        {% else %}
+            <p class="text-gray-500 text-center py-8">
+                В этом списке желаний пока нет подарков.
+            </p>
+        {% endif %}
+    </section>
+</div>
+{% endblock %}

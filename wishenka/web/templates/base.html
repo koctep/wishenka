@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Wishenka{% endblock %}</title>
+    <link rel="stylesheet" href="/static/miniapp.css">
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+</head>
+<body class="bg-gray-50 text-gray-900">
+    <main class="container mx-auto px-4 py-6 max-w-lg">
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>

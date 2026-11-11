@@ -1,0 +1,41 @@
+<div id="member-list" class="member-list space-y-2">
+    <div class="member-item flex items-center justify-between p-3 bg-gray-50 rounded border">
+        <div class="member-info">
+            <span class="font-medium text-gray-800">{{ owner_name or "Владелец списка" }}</span>
+        </div>
+        <span class="badge badge-owner px-2 py-1 text-xs font-semibold rounded"
+              style="background-color: #f3e8ff; color: #6b21a8;">
+            Владелец
+        </span>
+    </div>
+
+    {% for member in members %}
+    {% if member.user_id != owner_id %}
+    <div class="member-item flex items-center justify-between p-3 bg-white rounded border"
+         id="member-{{ member.user_id }}">
+        <div class="member-info flex items-center gap-2">
+            <span class="text-sm text-gray-700">Участник ID: {{ member.user_id }}</span>
+            {% if member.role.value == "admin" or member.role == "admin" %}
+            <span class="badge badge-admin px-2 py-0.5 text-xs font-semibold rounded"
+                  style="background-color: #dbeafe; color: #1e40af;">
+                Администратор
+            </span>
+            {% else %}
+            <span class="badge badge-member px-2 py-0.5 text-xs font-semibold rounded"
+                  style="background-color: #dcfce7; color: #166534;">
+                Участник
+            </span>
+            {% endif %}
+        </div>
+        {% if is_owner %}
+        <button hx-delete="/wishlists/{{ wishlist_id }}/members/{{ member.user_id }}/partial"
+                hx-target="#member-list"
+                hx-swap="outerHTML"
+                class="btn-delete text-xs text-red-600 font-medium px-2 py-1 border rounded">
+            Удалить
+        </button>
+        {% endif %}
+    </div>
+    {% endif %}
+    {% endfor %}
+</div>

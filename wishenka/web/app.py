@@ -18,6 +18,7 @@ from wishenka.logging import configure_logging
 from wishenka.users.store import UserStore
 from wishenka.web.routes.auth import router as auth_router
 from wishenka.web.routes.miniapp import router as miniapp_router
+from wishenka.web.routes.sharing import router as sharing_router
 from wishenka.web.routes.wishlists import router as wishlist_router
 from wishenka.web.security import BrowserSecurityMiddleware
 from wishenka.wishlists.cleanup import background_cleanup_worker
@@ -35,6 +36,14 @@ class ShareTokenAccessFilter(logging.Filter):
             client, method, path, version, status = record.args
             if isinstance(path, str) and path.startswith("/api/public/wishlists/"):
                 record.args = (client, method, "/api/public/wishlists/{token}", version, status)
+            elif isinstance(path, str) and path.startswith("/share/"):
+                record.args = (client, method, "/share/{token}", version, status)
+            elif isinstance(path, str) and path.startswith("/invite/"):
+                raw_path = path.split("?", 1)[0]
+                sanitized = (
+                    "/invite/{token}/join" if raw_path.endswith("/join") else "/invite/{token}"
+                )
+                record.args = (client, method, sanitized, version, status)
             elif isinstance(path, str) and "?" in path:
                 record.args = (client, method, path.split("?", 1)[0], version, status)
         return True
@@ -48,6 +57,10 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         if path.startswith("/api/public/wishlists/"):
             path = "/api/public/wishlists/{token}"
+        elif path.startswith("/share/"):
+            path = "/share/{token}"
+        elif path.startswith("/invite/"):
+            path = "/invite/{token}/join" if path.endswith("/join") else "/invite/{token}"
         logger.debug(
             "HTTP request started: %s %s",
             request.method,
@@ -165,6 +178,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(miniapp_router)
     app.include_router(auth_router)
     app.include_router(wishlist_router)
+    app.include_router(sharing_router)
 
     @app.get("/healthz")
     async def healthcheck() -> dict[str, Any]:

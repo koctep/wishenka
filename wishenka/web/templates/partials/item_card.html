@@ -1,0 +1,43 @@
+<div class="card item-card mb-4 p-4 border rounded shadow-sm bg-white"
+     id="item-card-{{ item.id }}">
+    <div class="item-header flex justify-between items-start">
+        <h3 class="item-title text-lg font-semibold">{{ item.title|safe }}</h3>
+        {% if item.price is not none %}
+        <span class="item-price font-bold text-primary">
+            {{ item.price }} {{ item.currency or "RUB" }}
+        </span>
+        {% endif %}
+    </div>
+
+    {% if item.description %}
+    <p class="item-description text-gray-600 mt-2 text-sm">{{ item.description }}</p>
+    {% endif %}
+
+    <div class="item-meta mt-3 flex flex-wrap gap-2 text-xs text-gray-500">
+        <span class="item-quantity">Количество: {{ item.quantity }}</span>
+        {% if item.link %}
+        <a href="{{ item.link }}"
+           target="_blank"
+           rel="noopener noreferrer"
+           class="item-link text-blue-600 underline">
+            Ссылка
+        </a>
+        {% endif %}
+    </div>
+
+    {% if not item.is_recipient %}
+    <div class="item-reservation mt-3 pt-2 border-t text-sm">
+        {% if item.is_fully_reserved %}
+        <span class="badge badge-reserved text-red-600 font-medium">Забронировано</span>
+        {% elif item.is_reserved_by_me %}
+        <span class="badge badge-my-reserved text-green-600 font-medium">
+            Забронировано вами ({{ item.my_reserved_quantity }})
+        </span>
+        {% else %}
+        <span class="badge badge-available text-gray-600">
+            Доступно: {{ item.available_quantity }} из {{ item.quantity }}
+        </span>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>

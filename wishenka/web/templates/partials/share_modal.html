@@ -1,0 +1,45 @@
+<div id="share-modal"
+     class="share-modal p-6 bg-white rounded-lg shadow-lg max-w-md w-full">
+    <div class="modal-header flex justify-between items-center mb-4">
+        <h2 class="text-xl font-bold">Поделиться списком</h2>
+    </div>
+
+    <div class="share-section mb-4">
+        <label class="block text-sm font-medium text-gray-700 mb-1">
+            Публичная ссылка для дарителей
+        </label>
+        <div class="flex">
+            <input type="text"
+                   readonly
+                   value="/share/{{ public_token }}"
+                   class="flex-1 p-2 text-sm border rounded bg-gray-50 text-gray-800" />
+        </div>
+        <p class="text-xs text-gray-500 mt-1">
+            Дарители увидят список желаний и смогут бронировать подарки втайне от вас.
+        </p>
+    </div>
+
+    <div class="share-section mb-6">
+        <label class="block text-sm font-medium text-gray-700 mb-1">
+            Ссылка-приглашение для соавторов
+        </label>
+        <div class="flex">
+            <input type="text"
+                   readonly
+                   value="/invite/{{ invite_token }}"
+                   class="flex-1 p-2 text-sm border rounded bg-gray-50 text-gray-800" />
+        </div>
+        <p class="text-xs text-gray-500 mt-1">
+            Соавторы смогут добавлять и редактировать желания в этом списке.
+        </p>
+    </div>
+
+    <div class="modal-actions border-t pt-4 flex justify-between items-center">
+        <button hx-post="/wishlists/{{ wishlist_id }}/invite/regenerate"
+                hx-target="#share-modal"
+                hx-swap="outerHTML"
+                class="btn btn-regenerate px-3 py-2 text-sm text-amber-700 border rounded">
+            Отозвать и создать новую ссылку
+        </button>
+    </div>
+</div>

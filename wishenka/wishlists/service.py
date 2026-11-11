@@ -329,6 +329,7 @@ class WishlistService:
         return WishlistDetailViewDTO(
             id=wl.id,
             title=wl.title,
+            owner_name=wl.owner_name,
             description=wl.description,
             event_title=wl.event_title,
             event_date=wl.event_date,
@@ -465,6 +466,29 @@ class WishlistService:
                 "actor_id": actor.telegram_id,
             },
         )
+
+    async def get_members(
+        self,
+        wishlist_id: int,
+        actor: AuthenticatedUser,
+    ) -> list[WishlistMember]:
+        """Retrieve collaborators belonging to the wishlist."""
+        wl = await self.get_wishlist_by_id(wishlist_id)
+        ctx = WishlistAccessPolicy.resolve_context(actor, wl)
+        if not (ctx.is_owner or ctx.is_admin or ctx.is_member):
+            logger.warning(
+                "Actor %s denied permission to view members of wishlist %s",
+                actor.telegram_id,
+                wishlist_id,
+                extra={
+                    "event": "access_denied",
+                    "actor_id": actor.telegram_id,
+                    "wishlist_id": wishlist_id,
+                    "action": "get_members",
+                },
+            )
+            raise PermissionDeniedError("Actor cannot view members")
+        return list(wl.members)
 
     async def update_wishlist_settings(
         self,
@@ -1614,6 +1638,16 @@ class WishlistService:
             },
         )
         return member
+
+    async def get_wishlist_by_invite_token(
+        self,
+        invite_token: str,
+    ) -> Wishlist | None:
+        """Find active wishlist by invite token."""
+        wl = next((w for w in self._wishlists.values() if w.invite_token == invite_token), None)
+        if wl is None or wl.status == WishlistStatus.DELETED:
+            return None
+        return wl
 
     async def regenerate_public_token(
         self,

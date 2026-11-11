@@ -111,6 +111,7 @@ class WishlistDetailViewDTO(BaseModel):
 
     id: int
     title: str
+    owner_name: str = ""
     description: str | None = None
     event_title: str | None = None
     event_date: datetime | None = None

@@ -152,6 +152,225 @@ tokens. If a shared link returns 404, check whether it was rotated or the list w
 a new link from an owner or admin. A 409 on modification indicates an archived list or an invalid
 state transition.
 
+## HTMX Web Views & Sharing Endpoints
+
+In addition to JSON REST endpoints, the wishlist module provides server-rendered HTML pages
+and HTMX partials implemented in
+[`wishenka.web.routes.sharing`](../../wishenka/web/routes/sharing.py). These routes power the
+browser and Telegram Mini App web views for public gift selection, collaborator onboarding,
+member management, and token rotation without client-side JavaScript SPA frameworks.
+
+### Endpoints Reference
+
+#### Public Gifter & Recipient Views
+
+- `GET /share/{public_token}`:
+  - **Description**: Renders the complete HTML page (`share_wishlist.html`) for a public wishlist.
+  - **Authentication**: Optional session (`get_optional_current_user`). Unauthenticated guests
+    can view public items and reservation status. If accessed by the list recipient or owner,
+    the Surprise Invariant strictly conceals all reservations.
+  - **Parameters**: `public_token` (str) — 16-byte URL-safe public sharing token.
+  - **Responses**:
+    - `200 OK`: Full HTML view with wishlist details, owner name, and list of items.
+    - `404 Not Found`: Returned when the wishlist does not exist or has been deleted.
+  - **Observability**: Logs `wishlist_shared_view` with `wishlist_id`, `is_recipient`, and
+    `is_collaborative`. On failure, logs `wishlist_shared_view_failed`. Access logs redact
+    the token to `/share/{token}`.
+
+- `GET /wishlists/{wishlist_id}/items/{item_id}/card`:
+  - **Description**: Returns an HTMX partial (`partials/item_card.html`) representing a single
+    gift item card. Used for out-of-band swaps or atomic card refreshes after reservation
+    actions without reloading the page.
+  - **Authentication**: Optional session (`get_optional_current_user`).
+  - **Parameters**: `wishlist_id` (int), `item_id` (int).
+  - **Responses**:
+    - `200 OK`: HTML fragment `<div class="card item-card" id="item-card-{id}">...</div>`.
+    - `404 Not Found`: Wishlist or item not found.
+
+#### Collaborator Invitation Flow
+
+- `GET /invite/{invite_token}`:
+  - **Description**: Previews a collaborator invitation before joining.
+  - **Authentication**: None required.
+  - **Parameters**: `invite_token` (str) — 24-byte URL-safe invite token.
+  - **Responses**:
+    - `200 OK`: Renders `invite_preview.html`. If the token is valid and active, displays
+      wishlist title, owner name, and a "Join" HTMX button. If the token is invalid, expired,
+      or associated with a deleted list, returns a friendly error card (`is_valid=False`) with
+      HTTP 200 rather than raw JSON errors.
+  - **Observability**: Logs `invite_preview_accessed` with status `valid`, `expired`, or
+    `not_found`. Access logs redact the token to `/invite/{token}`.
+
+- `POST /invite/{invite_token}/join`:
+  - **Description**: Processes acceptance of the invitation by an authenticated user.
+  - **Authentication**: Required session (`get_current_user`).
+  - **Parameters**: `invite_token` (str).
+  - **Responses**:
+    - `200 OK`: On success, returns confirmation markup with response header
+      `HX-Redirect: /share/{public_token}` triggering client navigation.
+    - `200 OK` (Error Card): If token expired or list was deleted concurrently, returns
+      the friendly error card template.
+  - **Observability**: Logs `invite_joined` with `wishlist_id`, `user_id`, and assigned role,
+    or `invite_join_failed` on error. Access logs redact the path to `/invite/{token}/join`.
+
+#### Member Administration
+
+- `GET /wishlists/{wishlist_id}/members/partial`:
+  - **Description**: Renders collaborator list partial (`partials/member_list.html`).
+  - **Authentication**: Required session (`get_current_user`). Caller must be owner, admin, or
+    member.
+  - **Responses**:
+    - `200 OK`: HTML fragment `<div id="member-list">...</div>` listing owner and members
+      with role badges. If caller is owner, includes `hx-delete` removal buttons.
+    - `403 Forbidden`: Caller lacks permission to view members.
+    - `404 Not Found`: Wishlist not found or deleted.
+
+- `DELETE /wishlists/{wishlist_id}/members/{user_id}/partial`:
+  - **Description**: Removes a collaborator from the wishlist and returns updated member list.
+  - **Authentication**: Required session (`get_current_user`). Only the wishlist owner can
+    remove members.
+  - **Responses**:
+    - `200 OK`: Updated HTML fragment `#member-list` with target member removed.
+    - `403 Forbidden`: Caller is not the wishlist owner.
+    - `404 Not Found`: Wishlist not found.
+  - **Observability**: Logs `member_removed` with `wishlist_id`, `removed_user_id`, and
+    `removed_by`.
+
+#### Share Drawer & Token Rotation
+
+- `GET /wishlists/{wishlist_id}/share-modal`:
+  - **Description**: Renders the share drawer dialog partial (`partials/share_modal.html`).
+  - **Authentication**: Required session (`get_current_user`). Owner-only access.
+  - **Responses**:
+    - `200 OK`: HTML fragment `<div id="share-modal">...</div>` containing readonly inputs
+      for `/share/{public_token}` and `/invite/{invite_token}`, accompanied by explanatory
+      copy and a button to revoke/regenerate the invite link.
+    - `403 Forbidden`: Caller is not the wishlist owner.
+    - `404 Not Found`: Wishlist not found.
+
+- `POST /wishlists/{wishlist_id}/invite/regenerate`:
+  - **Description**: Revokes the existing invite token and generates a fresh token, returning
+    the re-rendered modal.
+  - **Authentication**: Required session (`get_current_user`). Owner-only access.
+  - **Responses**:
+    - `200 OK`: Updated `#share-modal` partial reflecting the newly generated invite token.
+    - `403 Forbidden`: Caller is not the wishlist owner.
+  - **Observability**: Logs `invite_regenerated` with `wishlist_id` and `user_id`.
+
+---
+
+### Jinja2 Template Architecture
+
+Template rendering is configured in
+[`wishenka.web.templates`](../../wishenka/web/templates.py) using
+`fastapi.templating.Jinja2Templates` pointing to `wishenka/web/templates/`. The template
+directory structure follows a modular component layout:
+
+```
+wishenka/web/templates/
+├── base.html             # Master layout with viewport, CSS, Telegram SDK, HTMX
+├── share_wishlist.html   # Full page public view for gifters and recipients
+├── invite_preview.html   # Full page collaborator preview and friendly error screen
+└── partials/
+    ├── item_card.html    # Gift item card partial with Surprise Invariant
+    ├── member_list.html  # Collaborator member list with owner removal actions
+    └── share_modal.html  # Modal dialog for link sharing and regeneration
+```
+
+#### Template Specifications
+
+1. **`base.html`**:
+   - Master document providing HTML5 doctype, UTF-8 charset, responsive viewport metadata.
+   - Loads Telegram Web App SDK (`telegram-web-app.js`) and HTMX 1.9.12 runtime.
+   - Provides Jinja2 template extension blocks: `{% block title %}` and `{% block content %}`.
+
+2. **`share_wishlist.html`**:
+   - Extends `base.html`.
+   - Displays wishlist header (title, owner name, description, event title and date).
+   - Iterates over `wishlist.items` and includes `partials/item_card.html` for each item.
+   - Shows empty-state guidance if no items are present.
+
+3. **`invite_preview.html`**:
+   - Extends `base.html`.
+   - Conditionally renders an invitation card (`is_valid=True`) or friendly error card
+     (`is_valid=False`).
+   - The valid card features wishlist metadata, inviter attribution, and an HTMX form:
+     `<form hx-post="/invite/{{ token }}/join" hx-target="#invite-card" hx-swap="outerHTML">`.
+   - The error card displays an explanatory message and a link back to the homepage (`/`).
+
+4. **`partials/item_card.html`**:
+   - Encapsulates an individual gift item inside
+     `<div class="card item-card" id="item-card-{{ item.id }}">`.
+   - Displays item title, optional formatted price with currency, description, quantity, and
+     external link (`rel="noopener noreferrer"`).
+   - Enforces the Surprise Invariant via `{% if not item.is_recipient %}`.
+
+5. **`partials/member_list.html`**:
+   - Renders container `<div id="member-list" class="member-list space-y-2">`.
+   - Lists list owner with `Владелец` badge, followed by collaborators.
+   - Displays role badges (`Администратор` or `Участник`).
+   - If caller is owner (`is_owner=True`), renders an HTMX delete button:
+     `<button hx-delete="..." hx-target="#member-list" hx-swap="outerHTML">`.
+
+6. **`partials/share_modal.html`**:
+   - Renders container `<div id="share-modal" class="share-modal">`.
+   - Displays readonly input for public URL (`/share/{{ public_token }}`) for gifter access.
+   - Displays readonly input for invite URL (`/invite/{{ invite_token }}`) for co-authoring.
+   - Contains an HTMX regeneration button:
+     `<button hx-post="..." hx-target="#share-modal" hx-swap="outerHTML">`.
+
+---
+
+### Surprise Invariant in Server-Rendered Templates
+
+The Surprise Invariant is enforced at both the domain service layer and the template presentation
+layer, providing defense-in-depth against data leakage:
+
+1. **Domain DTO Projection**:
+   - When `WishlistService.get_wishlist_by_public_token` or `get_wishlist_view` is called,
+     items for which the viewing user is a recipient (`is_recipient == True`) are projected as
+     `WishItemRecipientViewDTO`.
+   - For gifters (`is_recipient == False`), items are projected as `WishItemGifterViewDTO`.
+   - `WishItemRecipientViewDTO` completely lacks reservation fields (`available_quantity`,
+     `is_fully_reserved`, `is_reserved_by_me`, `my_reserved_quantity`, and reservation lists).
+
+2. **Template-Level Conditional Guard**:
+   - In `partials/item_card.html`, reservation badges are guarded by
+     `{% if not item.is_recipient %}`:
+     ```html
+     {% if not item.is_recipient %}
+     <div class="item-reservation mt-3 pt-2 border-t text-sm">
+         {% if item.is_fully_reserved %}
+         <span class="badge badge-reserved text-red-600 font-medium">Забронировано</span>
+         {% elif item.is_reserved_by_me %}
+         <span class="badge badge-my-reserved text-green-600 font-medium">
+             Забронировано вами ({{ item.my_reserved_quantity }})
+         </span>
+         {% else %}
+         <span class="badge badge-available text-gray-600">
+             Доступно: {{ item.available_quantity }} из {{ item.quantity }}
+         </span>
+         {% endif %}
+     </div>
+     {% endif %}
+     ```
+   - When rendered for an owner or recipient, the entire `.item-reservation` container is omitted
+     from the generated HTML DOM. A recipient cannot infer reservation activity from HTML
+     attributes, CSS classes, or DOM nodes.
+
+3. **Bearer Token Isolation**:
+   - The private collaborator `invite_token` is strictly isolated to owner administrative views
+     (`share_modal.html`).
+   - Public views (`share_wishlist.html`) and item cards (`item_card.html`) never receive or
+     render `invite_token`, preventing accidental elevation of gifters to collaborators.
+
+4. **Access Log and URL Masking**:
+   - Both `ShareTokenAccessFilter` (logging filter) and `RequestLoggingMiddleware` redact raw
+     sharing and invite tokens in log streams to `/share/{token}` and `/invite/{token}`,
+     ensuring bearer tokens are not leaked into disk logs or terminal outputs.
+
+---
+
 ## Architecture & Domain Models
 
 The domain models are defined in [`wishenka.wishlists.models`](../../wishenka/wishlists/models.py)
@@ -246,6 +465,10 @@ an item has been booked, how many units remain, or who reserved it.
      availability (`available_quantity`), booking status, and whether calling user holds a booking.
 3. **Self-Reservation Guard**: Any attempt by a recipient to invoke `create_reservation` raises
    `SelfReservationError` and emits a warning audit log.
+4. **Template Presentation Guard**: Server-rendered Jinja2 templates (`item_card.html`) wrap
+   reservation blocks in `{% if not item.is_recipient %}`. For recipients, no reservation badges,
+   counters, or status indicators exist in the rendered HTML output. See
+   [HTMX Web Views & Sharing Endpoints](#htmx-web-views--sharing-endpoints).
 
 ---
 
@@ -1014,6 +1237,12 @@ Settings in `wishenka.config.Settings` (prefixed with `WISHENKA_` in environment
 | `access_denied` | `WARNING` | Action blocked | `wishlist_id`, `action` |
 | `surprise_invariant_violation_attempt` | `WARNING` | Self-booking blocked | `item_id` |
 | `invalid_invite_token` | `WARNING` | Bad invite token | None (token withheld) |
+| `wishlist_shared_view` | `INFO` | Public share rendered | `wishlist_id`, `is_recipient` |
+| `wishlist_shared_view_failed` | `WARNING` | Public view failed | None (token withheld) |
+| `invite_preview_accessed` | `INFO` | Invite preview rendered | `wishlist_id`, `status` |
+| `invite_joined` | `INFO` | Collaborator joined | `wishlist_id`, `user_id`, `role` |
+| `invite_join_failed` | `WARNING` | Invite join failed | `user_id` |
+| `invite_regenerated` | `INFO` | Invite token rotated | `wishlist_id`, `user_id` |
 | `favorites_listed` | `INFO` | Favorites fetched | `user_id`, `count` |
 | `favorite_added` | `INFO` | Favorite added | `wishlist_id`, `user_id` |
 | `favorite_removed` | `INFO` | Favorite removed | `wishlist_id`, `user_id` |
