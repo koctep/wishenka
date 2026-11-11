@@ -2,9 +2,13 @@
 
 ## Overview
 
-The `wishenka.wishlists` module implements the core domain logic for wishlists in the **Wishlist Service («Вишенка»)** Telegram Mini App.
+The `wishenka.wishlists` module implements the core domain logic for wishlists in the
+**Wishlist Service («Вишенка»)** Telegram Mini App.
 
-It manages personal and collaborative wishlists, enforces role-based access control (Contextual RBAC/ABAC), coordinates lifecycle transitions, protects the crucial **Surprise Invariant** (zero-leak projections of reservations), and provides cryptographically secure sharing tokens.
+It manages personal and collaborative wishlists, enforces role-based access control
+(Contextual RBAC/ABAC), coordinates lifecycle transitions, protects the crucial
+**Surprise Invariant** (zero-leak projections of reservations), and provides cryptographically
+secure sharing tokens.
 
 ```
 +-----------------------------------------------------------------------------------------+
@@ -31,11 +35,16 @@ It manages personal and collaborative wishlists, enforces role-based access cont
 
 ### Key Capabilities
 
-1. **Contextual Role-Based Access Control**: Combines static wishlist roles (`Owner`, `Admin`, `Member`) with dynamic item-level recipient checks.
-2. **Surprise Invariant (Zero-Leak Projection)**: Gift recipients are strictly prevented from viewing reservation counts, status, or gifter identities.
-3. **Dual Sharing Token Architecture**: Separate, cryptographically secure tokens for public viewing (`public_token`) and collaborative onboarding (`invite_token`).
-4. **Lifecycle Management**: Explicit state machine (`ACTIVE` $\leftrightarrow$ `ARCHIVED` $\rightarrow$ `DELETED`) preventing mutation or reservation on archived and deleted wishlists.
-5. **Structured Audit Logging**: Comprehensive security and operational event logging with zero leakage of sensitive raw tokens.
+1. **Contextual Role-Based Access Control**: Combines static wishlist roles (`Owner`, `Admin`,
+   `Member`) with dynamic item-level recipient checks.
+2. **Surprise Invariant (Zero-Leak Projection)**: Gift recipients are strictly prevented from
+   viewing reservation counts, status, or gifter identities.
+3. **Dual Sharing Token Architecture**: Separate, cryptographically secure tokens for public
+   viewing (`public_token`) and collaborative onboarding (`invite_token`).
+4. **Lifecycle Management**: Explicit state machine (`ACTIVE` <-> `ARCHIVED` -> `DELETED`)
+   preventing mutation or reservation on archived and deleted wishlists.
+5. **Structured Audit Logging**: Comprehensive security and operational event logging with
+   zero leakage of sensitive raw tokens.
 
 ---
 
@@ -88,7 +97,6 @@ rejected by the optional authentication dependency.
 
 - `DELETE /api/history`: Clears all viewing history for caller.
 
-
 Create and patch accept a JSON object with optional `name`, `description`, `event_title`, and
 `event_date`. The HTTP representation includes list details and items; member responses include
 `role` and `members`, and owner/admin responses also include `share_token` and `invite_token`.
@@ -122,18 +130,20 @@ state. The HTTP router uses the same store. For tests only, `app.state.wishlist_
 override the router's service.
 
 `WISHENKA_DATABASE_URL` selects the SQLite database and defaults to
-`sqlite+aiosqlite:///data/wishenka.db`. The application initializes the schema and WAL mode during
-lifespan startup, creates parent directories for a file database, and disposes the engine at
-shutdown. `WISHENKA_SQLITE_DB_PATH` is a separate setting and does not configure this store. All
-workers must point to the same database file to share state. The store applies a five-second SQLite
-busy timeout and serializes each operation with `BEGIN IMMEDIATE`; it loads and rewrites the
-aggregate graph even for reads. This favors correctness over scale and makes reads contend for the
-writer lock. The schema currently uses unversioned JSON payloads and application-maintained ID
-counters; migrations and more targeted access are tracked in
-[WISHENKA-48](https://pypost.atlassian.net/browse/WISHENKA-48). Favorites and viewing history are
-persisted in dedicated SQLite tables (`wl_favorites` with primary key `(user_id, wishlist_id)` and
-`wl_view_history` with unique index `(user_id, wishlist_id)` for deduplication), both cascading on
-wishlist deletion.
+`sqlite+aiosqlite:///data/wishenka.db`. The application initializes the normalized relational
+schema and WAL mode during lifespan startup, creates parent directories for a file database,
+and disposes the engine at shutdown. `WISHENKA_SQLITE_DB_PATH` is a separate setting and does not
+configure this store. All workers must point to the same database file to share state. The store
+applies a five-second SQLite busy timeout (`busy_timeout = 5000`) and serializes each mutation with
+`BEGIN IMMEDIATE`.
+
+As implemented in [WISHENKA-48](https://pypost.atlassian.net/browse/WISHENKA-48), persistence uses
+a fully normalized relational schema (`wl_lists`, `wl_members`, `wl_items`, `wl_reservations`,
+`wl_favorites`, `wl_view_history`, `wl_tokens`, `wl_invite_tokens`, `wl_counters`) mapped via
+SQLAlchemy 2.0 declarative models and queried through `WishlistRepository`. Destructive prototype
+mass table truncations (`DELETE FROM <table>`) are replaced with snapshot diffing and row-level
+mutations (`UPDATE`, `INSERT`, `DELETE WHERE id = :id`). See
+[Persistence Architecture](#persistence-architecture-sqlite-wal--repositories) below for details.
 
 If startup reports `Unable to initialize wishlist storage`, verify the database URL, directory
 permissions and SQLite availability. A generic `Wishlist storage operation failed` indicates a
@@ -144,16 +154,17 @@ state transition.
 
 ## Architecture & Domain Models
 
-The domain models are defined in [`wishenka.wishlists.models`](../../wishenka/wishlists/models.py) and pure access policies in [`wishenka.wishlists.policy`](../../wishenka/wishlists/policy.py).
+The domain models are defined in [`wishenka.wishlists.models`](../../wishenka/wishlists/models.py)
+and pure access policies in [`wishenka.wishlists.policy`](../../wishenka/wishlists/policy.py).
 
 ### Enumerations
 
 | Enum | Values | Description |
 | --- | --- | --- |
-| `WishlistRole` | `owner`, `admin`, `member` | Roles of collaborators participating in a wishlist. |
+| `WishlistRole` | `owner`, `admin`, `member` | Roles of collaborators in a wishlist. |
 | `WishlistStatus` | `active`, `archived`, `deleted` | Lifecycle state of the wishlist aggregate. |
-| `WishlistFormat` | `personal`, `collaborative` | Participation format (`personal` if sole owner, `collaborative` when members exist). |
-| `WishlistTimeType` | `ongoing`, `event` | Temporal classification (`event` if `event_date` is set, otherwise `ongoing`). |
+| `WishlistFormat` | `personal`, `collaborative` | Format: single owner vs collaborative members. |
+| `WishlistTimeType` | `ongoing`, `event` | Temporal classification (event vs ongoing). |
 | `ReservationStatus` | `active`, `completed`, `cancelled` | State of a gifter's item reservation. |
 
 ### Domain Models
@@ -167,7 +178,8 @@ The domain models are defined in [`wishenka.wishlists.models`](../../wishenka/wi
 
 ### RBAC Policy: `WishlistAccessPolicy` & `UserWishlistContext`
 
-Access decisions are evaluated purely through `WishlistAccessPolicy.resolve_context(user, wishlist)`, returning a frozen `UserWishlistContext`:
+Access decisions are evaluated purely through
+`WishlistAccessPolicy.resolve_context(user, wishlist)`, returning a frozen `UserWishlistContext`:
 
 ```python
 @dataclass(frozen=True)
@@ -192,7 +204,9 @@ class UserWishlistContext:
 | Delete wishlist (soft-delete) | Yes | No | No | No |
 | Regenerate sharing tokens | Yes | Yes | No | No |
 | Reserve item (non-recipient) | Yes | Yes | Yes | Yes |
-| Reserve item (as recipient) | **No** (Forbidden) | **No** (Forbidden) | **No** (Forbidden) | **No** (Forbidden) |
+| Reserve item (as recipient) | **No** | **No** | **No** | **No** |
+
+*Note: Item recipients are strictly prohibited from reserving items designated for themselves.*
 
 #### Role Precedence & Favorite Evaluation
 
@@ -213,24 +227,33 @@ owner > admin > member > favorite
 
 ### Surprise Invariant: Zero-Leak Projection Design
 
-The **Surprise Invariant** guarantees that the recipient of a gift can never discover whether an item has been booked, how many units remain, or who reserved it.
+The **Surprise Invariant** guarantees that the recipient of a gift can never discover whether
+an item has been booked, how many units remain, or who reserved it.
 
 #### Enforcement Mechanism
 
 1. **Policy Check**: `WishlistAccessPolicy.is_recipient(user, item)`:
    - Returns `True` if `item.recipient_user_id == user.telegram_id`.
-   - On personal wishlists without an explicit item recipient, defaults to the wishlist owner (`wishlist.owner_id == user.telegram_id`).
-   - If an item specifies a non-user external recipient (e.g. `recipient_name="Бабушка Нина"`), registered collaborators are not recipients.
+   - On personal wishlists without an explicit item recipient, defaults to the wishlist owner
+     (`wishlist.owner_id == user.telegram_id`).
+   - If an item specifies a non-user external recipient (e.g. `recipient_name="Бабушка Нина"`),
+     registered collaborators are not recipients.
 2. **DTO Projection**:
-   - **`WishItemRecipientViewDTO`**: Returned when `is_recipient` is `True`. All reservation details (`reservations`, `available_quantity`, `is_fully_reserved`, `is_reserved_by_me`, `my_reserved_quantity`) are omitted from the schema.
-   - **`WishItemGifterViewDTO`**: Returned when `is_recipient` is `False`. Includes computed availability (`available_quantity`), booking status, and whether the calling user holds an active reservation.
-3. **Self-Reservation Guard**: Any attempt by a recipient to invoke `create_reservation` raises `SelfReservationError` and emits a warning audit log.
+   - **`WishItemRecipientViewDTO`**: Returned when `is_recipient` is `True`. All reservation
+     details (`reservations`, `available_quantity`, `is_fully_reserved`, `is_reserved_by_me`,
+     `my_reserved_quantity`) are omitted from the schema.
+   - **`WishItemGifterViewDTO`**: Returned when `is_recipient` is `False`. Includes computed
+     availability (`available_quantity`), booking status, and whether calling user holds a booking.
+3. **Self-Reservation Guard**: Any attempt by a recipient to invoke `create_reservation` raises
+   `SelfReservationError` and emits a warning audit log.
 
 ---
 
 ## Usage / API
 
-The `WishlistService` in [`wishenka.wishlists.service`](../../wishenka/wishlists/service.py) provides the primary asynchronous application interface.
+The `WishlistService` in
+[`wishenka.wishlists.service`](../../wishenka/wishlists/service.py)
+provides the primary asynchronous application interface.
 
 ### Service Methods
 
@@ -272,8 +295,10 @@ async def get_wishlist_view(
 ```
 
 - **Raises**: `WishlistNotFoundError`, `WishlistDeletedError`.
-- **Surprise Invariant**: For each item, selects `WishItemRecipientViewDTO` if the caller is the recipient, or `WishItemGifterViewDTO` otherwise.
-- **Token Security**: The `invite_token` is exposed in the DTO only to `Owner` and `Admin` members; public viewers and regular members receive `invite_token = None`.
+- **Surprise Invariant**: For each item, selects `WishItemRecipientViewDTO` if caller is recipient,
+  or `WishItemGifterViewDTO` otherwise.
+- **Token Security**: The `invite_token` is exposed in the DTO only to `Owner` and `Admin` members;
+  public viewers and regular members receive `invite_token = None`.
 
 #### `add_member` / `change_member_role`
 
@@ -289,7 +314,8 @@ async def add_member(
 ) -> WishlistMember
 ```
 
-- **Permissions**: `Owner` and `Admin` can add `MEMBER`s. Only `Owner` can assign or change `ADMIN` role (`can_change_member_role`).
+- **Permissions**: `Owner` and `Admin` can add `MEMBER`s. Only `Owner` can assign or change `ADMIN`
+  role (`can_change_member_role`).
 - **Raises**: `PermissionDeniedError`, `WishlistArchivedError`, `WishlistDeletedError`.
 
 #### `remove_member`
@@ -305,7 +331,8 @@ async def remove_member(
 ) -> None
 ```
 
-- **Permissions**: `Owner` can remove any member; `Admin` can remove regular `MEMBER`s; any member can remove themselves.
+- **Permissions**: `Owner` can remove any member; `Admin` can remove regular `MEMBER`s; any member
+  can remove themselves.
 
 #### `join_by_invite`
 
@@ -319,7 +346,7 @@ async def join_by_invite(
 ) -> WishlistMember
 ```
 
-- **Raises**: `InvalidInviteTokenError` if token is non-existent, revoked, or expired (`invite_token_expires_at < now`).
+- **Raises**: `InvalidInviteTokenError` if token is non-existent, revoked, or expired.
 - Automatically transitions wishlist format to `WishlistFormat.COLLABORATIVE`.
 
 #### `regenerate_public_token` & `regenerate_invite_token`
@@ -363,7 +390,8 @@ async def unarchive_wishlist(  # restore operation
 ```
 
 - **Permissions**: `Owner` and `Admin`.
-- While `ARCHIVED`, adding items, editing metadata, and booking reservations are rejected with `WishlistArchivedError`.
+- While `ARCHIVED`, adding items, editing metadata, and booking reservations are rejected with
+  `WishlistArchivedError`.
 
 #### `delete_wishlist`
 
@@ -393,7 +421,7 @@ async def create_reservation(
 ) -> Reservation
 ```
 
-- **Surprise Invariant**: Raises `SelfReservationError` if the caller is the item's recipient.
+- **Surprise Invariant**: Raises `SelfReservationError` if caller is the item's recipient.
 - **Overbooking Prevention**: Raises `InsufficientQuantityError` if `quantity > available_quantity`.
 - **Status Guards**: Raises `WishlistArchivedError` if wishlist is archived.
 
@@ -417,7 +445,7 @@ async def remove_favorite(
 
 - **Self-Favoriting Guard**: Raises `ValueError("Cannot favorite own wishlist")` if
   `wishlist.owner_id == user.telegram_id`.
-- **Validation**: Raises `WishlistNotFoundError` if the wishlist does not exist or has been deleted.
+- **Validation**: Raises `WishlistNotFoundError` if wishlist does not exist or has been deleted.
 - **Idempotency**: Adding an existing favorite is an idempotent no-op.
 - Synchronous `has_favorite(user_id, wishlist_id)` and async `is_favorite(user, wishlist_id)`
   allow quick lookups.
@@ -477,9 +505,333 @@ async def clear_history(
 
 ---
 
+## Persistence Architecture: SQLite WAL & Repositories
+
+Wishenka stores wishlist aggregates in a fully normalized relational SQLite schema managed via
+the SQLAlchemy 2.0 async engine (`sqlite+aiosqlite`). Prototype JSON blobs and destructive mass
+table overwrites (`DELETE FROM <table>`) have been replaced with atomic, row-level persistence,
+granular async queries, and relationship cascade deletion.
+
+```
++-----------------------------------------------------------------------------------------+
+|                        WishlistStore (Unit of Work Boundary)                           |
+|  - Manages SQLite connection lifecycle, WAL mode, foreign keys, and busy timeout        |
+|  - BEGIN IMMEDIATE write transaction serialization and TokenCollision retries          |
+|  - Snapshot diffing: computes row-level INSERT / UPDATE / DELETE sets                   |
++-----------------------------------------------------------------------------------------+
+                                             |
+                                             v
++-----------------------------------------------------------------------------------------+
+|                    WishlistRepository (Granular Async SQL Operations)                   |
+|  - Targeted queries: get_wishlist, get_by_public_token, get_by_invite_token, etc.      |
+|  - Single-row mutations: upsert_wishlist, upsert_item, upsert_reservation, etc.         |
+|  - Bidirectional entity converters: _row_to_wishlist, _row_to_member, _row_to_item      |
++-----------------------------------------------------------------------------------------+
+                                             |
+                                             v
++-----------------------------------------------------------------------------------------+
+|                   SQLAlchemy 2.0 Declarative Models (db_models.py)                      |
+|  - Typed Mapped[...] columns, unique constraints, and foreign key cascades              |
+|  - wl_lists, wl_members, wl_items, wl_reservations, wl_favorites, wl_view_history,    |
+|    wl_tokens, wl_invite_tokens, wl_counters                                            |
++-----------------------------------------------------------------------------------------+
+```
+
+### 1. Normalized Relational Database Schema
+
+The persistence layer organizes domain entities into dedicated relational tables with explicit
+data types, foreign keys, unique constraints, and indexes.
+
+#### Schema DDL Specifications
+
+```sql
+-- 1. Wishlist Aggregate Root
+CREATE TABLE IF NOT EXISTS wl_lists (
+    id INTEGER PRIMARY KEY,
+    owner_id INTEGER NOT NULL,
+    owner_name TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL,
+    description TEXT,
+    event_title TEXT,
+    event_date TEXT,
+    is_collaborative INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    public_token TEXT NOT NULL,
+    invite_token TEXT NOT NULL,
+    invite_token_expires_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wl_lists_owner ON wl_lists(owner_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wl_lists_public_token ON wl_lists(public_token);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wl_lists_invite_token ON wl_lists(invite_token);
+CREATE INDEX IF NOT EXISTS idx_wl_lists_status ON wl_lists(status);
+
+-- 2. Collaborative Members
+CREATE TABLE IF NOT EXISTS wl_members (
+    id INTEGER PRIMARY KEY,
+    wishlist_id INTEGER NOT NULL REFERENCES wl_lists(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
+    joined_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wl_members_unique ON wl_members(wishlist_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_wl_members_user ON wl_members(user_id);
+
+-- 3. Wishlist Items
+CREATE TABLE IF NOT EXISTS wl_items (
+    id INTEGER PRIMARY KEY,
+    wishlist_id INTEGER NOT NULL REFERENCES wl_lists(id) ON DELETE CASCADE,
+    recipient_user_id INTEGER,
+    recipient_name TEXT,
+    title TEXT NOT NULL,
+    description TEXT,
+    link TEXT,
+    price INTEGER,
+    currency TEXT NOT NULL DEFAULT 'RUB',
+    quantity INTEGER NOT NULL DEFAULT 1,
+    received_quantity INTEGER NOT NULL DEFAULT 0,
+    image_url TEXT,
+    store_name TEXT,
+    store_icon_url TEXT,
+    priority TEXT NOT NULL DEFAULT 'medium',
+    category TEXT,
+    is_archived INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wl_items_wishlist ON wl_items(wishlist_id);
+CREATE INDEX IF NOT EXISTS idx_wl_items_recipient ON wl_items(recipient_user_id);
+
+-- 4. Item Reservations
+CREATE TABLE IF NOT EXISTS wl_reservations (
+    id INTEGER PRIMARY KEY,
+    wish_item_id INTEGER NOT NULL REFERENCES wl_items(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL,
+    quantity INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wl_reservations_item ON wl_reservations(wish_item_id);
+CREATE INDEX IF NOT EXISTS idx_wl_reservations_user ON wl_reservations(user_id);
+CREATE INDEX IF NOT EXISTS idx_wl_reservations_status ON wl_reservations(status);
+
+-- 5. User Favorites
+CREATE TABLE IF NOT EXISTS wl_favorites (
+    user_id INTEGER NOT NULL,
+    wishlist_id INTEGER NOT NULL REFERENCES wl_lists(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, wishlist_id)
+);
+CREATE INDEX IF NOT EXISTS idx_wl_favorites_user ON wl_favorites(user_id);
+
+-- 6. User Viewing History
+CREATE TABLE IF NOT EXISTS wl_view_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    wishlist_id INTEGER NOT NULL REFERENCES wl_lists(id) ON DELETE CASCADE,
+    viewed_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS wl_view_history_user_wl
+    ON wl_view_history(user_id, wishlist_id);
+CREATE INDEX IF NOT EXISTS idx_wl_view_history_user_time
+    ON wl_view_history(user_id, viewed_at DESC);
+
+-- 7. Public Sharing Capability Token Registry
+CREATE TABLE IF NOT EXISTS wl_tokens (
+    token TEXT PRIMARY KEY,
+    wishlist_id INTEGER NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_wl_tokens_wishlist ON wl_tokens(wishlist_id, active);
+
+-- 8. Collaborator Invite Capability Token Registry
+CREATE TABLE IF NOT EXISTS wl_invite_tokens (
+    token TEXT PRIMARY KEY
+);
+
+-- 9. Monotonic Sequence ID Counters
+CREATE TABLE IF NOT EXISTS wl_counters (
+    name TEXT PRIMARY KEY,
+    value INTEGER NOT NULL
+);
+```
+
+#### Foreign Key Constraints & Cascading Deletion
+- Foreign key enforcement is enabled on every SQLite connection via `PRAGMA foreign_keys = ON`.
+- Deleting a wishlist from `wl_lists` cascades (`ON DELETE CASCADE`) to:
+  - All associated members in `wl_members`.
+  - All contained items in `wl_items` (and subsequently all reservations in `wl_reservations`).
+  - All user bookmark entries in `wl_favorites`.
+  - All user viewing history records in `wl_view_history`.
+- Deleting a wish item (`wl_items`) cascades to all its reservations (`wl_reservations`).
+
+#### Unique Constraints & Indexing Strategy
+- **Unique Indexes**:
+  - `idx_wl_lists_public_token`: Prevents duplication across public sharing capability tokens.
+  - `idx_wl_lists_invite_token`: Prevents duplication across collaborator invite tokens.
+  - `idx_wl_members_unique` on `(wishlist_id, user_id)`: Enforces exactly one membership record
+    per user per wishlist.
+  - `wl_view_history_user_wl` on `(user_id, wishlist_id)`: Prevents duplicate viewing entries,
+    allowing deduplication via:
+    `INSERT ... ON CONFLICT DO UPDATE SET viewed_at = excluded.viewed_at`.
+  - Primary key `(user_id, wishlist_id)` on `wl_favorites`: Guarantees single bookmark per list.
+- **Lookup Indexes**:
+  - `idx_wl_lists_owner` and `idx_wl_lists_status`: Accelerate owner dashboards and status filters.
+  - `idx_wl_members_user`: Enables fast lookups of all collaborative wishlists for a user.
+  - `idx_wl_items_wishlist` and `idx_wl_items_recipient`: Speed up queries by list and recipient.
+  - `idx_wl_reservations_item`, `idx_wl_reservations_user`, `idx_wl_reservations_status`: Speed up
+    reservation lookups, user reservation queries, and active booking counting.
+
+### 2. SQLAlchemy 2.0 Declarative Models
+
+Declarative models in
+[`wishenka.wishlists.db_models`](../../wishenka/wishlists/db_models.py) map relational tables
+to typed Python structures using SQLAlchemy 2.0 `Mapped` and `mapped_column` constructs:
+
+- **`Base`**: Subclass of `sqlalchemy.orm.DeclarativeBase`.
+- **`WishlistRow`**: Represents `wl_lists`. Configures bidirectional relationships with
+  `cascade="all, delete-orphan"`:
+  ```python
+  members: Mapped[list["WishlistMemberRow"]] = relationship(
+      back_populates="wishlist", cascade="all, delete-orphan"
+  )
+  items: Mapped[list["WishItemRow"]] = relationship(
+      back_populates="wishlist", cascade="all, delete-orphan"
+  )
+  ```
+- **`WishlistMemberRow`**: Represents `wl_members`. References `wl_lists.id` via foreign key
+  `ForeignKey("wl_lists.id", ondelete="CASCADE")` and back-populates `members`.
+- **`WishItemRow`**: Represents `wl_items`. References `wl_lists.id` and configures child cascade:
+  ```python
+  reservations: Mapped[list["ReservationRow"]] = relationship(
+      back_populates="wish_item", cascade="all, delete-orphan"
+  )
+  ```
+- **`ReservationRow`**: Represents `wl_reservations` with `ForeignKey(..., ondelete="CASCADE")`.
+- **`WishlistFavoriteRow`**: Represents `wl_favorites` with composite key `(user_id, wishlist_id)`.
+- **`ViewHistoryRow`**: Represents `wl_view_history` with autoincrement integer primary key `id`.
+- **`WishlistTokenRow`** & **`InviteTokenRow`**: Represent capability registries `wl_tokens` and
+  `wl_invite_tokens`.
+- **`CounterRow`**: Represents `wl_counters` for monotonic sequence generation.
+
+### 3. WishlistRepository: Granular Async Queries & Mutations
+
+The `WishlistRepository` in
+[`wishenka.wishlists.repository`](../../wishenka/wishlists/repository.py) provides isolated,
+granular async operations over an active SQLAlchemy `AsyncConnection`.
+
+#### Targeted Query Methods
+- `get_wishlist(wishlist_id: int) -> Wishlist | None`: Loads a specific wishlist aggregate
+  along with its active members, items, and item reservations in targeted parameter-bound queries
+  (`WHERE id = :id` and `WHERE wish_item_id IN (...)`).
+- `get_by_public_token(token: str) -> Wishlist | None`: O(1) indexed lookup by public capability.
+- `get_by_invite_token(token: str) -> Wishlist | None`: O(1) indexed lookup by invite capability.
+- `list_by_owner(owner_id: int) -> list[Wishlist]`: Indexed fetch of wishlists owned by user.
+- `list_collaborative(user_id: int) -> list[Wishlist]`: Joined query on `wl_members` returning
+  only collaborative lists where caller is an active member.
+- `get_item(item_id: int) -> WishItem | None`: Single-item fetch with its reservations.
+- `list_user_reservations(user_id: int) -> list[Reservation]`: Fetches active/purchased reservations
+  created by the specified user.
+- `list_favorites(user_id: int) -> list[WishlistFavorite]`: Ordered bookmarks for caller.
+- `list_view_history(user_id: int, limit: int = 20) -> list[ViewHistoryEntry]`: Chronologically
+  ordered history entries up to the bounded limit.
+
+#### Row-Level Mutation Methods
+- `upsert_wishlist(wishlist: Wishlist)`: Checks existence by ID and executes row-level `UPDATE`
+  or `INSERT` without affecting any other wishlist rows.
+- `delete_wishlist(wishlist_id: int)`: Executes `DELETE FROM wl_lists WHERE id = :id`. Engine
+  foreign key cascade automatically cleans up child members, items, and reservations.
+- `upsert_item(item: WishItem)`: Targeted `UPDATE` or `INSERT` for a single wish item row.
+- `delete_item(item_id: int)`: Targeted `DELETE FROM wl_items WHERE id = :id`.
+- `upsert_reservation(res: Reservation)`: Targeted `UPDATE` or `INSERT` for reservation rows.
+- `delete_reservation(res_id: int)`: Targeted `DELETE FROM wl_reservations WHERE id = :id`.
+- `upsert_favorite(fav)`: Uses `INSERT ... ON CONFLICT(user_id, wishlist_id) DO NOTHING`.
+- `delete_favorite(user_id: int, wishlist_id: int)`: Targeted `DELETE FROM wl_favorites`.
+- `record_view(entry)`: Uses `INSERT ... ON CONFLICT DO UPDATE SET viewed_at = excluded.viewed_at`.
+- `clear_view_history(user_id: int)`: Deletes viewing history for a single user.
+
+#### Entity Converters
+Bidirectional entity converters decouple database row representations from pure domain dataclasses:
+- `_row_to_wishlist(row: Row[Any]) -> Wishlist`
+- `_row_to_member(row: Row[Any]) -> WishlistMember`
+- `_row_to_item(row: Row[Any]) -> WishItem`
+- `_row_to_reservation(row: Row[Any]) -> Reservation`
+- Datetime conversions parse ISO strings to timezone-aware UTC `datetime` objects via `_parse_dt`
+  and serialize them to ISO format via `_format_dt`.
+
+### 4. Concurrency & Transaction Management
+
+#### Elimination of Destructive Bulk Overwrites
+The legacy prototype wiped all database tables on every write via `DELETE FROM <table>`. In the
+relational architecture, `WishlistStore` coordinates atomic row-level persistence using
+**snapshot diffing**:
+
+1. **Snapshot Capture**: At transaction start, `_read()` reads current state and captures a
+   lightweight `_StorageSnapshot` containing existing entity ID sets:
+   ```python
+   @dataclass
+   class _StorageSnapshot:
+       wishlists: set[int]
+       members: set[int]
+       items: set[int]
+       reservations: set[int]
+       favorites: set[tuple[int, int]]
+       history_ids: set[int]
+   ```
+2. **Domain Execution**: The caller's business operation executes against `WishlistService`.
+3. **Differential Persistence**: During `_write()`, the store compares post-operation service
+   state with the initial snapshot:
+   - Entities in service but not in snapshot: executed via single-row `INSERT`.
+   - Entities in both snapshot and service: executed via single-row `UPDATE ... WHERE id = :id`.
+   - Entities in snapshot but not in service: executed via single-row `DELETE ... WHERE id = :id`.
+   - All other rows across unrelated wishlists remain completely untouched.
+
+#### SQLite WAL Mode & Lock Primitives
+- **WAL Journaling (`PRAGMA journal_mode = WAL`)**: Allows concurrent reads to proceed concurrently
+  with active write transactions without blocking or lock contention.
+- **Immediate Write Transactions (`BEGIN IMMEDIATE`)**: State mutations begin with `BEGIN IMMEDIATE`
+  to acquire an SQLite write lock at the start of the transaction, eliminating mid-transaction
+  upgrade deadlocks (`SQLITE_BUSY`).
+- **Bounded Busy Timeout (`PRAGMA busy_timeout = 5000`)**: If SQLite encounters a transient write
+  lock, it waits up to 5000 milliseconds before raising an operational error.
+- **Capability Collision Retry**: If a concurrent worker or token generation collides with an
+  existing capability token in `wl_tokens` or `wl_invite_tokens`, `WishlistStore.execute()`
+  catches `TokenCollision` / `IntegrityError` and retries up to 5 times with newly generated
+  cryptographic tokens.
+
+### 5. Observability & Security Guarantees
+
+#### Structured Persistence Logging Events
+Database operations emit structured audit logs under the `wishenka.wishlists` logger:
+
+| Event (`event`) | Level | Trigger | Key Extra Attributes |
+| --- | :---: | --- | --- |
+| `wishlist_store_read` | `INFO` | State read into service | `wishlists_count`, `items_count` |
+| `wishlist_store_write` | `INFO` | Differential committed | `wishlists_count`, `items_count` |
+| `wishlist_repo_mutation` | `INFO` | Repository mutation | `entity`, `operation`, `entity_id` |
+| `wishlist_token_collision_retry` | `WARNING` | Collision retry | `attempt` |
+| `wishlist_store_error` | `ERROR` | Database error | `event` |
+| `wishlist_store_integrity_error` | `ERROR` | Constraint failure | `event` |
+
+#### Zero Parameter & Token Leakage Guarantees
+- **SQLAlchemy Parameter Redaction**: Engines are initialized with `hide_parameters=True`,
+  ensuring that SQL parameters (including sharing tokens and private IDs) never appear in SQL
+  exception traces or debug logs.
+- **Driver Logging Redaction**: The low-level `aiosqlite` logger is explicitly configured to
+  `logging.WARNING` (`logging.getLogger("aiosqlite").setLevel(logging.WARNING)`), suppressing
+  aiosqlite DEBUG output that outputs raw parameter bindings.
+- **Sanitized Domain Exceptions**: Database exceptions (`SQLAlchemyError`, `IntegrityError`) are
+  caught at the `WishlistStore.execute()` boundary and sanitized into generic `RuntimeError`
+  messages (`"Wishlist storage operation failed"`). Internal SQLite table names, SQL syntax,
+  and tokens are strictly withheld from exception traces.
+
+---
+
 ## Token Schemas & Security
 
-Wishlists use two distinct cryptographic token schemas generated using Python's `secrets.token_urlsafe`:
+Wishlists use two cryptographic token schemas generated via Python's `secrets.token_urlsafe`:
 
 ```
 1. Public Sharing Token (Gifter Access)
@@ -505,38 +857,44 @@ Structured logging is managed under the `wishenka.wishlists` logger namespace.
 ### Security Invariant
 
 > [!IMPORTANT]
-> **Zero Token Leakage**: Raw token values (`public_token`, `invite_token`) MUST NEVER appear in log messages or log `extra` fields. Auditing captures only resource identifiers (`wishlist_id`, `actor_id`, `user_id`).
+> **Zero Token Leakage**: Raw token values (`public_token`, `invite_token`) MUST NEVER appear
+> in log messages or log `extra` fields. Auditing captures only resource identifiers
+> (`wishlist_id`, `actor_id`, `user_id`).
 
 ### Audit Event Reference
 
-| Event (`event`) | Level | Trigger | Key Extra Attributes |
+| Event (`event`) | Level | Trigger | Key Attributes |
 | --- | :---: | --- | --- |
-| `wishlist_created` | `INFO` | New wishlist created | `wishlist_id`, `owner_id`, `format`, `time_type`, `event_date` |
-| `wishlist_status_changed` | `INFO` | Archived, unarchived, or deleted | `wishlist_id`, `actor_id`, `from_status`, `to_status` |
-| `member_joined` | `INFO` | Collaborator accepted invite | `wishlist_id`, `user_id`, `role` |
-| `member_role_assigned` | `INFO` | Member added or role changed | `wishlist_id`, `actor_id`, `user_id`, `role` |
-| `member_removed` | `INFO` | Member expelled or departed | `wishlist_id`, `actor_id`, `user_id` |
-| `ownership_transferred` | `INFO` | Owner ceded control | `wishlist_id`, `actor_id`, `previous_owner_id`, `new_owner_id` |
-| `public_token_regenerated`| `INFO` | Public sharing token rotated | `wishlist_id`, `actor_id` |
-| `invite_token_regenerated`| `INFO` | Collaborator invite token rotated | `wishlist_id`, `actor_id`, `expires_at` |
-| `reservation_created` | `INFO` | Gifter booked item quantity | `wishlist_id`, `item_id`, `reservation_id`, `gifter_id`, `quantity` |
-| `access_denied` | `WARNING` | Unauthorized actor action blocked | `wishlist_id`, `actor_id`, `action` |
-| `surprise_invariant_violation_attempt` | `WARNING` | Recipient tried self-reservation | `wishlist_id`, `item_id`, `user_id` |
-| `invalid_invite_token` | `WARNING` | Bad or expired invite token | None (raw token withheld) |
-| `favorites_listed` | `INFO` | User fetched favorited wishlists | `user_id`, `count` |
-| `favorite_added` | `INFO` | Wishlist added to favorites | `wishlist_id`, `user_id` |
-| `favorite_removed` | `INFO` | Wishlist removed from favorites | `wishlist_id`, `user_id` |
-| `favorite_own_wishlist_denied` | `WARNING` | Self-favorite denied | `wishlist_id`, `user_id` |
-| `favorite_deleted_wishlist_denied` | `WARNING` | Deleted list access | `wishlist_id`, `user_id` |
-| `view_history_listed` | `INFO` | User fetched viewing history | `user_id`, `count` |
-| `view_history_recorded` | `INFO` | Wishlist view recorded/updated | `wishlist_id`, `user_id` |
-| `view_history_cleared` | `INFO` | User cleared viewing history | `user_id` |
+| `wishlist_created` | `INFO` | New wishlist created | `wishlist_id`, `owner_id` |
+| `wishlist_status_changed` | `INFO` | Status changed | `wishlist_id`, `to_status` |
+| `member_joined` | `INFO` | Collaborator joined | `wishlist_id`, `user_id` |
+| `member_role_assigned` | `INFO` | Role updated | `wishlist_id`, `role` |
+| `member_removed` | `INFO` | Member removed | `wishlist_id`, `user_id` |
+| `ownership_transferred` | `INFO` | Owner ceded control | `wishlist_id`, `new_owner_id` |
+| `public_token_regenerated`| `INFO` | Public token rotated | `wishlist_id`, `actor_id` |
+| `invite_token_regenerated`| `INFO` | Invite token rotated | `wishlist_id`, `actor_id` |
+| `reservation_created` | `INFO` | Item booked | `wishlist_id`, `quantity` |
+| `access_denied` | `WARNING` | Action blocked | `wishlist_id`, `action` |
+| `surprise_invariant_violation_attempt` | `WARNING` | Self-booking blocked | `item_id` |
+| `invalid_invite_token` | `WARNING` | Bad invite token | None (token withheld) |
+| `favorites_listed` | `INFO` | Favorites fetched | `user_id`, `count` |
+| `favorite_added` | `INFO` | Favorite added | `wishlist_id`, `user_id` |
+| `favorite_removed` | `INFO` | Favorite removed | `wishlist_id`, `user_id` |
+| `favorite_own_wishlist_denied` | `WARNING` | Self-favorite blocked | `wishlist_id`, `user_id` |
+| `favorite_deleted_wishlist_denied` | `WARNING` | Deleted list blocked | `wishlist_id`, `user_id` |
+| `view_history_listed` | `INFO` | History fetched | `user_id`, `count` |
+| `view_history_recorded` | `INFO` | View recorded | `wishlist_id`, `user_id` |
+| `view_history_cleared` | `INFO` | History cleared | `user_id` |
+| `wishlist_store_read` | `INFO` | State read | `wishlists_count` |
+| `wishlist_store_write` | `INFO` | Changes committed | `wishlists_count` |
+| `wishlist_repo_mutation` | `INFO` | Repo mutation | `entity`, `operation` |
 
 ---
 
 ## Troubleshooting & Domain Exceptions
 
-All domain exceptions inherit from `WishlistError` in [`wishenka.wishlists.exceptions`](../../wishenka/wishlists/exceptions.py).
+All domain exceptions inherit from `WishlistError` in
+[`wishenka.wishlists.exceptions`](../../wishenka/wishlists/exceptions.py).
 
 ```
 WishlistError
@@ -553,12 +911,39 @@ WishlistError
 
 ### Common Issues and Resolutions
 
-| Exception | Root Cause | Resolution |
-| --- | --- | --- |
-| `PermissionDeniedError` | Actor lacks required role (e.g. `Member` trying to archive wishlist or `Admin` trying to delete). | Verify user role via `WishlistAccessPolicy.resolve_context`. Only `Owner` can delete or reassign admin roles. |
-| `SelfReservationError` | Recipient attempted to reserve an item designated for themselves. | Recipient cannot reserve their own gifts. Have another collaborator or external gifter reserve the item. |
-| `WishlistArchivedError` | Attempted to add/edit items or create reservations on an archived list. | Unarchive the wishlist via `unarchive_wishlist` prior to mutation. |
-| `WishlistDeletedError` | Requested wishlist has been soft-deleted. | Deleted wishlists cannot be viewed or modified. Create a new wishlist. |
-| `InvalidInviteTokenError` | The invite link has expired, was rotated via `regenerate_invite_token`, or token is corrupted. | Ask the wishlist `Owner` or `Admin` to share an updated invite link. |
-| `InsufficientQuantityError` | Requested reservation units exceed remaining `available_quantity`. | Reduce reservation quantity or select another wish item. |
-| `ValueError` | Owner attempted self-favoriting. | Rejected by domain policy. |
+#### `PermissionDeniedError`
+- **Root Cause**: Actor lacks required role (e.g. `Member` trying to archive wishlist or `Admin`
+  trying to delete).
+- **Resolution**: Verify user role via `WishlistAccessPolicy.resolve_context`. Only `Owner` can
+  delete wishlists or promote/demote members to `Admin`.
+
+#### `SelfReservationError`
+- **Root Cause**: Recipient attempted to reserve an item designated for themselves.
+- **Resolution**: Recipients cannot reserve their own gifts. Another collaborator or external gifter
+  must reserve the item.
+
+#### `WishlistArchivedError`
+- **Root Cause**: Attempted to add/edit items or create reservations on an archived list.
+- **Resolution**: Unarchive the wishlist via `unarchive_wishlist` prior to mutation.
+
+#### `WishlistDeletedError`
+- **Root Cause**: Requested wishlist has been soft-deleted.
+- **Resolution**: Deleted wishlists cannot be viewed or modified. Create a new wishlist.
+
+#### `InvalidInviteTokenError`
+- **Root Cause**: Invite link has expired, was rotated via `regenerate_invite_token`, or token is
+  corrupted.
+- **Resolution**: Ask the wishlist `Owner` or `Admin` to share an updated invite link.
+
+#### `InsufficientQuantityError`
+- **Root Cause**: Requested reservation units exceed remaining `available_quantity`.
+- **Resolution**: Reduce reservation quantity or select another wish item.
+
+#### `ValueError` ("Cannot favorite own wishlist")
+- **Root Cause**: Owner attempted self-favoriting.
+- **Resolution**: Rejected by domain policy; owners already have access to their own lists.
+
+#### `RuntimeError` ("Wishlist storage operation failed")
+- **Root Cause**: SQLite database error, locked database, or constraint violation.
+- **Resolution**: Verify database file permissions and health. Error traces suppress sensitive SQL
+  parameters to protect token secrecy.

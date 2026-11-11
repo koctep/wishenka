@@ -434,15 +434,25 @@ async def test_storage_enforces_unique_membership(tmp_path: Path) -> None:
     store = WishlistStore(f"sqlite+aiosqlite:///{tmp_path / 'members.db'}")
     await store.initialize()
     async with store.engine.begin() as conn:
-        await conn.execute(text("INSERT INTO wl_lists VALUES (1, '{}')"))
         await conn.execute(
-            text("INSERT INTO wl_members VALUES (1, 1, :body)"),
-            {"body": '{"user_id": 7}'},
+            text(
+                "INSERT INTO wl_lists "
+                "(id, owner_id, title, public_token, invite_token, created_at, updated_at) "
+                "VALUES (1, 1, 'L', 'pub', 'inv', '2026-01-01', '2026-01-01')"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO wl_members (id, wishlist_id, user_id, joined_at) "
+                "VALUES (1, 1, 7, '2026-01-01')"
+            )
         )
         with pytest.raises(IntegrityError):
             await conn.execute(
-                text("INSERT INTO wl_members VALUES (2, 1, :body)"),
-                {"body": '{"user_id": 7}'},
+                text(
+                    "INSERT INTO wl_members (id, wishlist_id, user_id, joined_at) "
+                    "VALUES (2, 1, 7, '2026-01-01')"
+                )
             )
     await store.engine.dispose()
 

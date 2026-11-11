@@ -1,15 +1,19 @@
 """Async transactional SQLite storage for user entities."""
 
+from __future__ import annotations
+
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from wishenka.auth.models import TelegramUser
 from wishenka.users.models import UserRecord
+
+if TYPE_CHECKING:
+    from wishenka.auth.models import TelegramUser
 
 logger = logging.getLogger("wishenka.users")
 
