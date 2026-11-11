@@ -312,13 +312,43 @@ class WishlistService:
 
         active_items = sorted(
             [item for item in wl.items if not item.is_archived],
-            key=lambda it: (it.display_order, it.id),
+            key=lambda it: (it.display_order, it.created_at, it.id),
         )
         item_views: list[WishItemRecipientViewDTO | WishItemGifterViewDTO] = [
             project_wish_item(item, current_user) for item in active_items
         ]
 
         ctx = WishlistAccessPolicy.resolve_context(current_user, wl)
+        archived_views: list[WishItemRecipientViewDTO] = []
+        if ctx.is_member:
+            archived_raw = sorted(
+                [item for item in wl.items if item.is_archived],
+                key=lambda it: (it.display_order, it.created_at, it.id),
+            )
+            archived_views = [
+                WishItemRecipientViewDTO(
+                    id=item.id,
+                    title=item.title,
+                    description=item.description,
+                    link=item.link,
+                    image_url=item.image_url,
+                    price=item.price,
+                    currency=item.currency,
+                    store_name=item.store_name,
+                    store_icon_url=item.store_icon_url,
+                    quantity=item.quantity,
+                    received_quantity=item.received_quantity,
+                    priority=item.priority,
+                    category=item.category,
+                    display_order=item.display_order,
+                    is_archived=item.is_archived,
+                    recipient_user_id=item.recipient_user_id,
+                    recipient_name=item.recipient_name,
+                    is_recipient=True,
+                )
+                for item in archived_raw
+            ]
+
         can_edit = WishlistAccessPolicy.can_edit_settings(ctx, wl)
         can_archive = WishlistAccessPolicy.can_archive(ctx, wl)
         can_delete = WishlistAccessPolicy.can_delete(ctx, wl)
@@ -335,6 +365,8 @@ class WishlistService:
                 "wishlist_id": wl.id,
                 "user_id": current_user.telegram_id if current_user else None,
                 "role": ctx.role,
+                "items_count": len(item_views),
+                "archived_items_count": len(archived_views),
             },
         )
 
@@ -346,6 +378,7 @@ class WishlistService:
             event_title=wl.event_title,
             event_date=wl.event_date,
             is_collaborative=wl.is_collaborative,
+            warn_on_delete_reserved=wl.warn_on_delete_reserved,
             status=wl.status,
             user_role=ctx.role,
             can_edit=can_edit,
@@ -354,6 +387,7 @@ class WishlistService:
             public_token=wl.public_token,
             invite_token=invite_token,
             items=item_views,
+            archived_items=archived_views,
         )
 
     async def add_member(
@@ -1132,6 +1166,7 @@ class WishlistService:
         wishlist_id: int,
         item_id: int,
         actor: AuthenticatedUser,
+        warn_on_delete_reserved: bool | None = None,
     ) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
         """Safely archive a wish item, preserving reservations and blocking new ones."""
         wl = await self.get_wishlist_by_id(wishlist_id)
@@ -1163,6 +1198,10 @@ class WishlistService:
         item = self._items[item_id]
         if item.wishlist_id != wl.id:
             raise ItemNotFoundError(f"Item {item_id} not found in wishlist {wishlist_id}")
+
+        if warn_on_delete_reserved is not None:
+            wl.warn_on_delete_reserved = warn_on_delete_reserved
+            wl.updated_at = datetime.now(UTC)
 
         item.is_archived = True
         item.updated_at = datetime.now(UTC)

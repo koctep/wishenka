@@ -163,6 +163,7 @@ class Wishlist:
     event_title: str | None = None
     event_date: datetime | None = None
     is_collaborative: bool = False
+    warn_on_delete_reserved: bool = True
     status: WishlistStatus = WishlistStatus.ACTIVE
     public_token: str = ""
     invite_token: str = ""

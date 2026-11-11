@@ -1,0 +1,38 @@
+<div class="modal-backdrop fixed inset-0 bg-black bg-opacity-40 flex items-end justify-center z-50"
+     id="item-archive-modal">
+    <div class="modal-sheet bg-white w-full max-w-lg rounded-t-xl p-4 shadow-lg">
+        <h2 class="text-lg font-bold">Архивировать желание?</h2>
+        <p class="text-sm text-gray-600 mt-2">
+            «{{ item.title }}» будет перемещено в архив. Его можно восстановить в любой момент,
+            а существующие брони сохранятся.
+        </p>
+        {% if show_gifter_warning %}
+        <div id="archive-gifter-warning"
+             class="alert p-3 mt-3 rounded bg-yellow-50 text-yellow-800 text-sm"
+             role="alert">
+            Это желание уже зарезервировано дарителем. После архивации оно останется в списке
+            брони дарителя, но новые брони будут недоступны.
+        </div>
+        {% endif %}
+        <form hx-post="/web/wishlists/{{ wishlist_id }}/items/{{ item.id }}/archive"
+              hx-target="#items-list"
+              hx-swap="none">
+            <input type="hidden" name="warn_on_delete_reserved" value="false" />
+            <label class="text-sm">
+                <input type="checkbox"
+                       name="warn_on_delete_reserved"
+                       value="true"
+                       {% if warn_on_delete_reserved %}checked{% endif %} />
+                Предупреждать при архивации зарезервированных желаний
+            </label>
+            <div class="flex gap-2 mt-3">
+                <button type="submit" class="btn-confirm-archive">Архивировать</button>
+                <button type="button"
+                        class="btn-modal-close"
+                        onclick="document.getElementById('item-modal-container').innerHTML = ''">
+                    Отмена
+                </button>
+            </div>
+        </form>
+    </div>
+</div>

@@ -1,61 +1,126 @@
-<div class="card item-card mb-4 p-4 border rounded shadow-sm bg-white"
-     id="item-card-{{ item.id }}">
-    <div class="item-header flex justify-between items-start gap-2">
-        <div class="flex items-start gap-3">
+{% set card_wishlist_id = wishlist_id or (wishlist.id if wishlist else none) %}
+<div class="card item-card mb-4 border rounded shadow-sm bg-white"
+     id="item-card-{{ item.id }}"
+     data-item-id="{{ item.id }}"
+     {% if can_edit_wishlist %}draggable="true"{% endif %}>
+    <div class="item-card-summary flex justify-between items-center gap-2 p-3"
+         role="button"
+         tabindex="0"
+         aria-expanded="false"
+         aria-controls="item-details-{{ item.id }}"
+         onclick="toggleWishCard(event, this)"
+         onkeydown="if (event.key === 'Enter' || event.key === ' ') { toggleWishCard(event, this); }">
+        <div class="flex items-center gap-3">
             {% if item.image_url %}
             <img src="{{ item.image_url }}"
                  alt="{{ item.title }}"
                  class="item-thumbnail w-12 h-12 object-cover rounded" />
+            {% else %}
+            <div class="item-thumbnail-placeholder w-12 h-12 rounded" aria-hidden="true">🎁</div>
             {% endif %}
-            <h3 class="item-title text-lg font-semibold">{{ item.title }}</h3>
+            <div class="item-summary-text">
+                <h3 class="item-title text-lg font-semibold">{{ item.title }}</h3>
+                <div class="item-badges flex flex-wrap gap-1 text-xs">
+                    {% if item.category %}
+                    <span class="badge badge-category">{{ item.category }}</span>
+                    {% endif %}
+                    {% if item.priority|string == 'high' %}
+                    <span class="badge badge-priority-high">Высокий приоритет</span>
+                    {% elif item.priority|string == 'low' %}
+                    <span class="badge badge-priority-low">Низкий приоритет</span>
+                    {% endif %}
+                    {% if item.quantity > 1 %}
+                    <span class="badge badge-quantity">×{{ item.quantity }}</span>
+                    {% endif %}
+                    {% if item.recipient_name %}
+                    <span class="badge badge-recipient">Для: {{ item.recipient_name }}</span>
+                    {% endif %}
+                    {% if item.link %}
+                    <span class="badge badge-store">{{ item.store_name or "Магазин" }}</span>
+                    {% endif %}
+                </div>
+            </div>
         </div>
-        <div class="flex items-center gap-2">
-            {% if item.price is not none %}
-            <span class="item-price font-bold text-primary">
-                {{ item.price }} {{ item.currency or "RUB" }}
+        {% if item.price is not none %}
+        <span class="item-price font-bold text-primary">
+            {{ item.price }} {{ item.currency or "RUB" }}
+        </span>
+        {% endif %}
+    </div>
+
+    <div class="item-card-details p-3 border-t" id="item-details-{{ item.id }}" hidden>
+        {% if item.description %}
+        <p class="item-description text-gray-600 text-sm">{{ item.description }}</p>
+        {% endif %}
+
+        <div class="item-meta mt-2 flex flex-wrap gap-2 text-xs text-gray-500">
+            <span class="item-quantity">Количество: {{ item.quantity }}</span>
+            {% if item.link %}
+            <a href="{{ item.link }}"
+               target="_blank"
+               rel="noopener noreferrer"
+               class="item-link item-store-cta text-blue-600 underline">
+                Открыть в магазине{% if item.store_name %} ({{ item.store_name }}){% endif %}
+            </a>
+            {% endif %}
+        </div>
+
+        {% if not item.is_recipient %}
+        <div class="item-reservation mt-3 pt-2 border-t text-sm">
+            {% if item.is_fully_reserved %}
+            <span class="badge badge-reserved text-red-600 font-medium">Забронировано</span>
+            {% elif item.is_reserved_by_me %}
+            <span class="badge badge-my-reserved text-green-600 font-medium">
+                Забронировано вами ({{ item.my_reserved_quantity }})
+            </span>
+            {% else %}
+            <span class="badge badge-available text-gray-600">
+                Доступно: {{ item.available_quantity }} из {{ item.quantity }}
             </span>
             {% endif %}
-            {% if can_edit_wishlist %}
+        </div>
+        {% endif %}
+
+        {% if can_edit_wishlist %}
+        <div class="item-actions mt-3 flex flex-wrap items-center gap-2" data-no-toggle>
             <button type="button"
                     class="btn-edit-item text-xs text-blue-600 underline"
-                    hx-get="/web/wishlists/{{ wishlist_id or wishlist.id }}/items/{{ item.id }}/edit"
+                    data-no-toggle
+                    hx-get="/web/wishlists/{{ card_wishlist_id }}/items/{{ item.id }}/edit"
                     hx-target="#item-modal-container"
                     hx-swap="innerHTML">
                 Редактировать
             </button>
-            {% endif %}
+            <button type="button"
+                    class="btn-move-up"
+                    data-no-toggle
+                    aria-label="Переместить выше"
+                    {% if is_first %}disabled{% endif %}
+                    hx-post="/web/wishlists/{{ card_wishlist_id }}/items/{{ item.id }}/move?direction=up"
+                    hx-target="#items-list"
+                    hx-swap="innerHTML">
+                ↑
+            </button>
+            <button type="button"
+                    class="btn-move-down"
+                    data-no-toggle
+                    aria-label="Переместить ниже"
+                    {% if is_last %}disabled{% endif %}
+                    hx-post="/web/wishlists/{{ card_wishlist_id }}/items/{{ item.id }}/move?direction=down"
+                    hx-target="#items-list"
+                    hx-swap="innerHTML">
+                ↓
+            </button>
+            <span class="item-drag-handle" data-no-toggle aria-label="Перетащить" title="Перетащить">⠿</span>
+            <button type="button"
+                    class="btn-archive-confirm btn-archive-item text-xs text-red-600"
+                    data-no-toggle
+                    hx-get="/web/wishlists/{{ card_wishlist_id }}/items/{{ item.id }}/archive-confirm"
+                    hx-target="#item-modal-container"
+                    hx-swap="innerHTML">
+                Архивировать
+            </button>
         </div>
-    </div>
-
-    {% if item.description %}
-    <p class="item-description text-gray-600 mt-2 text-sm">{{ item.description }}</p>
-    {% endif %}
-
-    <div class="item-meta mt-3 flex flex-wrap gap-2 text-xs text-gray-500">
-        <span class="item-quantity">Количество: {{ item.quantity }}</span>
-        {% if item.link %}
-        <a href="{{ item.link }}"
-           target="_blank"
-           rel="noopener noreferrer"
-           class="item-link text-blue-600 underline">
-            Ссылка
-        </a>
         {% endif %}
     </div>
-
-    {% if not item.is_recipient %}
-    <div class="item-reservation mt-3 pt-2 border-t text-sm">
-        {% if item.is_fully_reserved %}
-        <span class="badge badge-reserved text-red-600 font-medium">Забронировано</span>
-        {% elif item.is_reserved_by_me %}
-        <span class="badge badge-my-reserved text-green-600 font-medium">
-            Забронировано вами ({{ item.my_reserved_quantity }})
-        </span>
-        {% else %}
-        <span class="badge badge-available text-gray-600">
-            Доступно: {{ item.available_quantity }} из {{ item.quantity }}
-        </span>
-        {% endif %}
-    </div>
-    {% endif %}
 </div>

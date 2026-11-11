@@ -25,16 +25,14 @@
     </header>
 
     <section class="wishlist-items" id="items-list">
-        {% if wishlist.items %}
-            {% for item in wishlist.items %}
-                {% include "partials/item_card.html" %}
-            {% endfor %}
-        {% else %}
-            <p id="empty-items-placeholder" class="text-gray-500 text-center py-8">
-                В этом списке желаний пока нет подарков.
-            </p>
-        {% endif %}
+        {% with items=wishlist.items %}{% include "partials/items_list.html" %}{% endwith %}
     </section>
+
+    {% if can_edit_wishlist %}
+        {% with archived_items=wishlist.archived_items, oob=false %}
+            {% include "partials/archived_items_section.html" %}
+        {% endwith %}
+    {% endif %}
 
     <div id="item-modal-container"></div>
 

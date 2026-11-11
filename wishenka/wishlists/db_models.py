@@ -21,6 +21,7 @@ class WishlistRow(Base):
     event_title: Mapped[str | None] = mapped_column(String, nullable=True)
     event_date: Mapped[str | None] = mapped_column(String, nullable=True)
     is_collaborative: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    warn_on_delete_reserved: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     status: Mapped[str] = mapped_column(String, nullable=False, default="active", index=True)
     public_token: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     invite_token: Mapped[str] = mapped_column(String, nullable=False, unique=True)

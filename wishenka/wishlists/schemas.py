@@ -120,6 +120,7 @@ class WishlistDetailViewDTO(BaseModel):
     event_title: str | None = None
     event_date: datetime | None = None
     is_collaborative: bool = False
+    warn_on_delete_reserved: bool = True
     status: WishlistStatus = WishlistStatus.ACTIVE
     user_role: WishlistRole | None = None
     can_edit: bool = False
@@ -128,6 +129,7 @@ class WishlistDetailViewDTO(BaseModel):
     public_token: str
     invite_token: str | None = None
     items: list[WishItemRecipientViewDTO | WishItemGifterViewDTO] = Field(default_factory=list)
+    archived_items: list[WishItemRecipientViewDTO] = Field(default_factory=list)
 
 
 WishlistViewDTO = WishlistDetailViewDTO

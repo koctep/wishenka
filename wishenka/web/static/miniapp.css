@@ -52,3 +52,22 @@ label { display: block; margin: .5rem 0; }
   min-height: 44px;
   touch-action: manipulation;
 }
+.item-card-summary { cursor: pointer; }
+.item-card-details[hidden] { display: none; }
+.item-thumbnail-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 3rem;
+  height: 3rem;
+  background: #f3e8ec;
+}
+.item-drag-handle { cursor: grab; padding: .5rem; touch-action: none; }
+.btn-move-up, .btn-move-down { min-width: 44px; }
+.btn-move-up:disabled, .btn-move-down:disabled { opacity: .4; cursor: not-allowed; }
+.badge-category { background: #ede9fe; color: #6d28d9; }
+.badge-priority-high { background: #fee2e2; color: #b91c1c; }
+.badge-priority-low { background: #e5e7eb; color: #4b5563; }
+.badge-quantity { background: #e0f2fe; color: #0369a1; }
+.badge-recipient { background: #fce7f3; color: #be185d; }
+.badge-store { background: #dcfce7; color: #15803d; }

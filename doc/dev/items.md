@@ -493,6 +493,20 @@ All HTMX UI endpoints are defined in [`wishenka/web/routes/items_ui.py`](file://
 | `POST` | `/web/wishlists/{wishlist_id}/items/{item_id}/archive` | [`archive_item_ui`](file:///home/src/wishenka/web/routes/items_ui.py#L717) | **Yes** | None | OOB delete `#item-card-{item_id}` + OOB close `#item-modal-container` | `200`, `404`, `409` | Safely archives item while preserving gifter reservations and removes card from DOM. |
 | `POST` | `/web/wishlists/{wishlist_id}/items/{item_id}/restore` | [`restore_item_ui`](file:///home/src/wishenka/web/routes/items_ui.py#L776) | **Yes** | None | [`partials/item_card.html`](file:///home/src/wishenka/web/templates/partials/item_card.html) | `200`, `404`, `409` | Restores archived item to the tail of the active list and renders updated card partial. |
 
+### WISHENKA-15 additions: ordering, archive confirmation
+
+| Method | Endpoint Path | Handler | Request | Response | Description |
+| :---: | :--- | :--- | :--- | :--- | :--- |
+| `POST` | `/web/wishlists/{wishlist_id}/items/reorder` | `reorder_items_ui` | Form: `item_ids` (repeated) | `partials/items_list.html` | Persists full manual order; `400` if not an exact permutation of active items. |
+| `POST` | `/web/wishlists/{wishlist_id}/items/{item_id}/move?direction=up\|down` | `move_item_ui` | Query: `direction` | `partials/items_list.html` | Swaps item with its neighbour; no-op at the list edges. |
+| `GET` | `/web/wishlists/{wishlist_id}/items/{item_id}/archive-confirm` | `archive_confirm_ui` | None | `partials/item_archive_modal.html` | Confirmation modal; warns about active reservations when `warn_on_delete_reserved` is set. |
+
+Notes: `Wishlist.warn_on_delete_reserved` (bool, default `True`, `wl_lists.warn_on_delete_reserved`)
+is persisted by the store and added to existing databases by an `ALTER TABLE` migration. Archive and
+restore responses include an OOB swap of `#archived-items-section`. Events: `ui_items_reordered`,
+`ui_item_moved`, `ui_items_reorder_rejected`, `ui_item_archive_confirm_opened`, `ui_item_archived`,
+`ui_item_restored`. See [miniapp.md](miniapp.md) section 9.8 for the UI behaviour.
+
 ---
 
 ## API / Usage

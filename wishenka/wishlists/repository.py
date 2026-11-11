@@ -40,6 +40,11 @@ def _format_dt(dt: datetime | None) -> str | None:
 def _row_to_wishlist(row: Row[Any]) -> Wishlist:
     created = _parse_dt(row.created_at) or datetime.now(UTC)
     updated = _parse_dt(row.updated_at) or datetime.now(UTC)
+    warn_pref = (
+        bool(row.warn_on_delete_reserved)
+        if hasattr(row, "warn_on_delete_reserved") and row.warn_on_delete_reserved is not None
+        else True
+    )
     return Wishlist(
         id=int(row.id),
         owner_id=int(row.owner_id),
@@ -49,6 +54,7 @@ def _row_to_wishlist(row: Row[Any]) -> Wishlist:
         event_title=str(row.event_title) if row.event_title is not None else None,
         event_date=_parse_dt(row.event_date),
         is_collaborative=bool(row.is_collaborative),
+        warn_on_delete_reserved=warn_pref,
         status=WishlistStatus(row.status),
         public_token=str(row.public_token),
         invite_token=str(row.invite_token),
@@ -125,9 +131,9 @@ class WishlistRepository:
         """Fetch a single wishlist aggregate with members, items, and reservations."""
         stmt = text(
             "SELECT id, owner_id, owner_name, title, description, event_title, "
-            "event_date, is_collaborative, status, public_token, invite_token, "
-            "invite_token_expires_at, created_at, updated_at "
-            "FROM wl_lists WHERE id = :id"
+            "event_date, is_collaborative, warn_on_delete_reserved, status, "
+            "public_token, invite_token, invite_token_expires_at, "
+            "created_at, updated_at FROM wl_lists WHERE id = :id"
         )
         row = (await self.conn.execute(stmt, {"id": wishlist_id})).one_or_none()
         if row is None:
@@ -242,6 +248,7 @@ class WishlistRepository:
             "event_title": wishlist.event_title,
             "event_date": _format_dt(wishlist.event_date),
             "is_collaborative": 1 if wishlist.is_collaborative else 0,
+            "warn_on_delete_reserved": 1 if wishlist.warn_on_delete_reserved else 0,
             "status": wishlist.status.value,
             "public_token": wishlist.public_token,
             "invite_token": wishlist.invite_token,
@@ -260,6 +267,7 @@ class WishlistRepository:
                 "owner_id = :owner_id, owner_name = :owner_name, title = :title, "
                 "description = :description, event_title = :event_title, "
                 "event_date = :event_date, is_collaborative = :is_collaborative, "
+                "warn_on_delete_reserved = :warn_on_delete_reserved, "
                 "status = :status, public_token = :public_token, "
                 "invite_token = :invite_token, "
                 "invite_token_expires_at = :invite_token_expires_at, "
@@ -268,11 +276,13 @@ class WishlistRepository:
         else:
             stmt = text(
                 "INSERT INTO wl_lists (id, owner_id, owner_name, title, description, "
-                "event_title, event_date, is_collaborative, status, public_token, "
-                "invite_token, invite_token_expires_at, created_at, updated_at) "
+                "event_title, event_date, is_collaborative, warn_on_delete_reserved, "
+                "status, public_token, invite_token, invite_token_expires_at, "
+                "created_at, updated_at) "
                 "VALUES (:id, :owner_id, :owner_name, :title, :description, "
-                ":event_title, :event_date, :is_collaborative, :status, :public_token, "
-                ":invite_token, :invite_token_expires_at, :created_at, :updated_at)"
+                ":event_title, :event_date, :is_collaborative, :warn_on_delete_reserved, "
+                ":status, :public_token, :invite_token, :invite_token_expires_at, "
+                ":created_at, :updated_at)"
             )
         await self.conn.execute(stmt, params)
         logger.info(

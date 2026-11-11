@@ -414,6 +414,25 @@ wish items without full-page reloads.
   Calls `WishlistService.restore_wish_item` (appending the item to the tail of active items while
   retaining reservations) and returns `200 OK` with the rendered `partials/item_card.html`.
 
+#### 9.8. Vertical Items List: Compact/Expanded Cards, Manual Order, Archived Section (WISHENKA-15)
+- **Layout**: `wishlist_detail.html` renders `#items-list` from `partials/items_list.html`, which
+  includes `partials/item_card.html` per item (`is_first`/`is_last` drive disabled move buttons).
+  Archived items render below via `partials/archived_items_section.html` (owner/editor only).
+- **Compact/expanded**: each card is a `<details>`; the summary row is the compact state and
+  `toggleWishCard(event, summary)` (in `base.html`) toggles it. Clicks on `a, button, input, select,
+  textarea` or any `[data-no-toggle]` element do not toggle the card.
+- **Manual order** (editors only):
+  - Buttons: `POST /web/wishlists/{id}/items/{item_id}/move?direction=up|down` (`move_item_ui`).
+  - Drag-and-drop: inline JS in `base.html` handles native HTML5 `dragstart/dragover/drop` on
+    `.item-card[draggable="true"]` inside `#items-list`, then posts the full order to
+    `POST /web/wishlists/{id}/items/reorder` with repeated form field `item_ids` (`reorder_items_ui`).
+  - Both return the re-rendered `partials/items_list.html` (`hx-target="#items-list"`). The submitted
+    ids must be an exact permutation of the active items, otherwise `400`.
+- **Archive flow**: `GET .../items/{item_id}/archive-confirm` (`archive_confirm_ui`) opens
+  `partials/item_archive_modal.html`; it warns about active reservations when the wishlist flag
+  `warn_on_delete_reserved` is true (default `1`; column added to `wl_lists` by the store migration).
+  `POST .../archive` and `.../restore` also refresh `#archived-items-section` via an OOB swap.
+
 ---
 
 ## HTTP Endpoints Reference
@@ -446,6 +465,9 @@ wish items without full-page reloads.
 | `/web/wishlists/{wishlist_id}/items/{item_id}/edit` | `POST` | Yes | Yes | Saves item edits or returns 409 modal. |
 | `/web/wishlists/{wishlist_id}/items/{item_id}/archive` | `POST` | Yes | Yes | Archives item & removes card via OOB swap. |
 | `/web/wishlists/{wishlist_id}/items/{item_id}/restore` | `POST` | Yes | Yes | Restores archived item & renders card. |
+| `/web/wishlists/{wishlist_id}/items/reorder` | `POST` | Yes | Yes | Persists full manual order (`item_ids`); returns items list. |
+| `/web/wishlists/{wishlist_id}/items/{item_id}/move?direction=up\|down` | `POST` | Yes | Yes | Moves item one step; returns items list. |
+| `/web/wishlists/{wishlist_id}/items/{item_id}/archive-confirm` | `GET` | Yes | No | Renders archive confirmation modal. |
 
 ---
 
@@ -537,3 +559,8 @@ The following settings configure the Mini App and web security layer:
 - **Cause**: The caller is viewing the wishlist as a guest/gifter (not an `OWNER`, `ADMIN`, or
   `MEMBER`), or the wishlist is in `ARCHIVED` status.
 - **Solution**: Authenticate as an active wishlist member and ensure the wishlist is `active`.
+
+### 10. Reorder Returns `400` or Drag-and-Drop Does Nothing
+- **Cause**: `item_ids` is not an exact permutation of active items (stale page after another
+  editor archived/added an item), or the card is not `draggable="true"` (non-editor view).
+- **Solution**: Reload the wishlist page and retry; logged as `ui_items_reorder_rejected`.

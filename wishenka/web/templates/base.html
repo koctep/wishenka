@@ -7,6 +7,49 @@
     <link rel="stylesheet" href="/static/miniapp.css">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+    <script>
+    function toggleWishCard(event, summary) {
+        if (event.target.closest('a, button, input, select, textarea, [data-no-toggle]')) { return; }
+        if (event.type === 'keydown') { event.preventDefault(); }
+        var expanded = summary.getAttribute('aria-expanded') === 'true';
+        summary.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+        var details = summary.parentElement.querySelector('.item-card-details');
+        if (details) { details.hidden = expanded; }
+    }
+    (function () {
+        var dragged = null;
+        document.addEventListener('dragstart', function (e) {
+            var card = e.target.closest ? e.target.closest('.item-card[draggable="true"]') : null;
+            if (!card) { return; }
+            dragged = card;
+            e.dataTransfer.effectAllowed = 'move';
+        });
+        document.addEventListener('dragover', function (e) {
+            if (dragged && e.target.closest && e.target.closest('#items-list')) { e.preventDefault(); }
+        });
+        document.addEventListener('drop', function (e) {
+            if (!dragged) { return; }
+            var list = document.getElementById('items-list');
+            var target = e.target.closest ? e.target.closest('.item-card') : null;
+            if (!list || !target || target === dragged) { dragged = null; return; }
+            e.preventDefault();
+            var rect = target.getBoundingClientRect();
+            var after = e.clientY > rect.top + rect.height / 2;
+            list.insertBefore(dragged, after ? target.nextSibling : target);
+            dragged = null;
+            var ids = Array.prototype.map.call(list.querySelectorAll('.item-card'), function (c) {
+                return c.getAttribute('data-item-id');
+            });
+            var match = window.location.pathname.match(/\/web\/wishlists\/(\d+)/);
+            if (match && window.htmx) {
+                htmx.ajax('POST', '/web/wishlists/' + match[1] + '/items/reorder', {
+                    target: '#items-list', swap: 'innerHTML', values: { item_ids: ids }
+                });
+            }
+        });
+        document.addEventListener('dragend', function () { dragged = null; });
+    })();
+    </script>
 </head>
 <body class="bg-gray-50 text-gray-900">
     <main class="container mx-auto px-4 py-6 max-w-lg">

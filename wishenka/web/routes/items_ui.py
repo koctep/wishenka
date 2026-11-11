@@ -5,9 +5,9 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, NoReturn, cast
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse
 
 from wishenka.auth.dependencies import get_current_user, get_optional_current_user
@@ -714,43 +714,250 @@ async def submit_edit_item(
     )
 
 
+def _archived_section_html(
+    request: Request,
+    wishlist_id: int,
+    archived_items: list[WishItemRecipientViewDTO],
+) -> str:
+    """Render the archived items section as an out-of-band outerHTML swap."""
+    return templates.get_template("partials/archived_items_section.html").render(
+        {
+            "request": request,
+            "wishlist_id": wishlist_id,
+            "archived_items": archived_items,
+            "can_edit_wishlist": True,
+            "oob": True,
+        }
+    )
+
+
+def _items_list_html(
+    request: Request,
+    wishlist_id: int,
+    items: list[WishItemRecipientViewDTO | WishItemGifterViewDTO],
+) -> str:
+    """Render the active items list partial for the editor view."""
+    return templates.get_template("partials/items_list.html").render(
+        {
+            "request": request,
+            "wishlist_id": wishlist_id,
+            "items": items,
+            "can_edit_wishlist": True,
+        }
+    )
+
+
+def _raise_http(exc: Exception) -> NoReturn:
+    """Translate domain exceptions into HTTP errors without leaking details."""
+    if isinstance(exc, WishlistArchivedError):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Wishlist is archived",
+        ) from exc
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Resource not found",
+    ) from exc
+
+
+_NOT_FOUND_ERRORS = (
+    WishlistNotFoundError,
+    WishlistDeletedError,
+    ItemNotFoundError,
+    PermissionDeniedError,
+    WishlistArchivedError,
+)
+
+
+async def _reordered_response(
+    request: Request,
+    wishlist_id: int,
+    user: AuthenticatedUser,
+    reorder: Callable[[WishlistService, list[int]], list[int]],
+) -> HTMLResponse:
+    """Apply a reorder computed from the current order and render the new list."""
+
+    async def action(
+        svc: WishlistService,
+    ) -> list[WishItemRecipientViewDTO | WishItemGifterViewDTO]:
+        wl = await svc.get_wishlist_by_id(wishlist_id)
+        _ensure_member_and_active(wl, user)
+        current = await svc.list_wish_items(wishlist_id=wishlist_id, actor=user)
+        new_ids = reorder(svc, [it.id for it in current])
+        if new_ids != [it.id for it in current]:
+            await svc.reorder_wish_items(wishlist_id=wishlist_id, actor=user, item_ids=new_ids)
+        return await svc.list_wish_items(wishlist_id=wishlist_id, actor=user)
+
+    try:
+        items = await _execute(request, action)
+    except _NOT_FOUND_ERRORS as exc:
+        _raise_http(exc)
+    except ValueError as exc:
+        logger.warning(
+            "Invalid reorder rejected in wishlist %s for actor %s",
+            wishlist_id,
+            user.telegram_id,
+            extra={
+                "event": "ui_items_reorder_rejected",
+                "wishlist_id": wishlist_id,
+                "actor_id": user.telegram_id,
+                "user_id": user.telegram_id,
+                "reason": "invalid_permutation",
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid item order",
+        ) from exc
+    return HTMLResponse(content=_items_list_html(request, wishlist_id, items))
+
+
+@router.post("/items/reorder", response_class=HTMLResponse)
+async def reorder_items_ui(
+    wishlist_id: int,
+    request: Request,
+    user: User,
+    item_ids: Annotated[list[int], Form()],
+) -> Response:
+    """Persist a full manual order of active items and return the re-rendered list."""
+    response = await _reordered_response(request, wishlist_id, user, lambda _svc, _cur: item_ids)
+    logger.info(
+        "Items in wishlist %s reordered via UI by actor %s",
+        wishlist_id,
+        user.telegram_id,
+        extra={
+            "event": "ui_items_reordered",
+            "wishlist_id": wishlist_id,
+            "actor_id": user.telegram_id,
+            "user_id": user.telegram_id,
+            "item_count": len(item_ids),
+        },
+    )
+    return response
+
+
+@router.post("/items/{item_id}/move", response_class=HTMLResponse)
+async def move_item_ui(
+    wishlist_id: int,
+    item_id: int,
+    request: Request,
+    user: User,
+    direction: Annotated[str, Query(pattern="^(up|down)$")],
+) -> Response:
+    """Move one item a single step up or down and return the re-rendered list."""
+
+    def compute(_svc: WishlistService, current: list[int]) -> list[int]:
+        if item_id not in current:
+            raise ItemNotFoundError(f"Item {item_id} not found")
+        idx = current.index(item_id)
+        target = idx - 1 if direction == "up" else idx + 1
+        result = list(current)
+        if 0 <= target < len(result):
+            result[idx], result[target] = result[target], result[idx]
+        return result
+
+    response = await _reordered_response(request, wishlist_id, user, compute)
+    logger.info(
+        "Item %s in wishlist %s moved %s via UI by actor %s",
+        item_id,
+        wishlist_id,
+        direction,
+        user.telegram_id,
+        extra={
+            "event": "ui_item_moved",
+            "wishlist_id": wishlist_id,
+            "item_id": item_id,
+            "actor_id": user.telegram_id,
+            "user_id": user.telegram_id,
+            "direction": direction,
+        },
+    )
+    return response
+
+
+@router.get("/items/{item_id}/archive-confirm", response_class=HTMLResponse)
+async def archive_confirm_ui(
+    wishlist_id: int,
+    item_id: int,
+    request: Request,
+    user: User,
+) -> Response:
+    """Render the archive confirmation modal without exposing gifter identities."""
+
+    async def action(svc: WishlistService) -> tuple[Any, bool, bool]:
+        wl = await svc.get_wishlist_by_id(wishlist_id)
+        _ensure_member_and_active(wl, user)
+        ctx = WishlistAccessPolicy.resolve_context(user, wl)
+        if not WishlistAccessPolicy.can_add_or_edit_item(ctx, wl):
+            raise PermissionDeniedError("Caller cannot archive items")
+        item = next((it for it in wl.items if it.id == item_id), None)
+        if item is None:
+            raise ItemNotFoundError(f"Item {item_id} not found")
+        has_locked = item.reserved_quantity + item.received_quantity > 0
+        return item, has_locked, wl.warn_on_delete_reserved
+
+    try:
+        item, has_locked, warn_pref = await _execute(request, action)
+    except _NOT_FOUND_ERRORS as exc:
+        _raise_http(exc)
+
+    show_warning = has_locked and warn_pref
+    logger.info(
+        "Archive confirmation opened for item %s in wishlist %s by actor %s",
+        item_id,
+        wishlist_id,
+        user.telegram_id,
+        extra={
+            "event": "ui_item_archive_confirm_opened",
+            "wishlist_id": wishlist_id,
+            "item_id": item_id,
+            "actor_id": user.telegram_id,
+            "user_id": user.telegram_id,
+            "has_active_reservations": has_locked,
+            "gifter_warning_shown": show_warning,
+        },
+    )
+    return templates.TemplateResponse(
+        request=request,
+        name="partials/item_archive_modal.html",
+        context={
+            "item": {"id": item.id, "title": item.title},
+            "wishlist_id": wishlist_id,
+            "show_gifter_warning": show_warning,
+            "warn_on_delete_reserved": warn_pref,
+        },
+    )
+
+
 @router.post("/items/{item_id}/archive", response_class=HTMLResponse)
 async def archive_item_ui(
     wishlist_id: int,
     item_id: int,
     request: Request,
     user: User,
+    warn_on_delete_reserved: Annotated[list[str] | None, Form()] = None,
 ) -> Response:
-    """Safely archive wish item via HTMX UI, removing card from DOM and closing modal."""
+    """Safely archive wish item via HTMX UI, updating list, modal and archive section."""
+    warn_pref: bool | None = None
+    if warn_on_delete_reserved:
+        warn_pref = warn_on_delete_reserved[-1].strip().lower() in {"true", "1", "on", "yes"}
 
-    async def action(
-        svc: WishlistService,
-    ) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
+    async def action(svc: WishlistService) -> list[WishItemRecipientViewDTO]:
         wl = await svc.get_wishlist_by_id(wishlist_id)
         _ensure_member_and_active(wl, user)
-        return await svc.archive_wish_item(
+        await svc.archive_wish_item(
             wishlist_id=wishlist_id,
             item_id=item_id,
             actor=user,
+            warn_on_delete_reserved=warn_pref,
         )
+        view = await svc.get_wishlist_view(wishlist_id, user)
+        return view.archived_items
 
     try:
-        await _execute(request, action)
-    except (
-        WishlistNotFoundError,
-        WishlistDeletedError,
-        ItemNotFoundError,
-        PermissionDeniedError,
-    ) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Resource not found",
-        ) from exc
-    except WishlistArchivedError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Wishlist is archived",
-        ) from exc
+        archived = await _execute(request, action)
+    except _NOT_FOUND_ERRORS as exc:
+        _raise_http(exc)
 
     logger.info(
         "Item %s in wishlist %s archived via UI by actor %s",
@@ -763,12 +970,14 @@ async def archive_item_ui(
             "item_id": item_id,
             "actor_id": user.telegram_id,
             "user_id": user.telegram_id,
+            "warn_on_delete_reserved": warn_pref,
         },
     )
 
     oob_html = (
         f'<div id="item-card-{item_id}" hx-swap-oob="delete"></div>\n'
-        f'<div id="item-modal-container" hx-swap-oob="innerHTML"></div>'
+        '<div id="item-modal-container" hx-swap-oob="innerHTML"></div>\n'
+        f"{_archived_section_html(request, wishlist_id, archived)}"
     )
     return HTMLResponse(content=oob_html, status_code=status.HTTP_200_OK)
 
@@ -780,36 +989,25 @@ async def restore_item_ui(
     request: Request,
     user: User,
 ) -> Response:
-    """Restore an archived wish item via HTMX UI and return rendered card partial."""
+    """Restore an archived item: card appended to list, archive section updated OOB."""
 
     async def action(
         svc: WishlistService,
-    ) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
+    ) -> tuple[WishItemRecipientViewDTO | WishItemGifterViewDTO, list[WishItemRecipientViewDTO]]:
         wl = await svc.get_wishlist_by_id(wishlist_id)
         _ensure_member_and_active(wl, user)
-        return await svc.restore_wish_item(
+        restored = await svc.restore_wish_item(
             wishlist_id=wishlist_id,
             item_id=item_id,
             actor=user,
         )
+        view = await svc.get_wishlist_view(wishlist_id, user)
+        return restored, view.archived_items
 
     try:
-        restored_item = await _execute(request, action)
-    except (
-        WishlistNotFoundError,
-        WishlistDeletedError,
-        ItemNotFoundError,
-        PermissionDeniedError,
-    ) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Resource not found",
-        ) from exc
-    except WishlistArchivedError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Wishlist is archived",
-        ) from exc
+        restored_item, archived = await _execute(request, action)
+    except _NOT_FOUND_ERRORS as exc:
+        _raise_http(exc)
 
     logger.info(
         "Item %s in wishlist %s restored via UI by actor %s",
@@ -822,15 +1020,23 @@ async def restore_item_ui(
             "item_id": item_id,
             "actor_id": user.telegram_id,
             "user_id": user.telegram_id,
+            "display_order": restored_item.display_order,
         },
     )
 
-    return templates.TemplateResponse(
-        request=request,
-        name="partials/item_card.html",
-        context={
+    card_html = templates.get_template("partials/item_card.html").render(
+        {
+            "request": request,
             "item": restored_item,
             "wishlist_id": wishlist_id,
             "can_edit_wishlist": True,
-        },
+            "is_last": True,
+        }
+    )
+    return HTMLResponse(
+        content=(
+            f"{card_html}\n"
+            '<div id="empty-items-placeholder" hx-swap-oob="delete"></div>\n'
+            f"{_archived_section_html(request, wishlist_id, archived)}"
+        )
     )

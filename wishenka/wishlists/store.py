@@ -121,6 +121,7 @@ class WishlistStore:
                     event_title TEXT,
                     event_date TEXT,
                     is_collaborative INTEGER NOT NULL DEFAULT 0,
+                    warn_on_delete_reserved INTEGER NOT NULL DEFAULT 1,
                     status TEXT NOT NULL DEFAULT 'active',
                     public_token TEXT NOT NULL,
                     invite_token TEXT NOT NULL,
@@ -244,6 +245,14 @@ class WishlistStore:
             for statement in ddl_statements:
                 await conn.exec_driver_sql(statement)
 
+            cursor_lists = await conn.execute(text("PRAGMA table_info(wl_lists)"))
+            cols_lists = [r[1] for r in cursor_lists.fetchall()]
+            if cols_lists and "warn_on_delete_reserved" not in cols_lists:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE wl_lists ADD COLUMN "
+                    "warn_on_delete_reserved INTEGER NOT NULL DEFAULT 1"
+                )
+
             cursor_items = await conn.execute(text("PRAGMA table_info(wl_items)"))
             cols_items = [r[1] for r in cursor_items.fetchall()]
             if cols_items and "display_order" not in cols_items:
@@ -260,11 +269,17 @@ class WishlistStore:
 
         l_stmt = text(
             "SELECT id, owner_id, owner_name, title, description, event_title, "
-            "event_date, is_collaborative, status, public_token, invite_token, "
-            "invite_token_expires_at, created_at, updated_at FROM wl_lists ORDER BY id ASC"
+            "event_date, is_collaborative, warn_on_delete_reserved, status, "
+            "public_token, invite_token, invite_token_expires_at, "
+            "created_at, updated_at FROM wl_lists ORDER BY id ASC"
         )
         l_rows = (await conn.execute(l_stmt)).all()
         for r in l_rows:
+            warn_pref = (
+                bool(r.warn_on_delete_reserved)
+                if hasattr(r, "warn_on_delete_reserved") and r.warn_on_delete_reserved is not None
+                else True
+            )
             wl = Wishlist(
                 id=int(r.id),
                 owner_id=int(r.owner_id),
@@ -274,6 +289,7 @@ class WishlistStore:
                 event_title=str(r.event_title) if r.event_title is not None else None,
                 event_date=_parse_dt(r.event_date),
                 is_collaborative=bool(r.is_collaborative),
+                warn_on_delete_reserved=warn_pref,
                 status=WishlistStatus(r.status),
                 public_token=str(r.public_token),
                 invite_token=str(r.invite_token),
@@ -448,6 +464,7 @@ class WishlistStore:
                 "event_title": wl.event_title,
                 "event_date": _format_dt(wl.event_date),
                 "is_collaborative": 1 if wl.is_collaborative else 0,
+                "warn_on_delete_reserved": 1 if wl.warn_on_delete_reserved else 0,
                 "status": wl.status.value,
                 "public_token": wl.public_token,
                 "invite_token": wl.invite_token,
@@ -461,6 +478,7 @@ class WishlistStore:
                     "owner_id = :owner_id, owner_name = :owner_name, title = :title, "
                     "description = :description, event_title = :event_title, "
                     "event_date = :event_date, is_collaborative = :is_collaborative, "
+                    "warn_on_delete_reserved = :warn_on_delete_reserved, "
                     "status = :status, public_token = :public_token, "
                     "invite_token = :invite_token, "
                     "invite_token_expires_at = :invite_token_expires_at, "
@@ -469,11 +487,13 @@ class WishlistStore:
             else:
                 stmt = text(
                     "INSERT INTO wl_lists (id, owner_id, owner_name, title, description, "
-                    "event_title, event_date, is_collaborative, status, public_token, "
-                    "invite_token, invite_token_expires_at, created_at, updated_at) "
+                    "event_title, event_date, is_collaborative, warn_on_delete_reserved, "
+                    "status, public_token, invite_token, invite_token_expires_at, "
+                    "created_at, updated_at) "
                     "VALUES (:id, :owner_id, :owner_name, :title, :description, "
-                    ":event_title, :event_date, :is_collaborative, :status, :public_token, "
-                    ":invite_token, :invite_token_expires_at, :created_at, :updated_at)"
+                    ":event_title, :event_date, :is_collaborative, :warn_on_delete_reserved, "
+                    ":status, :public_token, :invite_token, :invite_token_expires_at, "
+                    ":created_at, :updated_at)"
                 )
             await conn.execute(stmt, params)
 
