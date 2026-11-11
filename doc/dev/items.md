@@ -1,8 +1,8 @@
-# Items Domain: Input Parsing, Metadata Extraction, Preview Service, Piece Accounting, and Network Security
+# Items Domain: Input Parsing, Metadata Extraction, Preview Service, Marketplace Normalization, Piece Accounting, and Network Security
 
 ## Overview
 
-The `wishenka.items` package and its integration with `wishenka.wishlists` implement universal wish creation, rich asynchronous preview generation, resilient anti-bot degradation, enterprise-grade SSRF defense, streaming DoS payload limits, and piece-by-piece inventory accounting for the **Wishlist Service («Вишенка»)** Telegram Mini App.
+The `wishenka.items` package and its integration with `wishenka.wishlists` implement universal wish creation, marketplace URL sanitization, rich asynchronous metadata extraction, resilient anti-bot degradation, enterprise-grade SSRF defense, streaming DoS payload limits, and piece-by-piece inventory accounting for the **Wishlist Service («Вишенка»)** Telegram Mini App.
 
 ```text
 +----------------------------------------------------------------------------------------------------+
@@ -20,10 +20,11 @@ The `wishenka.items` package and its integration with `wishenka.wishlists` imple
                      | PLAIN_TEXT                                                | URL / COMPOSITE_SHARE
                      v                                                           v
 +-----------------------------------------+         +------------------------------------------------+
-|       ItemPreviewDTO (Manual Entry)     |         |     ItemPreviewService.fetch_preview(...)      |
-|   - title = residual_text               |         +------------------------------------------------+
-|   - is_fallback = False                 |                                  |
-+-----------------------------------------+                                  v
+|       ItemPreviewDTO (Manual Entry)     |         |     Marketplace URL Sanitizer (clean_url)      |
+|   - title = residual_text               |         |  - Strip utm_*, clid, from=share*, tracking    |
+|   - is_fallback = False                 |         +------------------------------------------------+
++-----------------------------------------+                                  |
+                                                                             v
                                                     +------------------------------------------------+
                                                     |            UrlMetadataService                  |
                                                     |  - Scheme Check (http / https only)            |
@@ -45,15 +46,17 @@ The `wishenka.items` package and its integration with `wishenka.wishlists` imple
                                                                                       v              v
                                             +---------------------------+   +--------------------------------+
                                             | ResponseBodyTooLargeError |   | Anti-Bot Challenge / Error?    |
-                                            | Graceful Fallback Preview |   | (403/429/WAF/Turnstile)        |
-                                            | - fallback_reason =       |   +--------------------------------+
-                                            |   "response_too_large"    |             |              |
-                                            | - is_fallback = True      |      YES    |              | NO (200 OK)
-                                            +---------------------------+             v              v
+                                            | Graceful Fallback Preview |   | (403/429/503/WAF/Turnstile/    |
+                                            | - fallback_reason =       |   |  Qrator challenge signatures)  |
+                                            |   "response_too_large"    |   +--------------------------------+
+                                            | - is_fallback = True      |             |              |
+                                            +---------------------------+      YES    |              | NO (200 OK)
+                                                                                      v              v
                                                                         +---------------------+  +-------------------+
                                                                         | Graceful Fallback   |  | HtmlMetadata      |
                                                                         | - is_fallback=True  |  |   Extractor       |
-                                                                        | - anti_bot/timeout  |  | - JSON-LD         |
+                                                                        | - anti_bot/timeout  |  | - JSON-LD @graph  |
+                                                                        | - clean url, store  |  | - AggregateOffer  |
                                                                         +---------------------+  | - OpenGraph       |
                                                                                                  | - Microdata       |
                                                                                                  | - HTML Fallback   |
@@ -62,8 +65,10 @@ The `wishenka.items` package and its integration with `wishenka.wishlists` imple
                                                                                                            v
                                                                                                  +-------------------+
                                                                                                  | Rich Preview DTO  |
-                                                                                                 | - title, price    |
-                                                                                                 | - image, store    |
+                                                                                                 | - cleaned title   |
+                                                                                                 | - parsed price    |
+                                                                                                 | - currency, image |
+                                                                                                 | - store name/icon |
                                                                                                  +-------------------+
 ```
 
@@ -75,22 +80,31 @@ The `wishenka.items` package and its integration with `wishenka.wishlists` imple
      - `EXPLICIT_URL`: Direct link containing protocol scheme (`https://...` or `http://...`).
      - `IMPLICIT_URL`: Domain-style link pasted without protocol (e.g. `ozon.ru/product/...`), automatically normalized with `https://`.
      - `COMPOSITE_SHARE`: Mobile OS "Share" text containing both a link and surrounding commentary (e.g. `Посмотри кроссовки https://ozon.ru/t/123 классная модель!`). Extracts the URL while isolating `residual_text`.
-2. **Server-Side Request Forgery (SSRF) Defense**:
+2. **Marketplace Normalization & URL Sanitization**:
+   - Strips affiliate, tracking, and marketing query parameters (`utm_*`, `clid`, `from=share*`, `ref`, `fbclid`, `yclid`, etc.) via [`clean_url`](file:///home/src/wishenka/items/marketplaces.py#L29) and [`MarketplaceRegistry`](file:///home/src/wishenka/items/marketplaces.py#L162).
+   - Extensible marketplace protocol [`MarketplaceRule`](file:///home/src/wishenka/items/marketplaces.py#L83) with built-in rules for major Russian e-commerce platforms: **Ozon**, **Wildberries**, **Yandex Market**, **Avito**, and **Megamarket**.
+   - Resolves canonical store names and platform aliases (e.g. `wb.ru` $\rightarrow$ `Wildberries`, `m.avito.ru` $\rightarrow$ `Авито`).
+3. **Server-Side Request Forgery (SSRF) Defense**:
    - Multi-layered defense-in-depth preventing outbound calls to internal infrastructure, local loops, cloud metadata services, and unroutable addresses:
      - Scheme whitelist: strictly `http` and `https` allowed; `file://`, `gopher://`, `ftp://`, etc. rejected early.
      - IP boundary enforcement: blocks IPv4/IPv6 private ranges (RFC 1918), loopbacks (`127.0.0.0/8`, `::1`), link-local (`169.254.0.0/16`, `fe80::/10`), cloud metadata endpoints (`169.254.169.254`), CGNAT (`100.64.0.0/10`), multicast, broadcast, and IPv6-mapped IPv4 representations (`::ffff:127.0.0.1`).
      - Non-blocking asynchronous DNS resolution via `asyncio.get_running_loop().getaddrinfo` with validation across all returned IP addresses.
      - Custom transport [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L209) that inspects every outbound request and every intermediate redirect hop before socket connection.
-3. **DoS & Payload Size Limiting (2 MB Hard Ceiling)**:
+4. **DoS & Payload Size Limiting (2 MB Hard Ceiling)**:
    - Enforces a strict 2 MB (`2,097,152` bytes) limit on all upstream responses:
      - Fast-fail early rejection on `Content-Length > 2 MB` before downloading response bytes.
      - Streaming chunk accumulation counter (`aiter_bytes`) enforcing the 2 MB ceiling in real time to neutralize chunked transfer encoding bombs (`Transfer-Encoding: chunked`) or infinite streams.
      - Raises [`ResponseBodyTooLargeError`](file:///home/src/wishenka/items/exceptions.py#L56) immediately when breached, aborting network consumption.
-4. **Cascading HTML Metadata Extraction**:
+5. **Cascading HTML Metadata Extraction with JSON-LD `@graph` & `AggregateOffer`**:
    - Prioritized hierarchical extraction pipeline: **JSON-LD Schema.org Product/Offer** $\rightarrow$ **OpenGraph** (`og:title`, `og:image`, `product:price:amount`) $\rightarrow$ **Microdata** (`itemprop`) $\rightarrow$ **Standard HTML** (`<title>`, `<meta name="description">`, `<link rel="icon">`).
-5. **Anti-Bot & Threat Graceful Fallback**:
-   - Zero-crash degradation on SSRF blocks, oversized payloads, anti-bot gates (Cloudflare Turnstile, DDoS-GUARD, WAF signatures, HTTP 403 Forbidden, HTTP 429 Too Many Requests), and network timeouts (4.0s total, 2.0s connect). Instead of throwing 500 errors to the client, emits a valid fallback [`ItemPreviewDTO`](file:///home/src/wishenka/items/schemas.py#L11-L24) for seamless manual entry.
-6. **Piece Accounting & Multi-Quantity Invariants**:
+   - Recursively traverses complex JSON-LD `@graph` trees and matches both standard `Product` and full Schema.org URI types (`https://schema.org/Product`).
+   - Extracts pricing from both simple `Offer` and `AggregateOffer` structures (extracting `lowPrice`, `highPrice`, or `price`).
+   - Cleans store advertising noise and marketing slogans from titles using regex patterns (e.g. stripping `— купить в интернет-магазине Ozon`, `в наличии на маркетплейсе`).
+   - Normalizes currency symbols (`₽`, `руб`, `₸`, `Br`, `$`, `€`, `£`, `¥`) to standard ISO 4217 uppercase codes.
+6. **Anti-Bot & Threat Graceful Fallback**:
+   - Zero-crash degradation on SSRF blocks, oversized payloads, anti-bot gates (Cloudflare Turnstile, Qrator, DDoS-GUARD, WAF signatures, HTTP 403 Forbidden, HTTP 429 Too Many Requests, HTTP 503 Service Unavailable), and network timeouts (4.0s total, 2.0s connect).
+   - Rather than returning 500 server errors, emits a valid fallback [`ItemPreviewDTO`](file:///home/src/wishenka/items/schemas.py#L11-L24) populated with the clean sanitized URL, recognized store name, and extracted residual title for seamless manual entry.
+7. **Piece Accounting & Multi-Quantity Invariants**:
    - Desired quantity boundary: $1 \le \text{desired} \le 1000$.
    - Available piece calculation:
      $$\text{available} = \max(0, \text{desired} - \text{reserved} - \text{fulfilled})$$
@@ -101,7 +115,7 @@ The `wishenka.items` package and its integration with `wishenka.wishlists` imple
 
 ## Architecture & Components
 
-The items subsystem consists of six core architectural building blocks:
+The items subsystem consists of seven core architectural building blocks:
 
 ### 1. [`UniversalInputClassifier`](file:///home/src/wishenka/items/classifier.py#L24-L105)
 
@@ -112,7 +126,39 @@ Responsible for pure string classification and URL normalization without perform
 - Regex pattern [`DOMAIN_URL_REGEX`](file:///home/src/wishenka/items/classifier.py#L18-L21) matches popular e-commerce TLDs (`.ru`, `.com`, `.org`, `.net`, `.by`, `.kz`, `.io`, `.me`, `.app`, `.store`, `.shop`, `.market`, `.su`) and prepends `https://`.
 - Strips matched URL substrings and consolidates surrounding whitespace into `residual_text`.
 
-### 2. SSRF Protection Suite (`wishenka.items.ssrf`)
+### 2. Marketplace Rule Registry & URL Normalization (`wishenka.items.marketplaces`)
+
+Located in [`wishenka/items/marketplaces.py`](file:///home/src/wishenka/items/marketplaces.py).
+
+Handles marketplace-specific store identification, URL cleaning, and affiliate tracking parameter removal:
+
+- **Tracking Parameter Sanitization ([`clean_url`](file:///home/src/wishenka/items/marketplaces.py#L29-L80))**:
+  - Parses query string parameters preserving non-tracking keys.
+  - Strips prefixes starting with `utm_` (e.g. `utm_source`, `utm_medium`, `utm_campaign`).
+  - Strips share parameters such as `from=share*` or any `from` query value containing `share`.
+  - Strips common affiliate and ad click identifiers: `targeturl`, `clid`, `src`, `promo`, `track`, `_ref`, `ref`, `fbclid`, `gclid`, `yclid`, `dclid`, `sub_id`, `_bqv_`.
+  - Preserves essential e-commerce routing keys (e.g. product IDs, SKU parameters, variant queries).
+  - Emits structured log event `marketplace_url_cleaned` recording removed parameter names without exposing sensitive query values.
+- **Protocol [`MarketplaceRule`](file:///home/src/wishenka/items/marketplaces.py#L83-L97)**:
+  - Runtime checkable protocol specifying:
+    - `domains: tuple[str, ...]`: List of domain names and regional aliases.
+    - `store_name: str`: Canonical human-readable brand name.
+    - `store_icon_url: str | None`: Optional URL to storefront branding asset.
+    - `matches(domain: str) -> bool`: Domain matching predicate (supports subdomains and domain aliases).
+    - `clean_url(url: str) -> str`: Normalization hook for canonicalizing product URLs.
+- **Base Class [`BaseMarketplaceRule`](file:///home/src/wishenka/items/marketplaces.py#L99-L120)**:
+  - Reusable implementation matching domain aliases (e.g. stripping `www.`, matching exact domain or ending with `.<domain>`).
+- **Standard Marketplace Rules**:
+  - [`OzonRule`](file:///home/src/wishenka/items/marketplaces.py#L122-L128): Domains `("ozon.ru", "ozon.by", "ozon.kz")`, store name `"Ozon"`.
+  - [`WildberriesRule`](file:///home/src/wishenka/items/marketplaces.py#L130-L136): Domains `("wildberries.ru", "wb.ru")`, store name `"Wildberries"`.
+  - [`YandexMarketRule`](file:///home/src/wishenka/items/marketplaces.py#L138-L144): Domains `("market.yandex.ru", "yandex.ru")`, store name `"Яндекс Маркет"`.
+  - [`AvitoRule`](file:///home/src/wishenka/items/marketplaces.py#L146-L152): Domains `("avito.ru", "m.avito.ru", "avito.st")`, store name `"Авито"`.
+  - [`MegamarketRule`](file:///home/src/wishenka/items/marketplaces.py#L154-L160): Domains `("megamarket.ru", "sbermegamarket.ru")`, store name `"Мегамаркет"`.
+- **Registry [`MarketplaceRegistry`](file:///home/src/wishenka/items/marketplaces.py#L162-L216)**:
+  - Central rule catalog offering `register(rule)`, `get_rule(url_or_domain)`, `clean_url(url)`, and `derive_store_name(url_or_domain)`.
+  - Logs `marketplace_rule_matched` (at `DEBUG`) upon successful rule dispatch.
+
+### 3. SSRF Protection Suite (`wishenka.items.ssrf`)
 
 Located in [`wishenka/items/ssrf.py`](file:///home/src/wishenka/items/ssrf.py).
 
@@ -135,7 +181,7 @@ Provides non-blocking IP validation, hostname resolution, and HTTPX transport-le
   - Overrides `handle_async_request(request)`. Intercepts the original request as well as every subsequent request initiated by HTTP redirect hops (`301`, `302`, `303`, `307`, `308`).
   - Rejects disallowed schemes (`InvalidUrlSchemeError`), ensures host is present, and executes `resolve_and_validate_host` prior to forwarding the request to `super().handle_async_request(request)`.
 
-### 3. Safe HTML Fetcher [`UrlMetadataService`](file:///home/src/wishenka/items/fetcher.py#L49)
+### 4. Safe HTML Fetcher [`UrlMetadataService`](file:///home/src/wishenka/items/fetcher.py#L49)
 
 Located in [`wishenka/items/fetcher.py`](file:///home/src/wishenka/items/fetcher.py).
 
@@ -155,39 +201,52 @@ Dedicated network service responsible for pulling HTML bodies under strict secur
   - High-level interface that calls `_fetch_html` and feeds the result to `HtmlMetadataExtractor.extract`.
   - Catches network, security, and parsing exceptions, logging a warning and returning a safe fallback [`ExtractedMetadata`](file:///home/src/wishenka/items/models.py#L34-L46) populated with `store_name=derive_store_name(url)`.
 
-### 4. [`HtmlMetadataExtractor`](file:///home/src/wishenka/items/parser.py#L177-L372)
+### 5. Cascading HTML Metadata Extractor [`HtmlMetadataExtractor`](file:///home/src/wishenka/items/parser.py#L195-L456)
 
 Located in [`wishenka/items/parser.py`](file:///home/src/wishenka/items/parser.py).
 
 Parses HTML documents using `BeautifulSoup4` with a multi-level fallback cascade:
-- **JSON-LD**: Recursively inspects `<script type="application/ld+json">` for `@type == "Product"` schemas, extracting `name`, `description`, `image`, `brand`, and nested `offers` (`price`, `priceCurrency`).
-- **OpenGraph**: Scrapes `meta[property="og:*"]` and `meta[property="product:*"]`.
-- **Microdata**: Scrapes elements with `[itemprop="name"]`, `[itemprop="price"]`, etc.
-- **HTML Fallback**: Scrapes `<title>`, `<meta name="description">`, and `<link rel="icon">`.
+- **1. JSON-LD Cascade (`_find_jsonld_products`)**:
+  - Traverses `<script type="application/ld+json">` elements.
+  - Recursively unrolls `@graph` containers, searching for nodes where `@type` is `"Product"` or `https://schema.org/Product`.
+  - Extracts title (`name`), description (`description`), image (`image`), and brand (`brand`).
+  - Supports both standard `Offer` and `AggregateOffer` price extraction (`offers.price`, `offers.lowPrice`, `offers.highPrice`), recording `jsonld_aggregate_offer_extracted`.
+- **2. OpenGraph Cascade**:
+  - Scrapes `meta[property="og:*"]` (`og:title`, `og:description`, `og:image`, `og:site_name`) and `meta[property="product:*"]` (`product:price:amount`, `product:price:currency`).
+- **3. Microdata Cascade**:
+  - Scrapes elements with `[itemprop="name"]`, `[itemprop="description"]`, `[itemprop="image"]`, `[itemprop="price"]`, and `[itemprop="priceCurrency"]`.
+- **4. Standard HTML Fallback**:
+  - Scrapes `<title>`, `<meta name="description">`, and `<link rel="icon">`.
 - **Sanitization Helpers**:
-  - [`clean_title`](file:///home/src/wishenka/items/parser.py#L55-L67): Removes store noise suffixes and promotional phrases (e.g. `— купить в интернет-магазине Ozon`).
-  - [`parse_price`](file:///home/src/wishenka/items/parser.py#L70-L103): Handles non-breaking spaces (`\xa0`), mixed European/Russian decimal separators, and casts values to integer minor units.
-  - [`normalize_currency`](file:///home/src/wishenka/items/parser.py#L105-L115): Normalizes currency symbols (`₽`, `$`, `€`, `₸`, `руб`) to ISO 4217 uppercase codes (`RUB`, `USD`, `EUR`, `KZT`), defaulting to `RUB`.
-  - [`derive_store_name`](file:///home/src/wishenka/items/parser.py#L131-L149): Resolves brand names, OpenGraph site names, or maps known domains to brand labels (e.g. `ozon.ru` $\rightarrow$ `Ozon`, `wildberries.ru` $\rightarrow$ `Wildberries`).
+  - [`clean_title`](file:///home/src/wishenka/items/parser.py#L59-L75): Removes store advertising noise and marketing suffixes (e.g. `— купить в интернет-магазине Ozon`, `на маркетплейсе Wildberries`, `объявление на Авито`).
+  - [`parse_price`](file:///home/src/wishenka/items/parser.py#L77-L110): Handles non-breaking spaces (`\xa0`), mixed European/Russian decimal separators, and casts values to integer minor units.
+  - [`normalize_currency`](file:///home/src/wishenka/items/parser.py#L112-L123): Normalizes currency symbols (`₽`, `руб`, `rub`, `$`, `€`, `₸`, `kzt`, `byn`, `£`, `¥`) to ISO 4217 uppercase codes (`RUB`, `USD`, `EUR`, `KZT`, `BYN`, `GBP`, `CNY`), defaulting to `RUB`.
+  - [`derive_store_name`](file:///home/src/wishenka/items/parser.py#L138-L167): Resolves store name via priority: OpenGraph `og:site_name` $\rightarrow$ brand $\rightarrow$ `KNOWN_STORES` domain map $\rightarrow$ [`MarketplaceRegistry.derive_store_name`](file:///home/src/wishenka/items/marketplaces.py#L210) $\rightarrow$ clean domain.
 
-### 5. [`ItemPreviewService`](file:///home/src/wishenka/items/service.py#L35-L363)
+### 6. Link Preview Orchestrator & Graceful Fallback [`ItemPreviewService`](file:///home/src/wishenka/items/service.py#L38-L387)
 
 Located in [`wishenka/items/service.py`](file:///home/src/wishenka/items/service.py).
 
-Asynchronous facade orchestrating input classification, secure network requests via `UrlMetadataService`, anti-bot detection, and graceful degradation:
+Asynchronous facade orchestrating input classification, URL cleaning, secure fetching, anti-bot detection, and graceful degradation:
 - Accepts optional `url_metadata_service` in `__init__` for dependency injection.
 - Invokes `UniversalInputClassifier.classify(raw_input)`.
   - For `PLAIN_TEXT`, returns manual entry preview immediately without network activity.
-  - For `EXPLICIT_URL`, `IMPLICIT_URL`, and `COMPOSITE_SHARE`, executes safe preview fetch.
-- Comprehensive exception trap for graceful degradation:
-  - Catches [`SSRFBlockedError`](file:///home/src/wishenka/items/exceptions.py#L26) and [`InvalidUrlSchemeError`](file:///home/src/wishenka/items/exceptions.py#L43): returns `ItemPreviewDTO` with `is_fallback=True` and `fallback_reason="ssrf_blocked"`.
-  - Catches [`ResponseBodyTooLargeError`](file:///home/src/wishenka/items/exceptions.py#L56): returns `ItemPreviewDTO` with `is_fallback=True` and `fallback_reason="response_too_large"`.
-  - Catches `httpx.TimeoutException`: returns `ItemPreviewDTO` with `is_fallback=True` and `fallback_reason="timeout"`.
-  - Catches `httpx.HTTPStatusError`: checks `_is_challenge(body, status)`; returns `fallback_reason="anti_bot_challenge"` or `"http_error"`.
-  - Catches other `httpx.RequestError` or generic exceptions: returns `fallback_reason="http_error"`.
-- Prevents unhandled 500 errors and ensures Telegram Mini App users always retain access to a functional manual wish entry form with extracted residual title.
+  - For `EXPLICIT_URL`, `IMPLICIT_URL`, and `COMPOSITE_SHARE`, sanitizes the target link via `clean_url` and dispatches safe preview fetching.
+- **Anti-Bot Challenge & WAF Detection**:
+  - Inspects upstream HTTP status codes: HTTP 403 Forbidden, HTTP 429 Too Many Requests, and HTTP 503 Service Unavailable.
+  - Scans HTML bodies against `CHALLENGE_SIGNATURES`:
+    - Cloudflare challenges: `_cf_chl_opt`, `challenge-running`, `just a moment...`, `cf-mitigated`, `turnstile`, `checking your browser`.
+    - Generic WAFs: `access denied`, `waf`, `ddos-guard`.
+    - Qrator anti-bot shield: `qrator`, `qrator_jsid`, `qrator-js`.
+  - Intercepts challenges and emits `item_preview_anti_bot` and `anti_bot_challenge_detected` logs, returning an `ItemPreviewDTO` with `is_fallback=True` and `fallback_reason="anti_bot_challenge"`.
+- **Comprehensive Exception Trap**:
+  - SSRF violations: `fallback_reason="ssrf_blocked"`.
+  - Payload overflow (>2 MB): `fallback_reason="response_too_large"`.
+  - Upstream timeout (>4.0s): `fallback_reason="timeout"`.
+  - Other network / HTTP errors: `fallback_reason="http_error"`.
+- Prevents unhandled 500 errors and ensures Telegram Mini App users always retain access to a functional manual wish entry form with extracted residual title and clean URL.
 
-### 6. Multi-Quantity Integration in [`wishenka.wishlists`](file:///home/src/wishenka/wishlists/service.py#L1-L320)
+### 7. Multi-Quantity Integration in [`wishenka.wishlists`](file:///home/src/wishenka/wishlists/service.py#L1-L320)
 
 Located in [`wishenka/wishlists/models.py`](file:///home/src/wishenka/wishlists/models.py) and [`wishenka/wishlists/service.py`](file:///home/src/wishenka/wishlists/service.py):
 - Extends [`WishItem`](file:///home/src/wishenka/wishlists/models.py#L78-L127) with dynamic properties:
@@ -237,6 +296,7 @@ WishlistError
 | [`InputClassificationResult`](file:///home/src/wishenka/items/models.py#L24-L31) | `wishenka.items.models` | Result dataclass with `input_type`, `normalized_url`, `residual_text`, `raw_input`. |
 | [`ExtractedMetadata`](file:///home/src/wishenka/items/models.py#L34-L46) | `wishenka.items.models` | Raw parsed fields: `title`, `description`, `image_url`, `price`, `currency`, `store_name`, `store_icon_url`, `raw_html_title`. |
 | [`ItemPreviewDTO`](file:///home/src/wishenka/items/schemas.py#L11-L24) | `wishenka.items.schemas` | Pydantic DTO for client preview rendering, including `is_fallback` and `fallback_reason` (`ssrf_blocked`, `response_too_large`, `anti_bot_challenge`, `timeout`, `http_error`). |
+| [`MarketplaceRule`](file:///home/src/wishenka/items/marketplaces.py#L83-L97) | `wishenka.items.marketplaces` | Runtime-checkable Protocol for marketplace URL cleaning and store resolution. |
 | [`CreateItemDTO`](file:///home/src/wishenka/items/schemas.py#L27-L44) | `wishenka.items.schemas` | Pydantic DTO for creating new items with $1 \le \text{quantity} \le 1000$ validation. |
 | [`UpdateItemDTO`](file:///home/src/wishenka/items/schemas.py#L47-L64) | `wishenka.items.schemas` | Pydantic DTO for item mutations with $1 \le \text{quantity} \le 1000$ validation. |
 
@@ -272,9 +332,35 @@ assert result.normalized_url == "https://market.yandex.ru/product/998877"
 assert result.residual_text == "Глянь какую кружку нашел синяя"
 ```
 
-### 2. Generating Link Previews with SSRF & Payload Fallback
+### 2. Marketplace URL Sanitization & Rule Matching
 
-Use [`ItemPreviewService.fetch_preview`](file:///home/src/wishenka/items/service.py#L53-L250) (or alias `.preview(...)`):
+Use [`clean_url`](file:///home/src/wishenka/items/marketplaces.py#L29) or [`MarketplaceRegistry`](file:///home/src/wishenka/items/marketplaces.py#L162) to strip marketing parameters and resolve stores:
+
+```python
+from wishenka.items.marketplaces import MarketplaceRegistry, clean_url
+
+# Stripping marketing and tracking parameters
+dirty_url = (
+    "https://www.ozon.ru/product/aerogrill-100200/?"
+    "utm_source=tg&utm_medium=share&from=share_android&sku=123"
+)
+cleaned = clean_url(dirty_url)
+# Cleaned URL preserves essential query params while removing trackers:
+assert cleaned == "https://www.ozon.ru/product/aerogrill-100200/?sku=123"
+
+# Resolving store name via MarketplaceRegistry
+store = MarketplaceRegistry.derive_store_name("https://wb.ru/catalog/123/detail.aspx")
+assert store == "Wildberries"
+
+# Looking up specific marketplace rule
+rule = MarketplaceRegistry.get_rule("market.yandex.ru")
+assert rule is not None
+assert rule.store_name == "Яндекс Маркет"
+```
+
+### 3. Generating Link Previews with SSRF & Anti-Bot Fallback
+
+Use [`ItemPreviewService.fetch_preview`](file:///home/src/wishenka/items/service.py#L58-L377) (or alias `.preview(...)`):
 
 ```python
 from wishenka.items.service import ItemPreviewService
@@ -282,7 +368,7 @@ from wishenka.items.service import ItemPreviewService
 service = ItemPreviewService()
 
 # 1. Successful public preview scrape
-preview = await service.fetch_preview("https://ozon.ru/product/aerogrill-100200")
+preview = await service.fetch_preview("https://example.com/product/aerogrill")
 if not preview.is_fallback:
     print(f"Title: {preview.title}")
     print(f"Price: {preview.price} {preview.currency}")
@@ -293,18 +379,65 @@ else:
     print(f"Graceful degradation: {preview.fallback_reason}")
     print(f"Manual entry title: {preview.title or 'Enter title manually'}")
 
-# Example: SSRF attempt (e.g. cloud metadata or localhost) degrades smoothly
+# Example: Anti-bot challenge (e.g. Cloudflare Turnstile, Qrator, or 403 Forbidden)
+bot_preview = await service.fetch_preview("https://ozon.ru/product/protected-item-123")
+if bot_preview.is_fallback:
+    assert bot_preview.fallback_reason == "anti_bot_challenge"
+    assert bot_preview.store_name == "Ozon"
+    assert bot_preview.url == "https://ozon.ru/product/protected-item-123"
+
+# Example: SSRF attempt degrades smoothly to fallback
 ssrf_preview = await service.fetch_preview("http://169.254.169.254/latest/meta-data")
 assert ssrf_preview.is_fallback is True
 assert ssrf_preview.fallback_reason == "ssrf_blocked"
-
-# Example: DoS payload (>2MB) degrades smoothly
-dos_preview = await service.fetch_preview("https://example.com/huge-50mb-file.iso")
-if dos_preview.is_fallback:
-    assert dos_preview.fallback_reason in ("response_too_large", "http_error")
 ```
 
-### 3. Direct HTML Fetching with SSRF and Size Bounds
+### 4. Cascading Metadata Parsing with JSON-LD `@graph` and `AggregateOffer`
+
+Use [`HtmlMetadataExtractor.extract`](file:///home/src/wishenka/items/parser.py#L198-L419):
+
+```python
+from wishenka.items.parser import HtmlMetadataExtractor
+
+html_content = """
+<!DOCTYPE html>
+<html>
+<head>
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@graph": [
+            {
+                "@type": "WebPage",
+                "name": "Category Listing"
+            },
+            {
+                "@type": "Product",
+                "name": "Электрогриль Tefal — купить в интернет-магазине Ozon",
+                "image": "https://cdn.example.com/grill.jpg",
+                "offers": {
+                    "@type": "AggregateOffer",
+                    "lowPrice": "4990",
+                    "highPrice": "6500",
+                    "priceCurrency": "RUB"
+                }
+            }
+        ]
+    }
+    </script>
+</head>
+<body></body>
+</html>
+"""
+
+metadata = HtmlMetadataExtractor.extract(html_content, base_url="https://ozon.ru/product/grill")
+assert metadata.title == "Электрогриль Tefal"  # Noise suffix cleanly stripped
+assert metadata.price == 4990  # Extracted from lowPrice in AggregateOffer
+assert metadata.currency == "RUB"
+assert metadata.store_name == "Ozon"
+```
+
+### 5. Direct HTML Fetching with SSRF and Size Bounds
 
 Use [`UrlMetadataService`](file:///home/src/wishenka/items/fetcher.py#L49) for lower-level safe fetching:
 
@@ -327,7 +460,7 @@ except ResponseBodyTooLargeError as exc:
     print(f"Payload exceeded {exc.max_allowed} bytes (actual: {exc.content_length})")
 ```
 
-### 4. Direct IP and Hostname Validation
+### 6. Direct IP and Hostname Validation
 
 Use [`is_ip_safe`](file:///home/src/wishenka/items/ssrf.py#L45) and [`resolve_and_validate_host`](file:///home/src/wishenka/items/ssrf.py#L76):
 
@@ -354,22 +487,7 @@ except SSRFBlockedError as exc:
     print(f"Hostname blocked: {exc.host} resolves to {exc.ip_address}")
 ```
 
-### 5. Using `SSRFSafeTransport` with Custom HTTPX Clients
-
-```python
-import httpx
-from wishenka.items.ssrf import SSRFSafeTransport
-
-transport = SSRFSafeTransport()
-async with httpx.AsyncClient(transport=transport, follow_redirects=True) as client:
-    # Safe request
-    resp = await client.get("https://example.com")
-    print(resp.status_code)
-
-    # Any redirect targeting internal IPs will be blocked immediately
-```
-
-### 6. Managing Multi-Quantity Items in Wishlists
+### 7. Managing Multi-Quantity Items in Wishlists
 
 Items are created and updated through [`WishlistService`](file:///home/src/wishenka/wishlists/service.py#L17-L320):
 
@@ -418,7 +536,7 @@ assert item.available_quantity == 1
 
 ### Network & Security Settings
 
-Defined in [`wishenka/items/ssrf.py`](file:///home/src/wishenka/items/ssrf.py) and [`wishenka/items/fetcher.py`](file:///home/src/wishenka/items/fetcher.py):
+Defined in [`wishenka/items/ssrf.py`](file:///home/src/wishenka/items/ssrf.py), [`wishenka/items/fetcher.py`](file:///home/src/wishenka/items/fetcher.py), and [`wishenka/items/marketplaces.py`](file:///home/src/wishenka/items/marketplaces.py):
 
 | Constant | Value | Description |
 | --- | --- | --- |
@@ -426,6 +544,8 @@ Defined in [`wishenka/items/ssrf.py`](file:///home/src/wishenka/items/ssrf.py) a
 | `ALLOWED_SCHEMES` | `frozenset({"http", "https"})` | Whitelisted URL schemes. |
 | `DEFAULT_TIMEOUT` | `httpx.Timeout(4.0, connect=2.0)` | Total budget `4.0s`, connection budget `2.0s`. |
 | `DEFAULT_HEADERS` | iOS Safari Mobile UA, Ru/En Accept | Standard headers maximizing storefront compatibility. |
+| `TRACKING_QUERY_PREFIXES` | `("utm_",)` | Prefixes stripped from URL queries. |
+| `TRACKING_QUERY_KEYS` | Set of 14 ad click / affiliate keys | Query keys stripped (`clid`, `targeturl`, `src`, `promo`, `track`, `ref`, `fbclid`, `gclid`, `yclid`, etc.). |
 
 ### Forbidden Network CIDRs (`FORBIDDEN_NETWORKS`)
 
@@ -457,25 +577,37 @@ All events are logged via structured extra dictionaries under logger name `"wish
 
 | Event Name | Level | Key Context Fields | Trigger Condition |
 | --- | --- | --- | --- |
-| `ssrf_blocked` | `WARNING` | `host`, `ip`, `reason` | Host or IP resolves to a restricted/forbidden address. |
+| `marketplace_url_cleaned` | `INFO` | `url_domain`, `removed_params_count`, `removed_keys` | Stripped marketing tracking parameters from URL before fetch. |
+| `marketplace_rule_matched` | `DEBUG` | `store_name`, `url_domain` | Target URL matched a registered marketplace rule. |
+| `jsonld_graph_traversal` | `DEBUG` | `graph_items_count` | Found and traversing JSON-LD `@graph` container. |
+| `jsonld_aggregate_offer_extracted` | `DEBUG` | `url_domain`, `offer_price`, `low_price`, `high_price` | Extracted price from Schema.org `AggregateOffer`. |
+| `metadata_extraction_started` | `DEBUG` | `url_domain`, `parser_stage="start"` | Commenced HTML parsing and metadata extraction. |
+| `metadata_stage_resolved` | `DEBUG` | `url_domain`, `parser_stage` (`json_ld`, `opengraph`) | Intermediate parsing stage successfully resolved fields. |
+| `metadata_extraction_completed` | `INFO` | `url_domain`, `duration_ms`, `has_title`, `has_price`, `has_image` | HTML extraction completed; fields resolved. |
+| `item_preview_anti_bot` | `WARNING` | `status_code`, `url_domain`, `duration_ms`, `fallback_reason` | Intercepted anti-bot gate (403, 429, 503, Turnstile, Qrator). |
+| `anti_bot_challenge_detected` | `INFO` | `status_code`, `url_domain`, `duration_ms`, `fallback_reason` | Telemetry signal for anti-bot degradation monitoring. |
+| `item_preview_plain_text` | `DEBUG` | `input_type`, `duration_ms` | Non-URL text input processed without network calls. |
+| `item_preview_success` | `INFO` | `url_domain`, `duration_ms`, `input_type`, `is_fallback=False` | Successful link preview retrieval (HTTP 200). |
+| `item_preview_ssrf_blocked` | `WARNING` | `url`, `url_domain`, `host`, `ip`, `reason`, `duration_ms` | SSRF attempt caught during preview generation; returns fallback. |
+| `item_preview_invalid_scheme` | `WARNING` | `url`, `scheme`, `duration_ms` | Unsupported URL scheme caught; returns fallback. |
+| `item_preview_response_too_large` | `WARNING` | `url`, `url_domain`, `content_length`, `max_allowed`, `duration_ms` | Oversized payload caught during preview generation; returns fallback. |
+| `item_preview_timeout` | `WARNING` | `url_domain`, `duration_ms`, `fallback_reason="timeout"` | HTTP connection or read timeout ($> 4.0\text{s}$). |
+| `item_preview_http_error` | `WARNING` | `status_code`, `url_domain`, `duration_ms`, `fallback_reason="http_error"` | Upstream HTTP $\ge 400$ error handled safely. |
+| `item_preview_network_error` | `WARNING` | `url_domain`, `duration_ms`, `fallback_reason="http_error"` | Network transport error handled safely. |
+| `item_metadata_parsing_error` | `ERROR` | `url_domain`, `duration_ms`, `fallback_reason="http_error"` | Unexpected HTML parsing failure during extraction. |
+| `ssrf_blocked` | `WARNING` | `host`, `ip`, `reason` | Low-level SSRF rejection on outbound connection or redirect. |
 | `payload_size_violation` | `WARNING` | `url`, `content_length`, `max_allowed`, `reason` | `Content-Length` or streaming chunks exceed 2 MB. |
 | `dns_resolution_start` | `DEBUG` | `host`, `clean_host`, `port` | Starting asynchronous DNS resolution. |
 | `dns_resolution_success` | `DEBUG` | `host`, `resolved_ips` | Successfully resolved hostname to safe IPs. |
 | `dns_resolution_failed` | `INFO` | `host`, `error` | Host failed to resolve (NXDOMAIN, gaierror). |
 | `ssrf_request_dispatch` | `DEBUG` | `url`, `host`, `scheme` | Outbound request verified and dispatched. |
 | `url_fetch_success` | `INFO` | `url`, `effective_url`, `bytes` | Successfully streamed and decoded response body. |
-| `fetch_and_extract_fallback` | `WARNING` | `url`, `error` | `UrlMetadataService.fetch_and_extract` caught an error and degraded safely. |
-| `item_preview_ssrf_blocked` | `WARNING` | `url`, `url_domain`, `host`, `ip`, `reason`, `duration_ms` | SSRF attempt caught during preview generation; returns fallback. |
-| `item_preview_invalid_scheme` | `WARNING` | `url`, `scheme`, `duration_ms` | Unsupported URL scheme caught; returns fallback. |
-| `item_preview_response_too_large` | `WARNING` | `url`, `url_domain`, `content_length`, `max_allowed`, `duration_ms` | Oversized payload caught during preview generation; returns fallback. |
-| `anti_bot_challenge_detected` | `INFO` | `status_code`, `url_domain`, `duration_ms`, `fallback_reason` | Cloudflare, Turnstile, or WAF challenge detected. |
-| `item_preview_timeout` | `WARNING` | `url_domain`, `duration_ms`, `fallback_reason="timeout"` | HTTP connection or read timeout ($> 4.0\text{s}$). |
-| `item_preview_success` | `INFO` | `url_domain`, `duration_ms`, `input_type`, `is_fallback=False` | Successful link preview retrieval (HTTP 200). |
 
 ### Privacy & Data Protection Guarantees
 
 In accordance with security requirements:
 - **No Payload Leaks**: Raw HTML bodies, full upstream responses, and long user notes are never dumped into logs.
+- **Tracking Parameter Value Isolation**: URL tracking removal logs list sanitized key names only (`removed_keys=["utm_source"]`), strictly omitting query parameter values that might contain sensitive affiliate IDs or campaign tokens.
 - **No Internal IP Leak to Clients**: Client-facing DTOs (`ItemPreviewDTO`) receive generic `fallback_reason="ssrf_blocked"`; internal IP details remain isolated to server audit logs.
 - **No Token/Credential Leaks**: URL query parameters with authorization tokens or session cookies are excluded.
 - **Clean Domains**: Domains are extracted without ports or query parameters (`url_domain`) for clean metric aggregation.
@@ -499,17 +631,22 @@ In accordance with security requirements:
 - **Cause**: The target URL serves a response body larger than 2,097,152 bytes (e.g. a high-resolution media file, firmware archive, or bloated uncompressed HTML document).
 - **Resolution**: Check the server logs for `event="payload_size_violation"`. The log indicates whether it was rejected early via `content_length_exceeded` or stopped during streaming (`stream_chunk_overflow`). The preview degrades gracefully to manual entry, protecting the worker from OOM failures.
 
-### 4. Anti-Bot Challenge Fallbacks (Cloudflare / WAF / Turnstile)
+### 4. Anti-Bot Challenge Fallbacks (Cloudflare / Qrator / WAF / Turnstile / 403 / 503)
 - **Symptom**: `ItemPreviewDTO` returns with `is_fallback=True` and `fallback_reason="anti_bot_challenge"`.
-- **Cause**: The remote store (e.g. Ozon or Wildberries) uses anti-scraping mitigation returning HTTP 403/429 or JavaScript challenges (`_cf_chl_opt`, `turnstile`).
-- **Resolution**: This is the expected design behavior. The frontend receives the fallback preview with the pre-populated domain name and user text, prompting the user to confirm or edit the title/price manually. To support automated extraction for protected marketplaces, dedicated API connectors or headless sidecars can be plugged in via [WISHENKA-55](https://pypost.atlassian.net/browse/WISHENKA-55).
+- **Cause**: The remote store (e.g. Ozon, Wildberries, Avito) uses anti-scraping mitigation returning HTTP 403, 429, 503, or JavaScript challenge pages (`_cf_chl_opt`, `turnstile`, `qrator`, `ddos-guard`).
+- **Resolution**: This is the expected design behavior. The frontend receives the fallback preview populated with the sanitized URL, the recognized store name, and the user's residual text, prompting the user to confirm or edit title and price manually. Dedicated official store APIs or headless rendering sidecars can be attached via [WISHENKA-55](https://pypost.atlassian.net/browse/WISHENKA-55).
 
-### 5. DNS Resolution Failures vs SSRF Blocks
-- **Symptom**: A preview returns `fallback_reason="http_error"`, but the operator suspects an SSRF issue.
-- **Cause**: If a hostname fails DNS resolution entirely (e.g. non-existent domain or upstream DNS outage), `resolve_and_validate_host` logs `dns_resolution_failed` and does not raise `SSRFBlockedError`. Instead, downstream HTTP connection fails with a standard network error.
-- **Resolution**: Inspect the server log: `event="dns_resolution_failed"` indicates NXDOMAIN or resolver connectivity issues, whereas `event="ssrf_blocked"` confirms the hostname successfully resolved to a forbidden IP address.
+### 5. Tracking Parameters and Affiliate Link Cleaning
+- **Symptom**: User pastes a link containing heavy tracking tokens (`utm_source`, `from=share_android`, `clid`), and the resulting item preview URL has those removed.
+- **Cause**: [`clean_url`](file:///home/src/wishenka/items/marketplaces.py#L29) automatically strips marketing parameters to prevent session bloat and tracker leakage.
+- **Resolution**: Intended behavior. If a specific e-commerce platform requires an atypical query parameter to display the product properly, register an updated [`MarketplaceRule`](file:///home/src/wishenka/items/marketplaces.py#L83) in [`MarketplaceRegistry`](file:///home/src/wishenka/items/marketplaces.py#L162).
 
-### 6. Upstream Timeout Handling
+### 6. Unresolved Product Pricing (`price` is `None`)
+- **Symptom**: Product title and store name are extracted, but `price` is returned as `None`.
+- **Cause**: The remote HTML document loads prices dynamically via client-side JavaScript or hides them in shadow DOM components without standard Schema.org JSON-LD, OpenGraph, or Microdata markup.
+- **Resolution**: The user can specify the price manually in the wish creation form. For high-volume stores without server-rendered markup, add store-specific JSON extraction to `wishenka.items.marketplaces`.
+
+### 7. Upstream Timeout Handling
 - **Symptom**: `ItemPreviewDTO` returns with `is_fallback=True` and `fallback_reason="timeout"`, and `item_preview_timeout` is logged.
 - **Cause**: The remote server failed to respond within `2.0s` connect or `4.0s` total timeout.
 - **Resolution**: Check external internet connectivity and upstream store availability. The service will never hang or block the TMA event loop.

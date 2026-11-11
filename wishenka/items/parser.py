@@ -36,11 +36,15 @@ CURRENCY_MAP = {
 
 KNOWN_STORES = {
     "ozon.ru": "Ozon",
+    "ozon.by": "Ozon",
+    "ozon.kz": "Ozon",
     "wildberries.ru": "Wildberries",
+    "wb.ru": "Wildberries",
     "market.yandex.ru": "Яндекс Маркет",
     "yandex.ru": "Яндекс Маркет",
     "lamoda.ru": "Lamoda",
     "avito.ru": "Авито",
+    "m.avito.ru": "Авито",
     "aliexpress.ru": "AliExpress",
     "aliexpress.com": "AliExpress",
     "amazon.com": "Amazon",
@@ -58,9 +62,12 @@ def clean_title(raw_title: str) -> str:
     noise_patterns = [
         (
             r"\s*[-—–|•]\s*(?:купить|интернет-магазин|по выгодной цене|"
-            r"в наличии|на маркетплейсе|в интернет-магазине).*$"
+            r"в наличии|на маркетплейсе|в интернет-магазине|объявление).*$"
         ),
-        r"\s*[-—–|•]\s*(?:ozon|wildberries|яндекс\s*маркет|вайлдберриз|озон|lamoda|авито).*$",
+        (
+            r"\s*[-—–|•]\s*(?:ozon|wildberries|яндекс\s*маркет|вайлдберриз|"
+            r"озон|lamoda|авито|мегамаркет|сбермегамаркет).*$"
+        ),
     ]
     for pattern in noise_patterns:
         title = re.sub(pattern, "", title, flags=re.IGNORECASE).strip()
@@ -142,9 +149,20 @@ def derive_store_name(
     if brand and brand.strip():
         return brand.strip()
 
+    # Check known stores first (including aliases)
     for known_domain, name in KNOWN_STORES.items():
         if domain == known_domain or domain.endswith("." + known_domain):
             return name
+
+    try:
+        from wishenka.items.marketplaces import MarketplaceRegistry
+
+        reg_name = MarketplaceRegistry.derive_store_name(base_url)
+        if reg_name:
+            return reg_name
+    except ImportError:
+        pass
+
     return domain
 
 
@@ -252,8 +270,37 @@ class HtmlMetadataExtractor:
                     if isinstance(offers, list) and offers:
                         offers = offers[0]
                     if isinstance(offers, dict):
-                        price_raw = offers.get("price")
-                        currency_raw = offers.get("priceCurrency")
+                        offer_type = offers.get("@type")
+                        offer_price = offers.get("price")
+                        is_aggregate = (
+                            offer_type == "AggregateOffer"
+                            or (
+                                isinstance(offer_type, str)
+                                and offer_type.endswith("/AggregateOffer")
+                            )
+                            or offers.get("lowPrice") is not None
+                            or offers.get("highPrice") is not None
+                        )
+                        if offer_price is None:
+                            offer_price = offers.get("lowPrice")
+                        if offer_price is None:
+                            offer_price = offers.get("highPrice")
+                        if is_aggregate:
+                            logger.debug(
+                                "Extracted AggregateOffer price for domain %s (price=%s)",
+                                url_domain,
+                                offer_price,
+                                extra={
+                                    "event": "jsonld_aggregate_offer_extracted",
+                                    "url_domain": url_domain,
+                                    "offer_price": offer_price,
+                                    "low_price": offers.get("lowPrice"),
+                                    "high_price": offers.get("highPrice"),
+                                },
+                            )
+                        price_raw = offer_price
+                        if not currency_raw:
+                            currency_raw = offers.get("priceCurrency")
                 logger.debug(
                     "JSON-LD product metadata extracted for domain %s",
                     url_domain,
@@ -371,15 +418,38 @@ class HtmlMetadataExtractor:
         )
 
     @staticmethod
+    def _is_product_type(type_val: Any) -> bool:
+        """Check if @type string or list corresponds to Schema.org Product."""
+        if isinstance(type_val, str):
+            val = type_val.strip().lower()
+            return val == "product" or val.endswith("/product")
+        if isinstance(type_val, list):
+            return any(HtmlMetadataExtractor._is_product_type(t) for t in type_val)
+        return False
+
+    @staticmethod
     def _find_jsonld_products(data: Any) -> list[dict[str, Any]]:
         """Extract Product schema objects recursively from JSON-LD structure."""
         results: list[dict[str, Any]] = []
         if isinstance(data, dict):
+            # Traverse @graph container if present
+            if "@graph" in data and isinstance(data["@graph"], list):
+                logger.debug(
+                    "Traversing JSON-LD @graph container (items=%d)",
+                    len(data["@graph"]),
+                    extra={
+                        "event": "jsonld_graph_traversal",
+                        "graph_items_count": len(data["@graph"]),
+                    },
+                )
+                for item in data["@graph"]:
+                    results.extend(HtmlMetadataExtractor._find_jsonld_products(item))
             type_val = data.get("@type")
-            if type_val == "Product" or (isinstance(type_val, list) and "Product" in type_val):
+            if HtmlMetadataExtractor._is_product_type(type_val):
                 results.append(data)
-            for v in data.values():
-                results.extend(HtmlMetadataExtractor._find_jsonld_products(v))
+            for k, v in data.items():
+                if k != "@graph":
+                    results.extend(HtmlMetadataExtractor._find_jsonld_products(v))
         elif isinstance(data, list):
             for item in data:
                 results.extend(HtmlMetadataExtractor._find_jsonld_products(item))

@@ -12,6 +12,7 @@ from wishenka.items.exceptions import (
     SSRFBlockedError,
 )
 from wishenka.items.fetcher import DEFAULT_HEADERS, DEFAULT_TIMEOUT, UrlMetadataService
+from wishenka.items.marketplaces import clean_url
 from wishenka.items.models import InputType
 from wishenka.items.parser import HtmlMetadataExtractor, derive_store_name, extract_domain
 from wishenka.items.schemas import ItemPreviewDTO
@@ -28,6 +29,9 @@ CHALLENGE_SIGNATURES = [
     "access denied",
     "waf",
     "ddos-guard",
+    "qrator",
+    "qrator_jsid",
+    "qrator-js",
 ]
 
 
@@ -76,7 +80,7 @@ class ItemPreviewService:
                 is_fallback=False,
             )
 
-        target_url = classification.normalized_url or raw_input
+        target_url = clean_url(classification.normalized_url or raw_input)
         url_domain = extract_domain(target_url)
         store_name = derive_store_name(target_url)
 
@@ -196,13 +200,27 @@ class ItemPreviewService:
             response_domain = extract_domain(response_url) or url_domain
             effective_store = derive_store_name(response_url) or store_name
 
-            if response.status_code in (403, 429) or self._is_challenge(response.text):
+            is_challenge = self._is_challenge(response.text)
+            if response.status_code in (403, 429, 503) or is_challenge:
                 reason = (
                     "anti_bot_challenge"
-                    if (response.status_code == 403 or self._is_challenge(response.text))
+                    if (response.status_code == 403 or is_challenge)
                     else "http_error"
                 )
                 duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+                logger.warning(
+                    "Anti-bot or restricted status (%s) for domain %s; degrading gracefully",
+                    response.status_code,
+                    response_domain,
+                    extra={
+                        "event": "item_preview_anti_bot",
+                        "status_code": response.status_code,
+                        "url_domain": response_domain,
+                        "input_type": classification.input_type.value,
+                        "duration_ms": duration_ms,
+                        "fallback_reason": reason,
+                    },
+                )
                 logger.info(
                     "Anti-bot or restricted response (%s) for domain %s; degrading gracefully",
                     response.status_code,
@@ -276,6 +294,17 @@ class ItemPreviewService:
 
         if self._is_challenge(html_text):
             duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            logger.warning(
+                "Anti-bot challenge signature detected in HTML for domain %s; degrading gracefully",
+                response_domain,
+                extra={
+                    "event": "item_preview_anti_bot",
+                    "url_domain": response_domain,
+                    "input_type": classification.input_type.value,
+                    "duration_ms": duration_ms,
+                    "fallback_reason": "anti_bot_challenge",
+                },
+            )
             logger.info(
                 "Anti-bot or restricted response for domain %s; degrading gracefully",
                 response_domain,

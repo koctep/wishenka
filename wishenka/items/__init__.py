@@ -17,6 +17,16 @@ from wishenka.items.fetcher import (
     DEFAULT_TIMEOUT,
     UrlMetadataService,
 )
+from wishenka.items.marketplaces import (
+    AvitoRule,
+    MarketplaceRegistry,
+    MarketplaceRule,
+    MegamarketRule,
+    OzonRule,
+    WildberriesRule,
+    YandexMarketRule,
+    clean_url,
+)
 from wishenka.items.models import (
     ExtractedMetadata,
     InputClassificationResult,
@@ -46,6 +56,7 @@ from wishenka.items.ssrf import (
 
 __all__ = [
     "ALLOWED_SCHEMES",
+    "AvitoRule",
     "CannotReduceQuantityBelowReservedError",
     "CreateItemDTO",
     "DEFAULT_HEADERS",
@@ -63,6 +74,10 @@ __all__ = [
     "ItemPreviewService",
     "ItemPriority",
     "MAX_RESPONSE_BYTES",
+    "MarketplaceRegistry",
+    "MarketplaceRule",
+    "MegamarketRule",
+    "OzonRule",
     "ResponseBodyTooLargeError",
     "SSRFBlockedError",
     "SSRFError",
@@ -70,7 +85,10 @@ __all__ = [
     "UniversalInputClassifier",
     "UpdateItemDTO",
     "UrlMetadataService",
+    "WildberriesRule",
+    "YandexMarketRule",
     "clean_title",
+    "clean_url",
     "derive_store_name",
     "is_ip_safe",
     "normalize_currency",
