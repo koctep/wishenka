@@ -1,0 +1,199 @@
+<div class="modal-backdrop fixed inset-0 bg-black bg-opacity-40 flex items-end justify-center z-50"
+     id="item-edit-sheet">
+    <div class="modal-sheet bg-white w-full max-w-lg rounded-t-xl p-4 shadow-lg">
+        <div class="modal-header flex justify-between items-center pb-3 border-b">
+            <h2 class="text-lg font-bold">
+                {% if is_edit %}Редактировать желание{% else %}Новое желание{% endif %}
+            </h2>
+            <button type="button"
+                    class="btn-modal-close text-gray-500"
+                    aria-label="Закрыть"
+                    onclick="document.getElementById('item-modal-container').innerHTML = ''">
+                ✕
+            </button>
+        </div>
+
+        {% if error_message %}
+        <div class="alert alert-error p-3 mt-3 rounded bg-red-50 text-red-700 text-sm" role="alert">
+            {{ error_message }}
+        </div>
+        {% endif %}
+
+        <form id="item-detailed-form"
+              class="mt-3"
+              {% if is_edit %}
+              hx-post="/web/wishlists/{{ wishlist_id }}/items/{{ form.id }}/edit"
+              hx-target="#item-card-{{ form.id }}"
+              hx-swap="outerHTML"
+              {% else %}
+              hx-post="/web/wishlists/{{ wishlist_id }}/items/quick"
+              hx-target="#items-list"
+              hx-swap="beforeend"
+              {% endif %}>
+            <div class="form-group">
+                <label for="item-title-input">Название подарка *</label>
+                <input type="text"
+                       id="item-title-input"
+                       name="title"
+                       required
+                       maxlength="255"
+                       value="{{ form.title or '' }}"
+                       placeholder="Например: Набор винных бокалов" />
+            </div>
+
+            <div class="form-group">
+                <label for="item-link-input">Ссылка на магазин</label>
+                <input type="url"
+                       id="item-link-input"
+                       name="link"
+                       value="{{ form.link or '' }}"
+                       placeholder="https://..." />
+            </div>
+
+            <div class="form-row flex gap-2">
+                <div class="form-group flex-1">
+                    <label for="item-price-input">Ориентировочная цена</label>
+                    <input type="number"
+                           id="item-price-input"
+                           name="price"
+                           min="0"
+                           max="999999999"
+                           value="{{ form.price if form.price is not none else '' }}"
+                           placeholder="0" />
+                </div>
+                <div class="form-group w-28">
+                    <label for="item-currency-select">Валюта</label>
+                    <select id="item-currency-select" name="currency">
+                        {% for code, label in [('RUB', 'RUB (₽)'), ('USD', 'USD ($)'), ('EUR', 'EUR (€)'), ('KZT', 'KZT (₸)'), ('BYN', 'BYN (Br)')] %}
+                        <option value="{{ code }}" {% if (form.currency or 'RUB') == code %}selected{% endif %}>
+                            {{ label }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="item-quantity-input">Требуемое количество (шт.)</label>
+                <div class="quantity-control flex items-center gap-2">
+                    <button type="button"
+                            class="btn-step btn-decrement"
+                            aria-label="Уменьшить количество"
+                            onclick="var inp = document.getElementById('item-quantity-input'); var v = parseInt(inp.value || '1', 10); if (v > {{ min_quantity }}) { inp.value = v - 1; }">
+                        -
+                    </button>
+                    <input type="number"
+                           id="item-quantity-input"
+                           name="quantity"
+                           value="{{ form.quantity or 1 }}"
+                           min="{{ min_quantity }}"
+                           max="1000"
+                           required
+                           class="w-24 text-center font-bold" />
+                    <button type="button"
+                            class="btn-step btn-increment"
+                            aria-label="Увеличить количество"
+                            onclick="var inp = document.getElementById('item-quantity-input'); var v = parseInt(inp.value || '1', 10); if (v < 1000) { inp.value = v + 1; }">
+                        +
+                    </button>
+                </div>
+                {% if locked_quantity > 0 %}
+                <div class="alert alert-warning text-xs mt-2 text-amber-700 bg-amber-50 p-2 rounded">
+                    ℹ️ Забронировано дарителями: {{ locked_quantity }} шт. Нельзя указать меньше забронированного объема.
+                </div>
+                {% endif %}
+            </div>
+
+            {% if is_collaborative %}
+            <div class="form-group recipient-targeting-group">
+                <label for="recipient-user-select">Кому предназначен подарок</label>
+                <select id="recipient-user-select" name="recipient_user_id">
+                    <option value="">Общий подарок (для всех)</option>
+                    {% for member in collaborative_members %}
+                    <option value="{{ member.user_id }}" {% if form.recipient_user_id == member.user_id %}selected{% endif %}>
+                        {{ member.display_name }}
+                    </option>
+                    {% endfor %}
+                </select>
+                <label for="recipient-name-input" class="mt-2">Или укажите имя получателя вручную</label>
+                <input type="text"
+                       id="recipient-name-input"
+                       name="recipient_name"
+                       maxlength="100"
+                       value="{{ form.recipient_name or '' }}"
+                       placeholder="Например: Малыш, Бабушка" />
+            </div>
+            {% endif %}
+
+            <div class="form-group">
+                <label for="item-description-input">Описание и комментарий</label>
+                <textarea id="item-description-input"
+                          name="description"
+                          maxlength="4000"
+                          rows="3"
+                          placeholder="Размер, цвет, пожелания...">{{ form.description or '' }}</textarea>
+            </div>
+
+            <div class="form-group">
+                <label for="item-image-url-input">Ссылка на изображение</label>
+                <input type="url"
+                       id="item-image-url-input"
+                       name="image_url"
+                       value="{{ form.image_url or '' }}"
+                       placeholder="https://..." />
+                {% if form.image_url %}
+                <div class="mt-2 flex items-center gap-2">
+                    <img src="{{ form.image_url }}"
+                         alt="Предпросмотр"
+                         class="w-16 h-16 object-cover rounded border" />
+                </div>
+                {% endif %}
+            </div>
+
+            <div class="form-row flex gap-2">
+                <div class="form-group flex-1">
+                    <label for="item-priority-select">Приоритет</label>
+                    <select id="item-priority-select" name="priority">
+                        {% for val, label in [('low', 'Если останется'), ('medium', 'Обычный'), ('high', 'Очень хочется')] %}
+                        <option value="{{ val }}" {% if (form.priority or 'medium') == val %}selected{% endif %}>
+                            {{ label }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-group flex-1">
+                    <label for="item-category-input">Категория</label>
+                    <input type="text"
+                           id="item-category-input"
+                           name="category"
+                           maxlength="50"
+                           value="{{ form.category or '' }}"
+                           placeholder="Гаджеты, книги, дом..." />
+                </div>
+            </div>
+
+            <div class="modal-footer flex justify-between items-center mt-4 pt-3 border-t">
+                <div>
+                    {% if is_edit %}
+                    <button type="button"
+                            class="btn-archive-item text-red-600 text-sm"
+                            hx-post="/web/wishlists/{{ wishlist_id }}/items/{{ form.id }}/archive"
+                            hx-confirm="Перенести желание в архив? Если подарок уже забронирован, бронирования дарителей сохранятся.">
+                        В архив
+                    </button>
+                    {% endif %}
+                </div>
+                <div class="flex gap-2">
+                    <button type="button"
+                            class="btn-cancel text-sm"
+                            onclick="document.getElementById('item-modal-container').innerHTML = ''">
+                        Отмена
+                    </button>
+                    <button type="submit" class="btn-save text-sm font-semibold">
+                        Сохранить
+                    </button>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>

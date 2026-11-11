@@ -49,6 +49,7 @@ wishlists domain service and security middleware to satisfy four primary goals:
 |  - /api/invitations/preview, accept    Collaborator onboarding flow             |
 |  - GET, POST, DELETE /api/favorites    Favorites management & role badges       |
 |  - GET, POST, DELETE /api/history      Viewing history tracking (20 bound)      |
+|  - /web/wishlists/{id}/items/*         HTMX Quick Add, Preview & Edit Modal UI  |
 +---------------------------------------------------------------------------------+
                                        |
                                        v
@@ -75,6 +76,11 @@ wishlists domain service and security middleware to satisfy four primary goals:
   requests against Cross-Site Request Forgery (CSRF) and Cross-Origin attacks.
 - **Wishlist Routes (`wishenka.web.routes.wishlists`)**: Implements authenticated management APIs
   and public read projections.
+- **HTMX Wish Item UI Routes (`wishenka.web.routes.items_ui`)**: Defined in
+  [`wishenka/web/routes/items_ui.py`](../../wishenka/web/routes/items_ui.py). Serves server-rendered
+  Jinja2 + HTMX views and partials for the wishlist detail page, universal quick-add bar, live URL
+  preview card, detailed item creation/editing bottom-sheet modal, Reduction Lock enforcement, and
+  safe item archiving/restoration.
 
 ---
 
@@ -285,6 +291,131 @@ Viewing history allows users to re-access recently visited wishlists:
 
 ---
 
+### 9. Wish Item Quick-Add Bar, Live Preview & Detailed Edit Sheet (HTMX UI)
+
+The wish item UI in [`wishenka/web/routes/items_ui.py`](../../wishenka/web/routes/items_ui.py)
+provides a mobile-first HTMX workflow for adding, previewing, editing, archiving, and restoring
+wish items without full-page reloads.
+
+#### 9.1. Wishlist Detail View & Role-Based UI Gating (`wishlist_detail.html`)
+- **Endpoint**: `GET /web/wishlists/{wishlist_id}` (`view_wishlist_detail`).
+- **Template**: [`wishenka/web/templates/wishlist_detail.html`](../../wishenka/web/templates/wishlist_detail.html).
+- **Access Control**: Evaluates `can_edit_wishlist` via
+  `WishlistAccessPolicy.can_add_or_edit_item(ctx, wishlist)`.
+  - `can_edit_wishlist == True` only for active members (`OWNER`, `ADMIN`, `MEMBER`) when the
+    wishlist status is `active`.
+  - When `can_edit_wishlist` is false (anonymous guests, external gifters, or archived wishlists),
+    both `#quick-add-bar` and the per-card `.btn-edit-item` triggers are omitted from the DOM.
+  - All mutating UI endpoints enforce `_ensure_member_and_active`, returning `404 Not Found` for
+    non-members and `409 Conflict` if the wishlist is archived.
+
+#### 9.2. Universal Quick Add Bar (`partials/item_quick_add.html`)
+- **Template**: [`wishenka/web/templates/partials/item_quick_add.html`](../../wishenka/web/templates/partials/item_quick_add.html).
+- **Viewport Positioning**: Pinned to the bottom of the screen via `.quick-add-container` in
+  `static/miniapp.css` (`position: fixed; bottom: 0; padding-bottom: max(12px,
+  env(safe-area-inset-bottom))`). Interactive controls enforce `min-height: 44px` touch targets.
+- **Debounced Live Preview Trigger**: The input `#quick-add-input` (`name="raw_input"`) is bound
+  with:
+  - `hx-post="/web/wishlists/{{ wishlist.id }}/items/preview"`
+  - `hx-trigger="input changed delay:500ms, paste"`
+  - `hx-target="#quick-add-preview-target"` and `hx-swap="innerHTML"`
+- **Actions**:
+  - **«Добавить» (`#btn-quick-add`)**: Submits `#quick-add-form` via
+    `hx-post="/web/wishlists/{{ wishlist.id }}/items/quick"` (`quick_add_item`), appending the new
+    card to `#items-list` (`hx-swap="beforeend"`).
+  - **«Подробнее» (`#btn-quick-details`)**: Opens the creation bottom-sheet modal via
+    `hx-get="/web/wishlists/{{ wishlist.id }}/items/new"` (`get_new_item_modal`) with
+    `hx-include="#quick-add-form"`, transferring any typed text or previewed metadata into the
+    detailed form.
+
+#### 9.3. Live URL Preview Card & Graceful Fallback (`partials/item_preview_card.html`)
+- **Endpoint**: `POST /web/wishlists/{wishlist_id}/items/preview` (`preview_item_input`).
+- **Template**: [`wishenka/web/templates/partials/item_preview_card.html`](../../wishenka/web/templates/partials/item_preview_card.html).
+- **Plain Text Fast-Path**: When `UniversalInputClassifier.classify(raw_input)` returns
+  `InputType.PLAIN_TEXT`, the endpoint immediately returns an empty `200 OK` HTML response without
+  making outbound network requests.
+- **Rich URL Preview**: For `EXPLICIT_URL`, `IMPLICIT_URL`, and `COMPOSITE_SHARE`,
+  `ItemPreviewService.fetch_preview` extracts metadata and renders `#item-preview-card` with:
+  - Product thumbnail (`preview.image_url`), store badge (`preview.store_name`), cleaned title
+    (`preview.title`), and price (`preview.price`, `preview.currency`).
+  - Hidden `<input type="hidden">` fields (`link`, `price`, `currency`, `image_url`, `store_name`,
+    `title`) inside `#quick-add-form` so clicking «Добавить» persists all scraped fields in one tap,
+    and clicking «Подробнее» carries them into the creation modal.
+  - Dismiss button (`✕`, `.btn-preview-dismiss`) clearing `#quick-add-preview-target`.
+- **Graceful Fallback (`preview.is_fallback` or missing title)**: When scraping hits anti-bot
+  protection, timeouts, or SSRF restrictions, the preview card displays the sanitized URL and
+  store badge alongside an inline `<input type="text" name="title">` prompting the user to enter
+  the gift title manually or open «Подробнее».
+
+#### 9.4. Quick-Add Submission & HTMX Out-of-Band (`hx-swap-oob`) Updates
+- **Endpoint**: `POST /web/wishlists/{wishlist_id}/items/quick` (`quick_add_item`, quick-add route).
+- **Behavior**: Creates the wish item via `WishlistService.add_wish_item` (preferring explicit
+  `title` from preview/modal over `raw_input`, defaulting to `quantity=1` and `currency="RUB"`).
+- **Response (`201 Created`)**:
+  - Primary payload: Rendered [`partials/item_card.html`](../../wishenka/web/templates/partials/item_card.html)
+    appended to `#items-list`.
+  - Out-of-Band (`hx-swap-oob`) fragments in the same response:
+    1. `<div id="quick-add-preview-target" hx-swap-oob="innerHTML"></div>` — clears the preview
+       card.
+    2. `<input type="text" id="quick-add-input" ... value="" hx-swap-oob="true" />` — resets the
+       quick-add input field while preserving its HTMX attributes.
+    3. `<div id="empty-items-placeholder" hx-swap-oob="delete"></div>` — removes the empty-list
+       placeholder if present.
+    4. `<div id="item-modal-container" hx-swap-oob="innerHTML"></div>` — closes the creation modal
+       when submitted from `#item-detailed-form`.
+
+#### 9.5. Detailed Creation & Edit Bottom-Sheet Modal (`partials/item_edit_modal.html`)
+- **Template**: [`wishenka/web/templates/partials/item_edit_modal.html`](../../wishenka/web/templates/partials/item_edit_modal.html).
+- **Creation Mode (`is_edit=False`)**:
+  - Loaded via `GET /web/wishlists/{wishlist_id}/items/new` (`get_new_item_modal`, new-modal route).
+  - Prepopulates `title`, `link`, `price`, `currency`, and `image_url` from query parameters or
+    classifies `raw_input` via `UniversalInputClassifier`.
+  - Submits to `POST /web/wishlists/{wishlist_id}/items/quick`.
+- **Edit Mode (`is_edit=True`)**:
+  - Loaded via `GET /web/wishlists/{wishlist_id}/items/{item_id}/edit` (`get_edit_item_modal`).
+  - Submits to `POST /web/wishlists/{wishlist_id}/items/{item_id}/edit` (`submit_edit_item`),
+    replacing `#item-card-{item_id}` (`hx-swap="outerHTML"`) and closing `#item-modal-container`
+    via `hx-swap-oob="innerHTML"`.
+- **Supported Fields**: `title` (required, 1..255 chars), `link`, `price`, `currency` (`RUB`,
+  `USD`, `EUR`, `KZT`, `BYN`), `quantity` (1..1000 stepper), collaborative recipient targeting
+  (`recipient_user_id` dropdown and `recipient_name` input rendered only when
+  `is_collaborative=True`), `description` (up to 4000 chars), `image_url` (with live thumbnail),
+  `priority` (`low`, `medium`, `high`), and `category`.
+
+#### 9.6. Reduction Lock UI, HTTP 409 Recovery & Surprise Invariant
+- **Reduction Lock Calculation**:
+  $$\text{locked\_quantity} = \text{reserved\_quantity} + \text{received\_quantity}$$
+  $$\text{min\_quantity} = \max(1, \text{locked\_quantity})$$
+- **Client-Side Stepper & Banner**:
+  - `#item-quantity-input` sets `min="{{ min_quantity }}"` and the decrement button (`-`) stops at
+    `min_quantity`.
+  - When `locked_quantity > 0`, an amber informational banner is rendered:
+    `ℹ️ Забронировано дарителями: {locked_quantity} шт. Нельзя указать меньше забронированного объема.`
+- **Server-Side HTTP 409 Conflict Recovery**:
+  - If `POST /web/wishlists/{wishlist_id}/items/{item_id}/edit` catches
+    `CannotReduceQuantityBelowReservedError` (e.g., a gifter reserved units while the modal was
+    open, or the user manually typed a lower value), the server returns HTTP `409 Conflict` with
+    `partials/item_edit_modal.html`.
+  - The modal displays a `role="alert"` error message (`error_message`) and preserves all
+    user-submitted form values (`submitted_form`) without data loss.
+- **Surprise Invariant & XSS Protection**:
+  - Neither `get_edit_item_modal` nor `partials/item_card.html` ever exposes individual
+    `item.reservations` or gifter identities (`user_id`, `username`, `first_name`) to the
+    recipient; only the aggregate `locked_quantity` bound is surfaced.
+  - All templates rely on Jinja2 auto-escaping (`{{ item.title }}`, `{{ item.description }}`)
+    without `|safe` filters, preventing XSS injection from scraped or user-supplied strings.
+
+#### 9.7. Safe Item Archiving & Restoration via HTMX
+- **Archive**: `POST /web/wishlists/{wishlist_id}/items/{item_id}/archive` (`archive_item_ui`),
+  triggered from the edit modal with `hx-confirm`. Calls `WishlistService.archive_wish_item`
+  (preserving existing gifter reservations) and returns `200 OK` with OOB swaps deleting
+  `#item-card-{item_id}` (`hx-swap-oob="delete"`) and emptying `#item-modal-container`.
+- **Restore**: `POST /web/wishlists/{wishlist_id}/items/{item_id}/restore` (`restore_item_ui`).
+  Calls `WishlistService.restore_wish_item` (appending the item to the tail of active items while
+  retaining reservations) and returns `200 OK` with the rendered `partials/item_card.html`.
+
+---
+
 ## HTTP Endpoints Reference
 
 | Endpoint | Method | Auth | CSRF | Description |
@@ -307,6 +438,40 @@ Viewing history allows users to re-access recently visited wishlists:
 | `/api/history` | `GET` | Yes | No | Lists up to 20 recent wishlists. |
 | `/api/history/{id}` | `POST` | Yes | Yes | Records wishlist viewing in history. |
 | `/api/history` | `DELETE` | Yes | Yes | Clears viewing history for caller. |
+| `/web/wishlists/{wishlist_id}` | `GET` | Optional | No | Renders TMA wishlist detail HTML page. |
+| `/web/wishlists/{wishlist_id}/items/preview` | `POST` | Yes | Yes | Classifies input & renders preview card. |
+| `/web/wishlists/{wishlist_id}/items/quick` | `POST` | Yes | Yes | Quick-adds item & returns card + OOB reset. |
+| `/web/wishlists/{wishlist_id}/items/new` | `GET` | Yes | No | Renders prepopulated item creation modal. |
+| `/web/wishlists/{wishlist_id}/items/{item_id}/edit` | `GET` | Yes | No | Renders item edit modal with Reduction Lock. |
+| `/web/wishlists/{wishlist_id}/items/{item_id}/edit` | `POST` | Yes | Yes | Saves item edits or returns 409 modal. |
+| `/web/wishlists/{wishlist_id}/items/{item_id}/archive` | `POST` | Yes | Yes | Archives item & removes card via OOB swap. |
+| `/web/wishlists/{wishlist_id}/items/{item_id}/restore` | `POST` | Yes | Yes | Restores archived item & renders card. |
+
+---
+
+## Structured UI Observability Events
+
+The HTMX wish item UI router (`wishenka.web.items_ui`) emits structured telemetry records via
+`extra={...}`:
+
+| Event Name | Level | Context Attributes | Description |
+| :--- | :---: | :--- | :--- |
+| `ui_item_quick_add_preview` | `INFO` | `wishlist_id`, `actor_id`, `user_id`, `input_type`, `domain`, `store_name`, `is_fallback`, `duration_ms` | Universal input classified and preview or fallback rendered. |
+| `ui_item_quick_add_success` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `has_link`, `price`, `quantity` | Wish item created via Quick Add Bar or creation modal. |
+| `ui_item_edit_opened` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `mode`, `locked_quantity`, `is_collaborative` | Item modal opened (`mode="create"` or `mode="edit"`). |
+| `ui_reduction_lock_rendered` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `locked_quantity` | Edit modal rendered with active Reduction Lock (`locked_quantity > 0`). |
+| `ui_reduction_lock_rejected` | `WARNING` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `requested_quantity`, `locked_quantity` | Edit rejected (HTTP 409) due to quantity below locked reservations. |
+| `ui_item_edit_saved` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `quantity`, `has_recipient` | Wish item edits persisted via detailed edit modal. |
+| `ui_item_archived` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id` | Wish item archived via HTMX UI. |
+| `ui_item_restored` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id` | Archived wish item restored via HTMX UI. |
+
+### Telemetry Privacy Invariants
+- **Zero Raw URLs Logged**: Only the normalized hostname (`domain`, e.g., `ozon.ru`) and canonical
+  `store_name` are recorded; full URLs, paths, and query parameters are never written to logs.
+- **Zero Secrets or Capability Tokens**: `public_token`, `invite_token`, and session tokens are
+  never logged.
+- **Surprise Invariant in Logs**: UI logs record only aggregate `locked_quantity` and never log
+  gifter identities (`user_id`, `username`, or `first_name` of gifters).
 
 ---
 
@@ -360,3 +525,15 @@ The following settings configure the Mini App and web security layer:
 - **Cause**: The referenced wishlist does not exist or has been soft-deleted (`DELETED`).
 - **Solution**: Deleted wishlists cannot be favorited or viewed in history. Ensure the wishlist ID
   is valid and active.
+
+### 8. `409 Conflict` When Saving Item Quantity in Edit Modal (`ui_reduction_lock_rejected`)
+- **Cause**: The requested `quantity` is lower than `reserved_quantity + received_quantity` (e.g., a
+  gifter booked additional units while the edit sheet was open).
+- **Solution**: The server re-renders `partials/item_edit_modal.html` with HTTP 409, preserving all
+  edited fields and updating `min_quantity` to the current `locked_quantity`. Set `quantity` to at
+  least `locked_quantity` and submit again.
+
+### 9. Quick Add Bar (`#quick-add-bar`) Not Displayed on Wishlist Page
+- **Cause**: The caller is viewing the wishlist as a guest/gifter (not an `OWNER`, `ADMIN`, or
+  `MEMBER`), or the wishlist is in `ARCHIVED` status.
+- **Solution**: Authenticate as an active wishlist member and ensure the wishlist is `active`.

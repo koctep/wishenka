@@ -1,0 +1,74 @@
+<div id="item-preview-card" class="item-preview-card p-3 mb-2 border rounded bg-gray-50">
+    {% if preview.url %}
+    <input type="hidden" name="link" value="{{ preview.url }}" />
+    {% endif %}
+    {% if preview.price is not none %}
+    <input type="hidden" name="price" value="{{ preview.price }}" />
+    {% endif %}
+    <input type="hidden" name="currency" value="{{ preview.currency or 'RUB' }}" />
+    {% if preview.image_url %}
+    <input type="hidden" name="image_url" value="{{ preview.image_url }}" />
+    {% endif %}
+    {% if preview.store_name %}
+    <input type="hidden" name="store_name" value="{{ preview.store_name }}" />
+    {% endif %}
+
+    <div class="preview-header flex justify-between items-start gap-2">
+        <div class="flex items-start gap-3 flex-1">
+            {% if preview.image_url %}
+            <img src="{{ preview.image_url }}"
+                 alt="{{ preview.title or preview.store_name or 'Preview' }}"
+                 class="w-12 h-12 object-cover rounded" />
+            {% endif %}
+            <div class="preview-info flex-1">
+                {% if preview.store_name %}
+                <span class="badge badge-store text-xs">{{ preview.store_name }}</span>
+                {% endif %}
+
+                {% if preview.is_fallback or not preview.title %}
+                <div class="preview-fallback mt-1">
+                    {% if preview.url %}
+                    <div class="text-xs text-gray-500 break-all">{{ preview.url }}</div>
+                    {% endif %}
+                    <p class="text-xs text-amber-700 mt-1">
+                        Заполните название желания вручную или нажмите «Подробнее».
+                    </p>
+                    <input type="text"
+                           name="title"
+                           value="{{ preview.title or '' }}"
+                           placeholder="Введите название подарка..."
+                           class="mt-1 w-full text-sm" />
+                </div>
+                {% else %}
+                <input type="hidden" name="title" value="{{ preview.title }}" />
+                <div class="preview-title font-semibold text-sm mt-1">{{ preview.title }}</div>
+                {% if preview.price is not none %}
+                <div class="preview-price text-xs font-bold text-primary mt-1">
+                    {{ preview.price }} {{ preview.currency or "RUB" }}
+                </div>
+                {% endif %}
+                {% endif %}
+            </div>
+        </div>
+        <button type="button"
+                class="btn-preview-dismiss text-gray-400 text-sm"
+                aria-label="Закрыть предпросмотр"
+                onclick="document.getElementById('quick-add-preview-target').innerHTML = ''">
+            ✕
+        </button>
+    </div>
+
+    <div class="preview-actions flex justify-end gap-2 mt-2 pt-2 border-t">
+        <button type="button"
+                class="btn-preview-details text-xs underline"
+                hx-get="/web/wishlists/{{ wishlist_id }}/items/new"
+                hx-include="#quick-add-form"
+                hx-target="#item-modal-container"
+                hx-swap="innerHTML">
+            Подробнее
+        </button>
+        <button type="submit" class="btn-preview-submit text-xs font-semibold">
+            Добавить
+        </button>
+    </div>
+</div>
