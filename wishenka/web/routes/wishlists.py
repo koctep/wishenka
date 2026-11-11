@@ -59,6 +59,8 @@ async def execute[T](request: Request, action: Callable[[WishlistService], Await
                 extra={"event": "wishlist_permission_denied", "operation": operation},
             )
         raise HTTPException(status_code=404, detail="Wishlist not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except WishlistArchivedError as exc:
         logger.warning(
             "Wishlist operation on archived list rejected: %s",
@@ -87,7 +89,12 @@ def require_member(wishlist: Wishlist, user: AuthenticatedUser, manager: bool = 
         raise HTTPException(status_code=404, detail="Wishlist not found")
 
 
-def projection(wishlist: Wishlist, user: AuthenticatedUser | None, public: bool) -> dict[str, Any]:
+def projection(
+    wishlist: Wishlist,
+    user: AuthenticatedUser | None,
+    public: bool,
+    is_favorite: bool | None = None,
+) -> dict[str, Any]:
     """Return only fields permitted for the caller, never reservation data publicly."""
     result: dict[str, Any] = {
         "id": wishlist.id,
@@ -118,7 +125,14 @@ def projection(wishlist: Wishlist, user: AuthenticatedUser | None, public: bool)
         )
     if not public and user is not None:
         ctx = WishlistAccessPolicy.resolve_context(user, wishlist)
-        result["role"] = ctx.role.value if ctx.role else None
+        if ctx.role:
+            result["role"] = ctx.role.value
+        elif is_favorite:
+            result["role"] = "favorite"
+        else:
+            result["role"] = None
+        if is_favorite is not None:
+            result["is_favorite"] = is_favorite
         result["members"] = member_projection(wishlist)
         if ctx.is_admin:
             result["share_token"] = wishlist.public_token
@@ -146,7 +160,7 @@ async def create_wishlist(request: Request, body: WishlistInput, user: User) -> 
                 "user_id": user.telegram_id,
             },
         )
-        return projection(wl, user, False)
+        return projection(wl, user, False, is_favorite=False)
 
     return await execute(request, action)
 
@@ -157,7 +171,12 @@ async def list_wishlists(
 ) -> list[dict[str, Any]]:
     async def action(service: WishlistService) -> list[dict[str, Any]]:
         return [
-            projection(wl, user, False)
+            projection(
+                wl,
+                user,
+                False,
+                is_favorite=service.has_favorite(user.telegram_id, wl.id),
+            )
             for wl in service._wishlists.values()
             if WishlistAccessPolicy.resolve_context(user, wl).is_member
             and wl.status != WishlistStatus.DELETED
@@ -172,7 +191,196 @@ async def get_wishlist(request: Request, wishlist_id: int, user: User) -> dict[s
     async def action(service: WishlistService) -> dict[str, Any]:
         wl = await service.get_wishlist_by_id(wishlist_id)
         require_member(wl, user)
-        return projection(wl, user, False)
+        return projection(
+            wl,
+            user,
+            False,
+            is_favorite=service.has_favorite(user.telegram_id, wl.id),
+        )
+
+    return await execute(request, action)
+
+
+@router.get("/api/favorites")
+async def list_favorites(request: Request, user: User) -> list[dict[str, Any]]:
+    async def action(service: WishlistService) -> list[dict[str, Any]]:
+        favs = await service.list_favorites(user)
+        result = []
+        for wl in favs:
+            ctx = WishlistAccessPolicy.resolve_context(user, wl)
+            role = ctx.role.value if ctx.role else "favorite"
+            result.append(
+                {
+                    "id": wl.id,
+                    "name": wl.title,
+                    "description": wl.description,
+                    "event_title": wl.event_title,
+                    "event_date": wl.event_date.isoformat() if wl.event_date else None,
+                    "status": wl.status.value,
+                    "role": role,
+                    "is_favorite": True,
+                }
+            )
+        logger.info(
+            "Favorites listed for user %s (count=%s)",
+            user.telegram_id,
+            len(result),
+            extra={
+                "event": "favorites_listed",
+                "user_id": user.telegram_id,
+                "count": len(result),
+            },
+        )
+        return result
+
+    return await execute(request, action)
+
+
+@router.post("/api/favorites/{wishlist_id}")
+async def add_favorite(request: Request, wishlist_id: int, user: User) -> dict[str, Any]:
+    async def action(service: WishlistService) -> dict[str, Any]:
+        wl = service._wishlists.get(wishlist_id)
+        if wl is None or wl.status == WishlistStatus.DELETED:
+            if wl is not None and wl.status == WishlistStatus.DELETED:
+                logger.warning(
+                    "Favorite attempt on deleted wishlist %s by user %s denied",
+                    wishlist_id,
+                    user.telegram_id,
+                    extra={
+                        "event": "favorite_deleted_wishlist_denied",
+                        "wishlist_id": wishlist_id,
+                        "user_id": user.telegram_id,
+                    },
+                )
+            raise WishlistNotFoundError(f"Wishlist {wishlist_id} not found")
+        if wl.owner_id == user.telegram_id:
+            logger.warning(
+                "Self-favoriting attempt by user %s on wishlist %s denied",
+                user.telegram_id,
+                wishlist_id,
+                extra={
+                    "event": "favorite_own_wishlist_denied",
+                    "wishlist_id": wishlist_id,
+                    "user_id": user.telegram_id,
+                },
+            )
+            raise ValueError("Cannot favorite own wishlist")
+        await service.add_favorite(user, wishlist_id)
+        logger.info(
+            "Wishlist %s favorited by user %s",
+            wishlist_id,
+            user.telegram_id,
+            extra={
+                "event": "favorite_added",
+                "wishlist_id": wishlist_id,
+                "user_id": user.telegram_id,
+            },
+        )
+        return {"status": "favorited", "wishlist_id": wishlist_id}
+
+    return await execute(request, action)
+
+
+@router.delete("/api/favorites/{wishlist_id}")
+async def remove_favorite(request: Request, wishlist_id: int, user: User) -> dict[str, Any]:
+    async def action(service: WishlistService) -> dict[str, Any]:
+        await service.remove_favorite(user, wishlist_id)
+        logger.info(
+            "Wishlist %s unfavorited by user %s",
+            wishlist_id,
+            user.telegram_id,
+            extra={
+                "event": "favorite_removed",
+                "wishlist_id": wishlist_id,
+                "user_id": user.telegram_id,
+            },
+        )
+        return {"status": "removed", "wishlist_id": wishlist_id}
+
+    return await execute(request, action)
+
+
+@router.get("/api/history")
+async def get_history(request: Request, user: User) -> list[dict[str, Any]]:
+    async def action(service: WishlistService) -> list[dict[str, Any]]:
+        history_entries = await service.get_history(user, limit=20)
+        result = []
+        for wl, viewed_at in history_entries:
+            ctx = WishlistAccessPolicy.resolve_context(user, wl)
+            is_fav = service.has_favorite(user.telegram_id, wl.id)
+            role = ctx.role.value if ctx.role else ("favorite" if is_fav else None)
+            result.append(
+                {
+                    "id": wl.id,
+                    "name": wl.title,
+                    "description": wl.description,
+                    "event_title": wl.event_title,
+                    "event_date": wl.event_date.isoformat() if wl.event_date else None,
+                    "viewed_at": viewed_at.isoformat(),
+                    "is_favorite": is_fav,
+                    "role": role,
+                }
+            )
+        logger.info(
+            "Viewing history listed for user %s (count=%s)",
+            user.telegram_id,
+            len(result),
+            extra={
+                "event": "view_history_listed",
+                "user_id": user.telegram_id,
+                "count": len(result),
+            },
+        )
+        return result
+
+    return await execute(request, action)
+
+
+@router.post("/api/history/{wishlist_id}")
+async def record_view(request: Request, wishlist_id: int, user: User) -> dict[str, Any]:
+    async def action(service: WishlistService) -> dict[str, Any]:
+        wl = service._wishlists.get(wishlist_id)
+        if wl is None or wl.status == WishlistStatus.DELETED:
+            if wl is not None and wl.status == WishlistStatus.DELETED:
+                logger.warning(
+                    "View history record denied: wishlist %s is deleted",
+                    wishlist_id,
+                    extra={
+                        "event": "favorite_deleted_wishlist_denied",
+                        "wishlist_id": wishlist_id,
+                        "user_id": user.telegram_id,
+                    },
+                )
+            raise WishlistNotFoundError(f"Wishlist {wishlist_id} not found")
+        await service.record_view(user, wishlist_id)
+        logger.info(
+            "Wishlist %s view recorded for user %s",
+            wishlist_id,
+            user.telegram_id,
+            extra={
+                "event": "view_history_recorded",
+                "wishlist_id": wishlist_id,
+                "user_id": user.telegram_id,
+            },
+        )
+        return {"status": "recorded", "wishlist_id": wishlist_id}
+
+    return await execute(request, action)
+
+
+@router.delete("/api/history")
+async def clear_history(request: Request, user: User) -> dict[str, Any]:
+    async def action(service: WishlistService) -> dict[str, Any]:
+        await service.clear_history(user)
+        logger.info(
+            "Viewing history cleared for user %s",
+            user.telegram_id,
+            extra={
+                "event": "view_history_cleared",
+                "user_id": user.telegram_id,
+            },
+        )
+        return {"status": "cleared"}
 
     return await execute(request, action)
 

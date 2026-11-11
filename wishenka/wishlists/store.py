@@ -16,8 +16,10 @@ from wishenka.items.models import ItemPriority
 from wishenka.wishlists.models import (
     Reservation,
     ReservationStatus,
+    ViewHistoryEntry,
     WishItem,
     Wishlist,
+    WishlistFavorite,
     WishlistMember,
     WishlistRole,
     WishlistStatus,
@@ -99,6 +101,16 @@ class WishlistStore:
                 "(name TEXT PRIMARY KEY, value INTEGER NOT NULL)",
                 "CREATE UNIQUE INDEX IF NOT EXISTS wl_member_identity "
                 "ON wl_members(wishlist_id, json_extract(payload, '$.user_id'))",
+                "CREATE TABLE IF NOT EXISTS wl_favorites ("
+                "user_id INTEGER NOT NULL, "
+                "wishlist_id INTEGER NOT NULL REFERENCES wl_lists(id) ON DELETE CASCADE, "
+                "created_at TEXT NOT NULL, PRIMARY KEY(user_id, wishlist_id))",
+                "CREATE TABLE IF NOT EXISTS wl_view_history ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, "
+                "wishlist_id INTEGER NOT NULL REFERENCES wl_lists(id) ON DELETE CASCADE, "
+                "viewed_at TEXT NOT NULL)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS wl_view_history_user_wl "
+                "ON wl_view_history(user_id, wishlist_id)",
             ):
                 await conn.exec_driver_sql(statement)
 
@@ -126,15 +138,50 @@ class WishlistStore:
                     service._reservations[obj.id] = obj
                     obj.wish_item = service._items[obj.wish_item_id]
                     obj.wish_item.reservations.append(obj)
+        fav_rows = (
+            await conn.execute(text("SELECT user_id, wishlist_id, created_at FROM wl_favorites"))
+        ).all()
+        for f_row in fav_rows:
+            fav = WishlistFavorite(
+                user_id=f_row[0],
+                wishlist_id=f_row[1],
+                created_at=datetime.fromisoformat(f_row[2]),
+            )
+            service._favorites[(fav.user_id, fav.wishlist_id)] = fav
+
+        hist_rows = (
+            await conn.execute(
+                text(
+                    "SELECT id, user_id, wishlist_id, viewed_at "
+                    "FROM wl_view_history ORDER BY id ASC"
+                )
+            )
+        ).all()
+        for h_row in hist_rows:
+            entry = ViewHistoryEntry(
+                id=h_row[0],
+                user_id=h_row[1],
+                wishlist_id=h_row[2],
+                viewed_at=datetime.fromisoformat(h_row[3]),
+            )
+            service._view_history.append(entry)
+
         counters: dict[str, int] = dict(
             (await conn.execute(text("SELECT name, value FROM wl_counters"))).all()
         )
-        for name in ("wishlist", "member", "item", "reservation"):
+        for name in ("wishlist", "member", "item", "reservation", "view_history"):
             setattr(service, f"_next_{name}_id", counters.get(name, 0))
         return service
 
     async def _write(self, conn: AsyncConnection, service: WishlistService) -> None:
-        for table in ("wl_reservations", "wl_items", "wl_members", "wl_lists"):
+        for table in (
+            "wl_reservations",
+            "wl_items",
+            "wl_members",
+            "wl_favorites",
+            "wl_view_history",
+            "wl_lists",
+        ):
             await conn.execute(text(f"DELETE FROM {table}"))
         for wl in service._wishlists.values():
             await conn.execute(
@@ -164,10 +211,37 @@ class WishlistStore:
                             "payload": _dump(reservation, {"wish_item"}),
                         },
                     )
-        for name in ("wishlist", "member", "item", "reservation"):
+        for fav in service._favorites.values():
+            if fav.wishlist_id in service._wishlists:
+                await conn.execute(
+                    text(
+                        "INSERT INTO wl_favorites (user_id, wishlist_id, created_at) "
+                        "VALUES (:user_id, :wishlist_id, :created_at)"
+                    ),
+                    {
+                        "user_id": fav.user_id,
+                        "wishlist_id": fav.wishlist_id,
+                        "created_at": fav.created_at.isoformat(),
+                    },
+                )
+        for entry in service._view_history:
+            if entry.wishlist_id in service._wishlists:
+                await conn.execute(
+                    text(
+                        "INSERT INTO wl_view_history (id, user_id, wishlist_id, viewed_at) "
+                        "VALUES (:id, :user_id, :wishlist_id, :viewed_at)"
+                    ),
+                    {
+                        "id": entry.id if entry.id > 0 else None,
+                        "user_id": entry.user_id,
+                        "wishlist_id": entry.wishlist_id,
+                        "viewed_at": entry.viewed_at.isoformat(),
+                    },
+                )
+        for name in ("wishlist", "member", "item", "reservation", "view_history"):
             await conn.execute(
                 text("INSERT OR REPLACE INTO wl_counters VALUES (:name, :value)"),
-                {"name": name, "value": getattr(service, f"_next_{name}_id")},
+                {"name": name, "value": getattr(service, f"_next_{name}_id", 0)},
             )
 
     async def execute(self, operation: Callable[[WishlistService], Awaitable[T]]) -> T:

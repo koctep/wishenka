@@ -59,21 +59,140 @@ function sharePanel(token, prefix, title) {
   }));
   return panel;
 }
-async function showHome() {
-  root.replaceChildren(node('h1', 'My wishlists'));
+function roleLabel(role) {
+  switch (role) {
+    case 'owner': return 'Владелец';
+    case 'admin': return 'Администратор';
+    case 'member': return 'Соавтор';
+    case 'favorite': return 'Избранное';
+    default: return role;
+  }
+}
+function renderBadge(role) {
+  return node('span', roleLabel(role), {class: `badge badge-${role}`});
+}
+function wishlistCard(list, onClick) {
+  const card = node('div', '', {class: 'wishlist-card'});
+  const titleBtn = button(list.name || 'Untitled wishlist', onClick);
+  card.append(titleBtn);
+  if (list.role) {
+    card.append(renderBadge(list.role));
+  }
+  return card;
+}
+async function showHistory() {
+  root.replaceChildren(
+    button('Back', showHome),
+    node('h1', 'Viewing history')
+  );
   status('Loading');
   try {
-    const lists = await api('/api/wishlists');
-    status(lists.length ? '' : 'No wishlists yet');
-    lists.forEach(list => {
-      root.append(button(list.name || 'Untitled wishlist', () => showList(list.id)));
-    });
-    root.append(button('Create wishlist', async () => {
+    const history = await api('/api/history');
+    if (history.length > 0) {
+      root.append(button('Clear history', async () => {
+        try {
+          await api('/api/history', {method: 'DELETE'});
+          await showHistory();
+          status('History cleared');
+        } catch (_) { status('Could not clear history'); }
+      }));
+    }
+    const historySection = node('section', '', {'aria-label': 'Viewing history', role: 'region'});
+    if (history.length === 0) {
+      historySection.append(node('p', 'No viewing history yet'));
+    } else {
+      history.forEach(item => {
+        const row = node('div', '', {class: 'history-item'});
+        row.append(button(item.name || 'Untitled wishlist', () => showList(item.id)));
+        if (item.viewed_at) {
+          const dateStr = new Date(item.viewed_at).toLocaleString();
+          row.append(node('span', ` Viewed: ${dateStr} `, {class: 'history-time'}));
+        }
+        if (item.role) {
+          row.append(renderBadge(item.role));
+        }
+        historySection.append(row);
+      });
+    }
+    root.append(historySection);
+    status('');
+  } catch (_) { status('Could not load history'); }
+}
+async function showHome() {
+  root.replaceChildren(node('h1', 'Wishlists'));
+  const nav = node('nav', '', {class: 'top-nav'});
+  nav.append(
+    button('Create wishlist', async () => {
       try {
         const list = await api('/api/wishlists', {method: 'POST', body: '{}'});
         await showList(list.id);
       } catch (_) { status('Could not create wishlist. Try again.'); }
-    }));
+    }),
+    button('Viewing history', showHistory)
+  );
+  root.append(nav);
+  status('Loading');
+  try {
+    const [lists, favs] = await Promise.all([
+      api('/api/wishlists'),
+      api('/api/favorites').catch(() => [])
+    ]);
+
+    const myLists = lists.filter(l => l.role === 'owner');
+    const collabLists = lists.filter(l => ['admin', 'member'].includes(l.role));
+
+    // My wishlists section
+    const mySection = node('section', '', {
+      'aria-label': 'My wishlists',
+      role: 'region',
+      class: 'wishlist-section'
+    });
+    mySection.append(node('h2', 'My wishlists'));
+    if (myLists.length === 0) {
+      mySection.append(node('p', 'No personal wishlists yet', {class: 'empty-notice'}));
+    } else {
+      myLists.forEach(l => mySection.append(wishlistCard(l, () => showList(l.id))));
+    }
+    root.append(mySection);
+
+    // Collaborating section
+    const collabSection = node('section', '', {
+      'aria-label': 'Collaborating',
+      role: 'region',
+      class: 'wishlist-section'
+    });
+    collabSection.append(node('h2', 'Collaborating'));
+    if (collabLists.length === 0) {
+      collabSection.append(node('p', 'No collaborative wishlists yet', {class: 'empty-notice'}));
+    } else {
+      collabLists.forEach(l => collabSection.append(wishlistCard(l, () => showList(l.id))));
+    }
+    root.append(collabSection);
+
+    // Favorites section
+    const favSection = node('section', '', {
+      'aria-label': 'Favorites',
+      role: 'region',
+      class: 'wishlist-section'
+    });
+    favSection.append(node('h2', 'Favorites'));
+    if (favs.length === 0) {
+      favSection.append(node('p', 'No favorites yet', {class: 'empty-notice'}));
+    } else {
+      favs.forEach(l => {
+        const card = wishlistCard(l, () => showList(l.id));
+        card.append(button('Remove', async () => {
+          try {
+            await api(`/api/favorites/${l.id}`, {method: 'DELETE'});
+            await showHome();
+            status('Removed from favorites');
+          } catch (_) { status('Could not remove from favorites'); }
+        }));
+        favSection.append(card);
+      });
+    }
+    root.append(favSection);
+    status('');
   } catch (_) { status('Could not load wishlists. Check your session and try again.'); }
 }
 function settingsForm(list) {
@@ -138,8 +257,27 @@ function memberControls(list) {
 async function showList(id) {
   status('Loading');
   try {
+    api(`/api/history/${id}`, {method: 'POST'}).catch(() => {});
     const list = await api(`/api/wishlists/${id}`);
     root.replaceChildren(button('Back', showHome), node('h1', list.name || 'Untitled wishlist'));
+    if (list.role) {
+      root.append(renderBadge(list.role));
+    }
+    if (list.role !== 'owner') {
+      const isFav = Boolean(list.is_favorite);
+      root.append(button(isFav ? 'Remove from favorites' : 'Add to favorites', async () => {
+        try {
+          if (isFav) {
+            await api(`/api/favorites/${list.id}`, {method: 'DELETE'});
+            status('Removed from favorites');
+          } else {
+            await api(`/api/favorites/${list.id}`, {method: 'POST'});
+            status('Added to favorites');
+          }
+          await showList(list.id);
+        } catch (_) { status('Could not update favorites'); }
+      }));
+    }
     root.append(node('p', list.description || ''), node('h2', 'Wishes'));
     for (const item of list.items || []) root.append(node('p', item.title));
     root.append(node('p', 'Adding wishes will be available in a future update.'));

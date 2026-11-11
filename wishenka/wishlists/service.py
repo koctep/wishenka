@@ -29,8 +29,10 @@ from wishenka.wishlists.exceptions import (
 from wishenka.wishlists.models import (
     Reservation,
     ReservationStatus,
+    ViewHistoryEntry,
     WishItem,
     Wishlist,
+    WishlistFavorite,
     WishlistFormat,
     WishlistMember,
     WishlistRole,
@@ -77,6 +79,9 @@ class WishlistService:
         self._next_member_id: int = 0
         self._next_item_id: int = 0
         self._next_reservation_id: int = 0
+        self._favorites: dict[tuple[int, int], WishlistFavorite] = {}
+        self._view_history: list[ViewHistoryEntry] = []
+        self._next_view_history_id: int = 0
 
     @property
     def concurrency_coordinator(self) -> ItemConcurrencyCoordinator:
@@ -1693,6 +1698,193 @@ class WishlistService:
             },
         )
         return new_token
+
+    def has_favorite(self, user_id: int, wishlist_id: int) -> bool:
+        """Check synchronously if a user has favorited a wishlist."""
+        return (user_id, wishlist_id) in self._favorites
+
+    async def is_favorite(self, user: AuthenticatedUser | None, wishlist_id: int) -> bool:
+        """Check if a user has favorited a wishlist."""
+        if user is None:
+            return False
+        return self.has_favorite(user.telegram_id, wishlist_id)
+
+    async def add_favorite(self, user: AuthenticatedUser, wishlist_id: int) -> WishlistFavorite:
+        """Add a wishlist to user's favorites."""
+        wl = self._wishlists.get(wishlist_id)
+        if wl is None or wl.status == WishlistStatus.DELETED:
+            if wl is not None and wl.status == WishlistStatus.DELETED:
+                logger.warning(
+                    "Favorite attempt on deleted wishlist %s by user %s denied",
+                    wishlist_id,
+                    user.telegram_id,
+                    extra={
+                        "event": "favorite_deleted_wishlist_denied",
+                        "wishlist_id": wishlist_id,
+                        "user_id": user.telegram_id,
+                    },
+                )
+            raise WishlistNotFoundError(f"Wishlist {wishlist_id} not found")
+        if wl.owner_id == user.telegram_id:
+            logger.warning(
+                "Self-favoriting attempt by user %s on wishlist %s denied",
+                user.telegram_id,
+                wishlist_id,
+                extra={
+                    "event": "favorite_own_wishlist_denied",
+                    "wishlist_id": wishlist_id,
+                    "user_id": user.telegram_id,
+                },
+            )
+            raise ValueError("Cannot favorite own wishlist")
+
+        key = (user.telegram_id, wishlist_id)
+        fav = self._favorites.get(key)
+        if fav is None:
+            fav = WishlistFavorite(user_id=user.telegram_id, wishlist_id=wishlist_id)
+            self._favorites[key] = fav
+            logger.info(
+                "Wishlist %s favorited by user %s",
+                wishlist_id,
+                user.telegram_id,
+                extra={
+                    "event": "favorite_added",
+                    "wishlist_id": wishlist_id,
+                    "user_id": user.telegram_id,
+                },
+            )
+        return fav
+
+    async def remove_favorite(self, user: AuthenticatedUser, wishlist_id: int) -> None:
+        """Remove a wishlist from user's favorites."""
+        key = (user.telegram_id, wishlist_id)
+        if self._favorites.pop(key, None) is not None:
+            logger.info(
+                "Wishlist %s unfavorited by user %s",
+                wishlist_id,
+                user.telegram_id,
+                extra={
+                    "event": "favorite_removed",
+                    "wishlist_id": wishlist_id,
+                    "user_id": user.telegram_id,
+                },
+            )
+
+    async def list_favorites(self, user: AuthenticatedUser) -> list[Wishlist]:
+        """List user's favorited wishlists in reverse-chronological order."""
+        user_favs = [f for f in self._favorites.values() if f.user_id == user.telegram_id]
+        user_favs.sort(key=lambda f: f.created_at, reverse=True)
+        result: list[Wishlist] = []
+        for f in user_favs:
+            wl = self._wishlists.get(f.wishlist_id)
+            if wl is not None and wl.status != WishlistStatus.DELETED:
+                result.append(wl)
+        logger.info(
+            "Favorites listed for user %s (count=%s)",
+            user.telegram_id,
+            len(result),
+            extra={
+                "event": "favorites_listed",
+                "user_id": user.telegram_id,
+                "count": len(result),
+            },
+        )
+        return result
+
+    async def record_view(self, user: AuthenticatedUser, wishlist_id: int) -> ViewHistoryEntry:
+        """Record or update a wishlist view event for user, bounding history to 20 entries."""
+        wl = self._wishlists.get(wishlist_id)
+        if wl is None or wl.status == WishlistStatus.DELETED:
+            if wl is not None and wl.status == WishlistStatus.DELETED:
+                logger.warning(
+                    "View history record denied: wishlist %s is deleted",
+                    wishlist_id,
+                    extra={
+                        "event": "favorite_deleted_wishlist_denied",
+                        "wishlist_id": wishlist_id,
+                        "user_id": user.telegram_id,
+                    },
+                )
+            raise WishlistNotFoundError(f"Wishlist {wishlist_id} not found")
+
+        now = datetime.now(UTC)
+        existing = next(
+            (
+                e
+                for e in self._view_history
+                if e.user_id == user.telegram_id and e.wishlist_id == wishlist_id
+            ),
+            None,
+        )
+        if existing is not None:
+            self._view_history.remove(existing)
+            existing.viewed_at = now
+            self._view_history.append(existing)
+            entry = existing
+        else:
+            self._next_view_history_id += 1
+            entry = ViewHistoryEntry(
+                id=self._next_view_history_id,
+                user_id=user.telegram_id,
+                wishlist_id=wishlist_id,
+                viewed_at=now,
+            )
+            self._view_history.append(entry)
+
+        user_entries = [e for e in self._view_history if e.user_id == user.telegram_id]
+        if len(user_entries) > 20:
+            user_entries.sort(key=lambda e: e.viewed_at)
+            to_remove = {e.id for e in user_entries[:-20]}
+            self._view_history = [e for e in self._view_history if e.id not in to_remove]
+
+        logger.info(
+            "Wishlist %s view recorded for user %s",
+            wishlist_id,
+            user.telegram_id,
+            extra={
+                "event": "view_history_recorded",
+                "wishlist_id": wishlist_id,
+                "user_id": user.telegram_id,
+            },
+        )
+        return entry
+
+    async def get_history(
+        self, user: AuthenticatedUser, limit: int = 20
+    ) -> list[tuple[Wishlist, datetime]]:
+        """Retrieve up to limit recent wishlists viewed by user, reverse-chronologically."""
+        user_entries = [e for e in self._view_history if e.user_id == user.telegram_id]
+        user_entries.sort(key=lambda e: e.viewed_at, reverse=True)
+        result: list[tuple[Wishlist, datetime]] = []
+        for e in user_entries:
+            wl = self._wishlists.get(e.wishlist_id)
+            if wl is not None and wl.status != WishlistStatus.DELETED:
+                result.append((wl, e.viewed_at))
+                if len(result) >= limit:
+                    break
+        logger.info(
+            "Viewing history listed for user %s (count=%s)",
+            user.telegram_id,
+            len(result),
+            extra={
+                "event": "view_history_listed",
+                "user_id": user.telegram_id,
+                "count": len(result),
+            },
+        )
+        return result
+
+    async def clear_history(self, user: AuthenticatedUser) -> None:
+        """Clear all viewing history entries for user."""
+        self._view_history = [e for e in self._view_history if e.user_id != user.telegram_id]
+        logger.info(
+            "Viewing history cleared for user %s",
+            user.telegram_id,
+            extra={
+                "event": "view_history_cleared",
+                "user_id": user.telegram_id,
+            },
+        )
 
 
 # Wrap every public async domain operation so callers of the configured service share

@@ -140,3 +140,12 @@ class WishlistAccessPolicy:
         if item.is_archived:
             return False
         return not WishlistAccessPolicy.is_recipient(user, item)
+
+    @staticmethod
+    def can_favorite(user: AuthenticatedUser | None, wishlist: Wishlist) -> bool:
+        """Check if user can favorite the wishlist (not owner, active and non-deleted)."""
+        if user is None:
+            return False
+        if wishlist.status == WishlistStatus.DELETED:
+            return False
+        return wishlist.owner_id != user.telegram_id

@@ -6,3 +6,21 @@ button { border: 1px solid #74283f; border-radius: .5rem; background: #fff; padd
 input { max-width: 100%; width: 100%; border: 1px solid #888; border-radius: .3rem; }
 label { display: block; margin: .5rem 0; }
 #status { min-height: 1.5rem; font-weight: 600; }
+.badge {
+  display: inline-block;
+  padding: .2rem .5rem;
+  border-radius: .3rem;
+  font-size: .8rem;
+  font-weight: 600;
+  margin-left: .5rem;
+  vertical-align: middle;
+}
+.badge-owner { background: #e0f2fe; color: #0369a1; }
+.badge-admin { background: #fef3c7; color: #b45309; }
+.badge-member { background: #dcfce7; color: #15803d; }
+.badge-favorite { background: #fce7f3; color: #be185d; }
+.top-nav { margin: .5rem 0; display: flex; gap: .5rem; flex-wrap: wrap; }
+.wishlist-card { display: flex; align-items: center; margin: .4rem 0; flex-wrap: wrap; }
+.history-item { display: flex; align-items: center; margin: .4rem 0; flex-wrap: wrap; }
+.history-time { font-size: .85rem; color: #666; margin-left: .5rem; }
+.empty-notice { color: #888; font-style: italic; }

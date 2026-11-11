@@ -47,6 +47,8 @@ wishlists domain service and security middleware to satisfy four primary goals:
 |  - /api/wishlists/{id}/members         Member administration & role management  |
 |  - /api/wishlists/{id}/invite/reset    Collaborator invite token rotation       |
 |  - /api/invitations/preview, accept    Collaborator onboarding flow             |
+|  - GET, POST, DELETE /api/favorites    Favorites management & role badges       |
+|  - GET, POST, DELETE /api/history      Viewing history tracking (20 bound)      |
 +---------------------------------------------------------------------------------+
                                        |
                                        v
@@ -209,18 +211,102 @@ Public links allow gift givers to view items and make reservations without colla
 
 ---
 
+### 6. Categorized Home Screen Sections & Role Badges
+
+The Mini App home screen organizes wishlists into three distinct semantic sections (`<section>`
+elements with `role="region"` and accessible `aria-label` attributes):
+
+1. **"My wishlists"** (`aria-label="My wishlists"`): Displays wishlists where the authenticated
+   user is the owner (`role: "owner"`). If empty, shows "No personal wishlists yet".
+2. **"Collaborating"** (`aria-label="Collaborating"`): Displays wishlists where the authenticated
+   user is an active collaborator with `role: "admin"` or `role: "member"`. If empty, shows
+   "No collaborative wishlists yet".
+3. **"Favorites"** (`aria-label="Favorites"`): Displays wishlists saved by the user. If empty,
+   shows "No favorites yet". Each card includes an explicit "Remove" button for quick unfavoriting.
+
+#### Role Badges & Precedence Rules
+
+Each wishlist card displays a localized visual badge indicating the user's role on that list:
+- `owner` $\rightarrow$ **«Владелец»** (`badge badge-owner`)
+- `admin` $\rightarrow$ **«Администратор»** (`badge badge-admin`)
+- `member` $\rightarrow$ **«Соавтор»** (`badge badge-member`)
+- `favorite` $\rightarrow$ **«Избранное»** (`badge badge-favorite`)
+
+**Role Precedence Rule**:
+```text
+owner > admin > member > favorite
+```
+If an active collaborator (`admin` or `member`) also adds that wishlist to their favorites, the
+collaborative operational role strictly takes precedence over `favorite` in both the card badge and
+the home section placement. The wishlist appears in the "Collaborating" section with their
+collaborator badge (`Администратор` or `Соавтор`).
+
+---
+
+### 7. Favorites Management & Zero-Leak Guarantees
+
+The Favorites feature provides quick access to external wishlists of interest without requiring
+collaborator membership:
+
+- **Adding to Favorites**: Calling `POST /api/favorites/{wishlist_id}` with session and CSRF
+  adds the wishlist. On the wishlist detail screen (`showList`), a toggle button displays
+  "Add to favorites" or "Remove from favorites".
+- **Self-Favoriting Guard**: Users cannot favorite their own wishlists (`wl.owner_id == user_id`).
+  Any self-favoriting attempt raises `ValueError`, returning HTTP 400
+  (`Cannot favorite own wishlist`) and emitting a security warning audit event
+  (`favorite_own_wishlist_denied`). The Mini App UI hides the favorite button for owned wishlists.
+- **Removing from Favorites**: Calling `DELETE /api/favorites/{wishlist_id}` removes the entry.
+- **Zero-Leak Guarantee (Surprise Invariant)**: Responses from `GET /api/favorites` return clean
+  wishlist projections with public metadata (`id`, `name`, `description`, `event_title`,
+  `event_date`, `status`, `role`, `is_favorite`). They strictly withhold all reservation entries,
+  buyer identities, and item booking counts, ensuring complete privacy for gift surprises.
+
+---
+
+### 8. Viewing History & Automated Tracking
+
+Viewing history allows users to re-access recently visited wishlists:
+
+- **Automatic View Recording**: When an authenticated user opens any wishlist (`showList`), the
+  client dispatches an asynchronous background request `POST /api/history/{id}`.
+- **History View (`showHistory()`)**:
+  - Accessible via the "Viewing history" button in the home top navigation bar.
+  - Lists visited wishlists in reverse-chronological order, displaying the list title, relative or
+    localized visit timestamp (`Viewed: <date>`), and role badge (if applicable).
+  - An accessible "Clear history" button triggers `DELETE /api/history` to erase
+    all history entries.
+  - When history is empty, an accessible notice "No viewing history yet" is shown.
+- **Deduplication**: Re-visiting an already recorded wishlist updates its `viewed_at` timestamp
+  rather than appending a duplicate row.
+- **20-Entry Bound**: Viewing history is strictly bounded to at most 20 entries per user. When a
+  21st entry is added, the oldest entry is automatically pruned from persistence.
+- **Zero-Leak Guarantees**: History endpoints (`GET /api/history`) project only sanitized list
+  metadata and omit all reservation records and buyer details.
+
+---
+
 ## HTTP Endpoints Reference
 
 | Endpoint | Method | Auth | CSRF | Description |
 | :--- | :---: | :---: | :---: | :--- |
 | `/` | `GET` | No | No | Returns the Telegram Mini App HTML shell. |
 | `/api/auth/csrf` | `GET` | Yes | No | Issues session-bound CSRF token for forms. |
+| `/api/wishlists` | `GET` | Yes | No | Lists user's wishlists (owner and member). |
+| `/api/wishlists` | `POST` | Yes | Yes | Creates an empty personal wishlist. |
+| `/api/wishlists/{id}` | `GET` | Yes | No | Returns wishlist details and item view. |
+| `/api/wishlists/{id}` | `PATCH` | Yes | Yes | Updates title, description, or event. |
 | `/api/wishlists/{id}/members` | `GET` | Yes | No | Returns list of members and roles. |
 | `/api/wishlists/{id}/members/{uid}/role` | `PATCH` | Yes | Yes | Updates role (Owner only). |
 | `/api/wishlists/{id}/members/{uid}` | `DELETE` | Yes | Yes | Removes member from wishlist. |
 | `/api/wishlists/{id}/invite/reset` | `POST` | Yes | Yes | Rotates collaborator invite token. |
 | `/api/invitations/preview` | `GET` | No | No | Previews invitation details via header. |
 | `/api/invitations/accept` | `POST` | Yes | Yes | Accepts invite and joins wishlist. |
+| `/api/favorites` | `GET` | Yes | No | Lists user's favorited wishlists. |
+| `/api/favorites/{id}` | `POST` | Yes | Yes | Adds wishlist to user's favorites. |
+| `/api/favorites/{id}` | `DELETE` | Yes | Yes | Removes wishlist from favorites. |
+| `/api/history` | `GET` | Yes | No | Lists up to 20 recent wishlists. |
+| `/api/history/{id}` | `POST` | Yes | Yes | Records wishlist viewing in history. |
+| `/api/history` | `DELETE` | Yes | Yes | Clears viewing history for caller. |
 
 ---
 
@@ -264,3 +350,13 @@ The following settings configure the Mini App and web security layer:
 - **Cause**: Some mobile WebViews restrict `navigator.clipboard` access without direct user gesture.
 - **Solution**: The Mini App provides an explicit fallback input displaying the link so users
   can manually select and copy if the automated API fails.
+
+### 6. `400 Cannot favorite own wishlist`
+- **Cause**: An owner attempted to favorite their own wishlist via `POST /api/favorites/{id}`.
+- **Solution**: The UI suppresses the favorite button on owned lists. On direct API calls, verify
+  that caller does not match `wishlist.owner_id`.
+
+### 7. `404 Wishlist not found` on Favorites or History
+- **Cause**: The referenced wishlist does not exist or has been soft-deleted (`DELETED`).
+- **Solution**: Deleted wishlists cannot be favorited or viewed in history. Ensure the wishlist ID
+  is valid and active.

@@ -76,12 +76,27 @@ rejected by the optional authentication dependency.
 
 - `GET /api/public/wishlists/{token}`: Reads the public projection, including archived lists.
 
+- `GET /api/favorites`: Lists the caller's favorited wishlists in reverse-chronological order.
+
+- `POST /api/favorites/{id}`: Adds a wishlist to caller's favorites (rejects self-favoriting).
+
+- `DELETE /api/favorites/{id}`: Removes a wishlist from caller's favorites.
+
+- `GET /api/history`: Lists up to 20 recently viewed wishlists in reverse-chronological order.
+
+- `POST /api/history/{id}`: Records or updates a wishlist view event for caller.
+
+- `DELETE /api/history`: Clears all viewing history for caller.
+
 
 Create and patch accept a JSON object with optional `name`, `description`, `event_title`, and
 `event_date`. The HTTP representation includes list details and items; member responses include
 `role` and `members`, and owner/admin responses also include `share_token` and `invite_token`.
 The public projection uses an explicit allowlist and omits membership, tokens and
 reservation-derived fields. It is returned even when an authenticated caller uses the public URL.
+Projections for `/api/favorites` and `/api/history` strictly enforce the Surprise Invariant: they
+return sanitized list metadata with roles and omit all reservation records, item availability
+counts, and buyer details.
 Unknown, deleted or inaccessible lists return 404; operations incompatible with the archived
 state return 409. Archive is read-only until restored. State-changing requests from browser
 sessions are protected by CSRF tokens and origin validation — see [miniapp.md](miniapp.md).
@@ -115,7 +130,10 @@ busy timeout and serializes each operation with `BEGIN IMMEDIATE`; it loads and 
 aggregate graph even for reads. This favors correctness over scale and makes reads contend for the
 writer lock. The schema currently uses unversioned JSON payloads and application-maintained ID
 counters; migrations and more targeted access are tracked in
-[WISHENKA-48](https://pypost.atlassian.net/browse/WISHENKA-48).
+[WISHENKA-48](https://pypost.atlassian.net/browse/WISHENKA-48). Favorites and viewing history are
+persisted in dedicated SQLite tables (`wl_favorites` with primary key `(user_id, wishlist_id)` and
+`wl_view_history` with unique index `(user_id, wishlist_id)` for deduplication), both cascading on
+wishlist deletion.
 
 If startup reports `Unable to initialize wishlist storage`, verify the database URL, directory
 permissions and SQLite availability. A generic `Wishlist storage operation failed` indicates a
@@ -140,10 +158,12 @@ The domain models are defined in [`wishenka.wishlists.models`](../../wishenka/wi
 
 ### Domain Models
 
-- **`Wishlist`**: The aggregate root entity holding metadata, tokens, member list, and items.
-- **`WishlistMember`**: Association between a Telegram user (`user_id`) and a wishlist with an assigned `WishlistRole`.
-- **`WishItem`**: An item desired by a recipient (`recipient_user_id` or `recipient_name`), with quantity and price.
-- **`Reservation`**: A reservation created by a gifter (`user_id`) holding an active allocation of a `WishItem`'s quantity.
+- **`Wishlist`**: Aggregate root entity holding metadata, tokens, member list, and items.
+- **`WishlistMember`**: Association between user (`user_id`) and wishlist with `WishlistRole`.
+- **`WishlistFavorite`**: Association tracking a user's favorite (`user_id`, `wishlist_id`).
+- **`ViewHistoryEntry`**: Record of a wishlist view event (`id`, `user_id`, `wishlist_id`).
+- **`WishItem`**: An item desired by a recipient, with quantity and optional price.
+- **`Reservation`**: Active allocation of a `WishItem`'s quantity created by a gifter.
 
 ### RBAC Policy: `WishlistAccessPolicy` & `UserWishlistContext`
 
@@ -173,6 +193,23 @@ class UserWishlistContext:
 | Regenerate sharing tokens | Yes | Yes | No | No |
 | Reserve item (non-recipient) | Yes | Yes | Yes | Yes |
 | Reserve item (as recipient) | **No** (Forbidden) | **No** (Forbidden) | **No** (Forbidden) | **No** (Forbidden) |
+
+#### Role Precedence & Favorite Evaluation
+
+Role assignment in API projections and UI badge rendering follows a strict four-level precedence:
+
+```text
+owner > admin > member > favorite
+```
+
+- **Collaborator Precedence**: Active collaborative membership (`owner`, `admin`, `member`)
+  strictly takes precedence over `favorite` status. If an admin or member also favorites a wishlist,
+  the system retains their operational collaborator role (`admin` or `member`) in all projections.
+- **Pure Favorites**: If the user holds no collaborator membership on the wishlist but has
+  favorited it, the projection assigns `role: "favorite"` and sets `is_favorite: true`.
+- **Policy Rule**: `WishlistAccessPolicy.can_favorite(user, wishlist)` controls favoriting
+  eligibility: it requires an authenticated user (`user is not None`), rejects soft-deleted lists,
+  and enforces the self-favoriting guard (`wishlist.owner_id != user.telegram_id`).
 
 ### Surprise Invariant: Zero-Leak Projection Design
 
@@ -360,6 +397,84 @@ async def create_reservation(
 - **Overbooking Prevention**: Raises `InsufficientQuantityError` if `quantity > available_quantity`.
 - **Status Guards**: Raises `WishlistArchivedError` if wishlist is archived.
 
+#### `add_favorite` & `remove_favorite`
+
+Adds or removes a wishlist from the user's favorites.
+
+```python
+async def add_favorite(
+    self,
+    user: AuthenticatedUser,
+    wishlist_id: int,
+) -> WishlistFavorite
+
+async def remove_favorite(
+    self,
+    user: AuthenticatedUser,
+    wishlist_id: int,
+) -> None
+```
+
+- **Self-Favoriting Guard**: Raises `ValueError("Cannot favorite own wishlist")` if
+  `wishlist.owner_id == user.telegram_id`.
+- **Validation**: Raises `WishlistNotFoundError` if the wishlist does not exist or has been deleted.
+- **Idempotency**: Adding an existing favorite is an idempotent no-op.
+- Synchronous `has_favorite(user_id, wishlist_id)` and async `is_favorite(user, wishlist_id)`
+  allow quick lookups.
+
+#### `list_favorites`
+
+Lists favorited wishlists for an authenticated user.
+
+```python
+async def list_favorites(
+    self,
+    user: AuthenticatedUser,
+) -> list[Wishlist]
+```
+
+- Returns active and archived wishlists favorited by the user, ordered reverse-chronologically by
+  when they were added. Soft-deleted lists are automatically filtered out.
+
+#### `record_view`
+
+Records or updates a wishlist visit in the user's viewing history.
+
+```python
+async def record_view(
+    self,
+    user: AuthenticatedUser,
+    wishlist_id: int,
+) -> ViewHistoryEntry
+```
+
+- **Deduplication**: If the user previously viewed this wishlist, updates its `viewed_at` timestamp
+  and moves it to the most recent position.
+- **20-Entry Bound**: Enforces a strict 20-entry ceiling per user by pruning the oldest records
+  whenever a 21st unique entry is recorded.
+- **Validation**: Raises `WishlistNotFoundError` if the wishlist is non-existent or soft-deleted.
+
+#### `get_history` & `clear_history`
+
+Retrieves or clears the user's viewing history.
+
+```python
+async def get_history(
+    self,
+    user: AuthenticatedUser,
+    limit: int = 20,
+) -> list[tuple[Wishlist, datetime]]
+
+async def clear_history(
+    self,
+    user: AuthenticatedUser,
+) -> None
+```
+
+- `get_history`: Returns up to `limit` entries as `(Wishlist, datetime)` tuples in reverse
+  chronological order of viewing. Excludes soft-deleted wishlists.
+- `clear_history`: Removes all viewing history entries for the authenticated user.
+
 ---
 
 ## Token Schemas & Security
@@ -408,6 +523,14 @@ Structured logging is managed under the `wishenka.wishlists` logger namespace.
 | `access_denied` | `WARNING` | Unauthorized actor action blocked | `wishlist_id`, `actor_id`, `action` |
 | `surprise_invariant_violation_attempt` | `WARNING` | Recipient tried self-reservation | `wishlist_id`, `item_id`, `user_id` |
 | `invalid_invite_token` | `WARNING` | Bad or expired invite token | None (raw token withheld) |
+| `favorites_listed` | `INFO` | User fetched favorited wishlists | `user_id`, `count` |
+| `favorite_added` | `INFO` | Wishlist added to favorites | `wishlist_id`, `user_id` |
+| `favorite_removed` | `INFO` | Wishlist removed from favorites | `wishlist_id`, `user_id` |
+| `favorite_own_wishlist_denied` | `WARNING` | Self-favorite denied | `wishlist_id`, `user_id` |
+| `favorite_deleted_wishlist_denied` | `WARNING` | Deleted list access | `wishlist_id`, `user_id` |
+| `view_history_listed` | `INFO` | User fetched viewing history | `user_id`, `count` |
+| `view_history_recorded` | `INFO` | Wishlist view recorded/updated | `wishlist_id`, `user_id` |
+| `view_history_cleared` | `INFO` | User cleared viewing history | `user_id` |
 
 ---
 
@@ -438,3 +561,4 @@ WishlistError
 | `WishlistDeletedError` | Requested wishlist has been soft-deleted. | Deleted wishlists cannot be viewed or modified. Create a new wishlist. |
 | `InvalidInviteTokenError` | The invite link has expired, was rotated via `regenerate_invite_token`, or token is corrupted. | Ask the wishlist `Owner` or `Admin` to share an updated invite link. |
 | `InsufficientQuantityError` | Requested reservation units exceed remaining `available_quantity`. | Reduce reservation quantity or select another wish item. |
+| `ValueError` | Owner attempted self-favoriting. | Rejected by domain policy. |

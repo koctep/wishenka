@@ -47,6 +47,25 @@ class WishlistTimeType(StrEnum):
 
 
 @dataclass
+class WishlistFavorite:
+    """User favorite bookmark for an accessible wishlist."""
+
+    user_id: int
+    wishlist_id: int
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+
+@dataclass
+class ViewHistoryEntry:
+    """Record of a user viewing a wishlist in the Mini App."""
+
+    id: int = 0
+    user_id: int = 0
+    wishlist_id: int = 0
+    viewed_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+
+@dataclass
 class WishlistMember:
     """Collaborator member record within a wishlist."""
 
@@ -166,12 +185,14 @@ __all__ = [
     "ItemPriority",
     "Reservation",
     "ReservationStatus",
+    "ViewHistoryEntry",
     "WishItem",
     "WishItemGifterViewDTO",
     "WishItemRecipientViewDTO",
     "WishItemViewDTO",
     "Wishlist",
     "WishlistDetailViewDTO",
+    "WishlistFavorite",
     "WishlistFormat",
     "WishlistMember",
     "WishlistRole",
