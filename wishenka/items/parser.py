@@ -241,7 +241,11 @@ class HtmlMetadataExtractor:
                 continue
             try:
                 data = json.loads(script_text)
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, TypeError, RecursionError):
+                logger.debug(
+                    "JSON-LD script could not be parsed",
+                    extra={"event": "jsonld_parse_skipped"},
+                )
                 continue
 
             products = cls._find_jsonld_products(data)
@@ -420,37 +424,65 @@ class HtmlMetadataExtractor:
     @staticmethod
     def _is_product_type(type_val: Any) -> bool:
         """Check if @type string or list corresponds to Schema.org Product."""
-        if isinstance(type_val, str):
-            val = type_val.strip().lower()
-            return val == "product" or val.endswith("/product")
-        if isinstance(type_val, list):
-            return any(HtmlMetadataExtractor._is_product_type(t) for t in type_val)
+        stack = [(type_val, 0)]
+        visited = 0
+        depth_exceeded = False
+        while stack and visited < 20_000:
+            value, depth = stack.pop()
+            visited += 1
+            if depth > 128:
+                depth_exceeded = True
+                continue
+            if isinstance(value, str):
+                val = value.strip().lower()
+                if val == "product" or val.endswith("/product"):
+                    return True
+            elif isinstance(value, list):
+                stack.extend((item, depth + 1) for item in reversed(value))
+        if depth_exceeded or stack:
+            logger.debug(
+                "JSON-LD type inspection reached a limit",
+                extra={"event": "jsonld_type_limit", "visited_nodes": visited},
+            )
         return False
 
     @staticmethod
     def _find_jsonld_products(data: Any) -> list[dict[str, Any]]:
-        """Extract Product schema objects recursively from JSON-LD structure."""
+        """Find products in graph-first order with bounded iterative traversal."""
         results: list[dict[str, Any]] = []
-        if isinstance(data, dict):
-            # Traverse @graph container if present
-            if "@graph" in data and isinstance(data["@graph"], list):
-                logger.debug(
-                    "Traversing JSON-LD @graph container (items=%d)",
-                    len(data["@graph"]),
-                    extra={
-                        "event": "jsonld_graph_traversal",
-                        "graph_items_count": len(data["@graph"]),
-                    },
+        stack: list[tuple[Any, int, bool]] = [(data, 0, False)]
+        visited = 0
+        depth_exceeded = False
+        while stack and visited < 20_000:
+            node, depth, process = stack.pop()
+            if process:
+                if HtmlMetadataExtractor._is_product_type(node.get("@type")):
+                    results.append(node)
+                continue
+            visited += 1
+            if depth > 128:
+                depth_exceeded = True
+                continue
+            if isinstance(node, dict):
+                stack.extend(
+                    (v, depth + 1, False) for k, v in reversed(list(node.items())) if k != "@graph"
                 )
-                for item in data["@graph"]:
-                    results.extend(HtmlMetadataExtractor._find_jsonld_products(item))
-            type_val = data.get("@type")
-            if HtmlMetadataExtractor._is_product_type(type_val):
-                results.append(data)
-            for k, v in data.items():
-                if k != "@graph":
-                    results.extend(HtmlMetadataExtractor._find_jsonld_products(v))
-        elif isinstance(data, list):
-            for item in data:
-                results.extend(HtmlMetadataExtractor._find_jsonld_products(item))
+                stack.append((node, depth, True))
+                if isinstance(node.get("@graph"), (list, dict)):
+                    logger.debug(
+                        "Traversing JSON-LD @graph container (items=%d)",
+                        len(node["@graph"]),
+                        extra={
+                            "event": "jsonld_graph_traversal",
+                            "graph_items_count": len(node["@graph"]),
+                        },
+                    )
+                    stack.append((node["@graph"], depth + 1, False))
+            elif isinstance(node, list):
+                stack.extend((item, depth + 1, False) for item in reversed(node))
+        if depth_exceeded or stack:
+            logger.debug(
+                "JSON-LD discovery reached a limit",
+                extra={"event": "jsonld_discovery_limit", "visited_nodes": visited},
+            )
         return results

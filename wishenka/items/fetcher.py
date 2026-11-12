@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, sentinel
 import httpcore
 import httpx
 
+from wishenka.items.encoding import decode_html
 from wishenka.items.exceptions import (
     InvalidUrlSchemeError,
     ResponseBodyTooLargeError,
@@ -269,7 +270,13 @@ class UrlMetadataService:
                 request=response.request,
                 response=response,
             )
-        return response.text, str(response.url) if response.url else url
+        content = response.content
+        html = (
+            decode_html(content, response.headers.get("content-type", ""))
+            if isinstance(content, bytes)
+            else response.text
+        )
+        return html, str(response.url) if response.url else url
 
     async def _stream_and_read(
         self,
@@ -344,11 +351,7 @@ class UrlMetadataService:
                     response=response,
                 )
 
-            encoding = response.encoding or "utf-8"
-            try:
-                html_text = raw_bytes.decode(encoding, errors="replace")
-            except Exception:
-                html_text = raw_bytes.decode("utf-8", errors="replace")
+            html_text = decode_html(raw_bytes, response.headers.get("content-type", ""))
 
             final_effective_url = str(response.url) if response.url else url
             if response.is_success:

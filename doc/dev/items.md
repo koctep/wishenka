@@ -97,7 +97,7 @@ The `wishenka.items` package and its integration with `wishenka.wishlists` imple
      - Raises [`ResponseBodyTooLargeError`](file:///home/src/wishenka/items/exceptions.py#L56) immediately when breached, aborting network consumption.
 5. **Cascading HTML Metadata Extraction with JSON-LD `@graph` & `AggregateOffer`**:
    - Prioritized hierarchical extraction pipeline: **JSON-LD Schema.org Product/Offer** $\rightarrow$ **OpenGraph** (`og:title`, `og:image`, `product:price:amount`) $\rightarrow$ **Microdata** (`itemprop`) $\rightarrow$ **Standard HTML** (`<title>`, `<meta name="description">`, `<link rel="icon">`).
-   - Recursively traverses complex JSON-LD `@graph` trees and matches both standard `Product` and full Schema.org URI types (`https://schema.org/Product`).
+   - Iteratively traverses bounded JSON-LD graphs and matches standard and URI Product types.
    - Extracts pricing from both simple `Offer` and `AggregateOffer` structures (extracting `lowPrice`, `highPrice`, or `price`).
    - Cleans store advertising noise and marketing slogans from titles using regex patterns (e.g. stripping `— купить в интернет-магазине Ozon`, `в наличии на маркетплейсе`).
    - Normalizes currency symbols (`₽`, `руб`, `₸`, `Br`, `$`, `€`, `£`, `¥`) to standard ISO 4217 uppercase codes.
@@ -209,7 +209,8 @@ Dedicated network service responsible for pulling HTML bodies under strict secur
 - **Early Fast-Fail & Streaming Accumulator (`_stream_and_read`)**:
   - Checks response header `Content-Length`. If $> 2 \text{ MB}$, immediately aborts and raises [`ResponseBodyTooLargeError`](file:///home/src/wishenka/items/exceptions.py#L56).
   - Iterates asynchronously over chunks via `response.aiter_bytes()`, tracking `total_bytes`. If cumulative size exceeds $2 \text{ MB}$, halts iteration immediately and raises [`ResponseBodyTooLargeError`](file:///home/src/wishenka/items/exceptions.py#L56).
-  - Decodes accumulated raw bytes using `response.encoding or "utf-8"` with `errors="replace"`.
+  - Decodes accumulated raw bytes with `decode_html` after status and size checks. The buffered
+    compatibility path uses the same decoder.
 - **Safe Fallback Wrapper `fetch_and_extract(url, client=None)`**:
   - High-level interface that calls `_fetch_html` and feeds the result to `HtmlMetadataExtractor.extract`.
   - Catches network, security, and parsing exceptions, logging a warning and returning a safe fallback [`ExtractedMetadata`](file:///home/src/wishenka/items/models.py#L34-L46) populated with `store_name=derive_store_name(url)`.
@@ -234,6 +235,22 @@ document over 1 MiB and a concurrent `/healthz` request. Its one-second test bou
 that controlled workload, not every deployment. Further load and queue analysis is tracked in
 [WISHENKA-113](https://pypost.atlassian.net/browse/WISHENKA-113).
 
+#### HTML encoding policy
+
+`wishenka.items.encoding.decode_html(raw, content_type)` converts response bytes to text without
+I/O. A recognized BOM takes precedence; otherwise strict non-ASCII UTF-8 wins over conflicting
+legacy declarations. Next, valid HTTP charset and then HTML meta declarations are tried in order.
+The header scan is limited to 1024 characters and the HTML meta scan to the first 4096 bytes;
+unsupported, malformed, non-text or overlong codec labels are ignored. When declarations are
+missing or unusable, strict UTF-8 is followed by a bounded Russian-language plausibility score
+for CP1251 and KOI8-R. Low-confidence input falls back to UTF-8 replacement decoding.
+
+Windows-1251 and CP1251 are aliases. Single-byte encodings can decode the same bytes, so the
+heuristic cannot guarantee the original encoding; a valid but incorrect header also takes
+precedence over a conflicting legacy meta declaration. Users can correct preview fields. This
+policy is fixed in code and has no environment settings. Offline coverage for both fetch paths
+and ambiguous or malformed inputs is in `tests/test_encoding_nested_graph.py`.
+
 ### 5. Cascading HTML Metadata Extractor [`HtmlMetadataExtractor`](file:///home/src/wishenka/items/parser.py#L195-L456)
 
 Located in [`wishenka/items/parser.py`](file:///home/src/wishenka/items/parser.py).
@@ -241,7 +258,10 @@ Located in [`wishenka/items/parser.py`](file:///home/src/wishenka/items/parser.p
 Parses HTML documents using `BeautifulSoup4` with a multi-level fallback cascade:
 - **1. JSON-LD Cascade (`_find_jsonld_products`)**:
   - Traverses `<script type="application/ld+json">` elements.
-  - Recursively unrolls `@graph` containers, searching for nodes where `@type` is `"Product"` or `https://schema.org/Product`.
+  - Iteratively searches `@graph` objects and arrays, matching `Product` and namespaced types.
+    Product discovery and nested `@type` inspection each stop at 20,000 nodes or depth 128.
+    Discovery retains earlier results; invalid or over-limit data can fall through to later
+    scripts and metadata sources. Remote contexts and `@id` references are not dereferenced.
   - Extracts title (`name`), description (`description`), image (`image`), and brand (`brand`).
   - Supports both standard `Offer` and `AggregateOffer` price extraction (`offers.price`, `offers.lowPrice`, `offers.highPrice`), recording `jsonld_aggregate_offer_extracted`.
 - **2. OpenGraph Cascade**:
@@ -986,6 +1006,9 @@ All events are logged via structured extra dictionaries under logger names `"wis
 | `marketplace_url_cleaned` | `INFO` | `url_domain`, `removed_params_count`, `removed_keys` | Stripped marketing tracking parameters from URL before fetch. |
 | `marketplace_rule_matched` | `DEBUG` | `store_name`, `url_domain` | Target URL matched a registered marketplace rule. |
 | `jsonld_graph_traversal` | `DEBUG` | `graph_items_count` | Found and traversing JSON-LD `@graph` container. |
+| `jsonld_parse_skipped` | `DEBUG` | — | Malformed or excessively nested JSON-LD was skipped. |
+| `jsonld_type_limit` | `DEBUG` | `visited_nodes` | Product type inspection reached a limit. |
+| `jsonld_discovery_limit` | `DEBUG` | `visited_nodes` | Product discovery reached a limit. |
 | `jsonld_aggregate_offer_extracted` | `DEBUG` | `url_domain`, `offer_price`, `low_price`, `high_price` | Extracted price from Schema.org `AggregateOffer`. |
 | `metadata_extraction_started` | `DEBUG` | `url_domain`, `parser_stage="start"` | Commenced HTML parsing and metadata extraction. |
 | `metadata_stage_resolved` | `DEBUG` | `url_domain`, `parser_stage` (`json_ld`, `opengraph`) | Intermediate parsing stage successfully resolved fields. |
@@ -1036,6 +1059,19 @@ In accordance with security requirements:
 ---
 
 ## Troubleshooting
+
+### Garbled text or missing structured product metadata
+
+- **Symptom**: A preview contains replacement characters, incorrect Cyrillic text, or misses a
+  product present in JSON-LD.
+- **Cause**: A legacy charset declaration may be wrong or an undeclared page may be ambiguous.
+  Invalid JSON-LD and products beyond the fixed traversal limits are skipped.
+- **Resolution**: Compare the response bytes, `Content-Type` charset and early meta declarations
+  in a controlled environment; avoid logging page contents. At DEBUG level, inspect
+  `jsonld_parse_skipped`, `jsonld_type_limit` and `jsonld_discovery_limit`. Users can edit fields
+  manually. Run `pytest tests/test_encoding_nested_graph.py` for offline regressions; expanding
+  the encoding calibration corpus and bounding traversal overhead are tracked in WISHENKA-117
+  and WISHENKA-116.
 
 ### 1. SSRF Blocked Targets (`fallback_reason="ssrf_blocked"`)
 - **Symptom**: `ItemPreviewDTO` returns with `is_fallback=True` and `fallback_reason="ssrf_blocked"`.
