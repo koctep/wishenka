@@ -203,7 +203,8 @@ Dedicated network service responsible for pulling HTML bodies under strict secur
   - Validates URL scheme against `ALLOWED_SCHEMES`.
   - Pre-validates destination host via `resolve_and_validate_host`.
   - If no client is passed, instantiates `httpx.AsyncClient(transport=SSRFSafeTransport(), follow_redirects=True)`.
-  - If an external client is injected (e.g. in tests or custom sessions), registers a temporary `request` event hook to guarantee SSRF validation across all redirect steps.
+  - An injected client uses an isolated preview client with a borrowed direct transport and a
+    request hook for redirect validation. It does not modify or close the owner's client.
   - Executes streaming download via `_stream_and_read`.
 - **Early Fast-Fail & Streaming Accumulator (`_stream_and_read`)**:
   - Checks response header `Content-Length`. If $> 2 \text{ MB}$, immediately aborts and raises [`ResponseBodyTooLargeError`](file:///home/src/wishenka/items/exceptions.py#L56).
@@ -277,6 +278,33 @@ Asynchronous facade orchestrating input classification, URL cleaning, secure fet
   - Upstream timeout (>4.0s): `fallback_reason="timeout"`.
   - Other network / HTTP errors: `fallback_reason="http_error"`.
 - Prevents unhandled 500 errors and ensures Telegram Mini App users always retain access to a functional manual wish entry form with extracted residual title and clean URL.
+
+#### Pooled requests and preview cache
+
+The FastAPI lifespan in `wishenka/web/app.py` owns one outbound HTTPX client and one
+`ItemPreviewService` with a `PreviewCache` per application instance. The UI uses the service from
+`app.state`; lifespan cleanup closes the client and clears the cache, including on startup errors.
+Independent processes and application instances have independent pools and caches. Standalone
+`ItemPreviewService()` calls still work without a shared cache or lifespan-owned client. A caller
+may inject a client or `PreviewCache` into the service; a per-call client bypasses the cache.
+
+The bounded in-memory cache stores copies of extracted source metadata by cleaned URL. It rebuilds
+the preview with the current caller's input and residual text. A plain-text input, failure,
+challenge, or fallback is never cached. Each response in a redirect chain must explicitly allow
+shared caching with `Cache-Control: public`; query strings, URL credentials, `Set-Cookie`, `Vary`,
+authentication challenges, and restrictive cache directives disqualify the chain. Freshness
+accounts for origin age and expiry headers. Concurrent misses can still perform duplicate fetches.
+
+Every cache hit revalidates the original and redirect destinations against current DNS and scheme
+rules. Outbound requests reject URL credentials and do not retain or send cookies; proxy transports
+are bypassed or rejected for injected clients. DNS is not cached by this feature. Validation and
+connection remain separate, so DNS rebinding is not prevented; the pinned-address follow-up is
+[WISHENKA-92](https://pypost.atlassian.net/browse/WISHENKA-92). The injected-client adapter uses
+private HTTPX/httpcore APIs, tracked in [WISHENKA-114](https://pypost.atlassian.net/browse/WISHENKA-114).
+
+`tests/test_preview_resource_reuse.py` covers cache eligibility and expiry, isolation, lifecycle,
+redirect validation, and connection reuse with a local HTTP server. Run it through the repository
+test workflow when changing preview transport or cache behavior.
 
 ### 7. Wish Items Domain Service & Piece Accounting ([`wishenka.wishlists.service`](file:///home/src/wishenka/wishlists/service.py))
 
@@ -901,6 +929,8 @@ Defined in [`wishenka/items/ssrf.py`](file:///home/src/wishenka/items/ssrf.py), 
 | `ALLOWED_SCHEMES` | `frozenset({"http", "https"})` | Whitelisted URL schemes. |
 | `DEFAULT_TIMEOUT` | `httpx.Timeout(4.0, connect=2.0)` | Total budget `4.0s`, connection budget `2.0s`. |
 | `DEFAULT_HEADERS` | iOS Safari Mobile UA, Ru/En Accept | Standard headers maximizing storefront compatibility. |
+| Preview cache | 256 entries, 300 seconds maximum TTL | Per application instance; LRU eviction and shorter origin freshness apply. |
+| Preview connection pool | 20 connections, 10 keep-alive, 5 seconds idle expiry | Lifespan-owned outbound transport; per application instance. |
 | `TRACKING_QUERY_PREFIXES` | `("utm_",)` | Prefixes stripped from URL queries. |
 | `TRACKING_QUERY_KEYS` | Set of 14 ad click / affiliate keys | Query keys stripped (`clid`, `targeturl`, `src`, `promo`, `track`, `ref`, `fbclid`, `gclid`, `yclid`, etc.). |
 
@@ -963,6 +993,7 @@ All events are logged via structured extra dictionaries under logger names `"wis
 | `item_preview_anti_bot` | `WARNING` | `status_code`, `url_domain`, `duration_ms`, `fallback_reason` | Intercepted anti-bot gate (403, 429, 503, Turnstile, Qrator). |
 | `anti_bot_challenge_detected` | `INFO` | `status_code`, `url_domain`, `duration_ms`, `fallback_reason` | Telemetry signal for anti-bot degradation monitoring. |
 | `item_preview_plain_text` | `DEBUG` | `input_type`, `duration_ms` | Non-URL text input processed without network calls. |
+| `preview_cache_lookup` | `DEBUG` | `cache_outcome` (`hit`, `miss`) | Cache lookup without logging its URL or key. |
 | `item_preview_success` | `INFO` | `url_domain`, `duration_ms`, `input_type`, `is_fallback=False` | Successful link preview retrieval (HTTP 200). |
 | `item_preview_ssrf_blocked` | `WARNING` | `url`, `url_domain`, `host`, `ip`, `reason`, `duration_ms` | SSRF attempt caught during preview generation; returns fallback. |
 | `item_preview_invalid_scheme` | `WARNING` | `url`, `scheme`, `duration_ms` | Unsupported URL scheme caught; returns fallback. |
@@ -1050,6 +1081,16 @@ In accordance with security requirements:
 - **Resolution**: Inspect `item_preview_success` duration and parsing-error events alongside CPU
   and request load. The duration includes fetching, queueing, and parsing; it does not isolate
   queue or parse time. Investigate sustained contention using the WISHENKA-113 follow-up.
+
+### Repeated preview requests still fetch upstream
+
+- **Cause**: The response or a redirect may not explicitly permit public caching, or may contain
+  a query string, cookies, `Vary`, restrictive directives, or expired freshness. Entries also
+  expire, are evicted, and are local to each application instance. Simultaneous misses can fetch
+  independently.
+- **Resolution**: Inspect `preview_cache_lookup` at DEBUG level and check upstream cache headers
+  without logging sensitive URLs. Verify that the application lifespan is running; direct
+  standalone services do not automatically share the application cache.
 
 ### 8. Quantity Reduction Rejection (`CannotReduceQuantityBelowReservedError` / HTTP 409 Conflict)
 - **Symptom**: `PATCH /api/wishlists/{wishlist_id}/items/{item_id}` returns `409 Conflict` with detail `"Cannot reduce quantity to X: Y units already locked"`.

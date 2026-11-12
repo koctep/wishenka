@@ -3,8 +3,12 @@
 import asyncio
 import contextlib
 import logging
+from contextvars import ContextVar
+from http.cookiejar import CookieJar, DefaultCookiePolicy
+from typing import Any
 from unittest.mock import AsyncMock, sentinel
 
+import httpcore
 import httpx
 
 from wishenka.items.exceptions import (
@@ -32,6 +36,68 @@ DEFAULT_HEADERS = {
 }
 
 DEFAULT_TIMEOUT = httpx.Timeout(4.0, connect=2.0)
+
+
+class RejectCookies(DefaultCookiePolicy):
+    """Prevent origin cookies from being stored or sent across redirects."""
+
+    def set_ok(self, cookie: Any, request: Any) -> bool:
+        return False
+
+    def return_ok(self, cookie: Any, request: Any) -> bool:
+        return False
+
+
+# Per-task response information; never shared across concurrent requests.
+fetch_provenance: ContextVar[tuple[tuple[str, httpx.Headers], ...]] = ContextVar(
+    "fetch_provenance", default=()
+)
+
+
+async def validate_url(url: str) -> None:
+    """Validate a URL and its current DNS destination before fetch or cache reuse."""
+    parsed = httpx.URL(url)
+    if parsed.scheme.lower() not in ALLOWED_SCHEMES:
+        raise InvalidUrlSchemeError("Invalid URL scheme", scheme=parsed.scheme)
+    if parsed.username or parsed.password:
+        from wishenka.items.exceptions import SSRFBlockedError
+
+        raise SSRFBlockedError("URL credentials are forbidden", reason="credentials")
+    await resolve_and_validate_host(
+        parsed.host, parsed.port or (443 if parsed.scheme == "https" else 80)
+    )
+
+
+async def _validate_request(request: httpx.Request) -> None:
+    """Validate every outbound request and redirect on an injected client."""
+    request.headers.pop("cookie", None)
+    if "authorization" in request.headers:
+        from wishenka.items.exceptions import SSRFBlockedError
+
+        raise SSRFBlockedError("Authorization is forbidden", reason="credentials")
+    await validate_url(str(request.url))
+
+
+class _BorrowedTransport(httpx.AsyncBaseTransport):
+    """Use the injected client's direct transport without sharing request state or ownership."""
+
+    def __init__(self, client: httpx.AsyncClient) -> None:
+        self.client = client
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        transport = self.client._transport_for_url(request.url)
+        pool = getattr(transport, "_pool", None)
+        if isinstance(pool, (httpcore.AsyncHTTPProxy, httpcore.AsyncSOCKSProxy)):
+            # Ignore proxy mounts (including environment configuration) while preserving
+            # explicit direct transports mounted by the client owner.
+            transport = self.client._transport
+            pool = getattr(transport, "_pool", None)
+        if isinstance(pool, (httpcore.AsyncHTTPProxy, httpcore.AsyncSOCKSProxy)):
+            from wishenka.items.exceptions import SSRFBlockedError
+
+            raise SSRFBlockedError("Proxy transports are forbidden", reason="proxy")
+        # A direct transport still has the pre-existing DNS rebinding limitation.
+        return await transport.handle_async_request(request)
 
 
 def _is_mock_get_configured(client: httpx.AsyncClient) -> bool:
@@ -75,6 +141,10 @@ class UrlMetadataService:
             httpx.HTTPError: On standard network or HTTP protocol errors.
         """
         parsed = httpx.URL(url)
+        if parsed.username or parsed.password:
+            from wishenka.items.exceptions import SSRFBlockedError
+
+            raise SSRFBlockedError("URL credentials are forbidden", reason="credentials")
         scheme = parsed.scheme.lower()
         if scheme not in ALLOWED_SCHEMES:
             logger.warning(
@@ -103,6 +173,8 @@ class UrlMetadataService:
                 transport=transport,
                 timeout=self.timeout,
                 follow_redirects=True,
+                cookies=CookieJar(policy=RejectCookies()),
+                trust_env=False,
             ) as local_client:
                 if isinstance(httpx.AsyncClient.get, AsyncMock):
                     return await self._fetch_via_get(local_client, url)
@@ -113,44 +185,22 @@ class UrlMetadataService:
         if _is_mock_get_configured(client):
             return await self._fetch_via_get(client, url)
 
-        hook_installed = False
-
-        async def _request_validation_hook(request: httpx.Request) -> None:
-            req_scheme = request.url.scheme.lower()
-            if req_scheme not in ALLOWED_SCHEMES:
-                logger.warning(
-                    "SSRF blocked on redirect: scheme '%s' not allowed for '%s'",
-                    req_scheme,
-                    request.url,
-                    extra={
-                        "event": "ssrf_blocked",
-                        "url": str(request.url),
-                        "scheme": req_scheme,
-                        "reason": "invalid_scheme",
-                    },
-                )
-                raise InvalidUrlSchemeError(
-                    f"Redirect URL scheme '{req_scheme}' is not allowed",
-                    scheme=req_scheme,
-                )
-            req_host = request.url.host
-            req_port = request.url.port or (443 if req_scheme == "https" else 80)
-            await resolve_and_validate_host(req_host, req_port)
-
-        if (
-            hasattr(client, "event_hooks")
-            and isinstance(client.event_hooks, dict)
-            and "request" in client.event_hooks
-        ):
-            client.event_hooks["request"].append(_request_validation_hook)
-            hook_installed = True
-
-        try:
+        if isinstance(client, AsyncMock):
             return await self._stream_and_read(client, url)
-        finally:
-            if hook_installed:
-                with contextlib.suppress(ValueError):
-                    client.event_hooks["request"].remove(_request_validation_hook)
+
+        if getattr(client, "_wishenka_safe_transport", False):
+            return await self._stream_and_read(client, url)
+
+        # Keep credentials, cookies, hooks and redirect state separate from the owner.
+        # The wrapper does not close the borrowed client's connection pool.
+        async with httpx.AsyncClient(
+            transport=_BorrowedTransport(client),
+            timeout=self.timeout,
+            cookies=CookieJar(policy=RejectCookies()),
+            event_hooks={"request": [_validate_request]},
+            trust_env=False,
+        ) as preview_client:
+            return await self._stream_and_read(preview_client, url)
 
     async def _fetch_via_get(
         self,
@@ -301,6 +351,13 @@ class UrlMetadataService:
                 html_text = raw_bytes.decode("utf-8", errors="replace")
 
             final_effective_url = str(response.url) if response.url else url
+            if response.is_success:
+                fetch_provenance.set(
+                    tuple(
+                        (str(item.url), httpx.Headers(item.headers))
+                        for item in [*response.history, response]
+                    )
+                )
             logger.info(
                 "Successfully fetched %s (bytes=%d, effective_url=%s)",
                 url,

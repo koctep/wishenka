@@ -12,10 +12,17 @@ from wishenka.items.exceptions import (
     ResponseBodyTooLargeError,
     SSRFBlockedError,
 )
-from wishenka.items.fetcher import DEFAULT_HEADERS, DEFAULT_TIMEOUT, UrlMetadataService
+from wishenka.items.fetcher import (
+    DEFAULT_HEADERS,
+    DEFAULT_TIMEOUT,
+    UrlMetadataService,
+    fetch_provenance,
+    validate_url,
+)
 from wishenka.items.marketplaces import clean_url
 from wishenka.items.models import InputType
 from wishenka.items.parser import HtmlMetadataExtractor, derive_store_name, extract_domain
+from wishenka.items.preview_cache import PreviewCache
 from wishenka.items.schemas import ItemPreviewDTO
 
 logger = logging.getLogger("wishenka.items")
@@ -42,10 +49,14 @@ class ItemPreviewService:
     def __init__(
         self,
         url_metadata_service: UrlMetadataService | None = None,
+        client: httpx.AsyncClient | None = None,
+        cache: PreviewCache | None = None,
     ) -> None:
         self.url_metadata_service = url_metadata_service or UrlMetadataService(
             timeout=DEFAULT_TIMEOUT
         )
+        self.client = client
+        self.cache = cache
 
     async def preview(
         self,
@@ -86,10 +97,31 @@ class ItemPreviewService:
         store_name = derive_store_name(target_url)
 
         try:
-            html_text, response_url = await self.url_metadata_service._fetch_html(
-                target_url,
-                client=client,
-            )
+            cached = self.cache.get(target_url) if self.cache and client is None else None
+            if cached is not None:
+                try:
+                    for destination in cached.urls:
+                        await validate_url(destination)
+                except Exception:
+                    self.cache.entries.pop(target_url, None)  # type: ignore[union-attr]
+                    raise
+                logger.debug(
+                    "Preview cache lookup: hit",
+                    extra={"event": "preview_cache_lookup", "cache_outcome": "hit"},
+                )
+                html_text = ""
+                response_url = cached.urls[-1]
+            else:
+                if self.cache is not None and client is None:
+                    logger.debug(
+                        "Preview cache lookup: miss",
+                        extra={"event": "preview_cache_lookup", "cache_outcome": "miss"},
+                    )
+                fetch_provenance.set(())
+                html_text, response_url = await self.url_metadata_service._fetch_html(
+                    target_url,
+                    client=client or self.client,
+                )
         except SSRFBlockedError as exc:
             duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
             logger.warning(
@@ -327,9 +359,14 @@ class ItemPreviewService:
             )
 
         try:
-            extracted = await asyncio.to_thread(
-                HtmlMetadataExtractor.extract, html_text, base_url=response_url
-            )
+            if cached is not None:
+                extracted = cached.metadata
+            else:
+                extracted = await asyncio.to_thread(
+                    HtmlMetadataExtractor.extract, html_text, base_url=response_url
+                )
+                if self.cache is not None and client is None:
+                    self.cache.put(target_url, extracted, fetch_provenance.get())
             duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
             logger.info(
                 "Link preview successfully generated for domain %s in %sms",

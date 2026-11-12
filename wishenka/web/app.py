@@ -6,14 +6,20 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import timedelta
+from http.cookiejar import CookieJar
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 from wishenka.config import Settings
+from wishenka.items.fetcher import DEFAULT_TIMEOUT, RejectCookies
+from wishenka.items.preview_cache import PreviewCache
+from wishenka.items.service import ItemPreviewService
+from wishenka.items.ssrf import SSRFSafeTransport
 from wishenka.logging import configure_logging
 from wishenka.users.store import UserStore
 from wishenka.web.routes.auth import router as auth_router
@@ -121,42 +127,56 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        await app.state.wishlist_store.initialize()
-        await app.state.user_store.initialize()
-
-        if settings.background_cleanup_enabled:
-            cleanup_task = asyncio.create_task(
-                background_cleanup_worker(app.state.wishlist_store, settings),
-                name="background_cleanup_worker",
-            )
-            app.state.background_cleanup_task = cleanup_task
-            app.state.cleanup_task = cleanup_task
-        else:
-            app.state.background_cleanup_task = None
-            app.state.cleanup_task = None
-
-        logger.info(
-            "Wishenka web application starting up",
-            extra={
-                "app_name": settings.app_name,
-                "environment": settings.environment,
-                "debug": settings.debug,
-                "log_level": settings.log_level,
-            },
+        limits = httpx.Limits(max_connections=20, max_keepalive_connections=10, keepalive_expiry=5)
+        transport = SSRFSafeTransport(limits=limits)
+        client = httpx.AsyncClient(
+            transport=transport,
+            timeout=DEFAULT_TIMEOUT,
+            follow_redirects=True,
+            cookies=CookieJar(policy=RejectCookies()),
+            trust_env=False,
         )
-        yield
+        client._wishenka_safe_transport = True  # type: ignore[attr-defined]
+        cache = PreviewCache()
+        app.state.item_preview_service = ItemPreviewService(client=client, cache=cache)
+        try:
+            await app.state.wishlist_store.initialize()
+            await app.state.user_store.initialize()
 
-        running_task: asyncio.Task[None] | None = getattr(
-            app.state, "background_cleanup_task", None
-        ) or getattr(app.state, "cleanup_task", None)
-        if running_task is not None:
-            running_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await running_task
+            if settings.background_cleanup_enabled:
+                cleanup_task = asyncio.create_task(
+                    background_cleanup_worker(app.state.wishlist_store, settings),
+                    name="background_cleanup_worker",
+                )
+                app.state.background_cleanup_task = cleanup_task
+                app.state.cleanup_task = cleanup_task
 
-        await app.state.wishlist_store.engine.dispose()
-        await app.state.user_store.dispose()
-        logger.info("Wishenka web application shutting down")
+            logger.info(
+                "Wishenka web application starting up",
+                extra={
+                    "app_name": settings.app_name,
+                    "environment": settings.environment,
+                    "debug": settings.debug,
+                    "log_level": settings.log_level,
+                },
+            )
+            yield
+        finally:
+            running_task: asyncio.Task[None] | None = getattr(
+                app.state, "background_cleanup_task", None
+            ) or getattr(app.state, "cleanup_task", None)
+            try:
+                if running_task is not None:
+                    running_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await running_task
+            finally:
+                cache.clear()
+                app.state.item_preview_service = None
+                await client.aclose()
+                await app.state.wishlist_store.engine.dispose()
+                await app.state.user_store.dispose()
+                logger.info("Wishenka web application shutting down")
 
     app = FastAPI(
         title=settings.app_name,

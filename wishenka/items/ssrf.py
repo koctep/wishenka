@@ -214,6 +214,8 @@ class SSRFSafeTransport(httpx.AsyncHTTPTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Validate request URL scheme and destination IP before dispatching TCP connection."""
+        if request.url.username or request.url.password or "authorization" in request.headers:
+            raise SSRFBlockedError("URL credentials are forbidden", reason="credentials")
         scheme = request.url.scheme.lower()
         if scheme not in ALLOWED_SCHEMES:
             logger.warning(
