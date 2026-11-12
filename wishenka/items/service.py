@@ -1,5 +1,6 @@
 """Item preview service providing asynchronous HTTP scraping and anti-bot graceful fallback."""
 
+import asyncio
 import logging
 import time
 
@@ -326,7 +327,9 @@ class ItemPreviewService:
             )
 
         try:
-            extracted = HtmlMetadataExtractor.extract(html_text, base_url=response_url)
+            extracted = await asyncio.to_thread(
+                HtmlMetadataExtractor.extract, html_text, base_url=response_url
+            )
             duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
             logger.info(
                 "Link preview successfully generated for domain %s in %sms",

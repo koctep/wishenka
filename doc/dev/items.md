@@ -213,6 +213,26 @@ Dedicated network service responsible for pulling HTML bodies under strict secur
   - High-level interface that calls `_fetch_html` and feeds the result to `HtmlMetadataExtractor.extract`.
   - Catches network, security, and parsing exceptions, logging a warning and returning a safe fallback [`ExtractedMetadata`](file:///home/src/wishenka/items/models.py#L34-L46) populated with `store_name=derive_store_name(url)`.
 
+#### Extraction execution and responsiveness
+
+`ItemPreviewService.fetch_preview` and `UrlMetadataService.fetch_and_extract` both await
+`asyncio.to_thread(HtmlMetadataExtractor.extract, ...)` after the protected fetch. The extractor
+itself remains synchronous and returns the same metadata; use the async service methods from
+event-loop code rather than calling `extract` directly there. Each service retains its existing
+exception handling and fallback result. SSRF checks, anti-bot checks, and response limits are
+unchanged.
+
+The calls share the event loop's default executor and need no additional configuration or parser
+dependency. Its worker count is bounded, but submissions can queue. Cancelling the awaiting
+request does not stop an extraction already running in a worker. Python's GIL and concurrent
+parsing can still affect latency; thread offload is not a latency guarantee under saturation.
+The network timeout settings below apply to HTTP activity, not as a deadline on worker parsing.
+
+`tests/test_metadata_extractor_service.py` checks both service paths, including a real HTML
+document over 1 MiB and a concurrent `/healthz` request. Its one-second test bound applies to
+that controlled workload, not every deployment. Further load and queue analysis is tracked in
+[WISHENKA-113](https://pypost.atlassian.net/browse/WISHENKA-113).
+
 ### 5. Cascading HTML Metadata Extractor [`HtmlMetadataExtractor`](file:///home/src/wishenka/items/parser.py#L195-L456)
 
 Located in [`wishenka/items/parser.py`](file:///home/src/wishenka/items/parser.py).
@@ -1019,7 +1039,17 @@ In accordance with security requirements:
 ### 7. Upstream Timeout Handling
 - **Symptom**: `ItemPreviewDTO` returns with `is_fallback=True` and `fallback_reason="timeout"`, and `item_preview_timeout` is logged.
 - **Cause**: The remote server failed to respond within `2.0s` connect or `4.0s` total timeout.
-- **Resolution**: Check external internet connectivity and upstream store availability. The service will never hang or block the TMA event loop.
+- **Resolution**: Check external internet connectivity and upstream store availability. The HTTP
+  timeout does not limit time spent parsing after the response has been downloaded.
+
+### Slow previews during concurrent extraction
+
+- **Symptom**: Preview duration or unrelated request latency grows while large pages are parsed.
+- **Cause**: The shared executor may be busy or queued; CPU contention under the GIL can also
+  delay the event loop. Cancelled requests can leave already-running extraction work behind.
+- **Resolution**: Inspect `item_preview_success` duration and parsing-error events alongside CPU
+  and request load. The duration includes fetching, queueing, and parsing; it does not isolate
+  queue or parse time. Investigate sustained contention using the WISHENKA-113 follow-up.
 
 ### 8. Quantity Reduction Rejection (`CannotReduceQuantityBelowReservedError` / HTTP 409 Conflict)
 - **Symptom**: `PATCH /api/wishlists/{wishlist_id}/items/{item_id}` returns `409 Conflict` with detail `"Cannot reduce quantity to X: Y units already locked"`.

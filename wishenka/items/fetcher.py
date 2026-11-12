@@ -1,5 +1,6 @@
 """Safe HTML document fetching with SSRF protection and streaming size limits."""
 
+import asyncio
 import contextlib
 import logging
 from unittest.mock import AsyncMock, sentinel
@@ -322,7 +323,9 @@ class UrlMetadataService:
         """Fetch HTML document body and extract rich metadata, falling back safely on errors."""
         try:
             html_text, final_url = await self._fetch_html(url, client=client)
-            return HtmlMetadataExtractor.extract(html_text, base_url=final_url)
+            return await asyncio.to_thread(
+                HtmlMetadataExtractor.extract, html_text, base_url=final_url
+            )
         except Exception as exc:
             logger.warning(
                 "UrlMetadataService fetch_and_extract failed for %s: %s; returning fallback",

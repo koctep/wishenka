@@ -12,14 +12,20 @@ Validates:
    resulting in graceful fallback `ItemPreviewDTO(is_fallback=True, fallback_reason=...)`.
 """
 
+import asyncio
 import logging
+import threading
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from bs4.builder._htmlparser import BeautifulSoupHTMLParser
 
 from wishenka.items import marketplaces
+from wishenka.items.fetcher import UrlMetadataService
 from wishenka.items.marketplaces import MarketplaceRegistry, clean_url
+from wishenka.items.models import ExtractedMetadata
 from wishenka.items.parser import (
     HtmlMetadataExtractor,
     clean_title,
@@ -27,9 +33,143 @@ from wishenka.items.parser import (
     normalize_currency,
     parse_price,
 )
+from wishenka.items.schemas import ItemPreviewDTO
 from wishenka.items.service import ItemPreviewService
+from wishenka.web.app import create_app
 
 pytestmark = pytest.mark.timeout(30)
+
+
+async def _fetch_from_entry_point(
+    entry_point: str, fetcher: UrlMetadataService, url: str
+) -> ItemPreviewDTO | ExtractedMetadata:
+    if entry_point == "preview":
+        return await ItemPreviewService(url_metadata_service=fetcher).fetch_preview(url)
+    return await fetcher.fetch_and_extract(url)
+
+
+@pytest.mark.parametrize("entry_point", ["preview", "metadata"])
+async def test_heavy_extraction_does_not_block_event_loop(
+    entry_point: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A light coroutine runs before the slow extractor is released on both paths."""
+    url = "https://example.com/product"
+    html = "<html>" + "x" * (1024 * 1024 + 1) + "</html>"
+    fetcher = UrlMetadataService()
+    monkeypatch.setattr(fetcher, "_fetch_html", AsyncMock(return_value=(html, url)))
+    entered = threading.Event()
+    release = threading.Event()
+    watchdog_fired = threading.Event()
+
+    def extract(body: str, base_url: str) -> ExtractedMetadata:
+        assert len(body) > 1024 * 1024
+        assert base_url == url
+        entered.set()
+        release.wait(timeout=5)
+        return ExtractedMetadata(title="A product", store_name="Example")
+
+    def watchdog() -> None:
+        if entered.wait(timeout=3) and not release.wait(timeout=1):
+            watchdog_fired.set()
+            release.set()
+
+    monkeypatch.setattr(HtmlMetadataExtractor, "extract", staticmethod(extract))
+    watchdog_thread = threading.Thread(target=watchdog, daemon=True)
+    watchdog_thread.start()
+    task = asyncio.create_task(_fetch_from_entry_point(entry_point, fetcher, url))
+    try:
+        assert await asyncio.to_thread(entered.wait, 3), "extractor did not start"
+        await asyncio.sleep(0)
+        assert not watchdog_fired.is_set(), "extractor blocked the event loop"
+    finally:
+        release.set()
+        result = await asyncio.wait_for(task, timeout=5)
+        watchdog_thread.join(timeout=3)
+    assert result.title == "A product"
+    assert result.store_name == "Example"
+
+
+@pytest.mark.parametrize("entry_point", ["preview", "metadata"])
+async def test_real_heavy_extraction_keeps_loop_responsive(
+    entry_point: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A health request completes promptly during real parsing of a >1 MiB document."""
+    url = "https://example.com/product"
+    html = (
+        "<html><head><title>Real product</title></head><body>"
+        + ("<span>product details</span>" * 60000)
+        + "</body></html>"
+    )
+    assert len(html) > 1024 * 1024
+    fetcher = UrlMetadataService()
+    monkeypatch.setattr(fetcher, "_fetch_html", AsyncMock(return_value=(html, url)))
+    loop = asyncio.get_running_loop()
+    request_finished = threading.Event()
+    request_finished_during_parse = threading.Event()
+    started = threading.Event()
+    original = BeautifulSoupHTMLParser.handle_starttag
+    request_results: asyncio.Queue[tuple[int, float]] = asyncio.Queue()
+    transport = httpx.ASGITransport(app=create_app())
+
+    async def request_health(scheduled_at: float) -> None:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/healthz")
+        request_results.put_nowait((response.status_code, time.monotonic() - scheduled_at))
+        request_finished.set()
+
+    def coordinated_starttag(
+        parser: BeautifulSoupHTMLParser,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+        handle_empty_element: bool = True,
+    ) -> None:
+        if not started.is_set():
+            started.set()
+            scheduled_at = time.monotonic()
+            loop.call_soon_threadsafe(lambda: asyncio.create_task(request_health(scheduled_at)))
+        elif request_finished.is_set():
+            request_finished_during_parse.set()
+        original(parser, tag, attrs, handle_empty_element)
+
+    monkeypatch.setattr(BeautifulSoupHTMLParser, "handle_starttag", coordinated_starttag)
+    task = asyncio.create_task(_fetch_from_entry_point(entry_point, fetcher, url))
+    result = await asyncio.wait_for(task, timeout=20)
+    status, latency = await asyncio.wait_for(request_results.get(), timeout=5)
+    assert status == 200
+    assert request_finished_during_parse.is_set(), "request did not complete during parsing"
+    # One second allows for shared CI scheduling while detecting a page-long stall.
+    assert latency < 1.0, f"health request took {latency:.3f}s during parsing"
+    assert result.title == "Real product"
+
+
+@pytest.mark.parametrize("entry_point", ["preview", "metadata"])
+async def test_extraction_error_preserves_existing_fallback(
+    entry_point: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Exceptions from the extractor still produce each service's fallback result."""
+    url = "https://ozon.ru/product/123/"
+    fetcher = UrlMetadataService()
+    monkeypatch.setattr(fetcher, "_fetch_html", AsyncMock(return_value=("<html></html>", url)))
+
+    def fail_extract(body: str, base_url: str) -> ExtractedMetadata:
+        raise ValueError("parser failed")
+
+    monkeypatch.setattr(HtmlMetadataExtractor, "extract", staticmethod(fail_extract))
+    with caplog.at_level(logging.WARNING, logger="wishenka.items"):
+        if entry_point == "preview":
+            result = await ItemPreviewService(url_metadata_service=fetcher).fetch_preview(url)
+            assert result.is_fallback
+            assert result.fallback_reason == "http_error"
+            assert result.store_name == "Ozon"
+        else:
+            metadata = await fetcher.fetch_and_extract(url)
+            assert metadata.title is None
+            assert metadata.store_name == "Ozon"
+
+    event = (
+        "item_metadata_parsing_error" if entry_point == "preview" else "fetch_and_extract_fallback"
+    )
+    assert any(getattr(record, "event", None) == event for record in caplog.records)
 
 
 class TestJsonLdGraphAndAggregateOffers:
