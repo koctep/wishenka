@@ -89,3 +89,6 @@
   администрирование участников, флоу инвайтов, шеринг и CSRF-защита.
 - [`doc/dev/infrastructure.md`](infrastructure.md) — Окружение разработки, Makefile, линтеры,
   форматирование и CI.
+- [`doc/dev/verification-matrix.md`](verification-matrix.md) — Verification
+  matrix for surprise exits, the free-remainder ceiling, and anonymous
+  share-link access (WISHENKA-37). Records coverage and gaps.
