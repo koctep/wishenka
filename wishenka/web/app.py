@@ -27,6 +27,7 @@ from wishenka.web.routes.items import router as items_router
 from wishenka.web.routes.items_ui import router as items_ui_router
 from wishenka.web.routes.miniapp import router as miniapp_router
 from wishenka.web.routes.reservations import router as reservations_router
+from wishenka.web.routes.reservations_ui import router as reservations_ui_router
 from wishenka.web.routes.sharing import router as sharing_router
 from wishenka.web.routes.wishlists import router as wishlist_router
 from wishenka.web.security import BrowserSecurityMiddleware
@@ -202,6 +203,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(auth_router)
     app.include_router(items_router)
     app.include_router(reservations_router)
+    app.include_router(reservations_ui_router)
     app.include_router(items_ui_router)
     app.include_router(wishlist_router)
     app.include_router(sharing_router)

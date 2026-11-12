@@ -93,6 +93,50 @@
     document.addEventListener('htmx:afterRequest', function (evt) {
         var elt = evt.detail.elt;
         if (!reservationRequestPath(elt)) { return; }
+        var row = elt.closest ? elt.closest('.reservation-row') : null;
+        if (row) {
+            var rowXhr = evt.detail.xhr;
+            var rowStatus = rowXhr ? rowXhr.status : 0;
+            var busySlot = row.querySelector('[data-reservation-busy]');
+            var busyText =
+                'Желание занято, бронь не изменилась. Повторите попытку.';
+            if (rowStatus === 503) {
+                if (busySlot) {
+                    busySlot.hidden = false;
+                    busySlot.textContent = busyText;
+                }
+                return;
+            }
+            var notice = '';
+            if (rowStatus === 409) {
+                var detail = rowXhr.responseText || '';
+                notice = detail.indexOf('available') === -1 ? 'refused' : 'shortage';
+            } else if (rowStatus === 401 || rowStatus === 403 || rowStatus === 404) {
+                notice = 'refused';
+            } else if (rowStatus !== 200 && rowStatus !== 201) {
+                return;
+            }
+            var listUrl = '/web/reservations/list';
+            if (notice) {
+                listUrl += '?notice=' + notice;
+                var reservationId = row.getAttribute('data-reservation-id');
+                if (notice === 'shortage' && reservationId) {
+                    listUrl += '&reservation_id=' + encodeURIComponent(reservationId);
+                }
+            }
+            fetch(listUrl, {
+                credentials: 'same-origin',
+                headers: {'Accept': 'text/html'}
+            }).then(function (response) { return response.text(); })
+                .then(function (markup) {
+                    var cabinet = document.getElementById('reservations-cabinet');
+                    if (!cabinet) { return; }
+                    cabinet.outerHTML = markup;
+                    var next = document.getElementById('reservations-cabinet');
+                    if (next && window.htmx) { window.htmx.process(next); }
+                });
+            return;
+        }
         var card = elt.closest ? elt.closest('.item-card') : null;
         if (!card) { return; }
         var xhr = evt.detail.xhr;

@@ -1,0 +1,67 @@
+<div id="reservations-cabinet">
+    {% if notice_kind == "shortage" %}
+    <p class="reservation-notice">
+        Бронь не изменилась. Свободно: {{ free_remainder }}.
+    </p>
+    {% elif notice_kind == "refused" %}
+    <p class="reservation-notice">Бронь не изменилась.</p>
+    {% endif %}
+    {% if not groups %}
+    <p class="reservations-empty">Нет бронирований</p>
+    {% endif %}
+    {% for group in groups %}
+    <section class="reservation-group">
+        <h2>{{ group.title }}</h2>
+        {% if group.event_title %}
+        <p class="reservation-event-title">{{ group.event_title }}</p>
+        {% endif %}
+        {% if group.event_date %}
+        <p class="reservation-event-date">{{ group.event_date }}</p>
+        {% endif %}
+        {% for row in group.rows %}
+        <div class="reservation-row" data-reservation-id="{{ row.reservation_id }}">
+            <p class="reservation-item">{{ row.item_title }}</p>
+            <p class="reservation-quantity">{{ row.quantity }}</p>
+            <p class="reservation-status">{{ row.status_label }}</p>
+            {% if row.for_name %}
+            <p class="reservation-for">Для: {{ row.for_name }}</p>
+            {% endif %}
+            {% if row.wish_archived %}
+            <p class="reservation-wish-archived">Желание в архиве</p>
+            {% endif %}
+            {% if row.list_archived %}
+            <p class="reservation-list-archived">Вишлист в архиве</p>
+            {% endif %}
+            <a href="{{ row.wish_href }}">К желанию</a>
+            {% if row.offer_actions %}
+            {% set patch_url = "/api/wishlists/" ~ row.wishlist_id
+                ~ "/items/" ~ row.wish_item_id
+                ~ "/reservations/" ~ row.reservation_id %}
+            <form hx-patch="{{ patch_url }}" hx-ext="json-enc" hx-swap="none">
+                <select name="quantity">
+                    {% for n in range(1, row.change_ceiling + 1) %}
+                    <option value="{{ n }}"
+                            {% if n == row.quantity %}selected{% endif %}>{{ n }}</option>
+                    {% endfor %}
+                </select>
+                <button type="submit">Изменить</button>
+            </form>
+            <button type="button" hx-post="{{ patch_url }}/cancel" hx-swap="none">
+                Отменить бронь
+            </button>
+            {% if row.status_label == "Забронировано" %}
+            <button type="button" hx-post="{{ patch_url }}/purchase" hx-swap="none">
+                Куплено
+            </button>
+            {% elif row.status_label == "Куплено" %}
+            <button type="button" hx-post="{{ patch_url }}/undo-purchase" hx-swap="none">
+                Вернуть в бронь
+            </button>
+            {% endif %}
+            {% endif %}
+            <p data-reservation-busy hidden></p>
+        </div>
+        {% endfor %}
+    </section>
+    {% endfor %}
+</div>

@@ -1891,6 +1891,27 @@ class WishlistService:
         )
         return res
 
+    @staticmethod
+    def _cabinet_recipient_name(item: WishItem, wishlist: Wishlist | None) -> str:
+        """Name who the wish is for, without another gifter.
+
+        A personal list names the owner. A collaborative list names the
+        designated member, or the display name when nobody is designated.
+        """
+        if wishlist is None:
+            return ""
+        owner_name = wishlist.owner_name.strip()
+        if not wishlist.is_collaborative:
+            if owner_name:
+                return owner_name
+            return f"Участник #{wishlist.owner_id}"
+        designated = item.recipient_user_id
+        if designated is not None:
+            if designated == wishlist.owner_id and owner_name:
+                return owner_name
+            return f"Участник #{designated}"
+        return (item.recipient_name or "").strip()
+
     async def get_user_reservations(
         self,
         user_id: int,
@@ -1906,14 +1927,13 @@ class WishlistService:
                 if item is None:
                     continue
                 wl = item.wishlist
-                recipient_name = item.recipient_name or (wl.owner_name if wl else "") or "Recipient"
                 results.append(
                     MyReservationItemDTO(
                         reservation_id=res.id,
                         wish_item_id=item.id,
                         wishlist_id=item.wishlist_id,
                         wishlist_title=wl.title if wl else "",
-                        recipient_name=recipient_name,
+                        recipient_name=self._cabinet_recipient_name(item, wl),
                         item_title=item.title,
                         item_link=item.link,
                         item_image_url=item.image_url,
@@ -1929,6 +1949,7 @@ class WishlistService:
                         ),
                         created_at=res.created_at,
                         updated_at=res.updated_at,
+                        change_ceiling=res.quantity + item.available_quantity,
                     )
                 )
         return results

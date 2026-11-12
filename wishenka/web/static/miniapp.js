@@ -192,6 +192,33 @@ async function showHome() {
       });
     }
     root.append(favSection);
+    try {
+      const cardResponse = await fetch('/web/reservations/card', {
+        credentials: 'same-origin',
+      });
+      if (cardResponse.ok) {
+        const parsed = new DOMParser().parseFromString(
+          await cardResponse.text(),
+          'text/html',
+        );
+        const sourceLink = parsed.querySelector('a');
+        const title = parsed.querySelector('.reservations-title');
+        const badge = parsed.querySelector('.reservations-badge');
+        if (sourceLink && title && badge) {
+          const card = node('a', '', {
+            href: sourceLink.getAttribute('href') || '',
+          });
+          card.append(
+            node('span', title.textContent || ''),
+            node('span', badge.textContent || '', {class: 'reservations-badge'}),
+          );
+          const firstSection = root.querySelector('.wishlist-section');
+          if (firstSection) root.insertBefore(card, firstSection);
+        }
+      }
+    } catch (_) {
+      // A failed card leaves the three sections in place.
+    }
     status('');
   } catch (_) { status('Could not load wishlists. Check your session and try again.'); }
 }

@@ -230,6 +230,27 @@ elements with `role="region"` and accessible `aria-label` attributes):
 3. **"Favorites"** (`aria-label="Favorites"`): Displays wishlists saved by the user. If empty,
    shows "No favorites yet". Each card includes an explicit "Remove" button for quick unfavoriting.
 
+#### Reservations card
+
+After those three sections load, `showHome` requests
+`GET /web/reservations/card` and inserts «Мои бронирования» before the
+first `.wishlist-section`. The copy uses `node()` (`textContent`). The
+badge text is `total_distinct_items`: distinct wishes on which the
+caller holds an occupying promise (`ACTIVE` or `PURCHASED`). A second
+promise on the same wish does not increment it. Units do not increment
+it. A response that is not OK, a fragment missing the link, title,
+or badge, and a failed fetch, leave the three sections in place.
+
+`publicView` and `invitationView` do not request the card, so a shared
+view and an invite view do not show it. `GET /share/{public_token}`
+does not render it either.
+
+On a personal list the owner is the recipient of every wish, so those
+wishes are not shown as that owner's promises and do not increase the
+badge. Grouping, «К желанию», the four actions, refresh, logs, and
+the CSRF window are in
+[reservations.md](reservations.md#7-my-reservations-cabinet).
+
 #### Role Badges & Precedence Rules
 
 Each wishlist card displays a localized visual badge indicating the user's role on that list:
@@ -473,6 +494,9 @@ wish items without full-page reloads.
 | `/web/wishlists/{wishlist_id}/items/reorder` | `POST` | Yes | Yes | Persists full manual order (`item_ids`); returns items list. |
 | `/web/wishlists/{wishlist_id}/items/{item_id}/move?direction=up\|down` | `POST` | Yes | Yes | Moves item one step; returns items list. |
 | `/web/wishlists/{wishlist_id}/items/{item_id}/archive-confirm` | `GET` | Yes | No | Renders archive confirmation modal. |
+| `/web/reservations/card` | `GET` | Yes | No | Home card. Badge is distinct wishes. |
+| `/web/reservations` | `GET` | Yes | No | Cabinet page of the caller's promises. |
+| `/web/reservations/list` | `GET` | Yes | No | Cabinet list partial used on refresh. |
 
 ---
 
@@ -565,7 +589,17 @@ The following settings configure the Mini App and web security layer:
   `MEMBER`), or the wishlist is in `ARCHIVED` status.
 - **Solution**: Authenticate as an active wishlist member and ensure the wishlist is `active`.
 
-### 10. Reorder Returns `400` or Drag-and-Drop Does Nothing
+### 10. Home Screen Has No «Мои бронирования» Card
+
+- **Cause**: The caller has no session, so `GET /web/reservations/card`
+  is HTTP 401. Or `showHome` did not run, because `publicView` or
+  `invitationView` is showing a shared or invite link. Or the card
+  fetch failed. A failed fetch leaves the three wishlist sections.
+- **Solution**: Open the home screen with a session. The badge and the
+  cabinet are documented in
+  [reservations.md](reservations.md#7-my-reservations-cabinet).
+
+### 11. Reorder Returns `400` or Drag-and-Drop Does Nothing
 - **Cause**: `item_ids` is not an exact permutation of active items (stale page after another
   editor archived/added an item), or the card is not `draggable="true"` (non-editor view).
 - **Solution**: Reload the wishlist page and retry; logged as `ui_items_reorder_rejected`.

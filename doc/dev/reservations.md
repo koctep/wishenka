@@ -51,8 +51,11 @@ card summary, compact and expanded. See
    mechanism.
 5. **Reduction Lock Invariant**:
    Prevents wishlist authors from reducing an item's desired quantity below the sum of active, purchased, and fulfilled units ($\text{desired} \ge \text{active} + \text{purchased} + \text{fulfilled}$).
-6. **Aggregated "My Reservations" Cabinet**:
-   Cross-wishlist personal cabinet for gifters displaying all active and purchased gifts with status flags, event dates, and archived item indicators.
+6. **My reservations cabinet**:
+   An identified caller sees the home card «Мои бронирования». The badge
+   is `total_distinct_items`: distinct wishes with an occupying promise.
+   The cabinet lists only that caller's occupying promises. See
+   [My reservations cabinet](#7-my-reservations-cabinet).
 7. **Authenticated promise HTTP API**:
    Five routes under
    `/api/wishlists/{wishlist_id}/items/{item_id}/reservations`
@@ -69,7 +72,7 @@ The reservation subsystem is located in `wishenka.wishlists` and consists of mod
 ```mermaid
 flowchart TD
     Client["Telegram Mini App / HTTP Client"] --> Router["Wishlists & Reservations API"]
-    
+
     subgraph ServiceLayer["Service & Domain Layer"]
         Router --> Service["WishlistService"]
         Service --> Policy["WishlistAccessPolicy"]
@@ -179,8 +182,8 @@ projects items into role-specific DTOs defined in
 |---|---|---|
 | [`WishItemRecipientViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L11) | Gift Recipient / Wishlist Owner | **Strictly None**. Exposes `quantity` and `received_quantity`. Fields like `available_quantity`, `is_fully_reserved`, `my_reserved_quantity`, and gifter names **do not exist**. |
 | [`WishItemGifterViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L39) | Gifters / Public Viewers | Exposes `available_quantity`, `is_fully_reserved`, `is_reserved_by_me`, `my_reserved_quantity`, `my_reservation_status`, `my_reservation_id`, `my_latest_reservation_quantity`, and `my_occupying_reservation_count`. Masks identities of other gifters. |
-| [`MyReservationItemDTO`](file:///home/src/wishenka/wishlists/schemas.py#L73) | Gifter Personal Cabinet | Contains aggregated item details, wishlist title, recipient name, event dates, booking status (`ACTIVE` vs `PURCHASED`), and `is_item_archived`. |
-| [`UserReservationsSummaryDTO`](file:///home/src/wishenka/wishlists/schemas.py#L98) | Home Screen Badge | Aggregates `total_active_reservations` and `total_distinct_items` across all wishlists for a user. |
+| `MyReservationItemDTO` | Caller cabinet | One occupying promise of the caller. |
+| `UserReservationsSummaryDTO` | Home card badge | Badge is `total_distinct_items`. |
 
 ### 4. Self-Reservation Guards
 
@@ -236,9 +239,10 @@ One block, `.item-giver`, sits inside `.item-card-summary`. The summary
 stays on screen when the details open, so the same block is the compact
 card and the expanded card. Writes use the five routes above and
 [`execute_wish`](file:///home/src/wishenka/wishlists/store.py#L942-L997).
-This card adds no reservation route. The My reservations cabinet remains
+This card adds no reservation write route. The cabinet reads are
+[My reservations cabinet](#7-my-reservations-cabinet). They load
 [`get_user_reservations`](file:///home/src/wishenka/wishlists/service.py)
-and [`MyReservationItemDTO`](file:///home/src/wishenka/wishlists/schemas.py#L75).
+and [`MyReservationItemDTO`](file:///home/src/wishenka/wishlists/schemas.py).
 The archive title row
 [`archived_items_section.html`](file:///home/src/wishenka/web/templates/partials/archived_items_section.html)
 is a separate list and has no giver controls.
@@ -372,6 +376,198 @@ The promise handler does not run, and no row is stored. The follow-up is
 [WISHENKA-123](https://pypost.atlassian.net/browse/WISHENKA-123).
 The token stays out of the HTML.
 
+### 7. My reservations cabinet
+
+The home card and the cabinet are read-only HTML. The router is
+[`wishenka/web/routes/reservations_ui.py`](../../wishenka/web/routes/reservations_ui.py),
+included from `wishenka/web/app.py`. Writes stay on the five routes in
+[HTTP promise actions](#http-promise-actions). These reads use the
+snapshot load below. Writes stay on those five routes.
+
+A missing session is HTTP 401 `{"detail":"Authentication required"}`.
+The body does not contain «Мои бронирования», «Нет бронирований», or
+`.reservations-badge`. `get_current_user` rejects the call before a
+read.
+
+| Method | Path | HTML |
+| ------ | ---- | ---- |
+| `GET` | `/web/reservations/card` | `partials/reservations_card.html` |
+| `GET` | `/web/reservations` | `reservations_cabinet.html` |
+| `GET` | `/web/reservations/list` | `partials/reservations_list.html` |
+
+A read uses `WishlistStore.execute` (a full snapshot), or the injected
+service when tests set `app.state.wishlist_service`.
+
+#### Home card
+
+`GET /web/reservations/card` renders
+[`partials/reservations_card.html`](../../wishenka/web/templates/partials/reservations_card.html).
+The title is «Мои бронирования». The badge is
+`UserReservationsSummaryDTO.total_distinct_items`, including `0`.
+That number is the count of distinct `wish_item_id` values among the
+caller's occupying promises (`ACTIVE` and `PURCHASED`). A second
+occupying promise on the same wish does not increment it. Units do
+not increment it. A `CANCELLED` promise does not increment it.
+`total_active_reservations` is the row count and is not the badge.
+The link target is `/web/reservations`.
+
+`showHome` in
+[`wishenka/web/static/miniapp.js`](../../wishenka/web/static/miniapp.js)
+requests this fragment after the three wishlist sections have loaded.
+It copies the title text, the badge text, and the href through
+`node()` (`textContent`) and inserts the link before the first
+`.wishlist-section`. The badge span keeps the class
+`reservations-badge`.
+A response that is not OK, a fragment missing the link, title, or
+badge, and a failed fetch, leave the three sections in place.
+`publicView` and `invitationView` do not request
+the card. `GET /` and `GET /share/{public_token}` do not render it.
+
+#### Cabinet list
+
+`GET /web/reservations` extends `base.html`, sets `viewer_identified`,
+and includes
+[`partials/reservations_list.html`](../../wishenka/web/templates/partials/reservations_list.html).
+The page title and the `h1` are «Мои бронирования».
+`GET /web/reservations/list` returns that same list. Optional query
+`notice` is kept only when it is `shortage` or `refused`. Any other
+value is omitted. `reservation_id` is used only for a shortage
+remainder.
+
+Both routes load `get_user_reservations` for the caller. The method
+keeps a row when `user_id` is the caller and the status is `ACTIVE`
+or `PURCHASED`. It skips `CANCELLED`. It skips another gifter's
+promise. The web layer groups the rows by `wishlist_id`. Groups are
+ordered by `title.casefold()`, then `wishlist_id`. Rows inside a
+group follow `created_at`, then `reservation_id`.
+
+Each group shows the wishlist title. A non-empty event title, after
+stripping, is shown. An event date is shown as the UTC calendar day
+`YYYY-MM-DD`. A list without those fields omits them. An empty
+cabinet shows «Нет бронирований» and no `.reservation-group`.
+
+Each row shows the wish title, that promise's quantity,
+«Забронировано» or «Куплено», and `Для: {name}` when the name is
+non-empty. An archived wish adds «Желание в архиве». An archived
+list adds «Вишлист в архиве». The row does not print another
+gifter's name, id, or quantity.
+
+The name comes from `_cabinet_recipient_name`. A personal list names
+the owner (`owner_name`, or `Участник #{owner_id}` when that name is
+blank). It does not use a display name on the wish. A collaborative
+list names the designated member (`owner_name` when that member is
+the owner, otherwise `Участник #{id}`), or the display name when
+nobody is designated.
+
+On a personal list the owner is the recipient of every wish,
+including a wish that has only a display name
+(`WishlistAccessPolicy.is_recipient`). A display name is never
+compared to a user. That owner cannot hold a promise on those
+wishes, so they are not shown as the owner's promises. They do not
+increase the owner's badge, and the cabinet omits them. The query
+does not add a second recipient filter. It returns the caller's
+occupying promises, and the owner has none on that list.
+
+Deleting a list sets its occupying promises to `CANCELLED`. Those
+rows then leave the cabinet and the distinct-wish count. The cabinet
+does not add a second cancel path.
+
+#### Link and the four actions
+
+Every row includes «К желанию». The href is
+`/web/wishlists/{wishlist_id}#item-card-{wish_item_id}`.
+
+While the wish card still has giver controls, the row offers only
+that link. That is an active wish on an active list. The row does
+not render «Изменить», «Отменить бронь», «Куплено», or
+«Вернуть в бронь», and it does not contain a write URL under
+`/reservations/`. An earlier promise on that wish is listed the same
+way. The card edits the latest promise. See
+[Wish-card giver controls](#6-wish-card-giver-controls).
+
+The four actions render only when the wish is archived and the list
+is active (`is_item_archived` and not `is_wishlist_archived`). Each
+control posts that row's `reservation_id` on the five existing
+promise routes. Create stays on the wish card. An earlier promise
+keeps its own id.
+
+| Control | Request |
+| ------- | ------- |
+| `Изменить` | `PATCH` that row, JSON quantity, `hx-ext="json-enc"` |
+| `Отменить бронь` | `POST` `{row}/cancel` |
+| `Куплено` | `POST` `{row}/purchase` when the label is «Забронировано» |
+| `Вернуть в бронь` | `POST` `{row}/undo-purchase` when the label is «Куплено» |
+
+`{row}` is
+`/api/wishlists/{wishlist_id}/items/{item_id}/reservations/{reservation_id}`
+and `reservation_id` is that row's id. The quantity form sends
+`hx-patch`, `hx-ext="json-enc"`, and `hx-swap="none"`. The select
+runs from 1 through `change_ceiling`. That ceiling is this promise's
+quantity plus the wish's `available_quantity`. The selected option
+is this row's quantity. Cancel, purchase, and undo are buttons with
+`hx-post` and `hx-swap="none"`. HTMX does not insert the JSON body.
+
+An archived list keeps the row and «К желанию», shows
+«Вишлист в архиве», and omits the four actions. The four writes on
+an archived list return HTTP 409 (`WishlistArchivedError`). A
+deleted list cancels occupying promises, so the group leaves the
+cabinet. A write that still reaches those routes is HTTP 404
+`{"detail":"Resource not found"}`.
+
+#### Cabinet refresh
+
+`htmx:afterRequest` in
+[`base.html`](../../wishenka/web/templates/base.html) runs when the
+control path contains `/reservations`. A closest `.reservation-row`
+takes the cabinet branch. The branch does not fetch the wish-card
+partial and does not write the action `responseText` into the page.
+
+- **HTTP 200 or 201.** The script requests
+  `GET /web/reservations/list` and replaces `#reservations-cabinet`
+  with that partial (`outerHTML`), then calls `htmx.process`. The
+  list is the caller's occupying promises only, so the refresh does
+  not name another gifter.
+- **HTTP 409.** The same GET adds `notice=shortage` when the
+  response text contains `available`, and `notice=refused`
+  otherwise. Shortage also sends this row's `reservation_id`.
+  Shortage text is `Бронь не изменилась. Свободно: {N}.` `N` is
+  `max(0, change_ceiling - reserved_quantity)` for that row. The
+  partial does not echo `detail`.
+- **HTTP 401, 403, or 404.** The same GET adds `notice=refused`.
+  The sentence is `Бронь не изменилась.`
+- **HTTP 503.** The cabinet stays in place. The script does not
+  request the list. It shows
+  `Желание занято, бронь не изменилась. Повторите попытку.`
+  on `[data-reservation-busy]` of the row already on screen. The
+  sentence names nobody. The stored promise is unchanged.
+
+#### Cookie CSRF
+
+The cabinet page sets `data-viewer-identified`, so it uses the same
+`DOMContentLoaded` listener as
+[Cookie CSRF on the card](#cookie-csrf-on-the-card). The empty-token
+window is unchanged. A click before `GET /api/auth/csrf` resolves,
+and a fetch that fails,
+sends no `X-CSRF-Token`. `BrowserSecurityMiddleware` answers HTTP
+403 `{"detail":"Invalid CSRF token"}`. The row branch maps that 403
+to `notice=refused`. The promise handler does not run, and no row
+is stored. The follow-up remains
+[WISHENKA-123](https://pypost.atlassian.net/browse/WISHENKA-123).
+The home-card fetch in `showHome` is a GET and does not use this
+token.
+
+#### Logs
+
+The three cabinet GETs write no event on `wishenka.web.reservations`.
+`reservations_ui.py` has no logger. A missing session is the
+existing `auth_failure` on `wishenka.auth`. It is not a cabinet
+mutation record. Promise writes stay on `wishenka.web.reservations`,
+from `execute` in `wishenka/web/routes/reservations.py`. A successful
+cabinet action is `reservation_action_completed`. A refused refresh
+is the matching WARNING under
+[HTTP route logs](#http-route-logs). HTTP 503 is
+`reservation_inventory_busy`.
+
 ---
 
 ## API & Usage
@@ -402,6 +598,9 @@ Cross-process exclusion remains `BEGIN IMMEDIATE` on the wish.
 The wish card sends these five calls from `.item-giver`. Which control
 sends which method is in
 [Wish-card giver controls](#6-wish-card-giver-controls).
+The cabinet sends the four mutation calls, each with that row's
+reservation id, only for an archived wish on an active list. See
+[My reservations cabinet](#7-my-reservations-cabinet).
 
 Create calls `create_reservation`. Quantity change calls
 `update_reservation_quantity`. Cancel calls `cancel_reservation`. Purchase
@@ -576,17 +775,21 @@ async def adjust_quantity(service: WishlistService, reservation_id: int, gifter:
 
 ```python
 async def view_my_reservations(service: WishlistService, gifter: AuthenticatedUser):
-    # Aggregated cabinet view across all wishlists
+    # Occupying promises only: ACTIVE and PURCHASED, this caller.
     my_reservations = await service.get_user_reservations(user_id=gifter.telegram_id)
     for res in my_reservations:
         print(f"Item: {res.item_title} (x{res.reserved_quantity}) for {res.recipient_name}")
         print(f"Status: {res.status.value}, Archived: {res.is_item_archived}")
 
-    # Summary badge count for home screen
+    # The home badge is the distinct-wish count, not the row count.
     summary = await service.get_user_reservations_summary(user_id=gifter.telegram_id)
-    print(f"Active commitments: {summary.total_active_reservations}")
-    print(f"Distinct wish items booked: {summary.total_distinct_items}")
+    print(f"Occupying rows: {summary.total_active_reservations}")
+    print(f"Home badge: {summary.total_distinct_items}")
 ```
+
+The HTTP card and page call these same methods. The badge text is
+`total_distinct_items`. See
+[My reservations cabinet](#7-my-reservations-cabinet).
 
 ### 6. Recording Item Fulfillment by Recipient
 
@@ -608,11 +811,18 @@ async def fulfill_item(service: WishlistService, item_id: int, author: Authentic
 ### HTTP route configuration
 
 The five promise routes add no environment variable and no second lock.
-The wish card adds none either. Cookie clicks on the card use the existing
+The wish card adds none either. The cabinet reads add none either.
+Cookie clicks on the card and on the cabinet use the existing
 `GET /api/auth/csrf` token and `csrf_secret_key`, as in
 [Cookie CSRF on the card](#cookie-csrf-on-the-card).
-Authentication is the existing `get_current_user` dependency (session cookie
-or bearer token). A missing session is HTTP 401 before `execute_wish` runs.
+The cabinet page uses that same listener. The empty-token window
+is unchanged. See
+[My reservations cabinet](#7-my-reservations-cabinet).
+Authentication is the existing `get_current_user` dependency (session
+cookie or bearer token). A missing session on a promise route is HTTP
+401 before `execute_wish` runs. A missing session on a cabinet GET is
+that same HTTP 401, before the snapshot read. That GET writes no
+mutation log.
 SQLite exclusion stays `BEGIN IMMEDIATE` with `busy_timeout` of 5000 ms, as
 in [`doc/dev/architecture.md`](architecture.md). `asyncio.Lock` inside
 `ItemConcurrencyCoordinator` is not the cross-process mechanism.
@@ -676,6 +886,11 @@ them includes a gifter id, name, or token.
 `GET /wishlists/{wishlist_id}/items/{item_id}/card` writes none of these
 records. The wish-card refresh reads that partial, or the browser shows
 the busy sentence, and the mutation log stays on this logger.
+
+`GET /web/reservations/card`, `GET /web/reservations`, and
+`GET /web/reservations/list` write none of these records either.
+A cabinet refresh reads the list partial, or the browser shows the
+busy sentence on the row. The mutation log stays on this logger.
 
 `reservation_action_completed` is written only after the action returns the
 promise DTO. `reservation_action_refused`, `reservation_permission_denied`,
@@ -750,11 +965,12 @@ Key metrics derived from structured log events:
   [`WishlistArchivedError`](file:///home/src/wishenka/wishlists/exceptions.py#L16).
 - **Existing Reservations**: When an author archives an item with existing
   bookings, the reservations are **not deleted**. They remain in the
-  gifter's "My Reservations" cabinet with `is_item_archived=True`. The
-  gifter retains full ability to cancel
-  ([`cancel_reservation`](file:///home/src/wishenka/wishlists/service.py#L1697))
-  or mark as purchased
-  ([`mark_reservation_purchased`](file:///home/src/wishenka/wishlists/service.py#L1537)).
+  caller's cabinet with `is_item_archived=True`. The four actions are
+  offered only while that list is still active. See
+  [My reservations cabinet](#7-my-reservations-cabinet).
+  `cancel_reservation` and `mark_reservation_purchased` still accept an
+  archived item on an active list. An archived list raises
+  `WishlistArchivedError`.
 
 ### 6. Missing session (HTTP 401)
 
@@ -852,3 +1068,70 @@ Key metrics derived from structured log events:
 - **Resolution**: Expected. The recipient HTML omits `.item-giver`.
   `get_item_card_partial` writes no reservation event. Mutation logs stay
   on `wishenka.web.reservations`.
+
+### 14. Anonymous cabinet request (HTTP 401)
+
+- **Symptom**: `GET /web/reservations/card`, `GET /web/reservations`, or
+  `GET /web/reservations/list` returns `401` and
+  `{"detail":"Authentication required"}`. The body has no
+  «Мои бронирования», «Нет бронирований», or `.reservations-badge`.
+- **Cause**: `get_current_user` rejected the call. The snapshot read
+  does not run. The record is `auth_failure` on `wishenka.auth`, not a
+  reservation mutation log.
+- **Resolution**: Send the existing session cookie or bearer token.
+  These routes do not add a second session mechanism.
+
+### 15. Cabinet row left in place on HTTP 503
+
+- **Symptom**: A cabinet action shows
+  `Желание занято, бронь не изменилась. Повторите попытку.` on the
+  row already on screen. The cabinet markup is unchanged. The sentence
+  names nobody.
+- **Cause**: The promise route returned HTTP 503 `InventoryBusyError`.
+  The `.reservation-row` branch in `base.html` does not request
+  `GET /web/reservations/list` and does not replace
+  `#reservations-cabinet`. The server record is
+  `reservation_inventory_busy` on `wishenka.web.reservations`. The
+  cabinet GET writes no mutation log.
+- **Resolution**: Repeat the same action. See
+  [My reservations cabinet](#7-my-reservations-cabinet).
+
+### 16. Cabinet cookie click before the CSRF token
+
+- **Symptom**: An identified cookie session clicks a cabinet action and
+  the list refreshes to `Бронь не изменилась.` The promise row is
+  unchanged.
+- **Cause**: The cabinet page uses the same `base.html` listener as the
+  wish card. `csrf_token` is stored only after `GET /api/auth/csrf`
+  resolves. Until then, and when that GET fails, the click sends no
+  `X-CSRF-Token`. The middleware returns HTTP 403
+  `{"detail":"Invalid CSRF token"}`. The row branch maps every 403,
+  including this one, to `notice=refused`. The promise handler does
+  not run. The empty-token window is unchanged.
+- **Resolution**: After the token is stored, the next click sends
+  `X-CSRF-Token`. Bearer calls skip the cookie check. The follow-up
+  remains
+  [WISHENKA-123](https://pypost.atlassian.net/browse/WISHENKA-123).
+
+### 17. Personal-list owner sees no promise for those wishes
+
+- **Symptom**: The owner of a personal list does not see those wishes
+  under «Мои бронирования», including a wish that has only a display
+  name. They do not increase the badge.
+- **Cause**: That owner is the recipient of every wish on the list
+  (`WishlistAccessPolicy.is_recipient`). A display name is never
+  compared to a user. The owner holds no occupying promise there.
+  Another gifter's promise is not an owner row.
+- **Resolution**: Expected. The gifter's cabinet lists the promise and
+  names the list owner. See
+  [My reservations cabinet](#7-my-reservations-cabinet).
+
+### 18. Shared or invite view has no reservations card
+
+- **Symptom**: A public gift link or a collaborator invitation does not
+  show «Мои бронирования».
+- **Cause**: `publicView` and `invitationView` do not request
+  `GET /web/reservations/card`. `GET /share/{public_token}` and the
+  `GET /` shell do not render the card. Only `showHome` requests it.
+- **Resolution**: Expected. Open the home screen with a session. See
+  [My reservations cabinet](#7-my-reservations-cabinet).
