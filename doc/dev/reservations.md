@@ -4,6 +4,9 @@
 
 The reservation subsystem in the **Wishlist Service («Вишенка»)** Telegram Mini App coordinates the commitment and purchase workflow for gifts. It enables gifters to book individual units of multi-quantity wish items, mark them as purchased in the real world, cancel bookings, or adjust reserved counts, while guaranteeing strict data confidentiality for the gift recipient.
 
+Clients reach that workflow through five authenticated HTTP routes on
+one wish. The contract is under [HTTP promise actions](#http-promise-actions).
+
 ```
 +-------------------------------------------------------------------------------------------------------+
 |                                         Wish Item Inventory                                           |
@@ -47,6 +50,12 @@ The reservation subsystem in the **Wishlist Service («Вишенка»)** Teleg
    Prevents wishlist authors from reducing an item's desired quantity below the sum of active, purchased, and fulfilled units ($\text{desired} \ge \text{active} + \text{purchased} + \text{fulfilled}$).
 6. **Aggregated "My Reservations" Cabinet**:
    Cross-wishlist personal cabinet for gifters displaying all active and purchased gifts with status flags, event dates, and archived item indicators.
+7. **Authenticated promise HTTP API**:
+   Five routes under
+   `/api/wishlists/{wishlist_id}/items/{item_id}/reservations`
+   create, resize, cancel, purchase, or undo one promise. Each call goes
+   through `execute_wish`. There is no second lock. Success is
+   `PromiseActionDTO`: the promise just changed, plus the gifter wish view.
 
 ---
 
@@ -101,19 +110,22 @@ stateDiagram-v2
 - **`PURCHASED`**: The gifter confirmed purchasing the gift in the physical world. Crucially, **`PURCHASED` reservations continue locking inventory** so other gifters cannot book the same units.
 - **`CANCELLED`**: The gifter cancelled the reservation or the parent wishlist was deleted. The reserved units are immediately released back to `available_quantity`. This is a terminal state.
 - **Receipt leaves the promise open**:
-  [`record_item_fulfillment`](file:///home/src/wishenka/wishlists/service.py#L1861-L1945)
+  [`record_item_fulfillment`](file:///home/src/wishenka/wishlists/service.py#L1948)
   only adds `received_quantity`. It does not cancel the reservation or set
   `ReservationStatus.COMPLETED`. There is no `FULFILLED` status. The promise
   stays `ACTIVE` or `PURCHASED`.
 
 > [!IMPORTANT]
-> Both `ACTIVE` and `PURCHASED` states contribute to [`reserved_quantity`](file:///home/src/wishenka/wishlists/models.py#L101-L108). Reverting a purchased reservation back to active or cancelling a reservation adjusts inventory atomically within the concurrency coordinator.
+> Both `ACTIVE` and `PURCHASED` states contribute to
+> [`reserved_quantity`](file:///home/src/wishenka/wishlists/models.py#L122).
+> `execute_wish` builds a new `WishlistService` per call. The shared write
+> is the wish-scoped `BEGIN IMMEDIATE` transaction.
 
 ### 2. Item Concurrency Coordinator (`KeyedMutex`)
 
 [`execute_wish`](file:///home/src/wishenka/wishlists/store.py#L942-L997) builds a new
 `WishlistService` on every call
-([`_load_wish`](file:///home/src/wishenka/wishlists/store.py#L1136) assigns
+([`_load_wish`](file:///home/src/wishenka/wishlists/store.py#L1016) assigns
 `WishlistService()`). That instance owns a fresh
 [`ItemConcurrencyCoordinator`](file:///home/src/wishenka/wishlists/concurrency.py#L8-L24).
 The `asyncio.Lock` lives on that instance. It is not shared across requests
@@ -155,27 +167,158 @@ class ItemConcurrencyCoordinator:
 
 ### 3. Role-Aware DTO Projections & Zero-Leak Guarantees
 
-To enforce the **Surprise Invariant**, [`WishlistService`](file:///home/src/wishenka/wishlists/service.py#L42-L1635) projects items into role-specific DTOs defined in [`wishenka.wishlists.schemas`](file:///home/src/wishenka/wishlists/schemas.py#L10-L102):
+To enforce the **Surprise Invariant**,
+[`WishlistService`](file:///home/src/wishenka/wishlists/service.py#L217)
+projects items into role-specific DTOs defined in
+[`wishenka.wishlists.schemas`](file:///home/src/wishenka/wishlists/schemas.py#L11):
 
 | DTO Schema | Target Audience | Reservation Attributes |
 |---|---|---|
-| [`WishItemRecipientViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L10-L30) | Gift Recipient / Wishlist Owner | **Strictly None**. Exposes `quantity` and `received_quantity`. Fields like `available_quantity`, `is_fully_reserved`, `my_reserved_quantity`, and gifter names **do not exist**. |
-| [`WishItemGifterViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L32-L68) | Gifters / Public Viewers | Exposes `available_quantity`, `is_fully_reserved`, `is_reserved_by_me`, `my_reserved_quantity`, `my_reservation_status`, and `my_reservation_id`. Masks identities of other gifters. |
-| [`MyReservationItemDTO`](file:///home/src/wishenka/wishlists/schemas.py#L69-L92) | Gifter Personal Cabinet | Contains aggregated item details, wishlist title, recipient name, event dates, booking status (`ACTIVE` vs `PURCHASED`), and `is_item_archived`. |
-| [`UserReservationsSummaryDTO`](file:///home/src/wishenka/wishlists/schemas.py#L94-L102) | Home Screen Badge | Aggregates `total_active_reservations` and `total_distinct_items` across all wishlists for a user. |
+| [`WishItemRecipientViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L11) | Gift Recipient / Wishlist Owner | **Strictly None**. Exposes `quantity` and `received_quantity`. Fields like `available_quantity`, `is_fully_reserved`, `my_reserved_quantity`, and gifter names **do not exist**. |
+| [`WishItemGifterViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L39) | Gifters / Public Viewers | Exposes `available_quantity`, `is_fully_reserved`, `is_reserved_by_me`, `my_reserved_quantity`, `my_reservation_status`, and `my_reservation_id`. Masks identities of other gifters. |
+| [`MyReservationItemDTO`](file:///home/src/wishenka/wishlists/schemas.py#L73) | Gifter Personal Cabinet | Contains aggregated item details, wishlist title, recipient name, event dates, booking status (`ACTIVE` vs `PURCHASED`), and `is_item_archived`. |
+| [`UserReservationsSummaryDTO`](file:///home/src/wishenka/wishlists/schemas.py#L98) | Home Screen Badge | Aggregates `total_active_reservations` and `total_distinct_items` across all wishlists for a user. |
 
 ### 4. Self-Reservation Guards
 
 A recipient must never be allowed to reserve an item designated for themselves:
 - **Personal Wishlists**: The owner is the recipient for all items (`wishlist.owner_id == user.telegram_id`).
-- **Collaborative Wishlists**: Items can specify an explicit [`recipient_user_id`](file:///home/src/wishenka/wishlists/models.py#L94). If `item.recipient_user_id == user.telegram_id`, the user is recognized as the recipient.
-- [`WishlistAccessPolicy.can_reserve_item`](file:///home/src/wishenka/wishlists/policy.py#L129-L142) evaluates this invariant. Attempting self-reservation raises [`SelfReservationError`](file:///home/src/wishenka/wishlists/exceptions.py#L29-L31) and logs a warning with event `self_reservation_blocked`.
+- **Collaborative Wishlists**: Items can specify an explicit
+  [`recipient_user_id`](file:///home/src/wishenka/wishlists/models.py#L114).
+  If `item.recipient_user_id == user.telegram_id`, the user is recognized
+  as the recipient.
+- [`WishlistAccessPolicy.can_reserve_item`](file:///home/src/wishenka/wishlists/policy.py#L134)
+  evaluates this invariant. Attempting self-reservation raises
+  [`SelfReservationError`](file:///home/src/wishenka/wishlists/exceptions.py#L28)
+  and logs a warning with event `self_reservation_blocked`.
+
+### 5. HTTP promise routes
+
+The client promise API is
+[`wishenka/web/routes/reservations.py`](file:///home/src/wishenka/web/routes/reservations.py),
+included from `wishenka/web/app.py`. `execute` in that module is the HTTP
+adapter. Unless tests inject `app.state.wishlist_service`, the action is
+passed to
+[`WishlistStore.execute_wish`](file:///home/src/wishenka/wishlists/store.py#L942-L997).
+Create passes `item_id`. Quantity change, cancel, purchase, and undo pass
+`reservation_id`. The store accepts exactly one of those keys. The service
+loaded inside `execute_wish` does not open a second transaction.
+
+The routes add no second lock. They do not call `WishlistStore.execute`,
+`SELECT FOR UPDATE`, or Redis, and they do not add an `asyncio.Lock`.
+Cross-process exclusion stays the wish-scoped SQLite transaction
+(`BEGIN IMMEDIATE`) in the section above. `execute_wish` still builds a new
+`WishlistService` per call, so `ItemConcurrencyCoordinator` is not shared
+across requests or processes.
+
+[`project_reservation_action`](file:///home/src/wishenka/wishlists/service.py#L196-L214)
+builds
+[`PromiseActionDTO`](file:///home/src/wishenka/wishlists/schemas.py#L119-L129)
+from the promise the method just returned and from `project_wish_item`. If
+the caller is the recipient, the projector raises `ReservationNotFoundError`
+and builds nothing. Receipt still does not introduce a `FULFILLED` status.
 
 ---
 
 ## API & Usage
 
-Below are concrete, runnable Python examples demonstrating typical reservation workflows using [`WishlistService`](file:///home/src/wishenka/wishlists/service.py#L42-L1635).
+### HTTP promise actions
+
+Five authenticated routes share the prefix
+`/api/wishlists/{wishlist_id}/items/{item_id}/reservations`.
+The router is `wishenka/web/routes/reservations.py`, included from
+`wishenka/web/app.py`. Each handler depends on `get_current_user`.
+
+A missing session is HTTP 401 `{"detail":"Authentication required"}`.
+The reservation method is not called, and no row is written.
+
+Each handler calls one existing method through `execute` in that module.
+`execute` passes the action to `WishlistStore.execute_wish`. Create passes
+`item_id`. The other four pass `reservation_id`. There is no second lock.
+Cross-process exclusion remains `BEGIN IMMEDIATE` on the wish.
+
+| Method  | Path under the prefix             | Success |
+| ------- | --------------------------------- | :-----: |
+| `POST`  | the prefix                        | `201`   |
+| `PATCH` | `/{reservation_id}`               | `200`   |
+| `POST`  | `/{reservation_id}/cancel`        | `200`   |
+| `POST`  | `/{reservation_id}/purchase`      | `200`   |
+| `POST`  | `/{reservation_id}/undo-purchase` | `200`   |
+
+Create calls `create_reservation`. Quantity change calls
+`update_reservation_quantity`. Cancel calls `cancel_reservation`. Purchase
+calls `mark_reservation_purchased`. Undo calls `revert_reservation_to_active`.
+
+The success body is `PromiseActionDTO`. `response_model` is that model
+alone. It is the promise the call just changed, plus the gifter wish view:
+
+- `reservation_id`, `wish_item_id`, `quantity`, and `status` come from that
+  one row. `status` is `active`, `purchased`, or `cancelled`.
+- `available_quantity` is the wish balance after the change.
+- `item` is `WishItemGifterViewDTO` from `project_wish_item`.
+
+Top-level quantity and status stay on the row that changed, including when
+the caller holds another promise on the same wish. `item` keeps the combined
+`my_reserved_quantity` and the latest promise on that wish. The body has no
+`user_id`. A recipient never receives this DTO. There is no `FULFILLED`
+status.
+
+Create and quantity change read `ReservationQuantityDTO`: a required integer
+`quantity` and no extra fields. On a wish `execute_wish` can load, a
+quantity below 1 is HTTP 400
+`{"detail":"Reservation quantity must be at least 1"}`. No row is stored or
+resized.
+
+The recipient of the wish cannot create a promise. The route returns HTTP
+403 with body exactly `{"detail":"Cannot promise this wish"}`. That body is
+the same whether a promise already exists. The route does not send the
+`SelfReservationError` text.
+
+A recipient mutation is refused before any write.
+`_guard_reservation_mutation` raises `ReservationNotFoundError` when the
+caller is the recipient, before ownership and before a status or quantity
+change. The route returns HTTP 404 `{"detail":"Resource not found"}`. A
+missing promise id uses that same body.
+
+`PermissionDeniedError` is HTTP 403 with body exactly
+`{"detail":"Forbidden"}`. Quantity change, cancel, purchase, and undo by a
+caller who does not hold the promise use that body.
+
+`InsufficientQuantityError`, `ReservationError`, and
+`WishlistArchivedError` are HTTP 409. The `detail` is the exception text.
+A shortage is this 409. A quantity below 1 on a loaded wish is HTTP 400
+`{"detail":"Reservation quantity must be at least 1"}`.
+`ReservationNotFoundError` stays the HTTP 404 body above.
+
+```python
+import httpx
+
+
+async def promise_one_unit(
+    client: httpx.AsyncClient,
+    wishlist_id: int,
+    item_id: int,
+    token: str,
+) -> dict:
+    response = await client.post(
+        f"/api/wishlists/{wishlist_id}/items/{item_id}/reservations",
+        json={"quantity": 1},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    response.raise_for_status()
+    # 201: this promise, plus the gifter wish view in "item"
+    return response.json()
+```
+
+Quantity change, cancel, purchase, and undo use that same prefix plus
+`/{reservation_id}`, `/{reservation_id}/cancel`,
+`/{reservation_id}/purchase`, or `/{reservation_id}/undo-purchase`. Those
+four return 200 and the same `PromiseActionDTO`.
+
+### Domain methods
+
+The examples below call `WishlistService` in process. The HTTP routes above
+are the client path. They call these same methods through `execute_wish`.
 
 ### 1. Creating a Reservation
 
@@ -304,6 +447,18 @@ async def fulfill_item(service: WishlistService, item_id: int, author: Authentic
 
 ## Configuration & Observability
 
+### HTTP route configuration
+
+The five promise routes add no environment variable and no second lock.
+Authentication is the existing `get_current_user` dependency (session cookie
+or bearer token). A missing session is HTTP 401 before `execute_wish` runs.
+SQLite exclusion stays `BEGIN IMMEDIATE` with `busy_timeout` of 5000 ms, as
+in [`doc/dev/architecture.md`](architecture.md). `asyncio.Lock` inside
+`ItemConcurrencyCoordinator` is not the cross-process mechanism.
+
+The route logger is `wishenka.web.reservations`. Domain events in the matrix
+below stay on `wishenka.wishlists` and are a separate stream.
+
 ### Structured Logging Matrix
 
 All reservation operations emit structured logs using `wishenka.wishlists` logger with standardized `extra={"event": "<event_name>", ...}` fields compatible with JSON and syslog log aggregators.
@@ -325,6 +480,44 @@ All reservation operations emit structured logs using `wishenka.wishlists` logge
 
 > [!NOTE]
 > In compliance with the Surprise Invariant, log records emitted during recipient interactions (e.g. viewing personal wishlist details) never include gifter identities, reservation IDs, or booking status.
+
+### HTTP route logs
+
+`execute` in `wishenka/web/routes/reservations.py` writes these records on
+`wishenka.web.reservations`. They are not the domain events above. None of
+them includes a gifter id, name, or token.
+
+- **INFO** `reservation_action_completed`: a promise action returned
+  `PromiseActionDTO`. Fields are `operation`, `item_id`, `reservation_id`,
+  and `status`. `status` is that promise (`active`, `purchased`, or
+  `cancelled`), not the HTTP code. The record has no quantity and no wish
+  view.
+- **WARNING** `reservation_action_refused`: the fixed recipient answers.
+  Create is HTTP 403. A mutation the recipient must not see, and a missing
+  promise, are HTTP 404 `Resource not found`. Fields are `http_status`,
+  `operation`, and the path `item_id` or `reservation_id` when that id is
+  in the URL. The message does not say whether a promise row was found.
+- **WARNING** `reservation_inventory_busy`: `InventoryBusyError` became
+  HTTP 503. Fields are `operation` and the path ids. The wish-scoped
+  transaction rolled back and changed nothing.
+- **WARNING** `reservation_permission_denied`: `PermissionDeniedError`
+  became HTTP 403 `{"detail":"Forbidden"}`. Fields are `operation` and the
+  path ids. The record has no gifter id.
+- **WARNING** `reservation_conflict`: `InsufficientQuantityError`,
+  `ReservationError`, or `WishlistArchivedError` became HTTP 409. The
+  response `detail` is the exception text. Fields are `operation` and the
+  path ids. The record has no gifter id.
+
+`operation` is the route function name: `create_reservation`,
+`update_reservation_quantity`, `cancel_reservation`,
+`purchase_reservation`, or `undo_reservation_purchase`.
+
+`reservation_action_completed` is written only after the action returns the
+promise DTO. `reservation_action_refused`, `reservation_permission_denied`,
+`reservation_conflict`, `reservation_validation_error`, and
+`reservation_inventory_busy` are separate records. A non-positive quantity
+on a loaded wish is `reservation_validation_error`. That record names no
+gifter.
 
 ### Business & Operational Metrics
 
@@ -352,15 +545,27 @@ Key metrics derived from structured log events:
     is not the cross-process mechanism.
   - A writer that waits past `busy_timeout` gets `InventoryBusyError` and
     changes nothing. A quantity that no longer fits raises
-    [`InsufficientQuantityError`](file:///home/src/wishenka/wishlists/exceptions.py#L33-L35).
+    [`InsufficientQuantityError`](file:///home/src/wishenka/wishlists/exceptions.py#L48).
 
 ### 2. `InsufficientQuantityError`
 - **Cause**: Requested reservation quantity exceeds available unreserved units:
   $$\text{quantity} > \text{available\_quantity}$$
 - **Common Scenarios**:
   - Another gifter booked the remaining unit seconds earlier.
-  - The gifter called [`update_reservation_quantity`](file:///home/src/wishenka/wishlists/service.py#L1239-L1340) with a delta greater than remaining available balance.
-- **Resolution**: UI displays real-time `available_quantity` from [`WishItemGifterViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L32-L68) and handles HTTP 409 / 400 with a prompt to refresh the wishlist.
+  - The gifter called
+    [`update_reservation_quantity`](file:///home/src/wishenka/wishlists/service.py#L1777)
+    with a delta greater than the remaining available balance.
+- **HTTP 409**: `execute` returns 409 for `InsufficientQuantityError`. The
+  `detail` is the exception text. `ReservationError` and
+  `WishlistArchivedError` use that same 409, and the `detail` is their
+  exception text.
+- **HTTP 403**: `execute` returns 403 `{"detail":"Forbidden"}` for
+  `PermissionDeniedError`.
+- **HTTP 400**: A quantity below 1 on a loaded wish is
+  `{"detail":"Reservation quantity must be at least 1"}`.
+- **Resolution**: The UI reads `available_quantity` from
+  [`WishItemGifterViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L39)
+  and prompts a refresh after the shortage 409.
 
 ### 3. `CannotReduceQuantityBelowReservedError`
 - **Cause**: Wishlist author attempts to update `desired_quantity` below the units already promised or fulfilled:
@@ -374,5 +579,70 @@ Key metrics derived from structured log events:
 - **Resolution**: Prevented by design. Users cannot book their own gifts.
 
 ### 5. Archived Items & Wishlists
-- **New Reservations**: Calling [`create_reservation`](file:///home/src/wishenka/wishlists/service.py#L880-L1013) on an archived wishlist or archived item raises [`WishlistArchivedError`](file:///home/src/wishenka/wishlists/exceptions.py#L21-L23).
-- **Existing Reservations**: When an author archives an item with existing bookings, the reservations are **not deleted**. They remain in the gifter's "My Reservations" cabinet with `is_item_archived=True`. The gifter retains full ability to cancel ([`cancel_reservation`](file:///home/src/wishenka/wishlists/service.py#L1169-L1237)) or mark as purchased ([`mark_reservation_purchased`](file:///home/src/wishenka/wishlists/service.py#L1030-L1095)).
+- **New Reservations**: Calling
+  [`create_reservation`](file:///home/src/wishenka/wishlists/service.py#L1380)
+  on an archived wishlist or archived item raises
+  [`WishlistArchivedError`](file:///home/src/wishenka/wishlists/exceptions.py#L16).
+- **Existing Reservations**: When an author archives an item with existing
+  bookings, the reservations are **not deleted**. They remain in the
+  gifter's "My Reservations" cabinet with `is_item_archived=True`. The
+  gifter retains full ability to cancel
+  ([`cancel_reservation`](file:///home/src/wishenka/wishlists/service.py#L1697))
+  or mark as purchased
+  ([`mark_reservation_purchased`](file:///home/src/wishenka/wishlists/service.py#L1537)).
+
+### 6. Missing session (HTTP 401)
+
+- **Symptom**: Any of the five promise routes without a session returns
+  `401` and `{"detail":"Authentication required"}`.
+- **Cause**: `get_current_user` rejected the call. `execute_wish` does not
+  run, and no promise row is written.
+- **Resolution**: Send the existing session cookie or bearer token. These
+  routes do not add a second session mechanism.
+
+### 7. Non-positive quantity on a loaded wish (HTTP 400)
+
+- **Symptom**: Create or quantity change with `quantity` below 1, on a wish
+  `execute_wish` can load, returns `400` and
+  `{"detail":"Reservation quantity must be at least 1"}`.
+- **Cause**: `create_reservation` and `update_reservation_quantity` raise
+  that `ValueError` before a row is stored or resized. The route logs
+  `reservation_validation_error` and names no gifter.
+- **Resolution**: Send an integer quantity of at least 1. A create whose
+  wish the store cannot load is `404` `Resource not found` instead: the
+  store resolves the wish before the quantity floor.
+
+### 8. Recipient create (HTTP 403)
+
+- **Symptom**: The recipient of the wish receives `403` with body exactly
+  `{"detail":"Cannot promise this wish"}`. There is no other key.
+- **Cause**: `SelfReservationError` is raised before a row is inserted. The
+  route replaces the exception text with that fixed detail. The body is the
+  same when the wish has no promise and when nothing is free.
+- **Resolution**: Only a caller who is not the recipient can promise the
+  wish. The route log is `reservation_action_refused` at WARNING. It names
+  no gifter and, on create, omits `reservation_id`.
+
+### 9. Recipient mutation (HTTP 404)
+
+- **Symptom**: Quantity change, cancel, purchase, or undo by the recipient
+  returns `404` and `{"detail":"Resource not found"}` only.
+- **Cause**: `_guard_reservation_mutation` raises `ReservationNotFoundError`
+  when the caller is the recipient, before ownership, before a status
+  comparison, and before any write. A missing id uses the same body.
+- **Resolution**: Do not treat this `404` as proof that a promise row
+  exists. The route log is `reservation_action_refused` at WARNING. It
+  carries the path id and names no gifter.
+
+### 10. Wish busy on a promise route (HTTP 503)
+
+- **Symptom**: One of the five routes returns `503`. The attempt changed
+  nothing.
+- **Cause**: The wish-scoped `BEGIN IMMEDIATE` writer waited past
+  `busy_timeout`. `execute_wish` raised `InventoryBusyError`. The route log
+  is `reservation_inventory_busy` at WARNING and names no gifter. This is
+  not an `asyncio.Lock` failure, and the promise is not moved to a
+  `FULFILLED` status.
+- **Resolution**: Repeat the same action. Confirm
+  `reservation_inventory_busy` on `wishenka.web.reservations` and
+  `wishlist_inventory_busy` on `wishenka.wishlists.store`.

@@ -42,6 +42,7 @@ from wishenka.wishlists.models import (
 from wishenka.wishlists.policy import WishlistAccessPolicy
 from wishenka.wishlists.schemas import (
     MyReservationItemDTO,
+    PromiseActionDTO,
     UserReservationsSummaryDTO,
     WishItemGifterViewDTO,
     WishItemRecipientViewDTO,
@@ -192,6 +193,27 @@ def project_wish_item(
     )
 
 
+def project_reservation_action(
+    reservation: Reservation,
+    user: AuthenticatedUser | None,
+) -> PromiseActionDTO:
+    """Project the single promise an action just changed for a non-recipient."""
+    item = reservation.wish_item
+    if item is None or WishlistAccessPolicy.is_recipient(user, item):
+        raise ReservationNotFoundError(f"Reservation {reservation.id} not found")
+    projected = project_wish_item(item, user)
+    if not isinstance(projected, WishItemGifterViewDTO):
+        raise ReservationNotFoundError(f"Reservation {reservation.id} not found")
+    return PromiseActionDTO(
+        reservation_id=reservation.id,
+        wish_item_id=reservation.wish_item_id,
+        quantity=reservation.quantity,
+        status=reservation.status,
+        available_quantity=item.available_quantity,
+        item=projected,
+    )
+
+
 class WishlistService:
     """Domain service managing wishlists, members, items, and role-aware projections."""
 
@@ -227,6 +249,27 @@ class WishlistService:
             raise WishlistArchivedError("Cannot modify a reservation on an archived wishlist")
         if wishlist is not None and wishlist.status == WishlistStatus.DELETED:
             raise WishlistDeletedError("Cannot modify a reservation on a deleted wishlist")
+
+    def _guard_reservation_mutation(
+        self,
+        reservation: Reservation,
+        user: AuthenticatedUser,
+        *,
+        wishlist_id: int | None,
+        item_id: int | None,
+    ) -> None:
+        """Refuse a path, recipient, or closed list before the promise is written."""
+        item = reservation.wish_item
+        if item_id is not None and item_id != reservation.wish_item_id:
+            raise ReservationNotFoundError(f"Reservation {reservation.id} not found")
+        loaded_list_id = item.wishlist_id if item is not None else None
+        if wishlist_id is not None and wishlist_id != loaded_list_id:
+            raise ReservationNotFoundError(f"Reservation {reservation.id} not found")
+        if item is not None and WishlistAccessPolicy.is_recipient(user, item):
+            raise ReservationNotFoundError(f"Reservation {reservation.id} not found")
+        # Deletion cancels the row first. The closed list has to refuse before
+        # the status check, or a deleted list would surface as a status conflict.
+        self._ensure_reservation_writable(reservation)
 
     @staticmethod
     def _ensure_wishlist_active(wishlist: Wishlist) -> None:
@@ -1339,9 +1382,15 @@ class WishlistService:
         item_id: int,
         user: AuthenticatedUser | None,
         quantity: int = 1,
+        *,
+        wishlist_id: int | None = None,
     ) -> Reservation:
         """Reserve quantity units of an item on behalf of a gifter."""
-        gifter_id = user.telegram_id if user is not None else 0
+        if quantity < 1:
+            raise ValueError("Reservation quantity must be at least 1")
+        if user is None:
+            raise PermissionDeniedError("Authentication required")
+        gifter_id = user.telegram_id
         async with self._concurrency_coordinator.acquire(item_id):
             if item_id not in self._items:
                 logger.warning(
@@ -1356,6 +1405,8 @@ class WishlistService:
                 raise ItemNotFoundError(f"Item {item_id} not found")
 
             item = self._items[item_id]
+            if wishlist_id is not None and item.wishlist_id != wishlist_id:
+                raise ItemNotFoundError(f"Item {item_id} not found")
             wl = item.wishlist
             if wl is not None:
                 if wl.status == WishlistStatus.ARCHIVED:
@@ -1487,6 +1538,9 @@ class WishlistService:
         self,
         reservation_id: int,
         user: AuthenticatedUser,
+        *,
+        wishlist_id: int | None = None,
+        item_id: int | None = None,
     ) -> Reservation:
         """Transition reservation from ACTIVE to PURCHASED."""
         if reservation_id not in self._reservations:
@@ -1502,6 +1556,12 @@ class WishlistService:
             raise ReservationNotFoundError(f"Reservation {reservation_id} not found")
 
         res = self._reservations[reservation_id]
+        self._guard_reservation_mutation(
+            res,
+            user,
+            wishlist_id=wishlist_id,
+            item_id=item_id,
+        )
         if res.user_id != user.telegram_id:
             logger.warning(
                 "Actor %s denied permission to mark reservation %s as purchased",
@@ -1556,6 +1616,9 @@ class WishlistService:
         self,
         reservation_id: int,
         user: AuthenticatedUser,
+        *,
+        wishlist_id: int | None = None,
+        item_id: int | None = None,
     ) -> Reservation:
         """Transition reservation from PURCHASED back to ACTIVE."""
         if reservation_id not in self._reservations:
@@ -1572,6 +1635,12 @@ class WishlistService:
             raise ReservationNotFoundError(f"Reservation {reservation_id} not found")
 
         res = self._reservations[reservation_id]
+        self._guard_reservation_mutation(
+            res,
+            user,
+            wishlist_id=wishlist_id,
+            item_id=item_id,
+        )
         if res.user_id != user.telegram_id:
             logger.warning(
                 "Actor %s denied permission to revert reservation %s to active",
@@ -1629,6 +1698,9 @@ class WishlistService:
         self,
         reservation_id: int,
         user: AuthenticatedUser,
+        *,
+        wishlist_id: int | None = None,
+        item_id: int | None = None,
     ) -> Reservation:
         """Cancel reservation and immediately restock available inventory balance."""
         if reservation_id not in self._reservations:
@@ -1645,6 +1717,12 @@ class WishlistService:
             raise ReservationNotFoundError(f"Reservation {reservation_id} not found")
 
         res = self._reservations[reservation_id]
+        self._guard_reservation_mutation(
+            res,
+            user,
+            wishlist_id=wishlist_id,
+            item_id=item_id,
+        )
         if res.user_id != user.telegram_id:
             logger.warning(
                 "Actor %s denied permission to cancel reservation %s",
@@ -1701,6 +1779,9 @@ class WishlistService:
         reservation_id: int,
         user: AuthenticatedUser,
         new_quantity: int,
+        *,
+        wishlist_id: int | None = None,
+        item_id: int | None = None,
     ) -> Reservation:
         """Adjust reserved quantity up or down with inventory bounds verification."""
         if reservation_id not in self._reservations:
@@ -1717,6 +1798,12 @@ class WishlistService:
             raise ReservationNotFoundError(f"Reservation {reservation_id} not found")
 
         res = self._reservations[reservation_id]
+        self._guard_reservation_mutation(
+            res,
+            user,
+            wishlist_id=wishlist_id,
+            item_id=item_id,
+        )
         if res.user_id != user.telegram_id:
             logger.warning(
                 "Actor %s denied permission to update quantity of reservation %s",

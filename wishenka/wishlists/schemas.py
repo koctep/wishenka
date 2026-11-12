@@ -108,6 +108,27 @@ class UserReservationsSummaryDTO(BaseModel):
 WishItemViewDTO = WishItemRecipientViewDTO | WishItemGifterViewDTO
 
 
+class ReservationQuantityDTO(BaseModel):
+    """Quantity for a new promise or a change to an existing one."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    quantity: int
+
+
+class PromiseActionDTO(BaseModel):
+    """The promise an action just changed, plus the caller's wish view."""
+
+    model_config = ConfigDict(frozen=True)
+
+    reservation_id: int
+    wish_item_id: int
+    quantity: int
+    status: ReservationStatus
+    available_quantity: int
+    item: WishItemGifterViewDTO
+
+
 class WishlistDetailViewDTO(BaseModel):
     """Detailed view of a wishlist tailored to caller's context and role."""
 
