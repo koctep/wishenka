@@ -7,7 +7,7 @@ import secrets
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from functools import wraps
-from inspect import iscoroutinefunction
+from inspect import iscoroutinefunction, signature
 from typing import TYPE_CHECKING, Any
 
 from wishenka.auth.models import AuthenticatedUser
@@ -50,8 +50,46 @@ from wishenka.wishlists.schemas import (
 
 logger = logging.getLogger("wishenka.wishlists")
 
+_ITEM_INVENTORY_METHODS = frozenset(
+    {
+        "create_reservation",
+        "update_wish_item",
+        "record_item_fulfillment",
+    }
+)
+_RESERVATION_INVENTORY_METHODS = frozenset(
+    {
+        "cancel_reservation",
+        "update_reservation_quantity",
+        "mark_reservation_purchased",
+        "revert_reservation_to_active",
+    }
+)
+
 if TYPE_CHECKING:
     from wishenka.wishlists.store import WishlistStore
+
+
+def _inventory_scope(
+    method: Callable[..., Awaitable[Any]],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> tuple[int | None, int | None] | None:
+    """Return the wish key for an inventory method, or None for a full snapshot."""
+    name = method.__name__
+    if name in _ITEM_INVENTORY_METHODS:
+        key = "item_id"
+        keyed_by_reservation = False
+    elif name in _RESERVATION_INVENTORY_METHODS:
+        key = "reservation_id"
+        keyed_by_reservation = True
+    else:
+        return None
+    bound = signature(method).bind(None, *args, **kwargs)
+    value = int(bound.arguments[key])
+    if keyed_by_reservation:
+        return None, value
+    return value, None
 
 
 def _transactional[T](method: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
@@ -61,7 +99,20 @@ def _transactional[T](method: Callable[..., Awaitable[T]]) -> Callable[..., Awai
     async def invoke(self: WishlistService, *args: Any, **kwargs: Any) -> T:
         if self._store is None:
             return await method(self, *args, **kwargs)
-        return await self._store.execute(lambda service: method(service, *args, **kwargs))
+        scope = _inventory_scope(method, args, kwargs)
+
+        async def call(service: WishlistService) -> T:
+            return await method(service, *args, **kwargs)
+
+        if scope is None:
+            return await self._store.execute(call)
+        item_id, reservation_id = scope
+        return await self._store.execute_wish(
+            call,
+            item_id=item_id,
+            reservation_id=reservation_id,
+            operation_name=method.__name__,
+        )
 
     return invoke
 

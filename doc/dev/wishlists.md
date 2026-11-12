@@ -1068,10 +1068,12 @@ Database operations emit structured audit logs under the `wishenka.wishlists` lo
 - **Driver Logging Redaction**: The low-level `aiosqlite` logger is explicitly configured to
   `logging.WARNING` (`logging.getLogger("aiosqlite").setLevel(logging.WARNING)`), suppressing
   aiosqlite DEBUG output that outputs raw parameter bindings.
-- **Sanitized Domain Exceptions**: Database exceptions (`SQLAlchemyError`, `IntegrityError`) are
-  caught at the `WishlistStore.execute()` boundary and sanitized into generic `RuntimeError`
-  messages (`"Wishlist storage operation failed"`). Internal SQLite table names, SQL syntax,
-  and tokens are strictly withheld from exception traces.
+- **Sanitized Domain Exceptions**: At `WishlistStore.execute()`, `SQLITE_BUSY` after
+  `busy_timeout` is translated to `InventoryBusyError` before the generic storage mapping.
+  The attempt changes nothing. Any other `SQLAlchemyError` on that path becomes
+  `RuntimeError` (`"Wishlist storage operation failed"`). A non-token `IntegrityError` is
+  still that same `RuntimeError`; token collisions retry. Internal SQLite table names, SQL
+  syntax, and tokens stay out of those messages.
 
 ---
 
@@ -1318,6 +1320,7 @@ WishlistError
 - **Resolution**: Rejected by domain policy; owners already have access to their own lists.
 
 #### `RuntimeError` ("Wishlist storage operation failed")
-- **Root Cause**: SQLite database error, locked database, or constraint violation.
+- **Root Cause**: A locked or busy database is `InventoryBusyError`; any other storage
+  failure, including a non-token constraint violation, raises this error.
 - **Resolution**: Verify database file permissions and health. Error traces suppress sensitive SQL
   parameters to protect token secrecy.

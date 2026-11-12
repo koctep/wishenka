@@ -3,17 +3,27 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, NoReturn, TypeVar
 
-from sqlalchemy import text
+from sqlalchemy import event, text
+from sqlalchemy.engine import Connection as SyncConnection
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from wishenka.items.models import ItemPriority
+from wishenka.wishlists.exceptions import (
+    InventoryBusyError,
+    ItemNotFoundError,
+    ReservationNotFoundError,
+    WishlistError,
+    WishlistNotFoundError,
+)
 from wishenka.wishlists.models import (
     Reservation,
     ReservationStatus,
@@ -35,6 +45,166 @@ logging.getLogger("aiosqlite").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
+def _configure_immediate_transactions(sync_engine: Engine) -> None:
+    """Take the SQLite reserved lock with BEGIN IMMEDIATE on Connection.begin()."""
+
+    @event.listens_for(sync_engine, "connect")
+    def _sqlite_connect(dbapi_connection: Any, _connection_record: Any) -> None:
+        # isolation_level None stops sqlite3 from emitting its own BEGIN.
+        dbapi_connection.isolation_level = None
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA busy_timeout=5000")
+        finally:
+            cursor.close()
+
+    @event.listens_for(sync_engine, "begin")
+    def _sqlite_begin_immediate(conn: SyncConnection) -> None:
+        # busy_timeout is applied before BEGIN IMMEDIATE, while __in_begin
+        # prevents SQLAlchemy from opening a second transaction for the pragma.
+        conn.exec_driver_sql("PRAGMA busy_timeout=5000")
+        conn.exec_driver_sql("BEGIN IMMEDIATE")
+
+
+def _sqlite_error_is_busy(exc: BaseException) -> bool:
+    if isinstance(exc, sqlite3.Error):
+        code = getattr(exc, "sqlite_errorcode", None)
+        if isinstance(code, int) and (code & 0xFF) == sqlite3.SQLITE_BUSY:
+            return True
+    if isinstance(exc, sqlite3.Error | SQLAlchemyError):
+        message = str(exc).casefold()
+        return "database is locked" in message or "database is busy" in message
+    return False
+
+
+def _is_sqlite_busy(exc: BaseException) -> bool:
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        if _sqlite_error_is_busy(current):
+            return True
+        orig = getattr(current, "orig", None)
+        if isinstance(orig, BaseException):
+            pending.append(orig)
+        cause = current.__cause__
+        if isinstance(cause, BaseException):
+            pending.append(cause)
+    return False
+
+
+def _wish_scope(
+    item_id: int | None,
+    reservation_id: int | None,
+    operation: str | None,
+) -> dict[str, object]:
+    scope: dict[str, object] = {}
+    if item_id is not None:
+        scope["item_id"] = item_id
+    if reservation_id is not None:
+        scope["reservation_id"] = reservation_id
+    if operation is not None:
+        scope["operation"] = operation
+    return scope
+
+
+def _wish_target(item_id: int | None, reservation_id: int | None) -> tuple[str, int] | None:
+    if item_id is not None:
+        return "item", item_id
+    if reservation_id is not None:
+        return "reservation", reservation_id
+    return None
+
+
+def _is_domain_refusal(exc: BaseException) -> bool:
+    """A refused wish is not a storage failure, including quantity ValueError."""
+    return isinstance(exc, WishlistError | ValueError)
+
+
+def _log_wish_rollback(
+    exc: BaseException,
+    *,
+    item_id: int | None,
+    reservation_id: int | None,
+    operation: str | None,
+) -> None:
+    """Record a rolled-back wish without row dumps, gifter ids, or driver text.
+
+    Domain refusals are WARNING. A non-busy database failure stays ERROR.
+    """
+    scope = _wish_scope(item_id, reservation_id, operation)
+    target = _wish_target(item_id, reservation_id)
+    error_type = type(exc).__name__
+    extra = {
+        "event": "wishlist_inventory_rolled_back",
+        "error_type": error_type,
+        **scope,
+    }
+    log = logger.warning if _is_domain_refusal(exc) else logger.error
+    if target is None:
+        log(
+            "Wishlist inventory transaction rolled back (%s)",
+            error_type,
+            extra=extra,
+        )
+        return
+    kind, target_id = target
+    log(
+        "Wishlist inventory transaction rolled back (%s %s, %s)",
+        kind,
+        target_id,
+        error_type,
+        extra=extra,
+    )
+
+
+def _raise_for_storage_error(
+    exc: SQLAlchemyError,
+    *,
+    item_id: int | None = None,
+    reservation_id: int | None = None,
+    operation: str | None = None,
+) -> NoReturn:
+    """Map a timed-out write lock before the generic storage failure."""
+    scope = _wish_scope(item_id, reservation_id, operation)
+    target = _wish_target(item_id, reservation_id)
+    if _is_sqlite_busy(exc):
+        extra = {"event": "wishlist_inventory_busy", **scope}
+        if target is None:
+            logger.warning(
+                "Wishlist inventory change rolled back because the database was busy",
+                extra=extra,
+            )
+        else:
+            kind, target_id = target
+            logger.warning(
+                "Wishlist inventory change rolled back because the database was busy (%s %s)",
+                kind,
+                target_id,
+                extra=extra,
+            )
+        raise InventoryBusyError from exc
+    if scope:
+        _log_wish_rollback(
+            exc,
+            item_id=item_id,
+            reservation_id=reservation_id,
+            operation=operation,
+        )
+    else:
+        logger.error(
+            "Wishlist storage operation failed due to database error",
+            extra={"event": "wishlist_store_error"},
+        )
+    raise RuntimeError("Wishlist storage operation failed") from exc
+
+
 class TokenCollision(Exception):
     """A generated capability was previously used for either access purpose."""
 
@@ -51,6 +221,94 @@ def _format_dt(dt: datetime | None) -> str | None:
     if dt is None:
         return None
     return dt.isoformat()
+
+
+def _item_state(item: WishItem) -> tuple[object, ...]:
+    return (
+        item.recipient_user_id,
+        item.recipient_name,
+        item.title,
+        item.description,
+        item.link,
+        item.price,
+        item.currency,
+        item.quantity,
+        item.received_quantity,
+        item.image_url,
+        item.store_name,
+        item.store_icon_url,
+        item.priority.value,
+        item.category,
+        item.display_order,
+        item.is_archived,
+        _format_dt(item.updated_at),
+    )
+
+
+def _reservation_state(reservation: Reservation) -> tuple[object, ...]:
+    return (
+        reservation.wish_item_id,
+        reservation.user_id,
+        reservation.quantity,
+        reservation.status.value,
+        _format_dt(reservation.created_at),
+        _format_dt(reservation.updated_at),
+    )
+
+
+def _item_bind(item: WishItem) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "recipient_user_id": item.recipient_user_id,
+        "recipient_name": item.recipient_name,
+        "title": item.title,
+        "description": item.description,
+        "link": item.link,
+        "price": item.price,
+        "currency": item.currency,
+        "quantity": item.quantity,
+        "received_quantity": item.received_quantity,
+        "image_url": item.image_url,
+        "store_name": item.store_name,
+        "store_icon_url": item.store_icon_url,
+        "priority": item.priority.value,
+        "category": item.category,
+        "display_order": item.display_order,
+        "is_archived": 1 if item.is_archived else 0,
+        "updated_at": _format_dt(item.updated_at),
+    }
+
+
+_ITEM_UPDATE = text(
+    "UPDATE wl_items SET "
+    "recipient_user_id = :recipient_user_id, recipient_name = :recipient_name, "
+    "title = :title, description = :description, link = :link, "
+    "price = :price, currency = :currency, quantity = :quantity, "
+    "received_quantity = :received_quantity, image_url = :image_url, "
+    "store_name = :store_name, store_icon_url = :store_icon_url, "
+    "priority = :priority, category = :category, "
+    "display_order = :display_order, is_archived = :is_archived, "
+    "updated_at = :updated_at WHERE id = :id"
+)
+_RESERVATION_INSERT = text(
+    "INSERT INTO wl_reservations (id, wish_item_id, user_id, quantity, "
+    "status, created_at, updated_at) "
+    "VALUES (:id, :wish_item_id, :user_id, :quantity, :status, "
+    ":created_at, :updated_at)"
+)
+_RESERVATION_UPDATE = text(
+    "UPDATE wl_reservations SET "
+    "quantity = :quantity, status = :status, updated_at = :updated_at "
+    "WHERE id = :id"
+)
+
+
+@dataclass
+class _WishSnapshot:
+    item_id: int
+    item_state: tuple[object, ...]
+    reservations: dict[int, tuple[object, ...]]
+    reservation_counter: int
 
 
 @dataclass
@@ -76,6 +334,7 @@ class WishlistStore:
         self.engine = create_async_engine(
             database_url, connect_args={"timeout": 5}, hide_parameters=True
         )
+        _configure_immediate_transactions(self.engine.sync_engine)
 
     async def initialize(self) -> None:
         """Create the normalized schema without modifying existing records."""
@@ -680,6 +939,285 @@ class WishlistStore:
             },
         )
 
+    async def execute_wish(
+        self,
+        operation: Callable[[WishlistService], Awaitable[T]],
+        *,
+        item_id: int | None = None,
+        reservation_id: int | None = None,
+        operation_name: str = "wish_inventory",
+    ) -> T:
+        """Run one inventory change for a single wish and persist only changed rows."""
+        if (item_id is None) == (reservation_id is None):
+            raise ValueError("Wish inventory change requires item_id or reservation_id")
+
+        resolved_item_id = item_id
+        reservations_written = 0
+
+        async def work(conn: AsyncConnection) -> T:
+            nonlocal resolved_item_id, reservations_written
+            resolved_item_id = await self._resolve_wish_item_id(
+                conn,
+                item_id=item_id,
+                reservation_id=reservation_id,
+            )
+            service, snapshot = await self._load_wish(conn, resolved_item_id)
+            result = await operation(service)
+            reservations_written = await self._persist_wish(conn, service, snapshot)
+            return result
+
+        try:
+            result = await self._immediate(work)
+        except SQLAlchemyError as exc:
+            _raise_for_storage_error(
+                exc,
+                item_id=item_id if item_id is not None else resolved_item_id,
+                reservation_id=reservation_id,
+                operation=operation_name,
+            )
+        except Exception as exc:
+            _log_wish_rollback(
+                exc,
+                item_id=resolved_item_id,
+                reservation_id=reservation_id,
+                operation=operation_name,
+            )
+            raise
+        logger.info(
+            "Wishlist inventory transaction committed for item %s (%s)",
+            resolved_item_id,
+            operation_name,
+            extra={
+                "event": "wishlist_inventory_committed",
+                "item_id": resolved_item_id,
+                "operation": operation_name,
+                "reservations_written": reservations_written,
+            },
+        )
+        return result
+
+    async def _resolve_wish_item_id(
+        self,
+        conn: AsyncConnection,
+        *,
+        item_id: int | None,
+        reservation_id: int | None,
+    ) -> int:
+        if item_id is not None:
+            return item_id
+        found = await conn.scalar(
+            text("SELECT wish_item_id FROM wl_reservations WHERE id = :reservation_id"),
+            {"reservation_id": reservation_id},
+        )
+        if found is None:
+            raise ReservationNotFoundError(f"Reservation {reservation_id} not found")
+        return int(found)
+
+    async def _load_wish(
+        self,
+        conn: AsyncConnection,
+        item_id: int,
+    ) -> tuple[WishlistService, _WishSnapshot]:
+        item_row = (
+            await conn.execute(
+                text(
+                    "SELECT id, wishlist_id, recipient_user_id, recipient_name, title, "
+                    "description, link, price, currency, quantity, received_quantity, "
+                    "image_url, store_name, store_icon_url, priority, category, "
+                    "display_order, is_archived, created_at, updated_at "
+                    "FROM wl_items WHERE id = :id"
+                ),
+                {"id": item_id},
+            )
+        ).one_or_none()
+        if item_row is None:
+            raise ItemNotFoundError(f"Item {item_id} not found")
+
+        wishlist_row = (
+            await conn.execute(
+                text(
+                    "SELECT id, owner_id, owner_name, title, description, event_title, "
+                    "event_date, is_collaborative, warn_on_delete_reserved, status, "
+                    "public_token, invite_token, invite_token_expires_at, "
+                    "created_at, updated_at FROM wl_lists WHERE id = :id"
+                ),
+                {"id": int(item_row.wishlist_id)},
+            )
+        ).one_or_none()
+        if wishlist_row is None:
+            raise WishlistNotFoundError(f"Wishlist {item_row.wishlist_id} not found")
+
+        warn_raw = getattr(wishlist_row, "warn_on_delete_reserved", None)
+        wishlist = Wishlist(
+            id=int(wishlist_row.id),
+            owner_id=int(wishlist_row.owner_id),
+            owner_name=str(wishlist_row.owner_name or ""),
+            title=str(wishlist_row.title),
+            description=(
+                None if wishlist_row.description is None else str(wishlist_row.description)
+            ),
+            event_title=(
+                None if wishlist_row.event_title is None else str(wishlist_row.event_title)
+            ),
+            event_date=_parse_dt(wishlist_row.event_date),
+            is_collaborative=bool(wishlist_row.is_collaborative),
+            warn_on_delete_reserved=True if warn_raw is None else bool(warn_raw),
+            status=WishlistStatus(wishlist_row.status),
+            public_token=str(wishlist_row.public_token),
+            invite_token=str(wishlist_row.invite_token),
+            invite_token_expires_at=_parse_dt(wishlist_row.invite_token_expires_at),
+            created_at=_parse_dt(wishlist_row.created_at) or datetime.now(UTC),
+            updated_at=_parse_dt(wishlist_row.updated_at) or datetime.now(UTC),
+            members=[],
+            items=[],
+        )
+        member_rows = (
+            await conn.execute(
+                text(
+                    "SELECT id, wishlist_id, user_id, role, joined_at "
+                    "FROM wl_members WHERE wishlist_id = :wishlist_id ORDER BY id ASC"
+                ),
+                {"wishlist_id": wishlist.id},
+            )
+        ).all()
+        for member_row in member_rows:
+            member = WishlistMember(
+                id=int(member_row.id),
+                wishlist_id=int(member_row.wishlist_id),
+                user_id=int(member_row.user_id),
+                role=WishlistRole(member_row.role),
+                joined_at=_parse_dt(member_row.joined_at) or datetime.now(UTC),
+            )
+            member.wishlist = wishlist
+            wishlist.members.append(member)
+
+        display_order = 0 if item_row.display_order is None else int(item_row.display_order)
+        item = WishItem(
+            id=int(item_row.id),
+            wishlist_id=int(item_row.wishlist_id),
+            recipient_user_id=(
+                None if item_row.recipient_user_id is None else int(item_row.recipient_user_id)
+            ),
+            recipient_name=(
+                None if item_row.recipient_name is None else str(item_row.recipient_name)
+            ),
+            title=str(item_row.title),
+            description=None if item_row.description is None else str(item_row.description),
+            link=None if item_row.link is None else str(item_row.link),
+            price=None if item_row.price is None else int(item_row.price),
+            currency=str(item_row.currency or "RUB"),
+            quantity=int(item_row.quantity),
+            received_quantity=int(item_row.received_quantity),
+            image_url=None if item_row.image_url is None else str(item_row.image_url),
+            store_name=None if item_row.store_name is None else str(item_row.store_name),
+            store_icon_url=(
+                None if item_row.store_icon_url is None else str(item_row.store_icon_url)
+            ),
+            priority=ItemPriority(item_row.priority),
+            category=None if item_row.category is None else str(item_row.category),
+            display_order=display_order,
+            is_archived=bool(item_row.is_archived),
+            created_at=_parse_dt(item_row.created_at) or datetime.now(UTC),
+            updated_at=_parse_dt(item_row.updated_at) or datetime.now(UTC),
+            reservations=[],
+            wishlist=wishlist,
+        )
+        wishlist.items.append(item)
+
+        reservation_rows = (
+            await conn.execute(
+                text(
+                    "SELECT id, wish_item_id, user_id, quantity, status, created_at, updated_at "
+                    "FROM wl_reservations WHERE wish_item_id = :item_id ORDER BY id ASC"
+                ),
+                {"item_id": item.id},
+            )
+        ).all()
+        service = WishlistService()
+        service._wishlists[wishlist.id] = wishlist
+        service._items[item.id] = item
+        for reservation_row in reservation_rows:
+            reservation = Reservation(
+                id=int(reservation_row.id),
+                wish_item_id=int(reservation_row.wish_item_id),
+                user_id=int(reservation_row.user_id),
+                quantity=int(reservation_row.quantity),
+                status=ReservationStatus(reservation_row.status),
+                created_at=_parse_dt(reservation_row.created_at) or datetime.now(UTC),
+                updated_at=_parse_dt(reservation_row.updated_at) or datetime.now(UTC),
+                wish_item=item,
+            )
+            item.reservations.append(reservation)
+            service._reservations[reservation.id] = reservation
+
+        counter = await conn.scalar(
+            text("SELECT value FROM wl_counters WHERE name = 'reservation'")
+        )
+        service._next_reservation_id = int(counter or 0)
+        snapshot = _WishSnapshot(
+            item_id=item.id,
+            item_state=_item_state(item),
+            reservations={
+                reservation.id: _reservation_state(reservation)
+                for reservation in service._reservations.values()
+            },
+            reservation_counter=service._next_reservation_id,
+        )
+        return service, snapshot
+
+    async def _persist_wish(
+        self,
+        conn: AsyncConnection,
+        service: WishlistService,
+        snapshot: _WishSnapshot,
+    ) -> int:
+        """Write the item, changed reservations, and the reservation counter only."""
+        item = service._items.get(snapshot.item_id)
+        if item is not None and _item_state(item) != snapshot.item_state:
+            await conn.execute(_ITEM_UPDATE, _item_bind(item))
+
+        written = 0
+        for reservation in service._reservations.values():
+            if reservation.wish_item_id != snapshot.item_id:
+                continue
+            state = _reservation_state(reservation)
+            previous = snapshot.reservations.get(reservation.id)
+            if previous is None:
+                await conn.execute(
+                    _RESERVATION_INSERT,
+                    {
+                        "id": reservation.id,
+                        "wish_item_id": reservation.wish_item_id,
+                        "user_id": reservation.user_id,
+                        "quantity": reservation.quantity,
+                        "status": reservation.status.value,
+                        "created_at": _format_dt(reservation.created_at),
+                        "updated_at": _format_dt(reservation.updated_at),
+                    },
+                )
+                written += 1
+            elif previous != state:
+                await conn.execute(
+                    _RESERVATION_UPDATE,
+                    {
+                        "id": reservation.id,
+                        "quantity": reservation.quantity,
+                        "status": reservation.status.value,
+                        "updated_at": _format_dt(reservation.updated_at),
+                    },
+                )
+                written += 1
+
+        if service._next_reservation_id != snapshot.reservation_counter:
+            await conn.execute(
+                text(
+                    "INSERT INTO wl_counters (name, value) VALUES ('reservation', :value) "
+                    "ON CONFLICT(name) DO UPDATE SET value = excluded.value"
+                ),
+                {"value": service._next_reservation_id},
+            )
+        return written
+
     async def execute(self, operation: Callable[[WishlistService], Awaitable[T]]) -> T:
         """Serialize reads and writes across workers and commit state atomically."""
         for attempt in range(5):
@@ -716,65 +1254,67 @@ class WishlistStore:
                     continue
                 else:
                     message = "Unable to allocate a unique public token"
-            except SQLAlchemyError:
-                logger.error(
-                    "Wishlist storage operation failed due to database error",
-                    extra={"event": "wishlist_store_error"},
-                )
-                message = "Wishlist storage operation failed"
+            except SQLAlchemyError as exc:
+                _raise_for_storage_error(exc)
             raise RuntimeError(message)
         raise RuntimeError("Unable to allocate a unique public token")
 
-    async def _execute_once(self, operation: Callable[[WishlistService], Awaitable[T]]) -> T:
+    async def _immediate(self, work: Callable[[AsyncConnection], Awaitable[T]]) -> T:
+        """Run work inside Connection.begin(); the listener emits BEGIN IMMEDIATE."""
         async with self.engine.connect() as conn:
-            await conn.exec_driver_sql("PRAGMA foreign_keys=ON")
-            await conn.exec_driver_sql("PRAGMA busy_timeout=5000")
-            await conn.commit()
-            await conn.exec_driver_sql("BEGIN IMMEDIATE")
             try:
-                service, snapshot = await self._read(conn)
-                previous = {wl.id: wl.public_token for wl in service._wishlists.values()}
-                prior_invites = {wl.id: wl.invite_token for wl in service._wishlists.values()}
-                for token in prior_invites.values():
-                    await conn.execute(
-                        text("INSERT OR IGNORE INTO wl_invite_tokens VALUES (:token)"),
-                        {"token": token},
-                    )
-                result = await operation(service)
-                for wl in service._wishlists.values():
-                    if prior_invites.get(wl.id) != wl.invite_token:
-                        matching_public = await conn.scalar(
-                            text("SELECT 1 FROM wl_tokens WHERE token=:token"),
-                            {"token": wl.invite_token},
-                        )
-                        if matching_public or wl.invite_token == wl.public_token:
-                            raise TokenCollision
-                        await conn.execute(
-                            text("INSERT INTO wl_invite_tokens VALUES (:token)"),
-                            {"token": wl.invite_token},
-                        )
-                    old = previous.get(wl.id)
-                    if old != wl.public_token:
-                        matching_invite = await conn.scalar(
-                            text("SELECT 1 FROM wl_invite_tokens WHERE token=:token"),
-                            {"token": wl.public_token},
-                        )
-                        if matching_invite:
-                            raise TokenCollision
-                        await conn.execute(
-                            text("UPDATE wl_tokens SET active=0 WHERE wishlist_id=:id"),
-                            {"id": wl.id},
-                        )
-                        await conn.execute(
-                            text("INSERT INTO wl_tokens VALUES (:token, :id, 1)"),
-                            {"token": wl.public_token, "id": wl.id},
-                        )
-                await self._write(conn, service, snapshot)
+                await conn.begin()
+                result = await work(conn)
                 await conn.commit()
                 return result
             except BaseException:
-                await conn.rollback()
+                if conn.in_transaction():
+                    await conn.rollback()
                 raise
+
+    async def _execute_once(self, operation: Callable[[WishlistService], Awaitable[T]]) -> T:
+        async def work(conn: AsyncConnection) -> T:
+            service, snapshot = await self._read(conn)
+            previous = {wl.id: wl.public_token for wl in service._wishlists.values()}
+            prior_invites = {wl.id: wl.invite_token for wl in service._wishlists.values()}
+            for token in prior_invites.values():
+                await conn.execute(
+                    text("INSERT OR IGNORE INTO wl_invite_tokens VALUES (:token)"),
+                    {"token": token},
+                )
+            result = await operation(service)
+            for wl in service._wishlists.values():
+                if prior_invites.get(wl.id) != wl.invite_token:
+                    matching_public = await conn.scalar(
+                        text("SELECT 1 FROM wl_tokens WHERE token=:token"),
+                        {"token": wl.invite_token},
+                    )
+                    if matching_public or wl.invite_token == wl.public_token:
+                        raise TokenCollision
+                    await conn.execute(
+                        text("INSERT INTO wl_invite_tokens VALUES (:token)"),
+                        {"token": wl.invite_token},
+                    )
+                old = previous.get(wl.id)
+                if old != wl.public_token:
+                    matching_invite = await conn.scalar(
+                        text("SELECT 1 FROM wl_invite_tokens WHERE token=:token"),
+                        {"token": wl.public_token},
+                    )
+                    if matching_invite:
+                        raise TokenCollision
+                    await conn.execute(
+                        text("UPDATE wl_tokens SET active=0 WHERE wishlist_id=:id"),
+                        {"id": wl.id},
+                    )
+                    await conn.execute(
+                        text("INSERT INTO wl_tokens VALUES (:token, :id, 1)"),
+                        {"token": wl.public_token, "id": wl.id},
+                    )
+            await self._write(conn, service, snapshot)
+            return result
+
+        return await self._immediate(work)
 
     async def cleanup_expired_tokens(self, now: datetime | None = None) -> int:
         """Revoke expired invite tokens across all wishlists."""

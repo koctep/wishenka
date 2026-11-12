@@ -16,6 +16,7 @@
   - `PRAGMA journal_mode = WAL;` (параллельное чтение без блокировки писателей)
   - `PRAGMA foreign_keys = ON;` (каскадная целостность)
   - `PRAGMA busy_timeout = 5000;`
+  - запись инвентаря одного желания стартует с `Connection.begin()`; слушатель `begin` выполняет `BEGIN IMMEDIATE` при `isolation_level = None`
 - **ORM и миграции:** SQLAlchemy 2.0 (Async) + Alembic
 - **Парсинг ссылок:** httpx + BeautifulSoup4 (с защитой от SSRF)
 - **Очередь сообщений:** Встроенный Transactional Outbox в SQLite + асинхронный воркер
@@ -33,12 +34,20 @@
   - Детальная документация ролевой модели, DTO и инвариантов представлена в [`doc/dev/wishlists.md`](wishlists.md) и [`doc/dev/reservations.md`](reservations.md).
 
 ### 2.2. Предотвращение овербукинга и штучный учет
-Суммарное количество забронированных штук не может превышать требуемое:
-- `reserved_quantity = sum(r.quantity for r in reservations if r.status in (ACTIVE, PURCHASED))`
-- `sum(active + purchased) <= wish_item.quantity`
-- Доступный остаток: `available_quantity = max(0, quantity - received_quantity - reserved_quantity)`
-- Запрет уменьшения желаемого количества ниже уже заблокированного (`reserved + fulfilled`).
-- Контролируется доменными инвариантами, координатором конкурентности (`ItemConcurrencyCoordinator` / KeyedMutex) и транзакциями в SQLite при бронировании (см. [`doc/dev/reservations.md`](reservations.md) и [`doc/dev/items.md`](items.md)).
+
+Несколько копий сервиса пишут один файл SQLite. Исключение записи инвентаря одного желания — wish-scoped транзакция WAL на движке вишлистов: `Connection.begin()`, слушатель `begin` выполняет `BEGIN IMMEDIATE`, у соединения `isolation_level = None`. `busy_timeout` равен 5000 мс. Redis в этом пути нет. `asyncio.Lock` внутри `ItemConcurrencyCoordinator` остаётся внутрипроцессным координатором и не виден другой копии процесса.
+
+Занятые штуки (`occupied`) — сумма `quantity` броней в статусах `ACTIVE` и `PURCHASED`. Правила одного желания считаются внутри этой транзакции:
+
+- Приход добавляет полученные штуки и ограничен `requested − received`.
+  Он не отменяет бронь и не ставит `ReservationStatus.COMPLETED`. Статуса
+  `FULFILLED` нет. Обещание остаётся открытым. После успешного прихода
+  `occupied + received` может превысить запрошенное количество.
+- Новое или увеличенное обещание берёт свободный остаток `max(0, requested − received − occupied)`.
+- Снижение запрошенного количества ниже `occupied + received` отклоняется. Строки остаются на последнем коммите.
+- `SQLITE_BUSY` после `busy_timeout` становится `InventoryBusyError`: транзакция откатывается и ничего не меняет.
+
+Запись изменившихся строк, HTTP 503 и журналы — в [`doc/dev/items.md`](items.md). Жизненный цикл броней — в [`doc/dev/reservations.md`](reservations.md).
 
 ### 2.3. Аутентификация в Telegram Mini App
 1. TMA при открытии передает `window.Telegram.WebApp.initData`.
@@ -66,8 +75,14 @@
 ## 4. Документация подсистем и доменов
 
 - [`doc/dev/wishlists.md`](wishlists.md) — Домен вишлистов: ролевая модель (RBAC/ABAC), жизненный цикл, Surprise Invariant, бронирование и токены шеринга.
-- [`doc/dev/reservations.md`](reservations.md) — Домен бронирования подарков: жизненный цикл броней (ACTIVE, PURCHASED, CANCELLED, FULFILLED), гарантия Surprise Invariant, координатор конкурентного доступа (KeyedMutex), штучный учет и личный кабинет дарителя «Мои бронирования».
-- [`doc/dev/items.md`](items.md) — Домен элементов желаний: универсальный ввод (текст, ссылки, шеринг), каскадный парсинг метаданных (JSON-LD, OpenGraph, Microdata), graceful fallback при антибот-защите и штучный учет подарков.
+- [`doc/dev/reservations.md`](reservations.md) — Домен бронирования подарков:
+  жизненный цикл броней (`ACTIVE`, `PURCHASED`, `CANCELLED`). Приход
+  добавляет полученные штуки и оставляет обещание открытым: статуса
+  `FULFILLED` нет, и `record_item_fulfillment` не ставит
+  `ReservationStatus.COMPLETED`. Гарантия Surprise Invariant и личный
+  кабинет дарителя «Мои бронирования». Исключение записи — wish-scoped
+  транзакция SQLite, а не `asyncio.Lock`.
+- [`doc/dev/items.md`](items.md) — Домен элементов желаний: универсальный ввод (текст, ссылки, шеринг), каскадный парсинг метаданных (JSON-LD, OpenGraph, Microdata), graceful fallback при антибот-защите, штучный учет и wish-scoped запись инвентаря.
 - [`doc/dev/auth.md`](auth.md) — Аутентификация Telegram Mini App, валидация initData и
   сессионные токены.
 - [`doc/dev/miniapp.md`](miniapp.md) — Telegram Mini App (TMA): интерфейс управления вишлистами,

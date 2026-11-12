@@ -35,9 +35,14 @@ The reservation subsystem in the **Wishlist Service («Вишенка»)** Teleg
 2. **Surprise Invariant (Zero-Leak Guarantee)**:
    The recipient of a gift must never observe or infer whether an item is reserved, who reserved it, how many units remain, or whether it has been purchased. Recipient projections completely omit booking metadata.
 3. **Discrete Lifecycle State Machine**:
-   Explicit states (`ACTIVE`, `PURCHASED`, `CANCELLED`, `COMPLETED` / `FULFILLED`) track real-world gift fulfillment and preserve inventory reserves.
-4. **Fine-Grained Concurrency Control (`ItemConcurrencyCoordinator`)**:
-   Keyed mutex architecture (`asyncio.Lock` per `item_id`) ensures atomicity during balance check-and-reserve operations, preventing Time-of-Check to Time-of-Use (TOCTOU) overbooking under high concurrent load.
+   Explicit states (`ACTIVE`, `PURCHASED`, `CANCELLED`) track a gifter's
+   promise. Receipt is not a status change.
+4. **Wish-scoped write exclusion**:
+   Concurrent booking is excluded by the wish-scoped SQLite transaction
+   (`BEGIN IMMEDIATE`). `execute_wish` builds a new `WishlistService` per
+   call, so `ItemConcurrencyCoordinator` (`asyncio.Lock`) is not shared
+   across requests or processes. That lock is not the cross-process
+   mechanism.
 5. **Reduction Lock Invariant**:
    Prevents wishlist authors from reducing an item's desired quantity below the sum of active, purchased, and fulfilled units ($\text{desired} \ge \text{active} + \text{purchased} + \text{fulfilled}$).
 6. **Aggregated "My Reservations" Cabinet**:
@@ -56,12 +61,13 @@ flowchart TD
     subgraph ServiceLayer["Service & Domain Layer"]
         Router --> Service["WishlistService"]
         Service --> Policy["WishlistAccessPolicy"]
-        Service --> Coord["ItemConcurrencyCoordinator (KeyedMutex)"]
+        Service --> Coord["ItemConcurrencyCoordinator (not shared)"]
         Service --> SM["Reservation Lifecycle State Machine"]
+        Service --> Tx["Wish-scoped SQLite transaction"]
     end
 
     subgraph DataLayer["Storage & Entities"]
-        Coord --> Storage[("SQLite Database (WAL Mode)")]
+        Tx --> Storage[("SQLite Database (WAL Mode)")]
         Storage --> ItemEntity["WishItem Entity"]
         Storage --> ResEntity["Reservation Entity"]
     end
@@ -88,25 +94,32 @@ stateDiagram-v2
     PURCHASED --> ACTIVE: revert_reservation_to_active
     ACTIVE --> CANCELLED: cancel_reservation / wishlist delete
     PURCHASED --> CANCELLED: cancel_reservation / wishlist delete
-    ACTIVE --> FULFILLED: record_item_fulfillment (recipient)
-    PURCHASED --> FULFILLED: record_item_fulfillment (recipient)
     CANCELLED --> [*]
-    FULFILLED --> [*]
 ```
 
 - **`ACTIVE`**: The initial state when a gifter reserves units of an item. Locks inventory from other gifters.
 - **`PURCHASED`**: The gifter confirmed purchasing the gift in the physical world. Crucially, **`PURCHASED` reservations continue locking inventory** so other gifters cannot book the same units.
 - **`CANCELLED`**: The gifter cancelled the reservation or the parent wishlist was deleted. The reserved units are immediately released back to `available_quantity`. This is a terminal state.
-- **`COMPLETED` / `FULFILLED`**: The wishlist recipient marked the item as received via [`record_item_fulfillment`](file:///home/src/wishenka/wishlists/service.py#L1414-L1488). This is a terminal state.
+- **Receipt leaves the promise open**:
+  [`record_item_fulfillment`](file:///home/src/wishenka/wishlists/service.py#L1861-L1945)
+  only adds `received_quantity`. It does not cancel the reservation or set
+  `ReservationStatus.COMPLETED`. There is no `FULFILLED` status. The promise
+  stays `ACTIVE` or `PURCHASED`.
 
 > [!IMPORTANT]
 > Both `ACTIVE` and `PURCHASED` states contribute to [`reserved_quantity`](file:///home/src/wishenka/wishlists/models.py#L101-L108). Reverting a purchased reservation back to active or cancelling a reservation adjusts inventory atomically within the concurrency coordinator.
 
 ### 2. Item Concurrency Coordinator (`KeyedMutex`)
 
-In asynchronous environments (FastAPI + `asyncio`), multiple concurrent requests can attempt to reserve the last remaining unit of an item simultaneously. Without serialization, two requests could read `available_quantity = 1` before either writes, resulting in overbooking.
+[`execute_wish`](file:///home/src/wishenka/wishlists/store.py#L942-L997) builds a new
+`WishlistService` on every call
+([`_load_wish`](file:///home/src/wishenka/wishlists/store.py#L1136) assigns
+`WishlistService()`). That instance owns a fresh
+[`ItemConcurrencyCoordinator`](file:///home/src/wishenka/wishlists/concurrency.py#L8-L24).
+The `asyncio.Lock` lives on that instance. It is not shared across requests
+or processes, and it is not the cross-process exclusion.
 
-[`ItemConcurrencyCoordinator`](file:///home/src/wishenka/wishlists/concurrency.py#L8-L24) provides application-level synchronization:
+Exclusion is the wish-scoped SQLite transaction. The class below is only the per-instance lock:
 
 ```python
 class ItemConcurrencyCoordinator:
@@ -127,9 +140,18 @@ class ItemConcurrencyCoordinator:
             yield
 ```
 
-**Database-Level SQLite WAL Alignment**:
-- SQLite operates in WAL mode (`PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;`).
-- Write operations acquire write locks using `BEGIN IMMEDIATE`, ensuring that competing write transactions wait cooperatively up to 5 seconds rather than producing `SQLITE_BUSY` errors.
+**Wish-scoped SQLite exclusion**:
+
+- Several service copies write one SQLite file. The shared exclusion is
+  `Connection.begin()` on the wishlist engine. The `begin` listener emits
+  `BEGIN IMMEDIATE` (`isolation_level = None`, `PRAGMA journal_mode = WAL`,
+  `PRAGMA busy_timeout = 5000`).
+- A second writer waits on that reserved lock. The quantity check runs
+  inside the transaction, so two calls cannot both commit the same free
+  units.
+- If the wait exceeds `busy_timeout`, the store raises `InventoryBusyError`
+  and changes nothing. `asyncio.Lock` does not cover another request or
+  another process.
 
 ### 3. Role-Aware DTO Projections & Zero-Leak Guarantees
 
@@ -320,9 +342,17 @@ Key metrics derived from structured log events:
 ### 1. Concurrency Contention and Race Conditions
 - **Symptom**: High volume of concurrent gifters booking the same limited-quantity gift simultaneously.
 - **Resolution**:
-  - The in-memory [`ItemConcurrencyCoordinator`](file:///home/src/wishenka/wishlists/concurrency.py#L8-L24) serializes operations on `item_id`.
-  - SQLite WAL mode ensures non-blocking concurrent reads while `BEGIN IMMEDIATE` locks write operations cooperatively without deadlocks.
-  - Exactly one request claims the remaining unit; subsequent requests receive [`InsufficientQuantityError`](file:///home/src/wishenka/wishlists/exceptions.py#L33-L35).
+  - Exclusion is the wish-scoped SQLite transaction (`BEGIN IMMEDIATE`).
+    The writer that commits is the one whose balance check is stored. The
+    next writer loads that committed balance.
+  - [`execute_wish`](file:///home/src/wishenka/wishlists/store.py#L942-L997)
+    builds a new `WishlistService` per call, so
+    [`ItemConcurrencyCoordinator`](file:///home/src/wishenka/wishlists/concurrency.py#L8-L24)
+    (`asyncio.Lock`) is not shared across requests or processes. That lock
+    is not the cross-process mechanism.
+  - A writer that waits past `busy_timeout` gets `InventoryBusyError` and
+    changes nothing. A quantity that no longer fits raises
+    [`InsufficientQuantityError`](file:///home/src/wishenka/wishlists/exceptions.py#L33-L35).
 
 ### 2. `InsufficientQuantityError`
 - **Cause**: Requested reservation quantity exceeds available unreserved units:

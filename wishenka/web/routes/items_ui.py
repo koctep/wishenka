@@ -19,6 +19,7 @@ from wishenka.items.service import ItemPreviewService
 from wishenka.web.templates import templates
 from wishenka.wishlists.exceptions import (
     CannotReduceQuantityBelowReservedError,
+    InventoryBusyError,
     ItemNotFoundError,
     PermissionDeniedError,
     WishlistArchivedError,
@@ -624,7 +625,42 @@ async def submit_edit_item(
         return project_wish_item(updated, user)
 
     try:
-        projected_item = await _execute(request, action)
+        injected = getattr(request.app.state, "wishlist_service", None)
+        if injected is not None:
+            projected_item = await action(injected)
+        else:
+            projected_item = await request.app.state.wishlist_store.execute_wish(
+                action,
+                item_id=item_id,
+                operation_name="submit_edit_item",
+            )
+    except InventoryBusyError:
+        logger.warning(
+            "Item edit was not saved because the wish was busy (item %s)",
+            item_id,
+            extra={
+                "event": "ui_item_edit_busy",
+                "wishlist_id": wishlist_id,
+                "item_id": item_id,
+            },
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="partials/item_edit_modal.html",
+            context={
+                "is_edit": True,
+                "wishlist_id": wishlist_id,
+                "form": submitted_form,
+                "locked_quantity": locked_quantity_snapshot,
+                "min_quantity": max(1, locked_quantity_snapshot),
+                "is_collaborative": is_collaborative_snapshot,
+                "collaborative_members": collaborative_members_snapshot,
+                "error_message": (
+                    "The wish was busy, the edit was not saved, and it can be submitted again."
+                ),
+            },
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
     except CannotReduceQuantityBelowReservedError:
         logger.warning(
             "UI Reduction Lock rejected quantity=%s (locked=%s) for item %s in wishlist %s",

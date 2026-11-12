@@ -11,6 +11,7 @@ from wishenka.auth.models import AuthenticatedUser
 from wishenka.items.schemas import CreateItemDTO, ReorderItemsDTO, UpdateItemDTO
 from wishenka.wishlists.exceptions import (
     CannotReduceQuantityBelowReservedError,
+    InventoryBusyError,
     ItemNotFoundError,
     PermissionDeniedError,
     WishlistArchivedError,
@@ -30,16 +31,46 @@ User = Annotated[AuthenticatedUser, Depends(get_current_user)]
 OptionalUser = Annotated[AuthenticatedUser | None, Depends(get_optional_current_user)]
 
 
-async def execute[T](request: Request, action: Callable[[WishlistService], Awaitable[T]]) -> T:
+async def execute[T](
+    request: Request,
+    action: Callable[[WishlistService], Awaitable[T]],
+    *,
+    item_id: int | None = None,
+) -> T:
     """Run an item operation against transactional storage or test-injected domain service."""
     operation = getattr(request.scope.get("endpoint"), "__name__", "")
     try:
         injected = getattr(request.app.state, "wishlist_service", None)
         if injected is not None:
             result = await action(injected)
+        elif item_id is not None:
+            result = cast(
+                T,
+                await request.app.state.wishlist_store.execute_wish(
+                    action,
+                    item_id=item_id,
+                    operation_name=operation or "wish_inventory",
+                ),
+            )
         else:
             result = cast(T, await request.app.state.wishlist_store.execute(action))
         return result
+    except InventoryBusyError as exc:
+        busy_context: dict[str, object] = {
+            "event": "item_inventory_busy",
+            "operation": operation,
+        }
+        if item_id is not None:
+            busy_context["item_id"] = item_id
+        logger.warning(
+            "Item operation busy: %s",
+            operation,
+            extra=busy_context,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
     except (WishlistNotFoundError, WishlistDeletedError, ItemNotFoundError) as exc:
         logger.warning(
             "Item operation not found: %s (%s)",
@@ -209,7 +240,7 @@ async def update_item(
         )
         return project_wish_item(item, user)
 
-    return await execute(request, action)
+    return await execute(request, action, item_id=item_id)
 
 
 @router.post(

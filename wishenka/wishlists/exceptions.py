@@ -47,3 +47,13 @@ class CannotReduceQuantityBelowReservedError(WishlistError):
 
 class InsufficientQuantityError(ReservationError):
     """Raised when requested reservation quantity exceeds available quantity."""
+
+
+class InventoryBusyError(WishlistError):
+    """Raised when a wish is busy and the inventory attempt changed nothing."""
+
+    def __init__(
+        self,
+        message: str = "The wish was busy and the attempt changed nothing",
+    ) -> None:
+        super().__init__(message)

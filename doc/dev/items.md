@@ -106,9 +106,10 @@ The `wishenka.items` package and its integration with `wishenka.wishlists` imple
    - Rather than returning 500 server errors, emits a valid fallback [`ItemPreviewDTO`](file:///home/src/wishenka/items/schemas.py#L11-L24) populated with the clean sanitized URL, recognized store name, and extracted residual title for seamless manual entry.
 7. **Piece Accounting & Multi-Quantity Invariants**:
    - Desired quantity boundary: $1 \le \text{desired} \le 1000$.
-   - Available piece calculation:
-     $$\text{available} = \max(0, \text{desired} - \text{reserved} - \text{fulfilled})$$
-   - **Reduction Lock Invariant**: A user cannot reduce `desired` quantity below already locked units ($\text{reserved} + \text{fulfilled}$). Attempting to do so raises [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L40-L42).
+   - Occupied units are the sum of reservation `quantity` in `ACTIVE` or `PURCHASED`. The free remainder a promise may take is $\max(0, \text{requested} - \text{received} - \text{occupied})$.
+   - A receipt adds received units and is capped by requested minus units already received. It leaves the promise open. After a successful receipt, occupied plus received may exceed the requested quantity.
+   - **Reduction Lock Invariant**: A user cannot reduce requested quantity below occupied plus received. Attempting to do so raises [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L44-L45).
+   - Inventory writes for one wish run in a wish-scoped SQLite WAL transaction ([`WishlistStore.execute_wish`](file:///home/src/wishenka/wishlists/store.py#L942-L997)). `SQLITE_BUSY` after `busy_timeout` becomes [`InventoryBusyError`](file:///home/src/wishenka/wishlists/exceptions.py#L52-L59) and changes nothing.
    - **Surprise Invariant**: Gift recipients receive [`WishItemRecipientViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L14-L35) strictly devoid of reservation statuses, gifter identities, or booked quantities.
 8. **RESTful Wish Items CRUD API & Atomic Reordering**:
    - Complete endpoint suite mounted at `/api/wishlists/{wishlist_id}/items` supporting item creation, listing, detail reading, patch updating, atomic reordering, safe archiving, and restoring.
@@ -121,7 +122,7 @@ The `wishenka.items` package and its integration with `wishenka.wishlists` imple
     - Archiving acts as a non-destructive soft-delete (`is_archived = True`), preserving all active reservations in the database while immediately hiding the item from default listings and blocking new bookings.
     - Restoring reactivates the item (`is_archived = False`) and safely appends it to the tail of the active display order (`display_order = max(active_orders) + 1`).
 11. **Telegram Mini App (TMA) HTMX Wish Item UI & BottomSheet Modals**:
-    - Server-rendered Jinja2 + HTMX interface mounted at `/web/wishlists/{wishlist_id}` ([`wishenka/web/routes/items_ui.py`](file:///home/src/wishenka/web/routes/items_ui.py)) providing a fixed bottom Universal Quick Add Bar (`partials/item_quick_add.html`), debounced live URL preview card (`partials/item_preview_card.html`), Out-of-Band (`hx-swap-oob`) DOM updates, and a detailed creation/editing bottom-sheet modal (`partials/item_edit_modal.html`) with visual Reduction Lock enforcement and HTTP 409 error recovery.
+    - Server-rendered Jinja2 + HTMX interface mounted at `/web/wishlists/{wishlist_id}` ([`wishenka/web/routes/items_ui.py`](file:///home/src/wishenka/web/routes/items_ui.py)) providing a fixed bottom Universal Quick Add Bar (`partials/item_quick_add.html`), debounced live URL preview card (`partials/item_preview_card.html`), Out-of-Band (`hx-swap-oob`) DOM updates, and a detailed creation/editing bottom-sheet modal (`partials/item_edit_modal.html`) with visual Reduction Lock enforcement, HTTP 409 quantity recovery, and HTTP 503 when the wish is busy.
 
 ---
 
@@ -342,13 +343,16 @@ Provides transactional domain operations for item lifecycle, piece-by-piece inve
   - Validates collaborative recipient targeting: if `recipient_user_id` is specified, verifies it exists in active wishlist membership (`{owner_id} | {m.user_id for m in members}`).
   - Automatically calculates next contiguous `display_order = max([it.display_order for it in wl.items], default=-1) + 1`.
   - Emits structured event `item_created`.
-- **Item Updates & Reduction Lock Invariant ([`update_wish_item`](file:///home/src/wishenka/wishlists/service.py#L845))**:
-  - Row-level concurrency coordination via `async with self._concurrency_coordinator.acquire(item_id):`.
-  - Rejects mutations on archived items ([`WishlistArchivedError`](file:///home/src/wishenka/wishlists/exceptions.py#L18)).
-  - Enforces the **Reduction Lock Invariant**:
+- **Item Updates & Reduction Lock Invariant ([`update_wish_item`](file:///home/src/wishenka/wishlists/service.py#L930))**:
+  - The in-process `ItemConcurrencyCoordinator` still wraps the check. It is an `asyncio.Lock` on that service instance. A second process does not share it, and the wish-scoped SQLite transaction is what excludes other copies.
+  - Rejects mutations on archived items ([`WishlistArchivedError`](file:///home/src/wishenka/wishlists/exceptions.py#L16)).
+  - Enforces the **Reduction Lock Invariant**. Occupied units are `reserved_quantity` (`ACTIVE` and `PURCHASED`). Lowering requested quantity is refused when it would fall below occupied plus received:
     $$\text{requested\_quantity} \ge \text{reserved\_quantity} + \text{received\_quantity}$$
-    If violated, raises [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L40) and logs `item_quantity_reduction_rejected`.
+    If violated, raises [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L44) and logs `item_quantity_reduction_rejected`. The open transaction rolls back, so the stored quantity stays at the last commit.
   - Computes `quantity_delta` and records modified fields list in structured event `item_updated`.
+- **Receipt and promises** (same wish-scoped transaction when the configured store is attached):
+  - [`record_item_fulfillment`](file:///home/src/wishenka/wishlists/service.py#L1861) adds `received_quantity`. The cap is requested minus units already received. The increment is refused with `ValueError` when it would pass that cap. Receipt does not cancel or complete the promise and is not capped by occupied units. After a successful receipt, occupied plus received may exceed the requested quantity.
+  - [`create_reservation`](file:///home/src/wishenka/wishlists/service.py#L1337) and an increase in [`update_reservation_quantity`](file:///home/src/wishenka/wishlists/service.py#L1699) use the free remainder `available_quantity` $= \max(0, \text{requested} - \text{received} - \text{occupied})$. A larger promise raises [`InsufficientQuantityError`](file:///home/src/wishenka/wishlists/exceptions.py#L48). A later promise still uses that remainder after a receipt.
 - **Atomic Reordering Protocol ([`reorder_wish_items`](file:///home/src/wishenka/wishlists/service.py#L1044))**:
   - Verifies active wishlist state and caller permissions.
   - Enforces strict 1:1 active permutation integrity:
@@ -379,13 +383,15 @@ FastAPI APIRouter mounted at `/api/wishlists/{wishlist_id}/items` providing HTTP
 - **Authentication Injections**:
   - `User = Annotated[AuthenticatedUser, Depends(get_current_user)]`: Enforces authenticated session for mutations (`POST`, `PUT`, `PATCH`).
   - `OptionalUser = Annotated[AuthenticatedUser | None, Depends(get_optional_current_user)]`: Allows anonymous access for public wishlist views while extracting caller credentials for personalized gifter badges when logged in.
-- **Transactional Execution Wrapper ([`execute`](file:///home/src/wishenka/web/routes/items.py#L33-L74))**:
-  - Executes operations against persistent `request.app.state.wishlist_store.execute` or test-injected domain service `request.app.state.wishlist_service`.
-  - Maps domain exceptions to standard HTTP error responses:
-    - [`WishlistNotFoundError`](file:///home/src/wishenka/wishlists/exceptions.py#L10), [`WishlistDeletedError`](file:///home/src/wishenka/wishlists/exceptions.py#L22), [`ItemNotFoundError`](file:///home/src/wishenka/wishlists/exceptions.py#L36) $\rightarrow$ **`404 Not Found`** (`event="item_not_found"`).
-    - [`PermissionDeniedError`](file:///home/src/wishenka/wishlists/exceptions.py#L26) $\rightarrow$ **`403 Forbidden`** (`event="item_permission_denied"`).
-    - [`WishlistArchivedError`](file:///home/src/wishenka/wishlists/exceptions.py#L18), [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L40) $\rightarrow$ **`409 Conflict`** (`event="item_conflict"`).
-    - `ValueError` (whitespace titles, invalid reorder permutations) $\rightarrow$ **`400 Bad Request`** (`event="item_validation_error"`).
+- **Transactional Execution Wrapper ([`execute`](file:///home/src/wishenka/web/routes/items.py#L34-L104))**:
+  - A test-injected `request.app.state.wishlist_service` runs the action on that in-memory service.
+  - When `item_id` is set, the persistent path is [`WishlistStore.execute_wish`](file:///home/src/wishenka/wishlists/store.py#L942). `update_item` (`PATCH`) passes the item id. Other item routes call [`WishlistStore.execute`](file:///home/src/wishenka/wishlists/store.py#L1221), the full-snapshot unit of work. Both paths translate a timed-out SQLite lock to [`InventoryBusyError`](file:///home/src/wishenka/wishlists/exceptions.py#L52) before a generic storage `RuntimeError`.
+  - Maps domain exceptions to standard HTTP error responses. The 503 body is the exception text (`The wish was busy and the attempt changed nothing`). It names no gifter.
+    - [`InventoryBusyError`](file:///home/src/wishenka/wishlists/exceptions.py#L52) $\rightarrow$ **`503 Service Unavailable`** (`event="item_inventory_busy"`, plus `item_id` when the route passed one).
+    - [`WishlistNotFoundError`](file:///home/src/wishenka/wishlists/exceptions.py#L12), [`WishlistDeletedError`](file:///home/src/wishenka/wishlists/exceptions.py#L20), [`ItemNotFoundError`](file:///home/src/wishenka/wishlists/exceptions.py#L32) $\rightarrow$ **`404 Not Found`** (`event="item_not_found"`).
+    - [`PermissionDeniedError`](file:///home/src/wishenka/wishlists/exceptions.py#L8) $\rightarrow$ **`403 Forbidden`** (`event="item_permission_denied"`).
+    - [`WishlistArchivedError`](file:///home/src/wishenka/wishlists/exceptions.py#L16), [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L44) $\rightarrow$ **`409 Conflict`** (`event="item_conflict"`).
+    - `ValueError` (whitespace titles, invalid reorder permutations, a recipient who is not a member) $\rightarrow$ **`400 Bad Request`** (`event="item_validation_error"`). A receipt past the received cap raises the same `ValueError` from `record_item_fulfillment`; the store rolls that wish back and logs `wishlist_inventory_rolled_back` at `WARNING`.
 
 ### 9. Relational Persistence & Ordering Index ([`wl_items`](file:///home/src/wishenka/wishlists/store.py))
 
@@ -395,6 +401,43 @@ Located in [`wishenka/wishlists/db_models.py`](file:///home/src/wishenka/wishlis
 - **Index**: `CREATE INDEX IF NOT EXISTS idx_wl_items_order ON wl_items(wishlist_id, display_order)`.
 - **Dynamic Schema Migration**: On startup, `WishlistStore._init_db` inspects `PRAGMA table_info(wl_items)` and executes `ALTER TABLE wl_items ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0` if absent, followed by creating `idx_wl_items_order`.
 - **Deterministic Ordering**: Repository selects sort by `ORDER BY display_order ASC, id ASC`.
+
+#### Wish-scoped inventory transaction
+
+Inventory changes for one wish share the SQLite file across service copies. The exclusion is a wish-scoped WAL write on the wishlist engine. Redis is not part of this path. `ItemConcurrencyCoordinator` keeps an in-process `asyncio.Lock` per item on the service instance that owns it. `execute_wish` builds a fresh `WishlistService` for the loaded wish, so that lock is not shared with another process or another request. The quantity rules still run inside the SQLite transaction.
+
+[`_configure_immediate_transactions`](file:///home/src/wishenka/wishlists/store.py#L48-L68) attaches to `engine.sync_engine`:
+
+- On `connect`, `isolation_level = None` so the sqlite3 driver does not emit its own `BEGIN`. The same connect sets `PRAGMA journal_mode=WAL`, `PRAGMA foreign_keys=ON`, and `PRAGMA busy_timeout=5000`.
+- On `begin`, the listener sets `PRAGMA busy_timeout=5000` and then emits `BEGIN IMMEDIATE`. The listener runs because code calls `Connection.begin()`.
+
+[`_immediate`](file:///home/src/wishenka/wishlists/store.py#L1262-L1273) opens a connection, calls `await conn.begin()`, runs the work, and `COMMIT`s. Any `BaseException` rolls the transaction back when it is still open, then re-raises. A failed attempt leaves the wish at the last commit.
+
+[`execute_wish`](file:///home/src/wishenka/wishlists/store.py#L942-L997) requires exactly one of `item_id` or `reservation_id`. Inside that transaction it:
+
+1. Resolves `reservation_id` with `SELECT wish_item_id FROM wl_reservations WHERE id = :reservation_id` ([`_resolve_wish_item_id`](file:///home/src/wishenka/wishlists/store.py#L999-L1014)). A missing row raises `ReservationNotFoundError` before any write.
+2. Loads the parent wishlist with its members, the one item, that item's reservations, and the `reservation` counter ([`_load_wish`](file:///home/src/wishenka/wishlists/store.py#L1016-L1166)). The wishlist carries `owner_id`, `is_collaborative`, and the member rows that `is_recipient`, `resolve_context`, and `submit_edit_item` read. Other wishes are not loaded.
+3. Runs the domain operation on that partial service. The service has no store, so the method body runs in memory inside the open transaction.
+4. Persists changed rows only ([`_persist_wish`](file:///home/src/wishenka/wishlists/store.py#L1168-L1219)): the item row when its state changed, reservations that are new or changed, and the reservation counter when it changed. It does not call `_write`. Unchanged rows, other wishes, members, favorites, and view history stay untouched.
+
+The configured `WishlistService` sends these methods through `execute_wish` via `_transactional`: `create_reservation`, `update_wish_item`, and `record_item_fulfillment` (by `item_id`); `cancel_reservation`, `update_reservation_quantity`, `mark_reservation_purchased`, and `revert_reservation_to_active` (by `reservation_id`). Other public methods still use the full-snapshot `execute`, which starts with the same `Connection.begin()`.
+
+`SQLITE_BUSY` after `busy_timeout` is recognized on the driver error, its
+`orig`, or its cause (`sqlite_errorcode` low byte `SQLITE_BUSY`, or the text
+`database is locked` / `database is busy`).
+[`_raise_for_storage_error`](file:///home/src/wishenka/wishlists/store.py#L167-L205)
+logs `wishlist_inventory_busy` and raises `InventoryBusyError`. The default
+text is `The wish was busy and the attempt changed nothing`. A non-busy
+`SQLAlchemyError` logs `wishlist_inventory_rolled_back` at `ERROR` only when
+the wish key is present (`item_id`, `reservation_id`, or `operation` on that
+helper) and becomes `RuntimeError` (`Wishlist storage operation failed`).
+[`WishlistStore.execute`](file:///home/src/wishenka/wishlists/store.py#L1221)
+calls the helper with no `item_id`, `reservation_id`, or `operation`. That
+branch logs `wishlist_store_error` at `ERROR`. A full-snapshot `execute`
+omits the id and the operation. A `WishlistError` or `ValueError` from the
+domain method is rolled back, logged as `wishlist_inventory_rolled_back` at
+`WARNING`, and re-raised unchanged. `wishlist_inventory_committed` is written
+only after `COMMIT`.
 
 ### 10. TMA HTMX Wish Items UI Controller & Partials ([`wishenka.web.routes.items_ui`](file:///home/src/wishenka/web/routes/items_ui.py))
 
@@ -425,7 +468,8 @@ Provides server-rendered HTML views and HTMX partials mounted at `/web/wishlists
 - **Detailed Creation & Edit BottomSheet Modal ([`partials/item_edit_modal.html`](file:///home/src/wishenka/web/templates/partials/item_edit_modal.html))**:
   - Served in creation mode (`is_edit=False`) by [`get_new_item_modal`](file:///home/src/wishenka/web/routes/items_ui.py#L344) (`GET /web/wishlists/{wishlist_id}/items/new`) and in edit mode (`is_edit=True`) by [`get_edit_item_modal`](file:///home/src/wishenka/web/routes/items_ui.py#L438) (`GET /web/wishlists/{wishlist_id}/items/{item_id}/edit`).
   - Enforces **Reduction Lock UI**: computes `locked_quantity = item.reserved_quantity + item.received_quantity` and `min_quantity = max(1, locked_quantity)`, sets `min="{{ min_quantity }}"` on `#item-quantity-input`, stops the `-` stepper button at `min_quantity`, and displays an amber warning banner when `locked_quantity > 0`.
-  - Enforces **HTTP 409 Error Recovery**: if [`submit_edit_item`](file:///home/src/wishenka/web/routes/items_ui.py#L541) (`POST /web/wishlists/{wishlist_id}/items/{item_id}/edit`) catches `CannotReduceQuantityBelowReservedError`, it re-renders `partials/item_edit_modal.html` with status `409 Conflict`, displaying a localized error alert while preserving all user-submitted form fields (`submitted_form`).
+  - Enforces **HTTP 409 Error Recovery**: if [`submit_edit_item`](file:///home/src/wishenka/web/routes/items_ui.py#L543) (`POST /web/wishlists/{wishlist_id}/items/{item_id}/edit`) catches `CannotReduceQuantityBelowReservedError`, it re-renders `partials/item_edit_modal.html` with status `409 Conflict`, displaying a localized error alert while preserving all user-submitted form fields (`submitted_form`).
+  - Enforces **HTTP 503 retry**: the same handler saves through `execute_wish`. `InventoryBusyError` re-renders that modal with status `503 Service Unavailable` and the sentence `The wish was busy, the edit was not saved, and it can be submitted again.` The modal stays open, the submitted fields stay filled, and the sentence names no gifter. A busy lower-quantity edit is this 503, not an unhandled 500. The log event is `ui_item_edit_busy` with `wishlist_id` and `item_id`.
   - Enforces **Surprise Invariant & XSS Safety**: never exposes `item.reservations` or gifter identities (`user_id`, `username`, `first_name`), and relies on Jinja2 auto-escaping across all templates (`partials/item_card.html`, `partials/item_edit_modal.html`, `partials/item_preview_card.html`).
   - Supports **Safe Archiving & Restoration**: [`archive_item_ui`](file:///home/src/wishenka/web/routes/items_ui.py#L717) (`POST /web/wishlists/{wishlist_id}/items/{item_id}/archive`) archives the item while keeping reservations and emits `hx-swap-oob="delete"` for `#item-card-{item_id}` plus `hx-swap-oob="innerHTML"` for `#item-modal-container`. [`restore_item_ui`](file:///home/src/wishenka/web/routes/items_ui.py#L776) (`POST /web/wishlists/{wishlist_id}/items/{item_id}/restore`) restores the item and returns the rendered `partials/item_card.html`.
 
@@ -446,6 +490,7 @@ WishlistError
   │                 └── InvalidUrlSchemeError
   ├── ItemNotFoundError
   ├── CannotReduceQuantityBelowReservedError
+  ├── InventoryBusyError
   ├── WishlistNotFoundError
   ├── WishlistArchivedError
   ├── WishlistDeletedError
@@ -464,7 +509,8 @@ WishlistError
 | [`InvalidUrlSchemeError`](file:///home/src/wishenka/items/exceptions.py#L43) | `SSRFError` | `scheme` | `400` | URL scheme is not `http` or `https` (e.g. `file://`, `ftp://`). |
 | [`ResponseBodyTooLargeError`](file:///home/src/wishenka/items/exceptions.py#L56) | `ItemParsingError` | `content_length`, `max_allowed` | `400` | Response exceeds 2 MB (`Content-Length` header or streaming chunk limit). |
 | [`ItemNotFoundError`](file:///home/src/wishenka/wishlists/exceptions.py#L36) | `WishlistError` | None | `404` | Target `item_id` does not exist or does not belong to the specified wishlist. |
-| [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L40) | `WishlistError` | None | `409` | Invariant violation: attempting to set `quantity < reserved_quantity + received_quantity`. |
+| [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L44) | `WishlistError` | None | `409` | Invariant violation: attempting to set `quantity < reserved_quantity + received_quantity`. |
+| [`InventoryBusyError`](file:///home/src/wishenka/wishlists/exceptions.py#L52) | `WishlistError` | None | `503` | `SQLITE_BUSY` after `busy_timeout`. The transaction rolled back and the wish is unchanged. The message names no gifter. |
 | [`WishlistNotFoundError`](file:///home/src/wishenka/wishlists/exceptions.py#L10) | `WishlistError` | None | `404` | Parent wishlist ID does not exist. |
 | [`WishlistArchivedError`](file:///home/src/wishenka/wishlists/exceptions.py#L18) | `WishlistError` | None | `409` | Attempting to mutate an item in an archived wishlist or edit an archived item. |
 | [`WishlistDeletedError`](file:///home/src/wishenka/wishlists/exceptions.py#L22) | `WishlistError` | None | `404` | Parent wishlist is marked as deleted. |
@@ -495,11 +541,15 @@ WishlistError
 ### 1. Piece Accounting & Reduction Lock Invariant
 
 - **Quantity Bounds**: $1 \le \text{quantity} \le 1000$. Enforced at schema level ([`CreateItemDTO`](file:///home/src/wishenka/items/schemas.py#L37), [`UpdateItemDTO`](file:///home/src/wishenka/items/schemas.py#L62)) and domain level.
-- **Availability Formula**:
+- **Occupied units**: `reserved_quantity` sums reservation `quantity` in `ACTIVE` or `PURCHASED`.
+- **Free remainder for a promise**:
   $$\text{available\_quantity} = \max(0, \text{quantity} - \text{received\_quantity} - \text{reserved\_quantity})$$
-- **Reduction Lock**: A wishlist creator or editor cannot reduce the `quantity` of an item below units that are already promised or delivered:
+  A new promise or a larger one that would make this remainder negative raises `InsufficientQuantityError`. The earlier promise stays as it was.
+- **Receipt cap**: `record_item_fulfillment` adds received units up to requested minus units already received. It does not close the promise and is not limited by occupied units. After a successful receipt, occupied plus received may exceed the requested quantity. A later promise still uses the free remainder.
+- **Reduction Lock**: A wishlist creator or editor cannot reduce the requested `quantity` below occupied plus received:
   $$\text{requested\_quantity} \ge \text{reserved\_quantity} + \text{received\_quantity}$$
-  Attempting to reduce below this threshold raises [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L40) and returns HTTP 409 Conflict. This prevents race conditions where a creator reduces an item quantity while a gifter is purchasing it.
+  Attempting to reduce below this threshold raises [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L44) and returns HTTP 409 Conflict. The wish-scoped transaction rolls back, so the stored quantity stays at the last commit.
+- **Busy lock**: these checks run inside the wish-scoped `BEGIN IMMEDIATE` transaction. If the write lock is still held when `busy_timeout` (5000 ms) expires, the store raises `InventoryBusyError`, rolls back, and changes nothing. Item `execute` and the edit modal answer that with HTTP 503 and name no gifter.
 
 ### 2. Reordering Protocol & 1:1 Active Permutation Integrity
 
@@ -540,7 +590,7 @@ All endpoints are mounted at `/api/wishlists/{wishlist_id}/items`.
 | `GET` | `/api/wishlists/{wishlist_id}/items` | Optional | None | `list[Recipient or Gifter DTO]` | `200`, `404` | List items sorted by `display_order ASC`. Query param `include_archived=bool`. |
 | `PUT` | `/api/wishlists/{wishlist_id}/items/reorder` | **Yes** | [`ReorderItemsDTO`](file:///home/src/wishenka/items/schemas.py#L76) | `list[Recipient or Gifter DTO]` | `200`, `400`, `403`, `404`, `409` | Atomically reorder active items enforcing 1:1 permutation integrity. |
 | `GET` | `/api/wishlists/{wishlist_id}/items/{item_id}` | Optional | None | Recipient or Gifter DTO | `200`, `404` | Retrieve single item projected for the caller. |
-| `PATCH` | `/api/wishlists/{wishlist_id}/items/{item_id}` | **Yes** | [`UpdateItemDTO`](file:///home/src/wishenka/items/schemas.py#L51) | Recipient or Gifter DTO | `200`, `400`, `403`, `404`, `409` | Update item properties enforcing Reduction Lock Invariant. |
+| `PATCH` | `/api/wishlists/{wishlist_id}/items/{item_id}` | **Yes** | [`UpdateItemDTO`](file:///home/src/wishenka/items/schemas.py#L51) | Recipient or Gifter DTO | `200`, `400`, `403`, `404`, `409`, `503` | Update item properties through `execute_wish`. Reduction lock is 409. A busy lock is 503 and names no gifter. |
 | `POST` | `/api/wishlists/{wishlist_id}/items/{item_id}/archive` | **Yes** | None | Recipient or Gifter DTO | `200`, `403`, `404`, `409` | Safely archive item, preserving reservations and blocking new bookings. |
 | `POST` | `/api/wishlists/{wishlist_id}/items/{item_id}/restore` | **Yes** | None | Recipient or Gifter DTO | `200`, `403`, `404`, `409` | Restore archived item, placing it at the end of the active list. |
 
@@ -557,7 +607,7 @@ All HTMX UI endpoints are defined in [`wishenka/web/routes/items_ui.py`](file://
 | `POST` | `/web/wishlists/{wishlist_id}/items/quick` | [`quick_add_item`](file:///home/src/wishenka/web/routes/items_ui.py#L225) | **Yes** | Form: `raw_input`, `title`, `link`, `price`, `currency`, `image_url`, `store_name`, `description`, `quantity`, `priority`, `category`, `recipient_user_id`, `recipient_name` | [`partials/item_card.html`](file:///home/src/wishenka/web/templates/partials/item_card.html) + OOB resets (`#quick-add-preview-target`, `#quick-add-input`, `#empty-items-placeholder`, `#item-modal-container`) | `201`, `400`, `404`, `409` | Quick-adds wish item (from Quick Add Bar or creation modal) and resets UI via `hx-swap-oob`. |
 | `GET` | `/web/wishlists/{wishlist_id}/items/new` | [`get_new_item_modal`](file:///home/src/wishenka/web/routes/items_ui.py#L344) | **Yes** | Query: `raw_input`, `title`, `link`, `price`, `currency`, `image_url`, `description`, `quantity`, `priority`, `category` | [`partials/item_edit_modal.html`](file:///home/src/wishenka/web/templates/partials/item_edit_modal.html) (`is_edit=False`, `min_quantity=1`) | `200`, `404`, `409` | Opens detailed item creation BottomSheet modal prepopulated from Quick Add or preview card. |
 | `GET` | `/web/wishlists/{wishlist_id}/items/{item_id}/edit` | [`get_edit_item_modal`](file:///home/src/wishenka/web/routes/items_ui.py#L438) | **Yes** | None | [`partials/item_edit_modal.html`](file:///home/src/wishenka/web/templates/partials/item_edit_modal.html) (`is_edit=True`, `min_quantity=max(1, locked_quantity)`) | `200`, `404`, `409` | Opens detailed edit modal enforcing Reduction Lock and Surprise Invariant. |
-| `POST` | `/web/wishlists/{wishlist_id}/items/{item_id}/edit` | [`submit_edit_item`](file:///home/src/wishenka/web/routes/items_ui.py#L541) | **Yes** | Form: `title`, `link`, `price`, `currency`, `quantity`, `description`, `image_url`, `priority`, `category`, `recipient_user_id`, `recipient_name` | [`partials/item_card.html`](file:///home/src/wishenka/web/templates/partials/item_card.html) + OOB close `#item-modal-container` (or `409` [`partials/item_edit_modal.html`](file:///home/src/wishenka/web/templates/partials/item_edit_modal.html) preserving inputs) | `200`, `400`, `404`, `409` | Saves item edits; on `CannotReduceQuantityBelowReservedError` returns HTTP 409 modal preserving form state. |
+| `POST` | `/web/wishlists/{wishlist_id}/items/{item_id}/edit` | [`submit_edit_item`](file:///home/src/wishenka/web/routes/items_ui.py#L543) | **Yes** | Form: `title`, `link`, `price`, `currency`, `quantity`, `description`, `image_url`, `priority`, `category`, `recipient_user_id`, `recipient_name` | [`partials/item_card.html`](file:///home/src/wishenka/web/templates/partials/item_card.html) + OOB close `#item-modal-container` (or the same edit modal on 409 or 503, preserving inputs) | `200`, `400`, `404`, `409`, `503` | Saves through `execute_wish`. Quantity below occupied plus received returns 409. A busy lock returns 503, keeps the modal open, and names no gifter. |
 | `POST` | `/web/wishlists/{wishlist_id}/items/{item_id}/archive` | [`archive_item_ui`](file:///home/src/wishenka/web/routes/items_ui.py#L717) | **Yes** | None | OOB delete `#item-card-{item_id}` + OOB close `#item-modal-container` | `200`, `404`, `409` | Safely archives item while preserving gifter reservations and removes card from DOM. |
 | `POST` | `/web/wishlists/{wishlist_id}/items/{item_id}/restore` | [`restore_item_ui`](file:///home/src/wishenka/web/routes/items_ui.py#L776) | **Yes** | None | [`partials/item_card.html`](file:///home/src/wishenka/web/templates/partials/item_card.html) | `200`, `404`, `409` | Restores archived item to the tail of the active list and renders updated card partial. |
 
@@ -939,6 +989,17 @@ async with httpx.AsyncClient(base_url="https://api.wishenka.app") as client:
 
 ## Configuration & Security Constants
 
+### Wishlist inventory lock
+
+Set on the wishlist engine in [`_configure_immediate_transactions`](file:///home/src/wishenka/wishlists/store.py#L48-L68). There is no separate environment variable and no Redis client for this lock.
+
+| Setting | Value | Where |
+| --- | --- | --- |
+| `PRAGMA journal_mode` | `WAL` | `connect` |
+| `PRAGMA foreign_keys` | `ON` | `connect` |
+| `PRAGMA busy_timeout` | `5000` (milliseconds) | `connect`, and again in the `begin` listener before `BEGIN IMMEDIATE` |
+| `isolation_level` | `None` | `connect`, so sqlite3 does not emit its own `BEGIN` |
+
 ### Network & Security Settings
 
 Defined in [`wishenka/items/ssrf.py`](file:///home/src/wishenka/items/ssrf.py), [`wishenka/items/fetcher.py`](file:///home/src/wishenka/items/fetcher.py), and [`wishenka/items/marketplaces.py`](file:///home/src/wishenka/items/marketplaces.py):
@@ -980,9 +1041,9 @@ The following subnets are hard-blocked from outbound connections:
 
 ### Structured Audit and Operational Logging
 
-All events are logged via structured extra dictionaries under logger names `"wishenka.items"` (URL parsing and preview pipeline), `"wishenka.wishlists"` (domain service lifecycle), `"wishenka.web.items"` (REST API layer), and `"wishenka.web.items_ui"` (TMA HTMX UI layer):
+All events are logged via structured extra dictionaries under logger names `"wishenka.items"` (URL parsing and preview pipeline), `"wishenka.wishlists"` (domain service lifecycle), `"wishenka.wishlists.store"` (wish-scoped inventory commit, busy, and rollback), `"wishenka.web.items"` (REST API layer), and `"wishenka.web.items_ui"` (TMA HTMX UI layer):
 
-#### 1. Wish Items Lifecycle & Accounting Events (`wishenka.wishlists`, `wishenka.web.items`)
+#### 1. Wish Items Lifecycle & Accounting Events (`wishenka.wishlists`, `wishenka.wishlists.store`, `wishenka.web.items`)
 
 | Event Name | Level | Key Context Fields | Trigger Condition |
 | :--- | :---: | :--- | :--- |
@@ -992,6 +1053,12 @@ All events are logged via structured extra dictionaries under logger names `"wis
 | `item_restored` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `display_order`, `new_display_order` | Archived item restored and appended to the tail of the active list. |
 | `items_reordered` | `INFO` | `wishlist_id`, `actor_id`, `item_count`, `count`, `item_ids` | Active items display order atomically permuted. |
 | `item_quantity_reduction_rejected` | `WARNING` | `wishlist_id`, `item_id`, `actor_id`, `requested_quantity`, `locked_quantity`, `reason` | Invariant violation: attempt to reduce quantity below reserved + fulfilled units. |
+| `wishlist_inventory_committed` | `INFO` | `item_id`, `operation`, `reservations_written` | `WishlistStore.execute_wish` after `COMMIT`. No row dump, title, or gifter identity. A failed attempt does not emit this event. |
+| `wishlist_inventory_busy` | `WARNING` | `item_id` or `reservation_id`, `operation` | `SQLITE_BUSY` after `busy_timeout` became `InventoryBusyError`. The wish is unchanged. No gifter id or name. A full-snapshot `execute` with no wish key omits the id. |
+| `wishlist_inventory_rolled_back` | `WARNING` | `error_type`, `item_id` or `reservation_id`, `operation` | Domain refusal (`WishlistError` or `ValueError`, including a quantity or membership check). The exception is re-raised. Driver text and gifter identity are omitted. |
+| `wishlist_inventory_rolled_back` | `ERROR` | `error_type`, `item_id` or `reservation_id`, `operation` | Non-busy `SQLAlchemyError` only when the wish key is present (`item_id`, `reservation_id`, or `operation`). Re-raised as `RuntimeError` (`Wishlist storage operation failed`). |
+| `wishlist_store_error` | `ERROR` | none | [`WishlistStore.execute`](file:///home/src/wishenka/wishlists/store.py#L1221) calls `_raise_for_storage_error` with no `item_id`, `reservation_id`, or `operation`. A full-snapshot `execute` omits the id and the operation. That branch logs this event for a non-busy `SQLAlchemyError`, then raises `RuntimeError` (`Wishlist storage operation failed`). |
+| `item_inventory_busy` | `WARNING` | `operation`, `item_id` when the route is wish-scoped | `items.py` `execute` mapped `InventoryBusyError` to HTTP 503. The response body is the busy sentence and names no gifter. |
 | `item_reorder_invalid` | `WARNING` | `wishlist_id`, `actor_id`, `reason` | Permutation integrity violation: duplicate IDs or set mismatch against active items. |
 | `item_access_denied` | `WARNING` | `wishlist_id`, `actor_id`, `action`, `role`, `item_id` | Unauthorized actor denied permission to create, edit, reorder, archive, or restore items. |
 | `item_not_found` | `WARNING` | `operation`, `item_id`, `actor_id` | HTTP route caught `ItemNotFoundError` or `WishlistNotFoundError` (returns 404). |
@@ -1042,6 +1109,7 @@ All events are logged via structured extra dictionaries under logger names `"wis
 | `ui_item_edit_opened` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `mode`, `locked_quantity`, `is_collaborative` | Detailed item creation (`mode="create"`) or edit (`mode="edit"`) BottomSheet modal opened. |
 | `ui_reduction_lock_rendered` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `locked_quantity` | Edit modal rendered with active Reduction Lock constraint (`locked_quantity > 0`). |
 | `ui_reduction_lock_rejected` | `WARNING` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `requested_quantity`, `locked_quantity` | Edit submission rejected with HTTP 409 Conflict due to quantity below locked reservations. |
+| `ui_item_edit_busy` | `WARNING` | `wishlist_id`, `item_id` | Edit modal returned HTTP 503. The sentence names no gifter. |
 | `ui_item_edit_saved` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `quantity`, `has_recipient` | Wish item attributes and collaborative recipient targeting saved via edit modal. |
 | `ui_item_archived` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id` | Wish item safely archived via HTMX UI while preserving gifter reservations. |
 | `ui_item_restored` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id` | Archived wish item restored to the active list via HTMX UI. |
@@ -1054,6 +1122,7 @@ In accordance with security requirements:
 - **No Payload Leaks**: Raw HTML bodies, full upstream responses, and long user notes are never dumped into logs.
 - **Tracking Parameter Value Isolation**: URL tracking removal logs list sanitized key names only (`removed_keys=["utm_source"]`), strictly omitting query parameter values that might contain sensitive affiliate IDs or campaign tokens.
 - **No Internal IP Leak to Clients**: Client-facing DTOs (`ItemPreviewDTO`) receive generic `fallback_reason="ssrf_blocked"`; internal IP details remain isolated to server audit logs.
+- **No gifter on a busy wish**: `InventoryBusyError`, the HTTP 503 detail, the edit-modal sentence, and `wishlist_inventory_busy` / `wishlist_inventory_rolled_back` / `item_inventory_busy` / `ui_item_edit_busy` omit gifter ids and names.
 - **Clean Domains**: Domains are extracted without ports or query parameters (`url_domain`) for clean metric aggregation.
 
 ---
@@ -1129,9 +1198,14 @@ In accordance with security requirements:
   standalone services do not automatically share the application cache.
 
 ### 8. Quantity Reduction Rejection (`CannotReduceQuantityBelowReservedError` / HTTP 409 Conflict)
-- **Symptom**: `PATCH /api/wishlists/{wishlist_id}/items/{item_id}` returns `409 Conflict` with detail `"Cannot reduce quantity to X: Y units already locked"`.
-- **Cause**: The user attempted to reduce `quantity` below already committed reservations plus fulfilled units ($\text{reserved\_quantity} + \text{received\_quantity}$).
-- **Resolution**: The item quantity cannot be reduced below the locked count while active reservations exist. If the reservations are no longer valid, gifters must cancel their reservations first. Alternatively, the creator can archive the entire item.
+- **Symptom**: `PATCH /api/wishlists/{wishlist_id}/items/{item_id}` returns `409 Conflict` with detail `"Cannot reduce quantity to X: Y units already locked"`. The edit modal returns the same refusal as HTTP 409 and keeps the form.
+- **Cause**: The user attempted to reduce `quantity` below occupied plus received units ($\text{reserved\_quantity} + \text{received\_quantity}$).
+- **Resolution**: The item quantity cannot be reduced below the locked count while active reservations exist. If the reservations are no longer valid, gifters must cancel their reservations first. Alternatively, the creator can archive the entire item. The store log is `wishlist_inventory_rolled_back` at `WARNING` with `error_type` `CannotReduceQuantityBelowReservedError`.
+
+### Wish inventory busy (`InventoryBusyError` / HTTP 503)
+- **Symptom**: `PATCH` returns `503 Service Unavailable` with detail `The wish was busy and the attempt changed nothing`. `POST .../items/{item_id}/edit` returns `503` and re-renders the edit modal with `The wish was busy, the edit was not saved, and it can be submitted again.` Neither sentence names a gifter. The wish balance is unchanged.
+- **Cause**: Another writer held the SQLite reserved lock until `busy_timeout` (5000 ms) elapsed. `execute_wish` rolled the transaction back and raised `InventoryBusyError`. This is the shared write path. Redis and `asyncio.Lock` do not exclude the other process.
+- **Resolution**: Submit the same change again. Confirm `wishlist_inventory_busy` at `WARNING` on `wishenka.wishlists.store`, and `item_inventory_busy` or `ui_item_edit_busy` on the route logger. A quantity or membership refusal stays HTTP 409 or 400 and logs `wishlist_inventory_rolled_back` at `WARNING`. A non-busy `SQLAlchemyError` logs `wishlist_inventory_rolled_back` at `ERROR` only when the wish key is present. A full-snapshot `execute` that omits the id and the operation logs `wishlist_store_error` at `ERROR`. Both become `RuntimeError` (`Wishlist storage operation failed`).
 
 ### 9. Reorder Permutation Validation Failure (`ValueError` / HTTP 400 Bad Request)
 - **Symptom**: `PUT /api/wishlists/{wishlist_id}/items/reorder` returns `400 Bad Request` with detail `"Reorder list must contain exactly all active item IDs for this wishlist"` or `"Duplicate item IDs in reorder request"`.
