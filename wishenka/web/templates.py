@@ -16,3 +16,4 @@ def _text_escape(value: object) -> Markup:
 
 
 templates.env.filters["text_escape"] = _text_escape
+templates.env.globals["range"] = range

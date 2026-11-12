@@ -6,7 +6,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Annotated, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse
 
 from wishenka.auth.dependencies import get_current_user, get_optional_current_user
@@ -19,8 +19,9 @@ from wishenka.wishlists.exceptions import (
     WishlistDeletedError,
     WishlistNotFoundError,
 )
-from wishenka.wishlists.models import WishlistRole
+from wishenka.wishlists.models import WishlistRole, WishlistStatus
 from wishenka.wishlists.policy import WishlistAccessPolicy
+from wishenka.wishlists.schemas import WishItemGifterViewDTO
 from wishenka.wishlists.service import WishlistService
 
 router = APIRouter()
@@ -80,7 +81,12 @@ async def view_public_share(
     return templates.TemplateResponse(
         request=request,
         name="share_wishlist.html",
-        context={"wishlist": dto, "items": dto.items},
+        context={
+            "wishlist": dto,
+            "items": dto.items,
+            "viewer_identified": current_user is not None,
+            "wishlist_active": dto.status == WishlistStatus.ACTIVE,
+        },
     )
 
 
@@ -90,10 +96,14 @@ async def get_item_card_partial(
     wishlist_id: int,
     item_id: int,
     current_user: OptionalUser,
+    notice: Annotated[str | None, Query()] = None,
+    is_first: bool = False,
+    is_last: bool = False,
 ) -> Response:
     """Render single item card HTMX partial adhering to Surprise Invariant."""
     service = _get_service(request)
     try:
+        wishlist = await service.get_wishlist_by_id(wishlist_id)
         dto = await service.get_wishlist_view(wishlist_id, current_user)
     except (WishlistNotFoundError, WishlistDeletedError) as exc:
         raise HTTPException(
@@ -108,10 +118,22 @@ async def get_item_card_partial(
             detail="Item not found",
         )
 
+    context_user = WishlistAccessPolicy.resolve_context(current_user, wishlist)
+    visible_notice = notice if isinstance(item, WishItemGifterViewDTO) else None
     return templates.TemplateResponse(
         request=request,
         name="partials/item_card.html",
-        context={"item": item, "wishlist_id": wishlist_id},
+        context={
+            "item": item,
+            "wishlist_id": wishlist_id,
+            "wishlist": dto,
+            "viewer_identified": current_user is not None,
+            "wishlist_active": wishlist.status == WishlistStatus.ACTIVE,
+            "can_edit_wishlist": WishlistAccessPolicy.can_add_or_edit_item(context_user, wishlist),
+            "notice": visible_notice,
+            "is_first": is_first,
+            "is_last": is_last,
+        },
     )
 
 

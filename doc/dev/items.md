@@ -369,10 +369,10 @@ Provides transactional domain operations for item lifecycle, piece-by-piece inve
   - Sets `is_archived = False`.
   - Re-inserts item at the end of the active list: `display_order = max(active_orders, default=-1) + 1`.
   - Emits structured event `item_restored`.
-- **Surprise Invariant Projections ([`project_wish_item`](file:///home/src/wishenka/wishlists/service.py#L69))**:
-  - Strictly distinguishes recipient from gifter contexts using [`WishlistAccessPolicy.is_recipient`](file:///home/src/wishenka/wishlists/service.py#L74).
-  - Recipient caller receives [`WishItemRecipientViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L11-L37) with `is_recipient=True` and all reservation/buyer fields stripped.
-  - Non-recipient caller receives [`WishItemGifterViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L39-L71) containing `available_quantity`, `is_fully_reserved`, `is_reserved_by_me`, `my_reserved_quantity`, `my_reservation_status`, and `my_reservation_id`.
+- **Surprise Invariant Projections ([`project_wish_item`](file:///home/src/wishenka/wishlists/service.py#L121))**:
+  - Strictly distinguishes recipient from gifter contexts using [`WishlistAccessPolicy.is_recipient`](file:///home/src/wishenka/wishlists/policy.py#L115). On a personal list the owner is the recipient of every wish, including a display-name-only wish. On a collaborative list the recipient is `recipient_user_id` only. A display name is never compared to a user.
+  - Recipient caller receives [`WishItemRecipientViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L11-L37) with `is_recipient=True` and all reservation/buyer fields stripped. The wish card then omits `.item-giver`.
+  - Non-recipient caller receives [`WishItemGifterViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L39-L73) containing `available_quantity`, `is_fully_reserved`, `is_reserved_by_me`, `my_reserved_quantity`, `my_reservation_status`, `my_reservation_id`, `my_latest_reservation_quantity`, and `my_occupying_reservation_count`. The wish-card summary paints giver controls from these fields. See [reservations.md](reservations.md#6-wish-card-giver-controls).
 
 ### 8. RESTful Wish Items Controller ([`wishenka.web.routes.items`](file:///home/src/wishenka/web/routes/items.py))
 
@@ -532,7 +532,7 @@ WishlistError
 | [`UpdateItemDTO`](file:///home/src/wishenka/items/schemas.py#L51-L74) | `wishenka.items.schemas` | Pydantic DTO for updating items: non-whitespace title, $1 \le \text{quantity} \le 1000$, optional recipient overrides. |
 | [`ReorderItemsDTO`](file:///home/src/wishenka/items/schemas.py#L76-L82) | `wishenka.items.schemas` | Pydantic DTO for atomic reordering containing `item_ids: list[int]`. |
 | [`WishItemRecipientViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L11-L37) | `wishenka.wishlists/schemas` | Surprise Invariant view for the recipient: omits all reservation status and gifter details. |
-| [`WishItemGifterViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L39-L71) | `wishenka.wishlists/schemas` | View for gifters and non-recipient collaborators: includes `available_quantity`, `is_fully_reserved`, `my_reserved_quantity`, and `my_reservation_id`. |
+| [`WishItemGifterViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L39-L73) | `wishenka.wishlists/schemas` | View for gifters and non-recipient collaborators: includes `available_quantity`, `is_fully_reserved`, `my_reserved_quantity`, `my_reservation_id`, `my_latest_reservation_quantity`, and `my_occupying_reservation_count`. The wish card reads these fields. |
 
 ---
 
@@ -574,9 +574,9 @@ WishlistError
 
 - **Target Recipients**: In collaborative wishlists, an item can be designated for a specific recipient via `recipient_user_id` or descriptive `recipient_name`.
 - **Membership Check**: `recipient_user_id` must belong to the wishlist's active members (`owner_id` or enrolled members). Non-member recipient IDs are rejected with `ValueError` (HTTP 400 Bad Request).
-- **Dual-Role Projections ([`project_wish_item`](file:///home/src/wishenka/wishlists/service.py#L69))**:
-  - **Recipient View ([`WishItemRecipientViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L11))**: Returned when `WishlistAccessPolicy.is_recipient(current_user, item)` is true (i.e. caller is the designated recipient, or caller is the wishlist owner if no recipient is set). Completely omits `available_quantity`, `is_fully_reserved`, and all reservation details.
-  - **Gifter View ([`WishItemGifterViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L39))**: Returned to all other callers (collaborators and gifters). Displays `available_quantity`, whether the item is fully reserved, and the caller's personal reservation status (`is_reserved_by_me`, `my_reserved_quantity`, `my_reservation_id`).
+- **Dual-Role Projections ([`project_wish_item`](file:///home/src/wishenka/wishlists/service.py#L121))**:
+  - **Recipient View ([`WishItemRecipientViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L11))**: Returned when [`WishlistAccessPolicy.is_recipient`](file:///home/src/wishenka/wishlists/policy.py#L115) is true. On a personal list the owner is the recipient of every wish, including a display-name-only wish. On a collaborative list the caller is the recipient only when `recipient_user_id` equals `telegram_id`. A display name is never compared to a user. The DTO omits `available_quantity`, `is_fully_reserved`, and all reservation details, and the wish card omits `.item-giver`.
+  - **Gifter View ([`WishItemGifterViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L39))**: Returned to every other caller. Displays `available_quantity`, whether the item is fully reserved, and the caller's occupying promises (`is_reserved_by_me`, `my_reserved_quantity`, `my_reservation_status`, `my_reservation_id`, `my_latest_reservation_quantity`, `my_occupying_reservation_count`). The card summary uses the combined quantity for `Забронировано вами (N)` and the latest row for `Изменить`, `Куплено`, and `Вернуть в бронь`. See [reservations.md](reservations.md#6-wish-card-giver-controls).
 
 ---
 

@@ -418,9 +418,14 @@ wish items without full-page reloads.
 - **Layout**: `wishlist_detail.html` renders `#items-list` from `partials/items_list.html`, which
   includes `partials/item_card.html` per item (`is_first`/`is_last` drive disabled move buttons).
   Archived items render below via `partials/archived_items_section.html` (owner/editor only).
-- **Compact/expanded**: each card is a `<details>`; the summary row is the compact state and
-  `toggleWishCard(event, summary)` (in `base.html`) toggles it. Clicks on `a, button, input, select,
-  textarea` or any `[data-no-toggle]` element do not toggle the card.
+- **Compact/expanded**: `.item-card-summary` is the compact row (`aria-expanded` starts `false`).
+  `.item-card-details` is rendered with `hidden`. `toggleWishCard(event, summary)` in `base.html`
+  clears `hidden` to expand and sets it to collapse. Clicks on `a, button, input, select,
+  textarea` or any `[data-no-toggle]` element do not toggle the card. Giver controls are
+  `.item-giver` inside that summary, so they stay on screen while the card is expanded. A
+  successful promise refresh keeps an expanded card expanded by clearing `hidden` on the new
+  details. The control list, own line, recipient omission, HTTP 503 busy sentence, and cookie
+  CSRF behavior are in [reservations.md](reservations.md#6-wish-card-giver-controls).
 - **Manual order** (editors only):
   - Buttons: `POST /web/wishlists/{id}/items/{item_id}/move?direction=up|down` (`move_item_ui`).
   - Drag-and-drop: inline JS in `base.html` handles native HTML5 `dragstart/dragover/drop` on

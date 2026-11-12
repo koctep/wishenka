@@ -181,10 +181,15 @@ member management, and token rotation without client-side JavaScript SPA framewo
 
 - `GET /wishlists/{wishlist_id}/items/{item_id}/card`:
   - **Description**: Returns an HTMX partial (`partials/item_card.html`) representing a single
-    gift item card. Used for out-of-band swaps or atomic card refreshes after reservation
-    actions without reloading the page.
+    gift item card. After a promise write other than HTTP 503, the giver-control script
+    replaces `#item-card-{id}` with this partial. The handler renders the partial and writes
+    no reservation event. Mutation logs stay on `wishenka.web.reservations`. See
+    [Wish-card giver controls](reservations.md#6-wish-card-giver-controls).
   - **Authentication**: Optional session (`get_optional_current_user`).
-  - **Parameters**: `wishlist_id` (int), `item_id` (int).
+  - **Parameters**: `wishlist_id` (int), `item_id` (int), optional `notice` (`shortage` or
+    `refused`), `is_first` (bool), `is_last` (bool).
+  - **Notice**: `notice` is passed to the template only when the item is
+    `WishItemGifterViewDTO`. A recipient card omits it.
   - **Responses**:
     - `200 OK`: HTML fragment `<div class="card item-card" id="item-card-{id}">...</div>`.
     - `404 Not Found`: Wishlist or item not found.
@@ -303,9 +308,15 @@ wishenka/web/templates/
 4. **`partials/item_card.html`**:
    - Encapsulates an individual gift item inside
      `<div class="card item-card" id="item-card-{{ item.id }}">`.
+   - The compact row is `.item-card-summary` (`aria-expanded="false"`). The expanded body is
+     `.item-card-details`, rendered with `hidden`. `toggleWishCard` in `base.html` clears
+     `hidden` to expand the same card.
    - Displays item title, optional formatted price with currency, description, quantity, and
      external link (`rel="noopener noreferrer"`).
-   - Enforces the Surprise Invariant via `{% if not item.is_recipient %}`.
+   - Giver controls are one `.item-giver` block in the summary, guarded by
+     `{% if not item.is_recipient %}`. The details do not repeat that block. Editor controls
+     stay in the details. The control list, own line, refresh, and CSRF behavior are in
+     [Wish-card giver controls](reservations.md#6-wish-card-giver-controls).
 
 5. **`partials/member_list.html`**:
    - Renders container `<div id="member-list" class="member-list space-y-2">`.
@@ -334,31 +345,26 @@ layer, providing defense-in-depth against data leakage:
      `WishItemRecipientViewDTO`.
    - For gifters (`is_recipient == False`), items are projected as `WishItemGifterViewDTO`.
    - `WishItemRecipientViewDTO` completely lacks reservation fields (`available_quantity`,
-     `is_fully_reserved`, `is_reserved_by_me`, `my_reserved_quantity`, and reservation lists).
+     `is_fully_reserved`, `is_reserved_by_me`, `my_reserved_quantity`,
+     `my_latest_reservation_quantity`, `my_occupying_reservation_count`, and reservation lists).
 
 2. **Template-Level Conditional Guard**:
-   - In `partials/item_card.html`, reservation badges are guarded by
-     `{% if not item.is_recipient %}`:
+   - In `partials/item_card.html`, the giver block is guarded by
+     `{% if not item.is_recipient %}` and lives in `.item-card-summary`:
      ```html
      {% if not item.is_recipient %}
-     <div class="item-reservation mt-3 pt-2 border-t text-sm">
-         {% if item.is_fully_reserved %}
-         <span class="badge badge-reserved text-red-600 font-medium">Забронировано</span>
-         {% elif item.is_reserved_by_me %}
-         <span class="badge badge-my-reserved text-green-600 font-medium">
-             Забронировано вами ({{ item.my_reserved_quantity }})
-         </span>
-         {% else %}
-         <span class="badge badge-available text-gray-600">
-             Доступно: {{ item.available_quantity }} из {{ item.quantity }}
-         </span>
-         {% endif %}
+     <div class="item-giver mt-2 text-sm" data-no-toggle>
+         <!-- availability, «Забронировано вами (N)», and the five promise controls -->
      </div>
      {% endif %}
      ```
-   - When rendered for an owner or recipient, the entire `.item-reservation` container is omitted
-     from the generated HTML DOM. A recipient cannot infer reservation activity from HTML
-     attributes, CSS classes, or DOM nodes.
+   - When `item.is_recipient` is true, `.item-giver` is omitted from the HTML. On a personal
+     list that includes the owner of a display-name-only wish. A recipient cannot infer
+     reservation activity from HTML attributes, CSS classes, or DOM nodes. Availability and the
+     own line are independent: a holder who took the last units still sees
+     `Забронировано вами (N)` next to `Забронировано`. ` · Куплено` is added only when the
+     latest occupying promise is bought and it is the only one. The full control and refresh
+     contract is in [Wish-card giver controls](reservations.md#6-wish-card-giver-controls).
 
 3. **Bearer Token Isolation**:
    - The private collaborator `invite_token` is strictly isolated to owner administrative views
@@ -454,23 +460,29 @@ an item has been booked, how many units remain, or who reserved it.
 #### Enforcement Mechanism
 
 1. **Policy Check**: `WishlistAccessPolicy.is_recipient(user, item)`:
-   - Returns `True` if `item.recipient_user_id == user.telegram_id`.
-   - On personal wishlists without an explicit item recipient, defaults to the wishlist owner
+   - A missing user is not a recipient.
+   - On a personal list (`wishlist` is present and `is_collaborative` is false) the owner is
+     the recipient of every wish, including a wish that has only a display name
      (`wishlist.owner_id == user.telegram_id`).
-   - If an item specifies a non-user external recipient (e.g. `recipient_name="Бабушка Нина"`),
-     registered collaborators are not recipients.
+   - On a collaborative list the caller is the recipient only when
+     `item.recipient_user_id == user.telegram_id`.
+   - A display name is never compared to a user. A name alone does not make a recipient.
 2. **DTO Projection**:
    - **`WishItemRecipientViewDTO`**: Returned when `is_recipient` is `True`. All reservation
      details (`reservations`, `available_quantity`, `is_fully_reserved`, `is_reserved_by_me`,
-     `my_reserved_quantity`) are omitted from the schema.
+     `my_reserved_quantity`, `my_latest_reservation_quantity`,
+     `my_occupying_reservation_count`) are omitted from the schema.
    - **`WishItemGifterViewDTO`**: Returned when `is_recipient` is `False`. Includes computed
-     availability (`available_quantity`), booking status, and whether calling user holds a booking.
+     availability (`available_quantity`), the combined occupying quantity
+     (`my_reserved_quantity`), the latest occupying row (`my_reservation_id`,
+     `my_reservation_status`, `my_latest_reservation_quantity`), and
+     `my_occupying_reservation_count`.
 3. **Self-Reservation Guard**: Any attempt by a recipient to invoke `create_reservation` raises
    `SelfReservationError` and emits a warning audit log.
 4. **Template Presentation Guard**: Server-rendered Jinja2 templates (`item_card.html`) wrap
-   reservation blocks in `{% if not item.is_recipient %}`. For recipients, no reservation badges,
-   counters, or status indicators exist in the rendered HTML output. See
-   [HTMX Web Views & Sharing Endpoints](#htmx-web-views--sharing-endpoints).
+   `.item-giver` in `{% if not item.is_recipient %}`. For recipients, no availability line,
+   own line, or promise control exists in the rendered HTML. See
+   [Wish-card giver controls](reservations.md#6-wish-card-giver-controls).
 
 ---
 

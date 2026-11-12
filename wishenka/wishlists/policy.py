@@ -113,22 +113,22 @@ class WishlistAccessPolicy:
 
     @staticmethod
     def is_recipient(user: AuthenticatedUser | None, item: WishItem) -> bool:
-        """Surprise Invariant: Check if current user is the recipient of this item."""
+        """Return whether this caller must not see booking facts for the wish.
+
+        On a personal list the owner receives every wish, including one that
+        only has a display name. A display name is never compared to a user.
+        On a collaborative list the recipient is ``recipient_user_id`` only.
+        """
         if user is None:
             return False
-
-        if item.recipient_user_id is not None:
-            return item.recipient_user_id == user.telegram_id
-
-        # External named recipient (e.g. "Бабушка Нина")
-        if item.recipient_name and item.recipient_name.strip():
-            return False
-
-        # Personal wishlist fallback: owner is implicit recipient
-        if item.wishlist is not None and not item.wishlist.is_collaborative:
-            return item.wishlist.owner_id == user.telegram_id
-
-        return False
+        wishlist = item.wishlist
+        if (
+            wishlist is not None
+            and not wishlist.is_collaborative
+            and wishlist.owner_id == user.telegram_id
+        ):
+            return True
+        return item.recipient_user_id is not None and item.recipient_user_id == user.telegram_id
 
     @staticmethod
     def can_reserve_item(

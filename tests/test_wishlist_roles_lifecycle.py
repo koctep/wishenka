@@ -246,68 +246,74 @@ class TestSurpriseInvariantZeroLeak:
     """Validate Surprise Invariant zero-leak projections and reservation rules."""
 
     def test_recipient_contextual_identification(self) -> None:
-        """Surprise invariant identifies recipient in both personal and collaborative lists."""
+        """A personal owner receives every wish; a collaborative list is per wish."""
         owner = make_user(1001, "Alice")
         collaborator = make_user(1002, "Bob")
         gifter = make_user(2001, "Gifter Dave")
 
-        wishlist = Wishlist(
+        def build(wishlist: Wishlist) -> tuple[WishItem, WishItem, WishItem]:
+            for_owner = WishItem(
+                id=50,
+                wishlist_id=wishlist.id,
+                wishlist=wishlist,
+                recipient_user_id=owner.telegram_id,
+                title="Alice's Dream Watch",
+                quantity=1,
+            )
+            for_collaborator = WishItem(
+                id=51,
+                wishlist_id=wishlist.id,
+                wishlist=wishlist,
+                recipient_user_id=collaborator.telegram_id,
+                title="Bob's Coffee Machine",
+                quantity=1,
+            )
+            named = WishItem(
+                id=52,
+                wishlist_id=wishlist.id,
+                wishlist=wishlist,
+                recipient_name="Бабушка Нина",
+                title="Tea Set",
+                quantity=1,
+            )
+            return for_owner, for_collaborator, named
+
+        personal = Wishlist(
             id=1,
+            owner_id=owner.telegram_id,
+            title="Alice Birthday",
+            status=WishlistStatus.ACTIVE,
+            is_collaborative=False,
+        )
+        own_item, other_item, named_item = build(personal)
+        assert WishlistAccessPolicy.is_recipient(owner, own_item) is True
+        assert WishlistAccessPolicy.is_recipient(owner, other_item) is True
+        assert WishlistAccessPolicy.is_recipient(owner, named_item) is True
+        assert WishlistAccessPolicy.is_recipient(collaborator, own_item) is False
+        assert WishlistAccessPolicy.is_recipient(collaborator, other_item) is True
+        assert WishlistAccessPolicy.is_recipient(collaborator, named_item) is False
+        assert WishlistAccessPolicy.is_recipient(gifter, own_item) is False
+        assert WishlistAccessPolicy.is_recipient(gifter, other_item) is False
+        assert WishlistAccessPolicy.is_recipient(gifter, named_item) is False
+        assert WishlistAccessPolicy.is_recipient(None, named_item) is False
+
+        shared = Wishlist(
+            id=2,
             owner_id=owner.telegram_id,
             title="Shared Celebration",
             status=WishlistStatus.ACTIVE,
-            public_token="pub_tok",
-            invite_token="inv_tok",
+            is_collaborative=True,
         )
-
-        # Item intended for Alice
-        item_for_alice = WishItem(
-            id=50,
-            wishlist_id=wishlist.id,
-            wishlist=wishlist,
-            recipient_user_id=owner.telegram_id,
-            title="Alice's Dream Watch",
-            quantity=1,
-            is_archived=False,
-        )
-
-        # Item intended for Bob
-        item_for_bob = WishItem(
-            id=51,
-            wishlist_id=wishlist.id,
-            wishlist=wishlist,
-            recipient_user_id=collaborator.telegram_id,
-            title="Bob's Coffee Machine",
-            quantity=1,
-            is_archived=False,
-        )
-
-        # Item with external recipient (Grandmother Nina)
-        item_for_nina = WishItem(
-            id=52,
-            wishlist_id=wishlist.id,
-            wishlist=wishlist,
-            recipient_user_id=None,
-            recipient_name="Бабушка Нина",
-            title="Tea Set",
-            quantity=1,
-            is_archived=False,
-        )
-
-        # Alice is recipient for item 50, but NOT item 51 or 52
-        assert WishlistAccessPolicy.is_recipient(owner, item_for_alice) is True
-        assert WishlistAccessPolicy.is_recipient(owner, item_for_bob) is False
-        assert WishlistAccessPolicy.is_recipient(owner, item_for_nina) is False
-
-        # Bob is recipient for item 51, but NOT item 50 or 52
-        assert WishlistAccessPolicy.is_recipient(collaborator, item_for_alice) is False
-        assert WishlistAccessPolicy.is_recipient(collaborator, item_for_bob) is True
-        assert WishlistAccessPolicy.is_recipient(collaborator, item_for_nina) is False
-
-        # Gifter is never recipient
-        assert WishlistAccessPolicy.is_recipient(gifter, item_for_alice) is False
-        assert WishlistAccessPolicy.is_recipient(gifter, item_for_bob) is False
-        assert WishlistAccessPolicy.is_recipient(gifter, item_for_nina) is False
+        own_item, other_item, named_item = build(shared)
+        assert WishlistAccessPolicy.is_recipient(owner, own_item) is True
+        assert WishlistAccessPolicy.is_recipient(owner, other_item) is False
+        assert WishlistAccessPolicy.is_recipient(owner, named_item) is False
+        assert WishlistAccessPolicy.is_recipient(collaborator, own_item) is False
+        assert WishlistAccessPolicy.is_recipient(collaborator, other_item) is True
+        assert WishlistAccessPolicy.is_recipient(collaborator, named_item) is False
+        assert WishlistAccessPolicy.is_recipient(gifter, own_item) is False
+        assert WishlistAccessPolicy.is_recipient(gifter, other_item) is False
+        assert WishlistAccessPolicy.is_recipient(gifter, named_item) is False
 
     def test_recipient_cannot_reserve_own_gift(self) -> None:
         """Recipient cannot reserve an item meant for them, even if Owner or Admin."""

@@ -2,6 +2,9 @@
 <div class="card item-card mb-4 border rounded shadow-sm bg-white"
      id="item-card-{{ item.id }}"
      data-item-id="{{ item.id }}"
+     data-wishlist-id="{{ card_wishlist_id }}"
+     data-is-first="{{ 'true' if is_first else 'false' }}"
+     data-is-last="{{ 'true' if is_last else 'false' }}"
      {% if can_edit_wishlist %}draggable="true"{% endif %}>
     <div class="item-card-summary flex justify-between items-center gap-2 p-3"
          role="button"
@@ -9,7 +12,9 @@
          aria-expanded="false"
          aria-controls="item-details-{{ item.id }}"
          onclick="toggleWishCard(event, this)"
-         onkeydown="if (event.key === 'Enter' || event.key === ' ') { toggleWishCard(event, this); }">
+         onkeydown="if (event.key === 'Enter' || event.key === ' ') {
+                        toggleWishCard(event, this);
+                    }">
         <div class="flex items-center gap-3">
             {% if item.image_url %}
             <img src="{{ item.image_url }}"
@@ -39,6 +44,98 @@
                     <span class="badge badge-store">{{ item.store_name or "Магазин" }}</span>
                     {% endif %}
                 </div>
+                {% set giver_viewer = viewer_identified|default(false) %}
+                {% set giver_list_active = wishlist_active|default(false) %}
+                {% if not item.is_recipient %}
+                {% set reservation_prefix = "/api/wishlists/" ~ card_wishlist_id
+                    ~ "/items/" ~ item.id ~ "/reservations" %}
+                {% set can_promise = giver_viewer and giver_list_active %}
+                {% set change_ceiling = item.my_latest_reservation_quantity
+                    + item.available_quantity %}
+                {% set bought_mark = item.my_occupying_reservation_count == 1
+                    and item.my_reservation_status|string == 'purchased' %}
+                <div class="item-giver mt-2 text-sm" data-no-toggle>
+                    {% if notice == 'shortage' %}
+                    <p class="giver-notice">
+                        Бронь не изменилась. Свободно: {{ item.available_quantity }}.
+                    </p>
+                    {% elif notice == 'refused' %}
+                    <p class="giver-notice">Бронь не изменилась.</p>
+                    {% endif %}
+                    {% if item.available_quantity >= 1 %}
+                    <p class="giver-available">
+                        Доступно: {{ item.available_quantity }} из {{ item.quantity }}
+                    </p>
+                    {% else %}
+                    <p class="giver-available">Забронировано</p>
+                    {% endif %}
+                    {% if item.is_reserved_by_me %}
+                    <p class="giver-own">
+                        Забронировано вами ({{ item.my_reserved_quantity }})
+                        {%- if bought_mark %} · Куплено{% endif -%}
+                    </p>
+                    {% endif %}
+                    {% if can_promise
+                        and not item.is_archived
+                        and not item.is_reserved_by_me
+                        and item.available_quantity >= 1 %}
+                    <form hx-post="{{ reservation_prefix }}"
+                          hx-ext="json-enc"
+                          hx-swap="none"
+                          data-no-toggle>
+                        {% if item.available_quantity == 1 %}
+                        <input type="hidden" name="quantity" value="1">
+                        {% else %}
+                        <select name="quantity" data-no-toggle>
+                            {% for n in range(1, item.available_quantity + 1) %}
+                            <option value="{{ n }}"
+                                    {% if n == 1 %}selected{% endif %}>{{ n }}</option>
+                            {% endfor %}
+                        </select>
+                        {% endif %}
+                        <button type="submit" data-no-toggle>Забронировать</button>
+                    </form>
+                    {% endif %}
+                    {% if can_promise and item.is_reserved_by_me %}
+                    {% if change_ceiling > 1 %}
+                    <form data-no-toggle>
+                        <select name="quantity" data-no-toggle>
+                            {% for n in range(1, change_ceiling + 1) %}
+                            <option value="{{ n }}"
+                                    {% if n == item.my_latest_reservation_quantity %}
+                                        selected
+                                    {% endif %}>{{ n }}</option>
+                            {% endfor %}
+                        </select>
+                        <button type="button"
+                                data-no-toggle
+                                hx-patch="{{ reservation_prefix }}/{{ item.my_reservation_id }}"
+                                hx-ext="json-enc"
+                                hx-swap="none"
+                                hx-include="closest form">Изменить</button>
+                    </form>
+                    {% endif %}
+                    <button type="button"
+                            data-no-toggle
+                            hx-post="{{ reservation_prefix }}/{{ item.my_reservation_id }}/cancel"
+                            hx-swap="none">Отменить бронь</button>
+                    {% if item.my_reservation_status|string == 'active' %}
+                    <button type="button"
+                            data-no-toggle
+                            hx-post="{{ reservation_prefix }}/{{ item.my_reservation_id }}/purchase"
+                            hx-swap="none">Куплено</button>
+                    {% elif item.my_reservation_status|string == 'purchased' %}
+                    {% set undo_path = reservation_prefix ~ "/" ~ item.my_reservation_id
+                        ~ "/undo-purchase" %}
+                    <button type="button"
+                            data-no-toggle
+                            hx-post="{{ undo_path }}"
+                            hx-swap="none">Вернуть в бронь</button>
+                    {% endif %}
+                    {% endif %}
+                    <p class="giver-busy" data-giver-busy hidden></p>
+                </div>
+                {% endif %}
             </div>
         </div>
         {% if item.price is not none %}
@@ -65,28 +162,13 @@
             {% endif %}
         </div>
 
-        {% if not item.is_recipient %}
-        <div class="item-reservation mt-3 pt-2 border-t text-sm">
-            {% if item.is_fully_reserved %}
-            <span class="badge badge-reserved text-red-600 font-medium">Забронировано</span>
-            {% elif item.is_reserved_by_me %}
-            <span class="badge badge-my-reserved text-green-600 font-medium">
-                Забронировано вами ({{ item.my_reserved_quantity }})
-            </span>
-            {% else %}
-            <span class="badge badge-available text-gray-600">
-                Доступно: {{ item.available_quantity }} из {{ item.quantity }}
-            </span>
-            {% endif %}
-        </div>
-        {% endif %}
-
         {% if can_edit_wishlist %}
+        {% set item_web = "/web/wishlists/" ~ card_wishlist_id ~ "/items/" ~ item.id %}
         <div class="item-actions mt-3 flex flex-wrap items-center gap-2" data-no-toggle>
             <button type="button"
                     class="btn-edit-item text-xs text-blue-600 underline"
                     data-no-toggle
-                    hx-get="/web/wishlists/{{ card_wishlist_id }}/items/{{ item.id }}/edit"
+                    hx-get="{{ item_web }}/edit"
                     hx-target="#item-modal-container"
                     hx-swap="innerHTML">
                 Редактировать
@@ -96,7 +178,7 @@
                     data-no-toggle
                     aria-label="Переместить выше"
                     {% if is_first %}disabled{% endif %}
-                    hx-post="/web/wishlists/{{ card_wishlist_id }}/items/{{ item.id }}/move?direction=up"
+                    hx-post="{{ item_web }}/move?direction=up"
                     hx-target="#items-list"
                     hx-swap="innerHTML">
                 ↑
@@ -106,16 +188,19 @@
                     data-no-toggle
                     aria-label="Переместить ниже"
                     {% if is_last %}disabled{% endif %}
-                    hx-post="/web/wishlists/{{ card_wishlist_id }}/items/{{ item.id }}/move?direction=down"
+                    hx-post="{{ item_web }}/move?direction=down"
                     hx-target="#items-list"
                     hx-swap="innerHTML">
                 ↓
             </button>
-            <span class="item-drag-handle" data-no-toggle aria-label="Перетащить" title="Перетащить">⠿</span>
+            <span class="item-drag-handle"
+                  data-no-toggle
+                  aria-label="Перетащить"
+                  title="Перетащить">⠿</span>
             <button type="button"
                     class="btn-archive-confirm btn-archive-item text-xs text-red-600"
                     data-no-toggle
-                    hx-get="/web/wishlists/{{ card_wishlist_id }}/items/{{ item.id }}/archive-confirm"
+                    hx-get="{{ item_web }}/archive-confirm"
                     hx-target="#item-modal-container"
                     hx-swap="innerHTML">
                 Архивировать

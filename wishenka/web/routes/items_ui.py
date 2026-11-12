@@ -50,6 +50,11 @@ async def _execute[T](request: Request, action: Callable[[WishlistService], Awai
     return cast(T, await request.app.state.wishlist_store.execute(action))
 
 
+def _editor_card_flags() -> dict[str, bool]:
+    """Flags for a card rendered after an identified active-list check."""
+    return {"viewer_identified": True, "wishlist_active": True}
+
+
 def _ensure_member_and_active(wishlist: Wishlist, user: AuthenticatedUser) -> None:
     """Validate that caller is a member of the wishlist and that the wishlist is active."""
     ctx = WishlistAccessPolicy.resolve_context(user, wishlist)
@@ -114,15 +119,15 @@ async def view_wishlist_detail(
 ) -> Response:
     """Render main TMA wishlist detail page with RBAC-gated Quick Add Bar and edit triggers."""
 
-    async def action(svc: WishlistService) -> tuple[WishlistDetailViewDTO, bool]:
+    async def action(svc: WishlistService) -> tuple[WishlistDetailViewDTO, bool, bool]:
         wl = await svc.get_wishlist_by_id(wishlist_id)
         dto = await svc.get_wishlist_view(wishlist_id, current_user)
         ctx = WishlistAccessPolicy.resolve_context(current_user, wl)
         can_edit_wishlist = WishlistAccessPolicy.can_add_or_edit_item(ctx, wl)
-        return dto, can_edit_wishlist
+        return dto, can_edit_wishlist, wl.status == WishlistStatus.ACTIVE
 
     try:
-        dto, can_edit_wishlist = await _execute(request, action)
+        dto, can_edit_wishlist, wishlist_active = await _execute(request, action)
     except (WishlistNotFoundError, WishlistDeletedError) as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -137,6 +142,8 @@ async def view_wishlist_detail(
             "wishlist_id": dto.id,
             "items": dto.items,
             "can_edit_wishlist": can_edit_wishlist,
+            "viewer_identified": current_user is not None,
+            "wishlist_active": wishlist_active,
         },
     )
 
@@ -323,6 +330,7 @@ async def quick_add_item(
             "item": projected_item,
             "wishlist_id": wishlist_id,
             "can_edit_wishlist": True,
+            **_editor_card_flags(),
         }
     )
     oob_html = (
@@ -741,6 +749,7 @@ async def submit_edit_item(
             "item": projected_item,
             "wishlist_id": wishlist_id,
             "can_edit_wishlist": True,
+            **_editor_card_flags(),
         }
     )
     close_modal_oob = '<div id="item-modal-container" hx-swap-oob="innerHTML"></div>'
@@ -779,6 +788,7 @@ def _items_list_html(
             "wishlist_id": wishlist_id,
             "items": items,
             "can_edit_wishlist": True,
+            **_editor_card_flags(),
         }
     )
 
@@ -1067,6 +1077,7 @@ async def restore_item_ui(
             "wishlist_id": wishlist_id,
             "can_edit_wishlist": True,
             "is_last": True,
+            **_editor_card_flags(),
         }
     )
     return HTMLResponse(

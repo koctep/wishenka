@@ -156,15 +156,19 @@ def project_wish_item(
     my_reserved_qty = 0
     my_reservation_status: ReservationStatus | None = None
     my_reservation_id: int | None = None
+    my_latest_quantity = 0
+    my_occupying_count = 0
     if current_user is not None:
         user_reservations = [
             r for r in active_or_purchased if r.user_id == current_user.telegram_id
         ]
         my_reserved_qty = sum(r.quantity for r in user_reservations)
+        my_occupying_count = len(user_reservations)
         if user_reservations:
             my_res = user_reservations[-1]
             my_reservation_status = my_res.status
             my_reservation_id = my_res.id
+            my_latest_quantity = my_res.quantity
     return WishItemGifterViewDTO(
         id=item.id,
         title=item.title,
@@ -183,6 +187,8 @@ def project_wish_item(
         my_reserved_quantity=my_reserved_qty,
         my_reservation_status=my_reservation_status,
         my_reservation_id=my_reservation_id,
+        my_latest_reservation_quantity=my_latest_quantity,
+        my_occupying_reservation_count=my_occupying_count,
         priority=item.priority,
         category=item.category,
         display_order=item.display_order,

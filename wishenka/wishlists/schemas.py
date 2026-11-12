@@ -61,6 +61,8 @@ class WishItemGifterViewDTO(BaseModel):
     my_reserved_quantity: int
     my_reservation_status: ReservationStatus | None = None
     my_reservation_id: int | None = None
+    my_latest_reservation_quantity: int = 0
+    my_occupying_reservation_count: int = 0
     priority: ItemPriority = ItemPriority.MEDIUM
     category: str | None = None
     display_order: int = 0

@@ -6,6 +6,9 @@ The reservation subsystem in the **Wishlist Service («Вишенка»)** Teleg
 
 Clients reach that workflow through five authenticated HTTP routes on
 one wish. The contract is under [HTTP promise actions](#http-promise-actions).
+The wish card calls those same routes. Giver controls sit on the existing
+card summary, compact and expanded. See
+[Wish-card giver controls](#6-wish-card-giver-controls).
 
 ```
 +-------------------------------------------------------------------------------------------------------+
@@ -175,20 +178,27 @@ projects items into role-specific DTOs defined in
 | DTO Schema | Target Audience | Reservation Attributes |
 |---|---|---|
 | [`WishItemRecipientViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L11) | Gift Recipient / Wishlist Owner | **Strictly None**. Exposes `quantity` and `received_quantity`. Fields like `available_quantity`, `is_fully_reserved`, `my_reserved_quantity`, and gifter names **do not exist**. |
-| [`WishItemGifterViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L39) | Gifters / Public Viewers | Exposes `available_quantity`, `is_fully_reserved`, `is_reserved_by_me`, `my_reserved_quantity`, `my_reservation_status`, and `my_reservation_id`. Masks identities of other gifters. |
+| [`WishItemGifterViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L39) | Gifters / Public Viewers | Exposes `available_quantity`, `is_fully_reserved`, `is_reserved_by_me`, `my_reserved_quantity`, `my_reservation_status`, `my_reservation_id`, `my_latest_reservation_quantity`, and `my_occupying_reservation_count`. Masks identities of other gifters. |
 | [`MyReservationItemDTO`](file:///home/src/wishenka/wishlists/schemas.py#L73) | Gifter Personal Cabinet | Contains aggregated item details, wishlist title, recipient name, event dates, booking status (`ACTIVE` vs `PURCHASED`), and `is_item_archived`. |
 | [`UserReservationsSummaryDTO`](file:///home/src/wishenka/wishlists/schemas.py#L98) | Home Screen Badge | Aggregates `total_active_reservations` and `total_distinct_items` across all wishlists for a user. |
 
 ### 4. Self-Reservation Guards
 
-A recipient must never be allowed to reserve an item designated for themselves:
-- **Personal Wishlists**: The owner is the recipient for all items (`wishlist.owner_id == user.telegram_id`).
-- **Collaborative Wishlists**: Items can specify an explicit
-  [`recipient_user_id`](file:///home/src/wishenka/wishlists/models.py#L114).
-  If `item.recipient_user_id == user.telegram_id`, the user is recognized
-  as the recipient.
+A recipient must never be allowed to reserve an item designated for themselves.
+[`WishlistAccessPolicy.is_recipient`](file:///home/src/wishenka/wishlists/policy.py#L115)
+is the shared predicate. A missing user is not a recipient.
+
+- **Personal wishlists**: The owner is the recipient of every wish,
+  including a wish that has only a display name. The check is
+  `wishlist` present, `is_collaborative` false, and
+  `wishlist.owner_id == user.telegram_id`. A display name is never
+  compared to a user.
+- **Collaborative wishlists**: The recipient is `recipient_user_id` on
+  that wish. The caller is the recipient only when
+  `item.recipient_user_id == user.telegram_id`. A display name alone
+  does not make a recipient.
 - [`WishlistAccessPolicy.can_reserve_item`](file:///home/src/wishenka/wishlists/policy.py#L134)
-  evaluates this invariant. Attempting self-reservation raises
+  returns false for a recipient. Attempting self-reservation raises
   [`SelfReservationError`](file:///home/src/wishenka/wishlists/exceptions.py#L28)
   and logs a warning with event `self_reservation_blocked`.
 
@@ -218,6 +228,150 @@ from the promise the method just returned and from `project_wish_item`. If
 the caller is the recipient, the projector raises `ReservationNotFoundError`
 and builds nothing. Receipt still does not introduce a `FULFILLED` status.
 
+### 6. Wish-card giver controls
+
+Giver controls live on the existing wish card
+[`partials/item_card.html`](file:///home/src/wishenka/web/templates/partials/item_card.html).
+One block, `.item-giver`, sits inside `.item-card-summary`. The summary
+stays on screen when the details open, so the same block is the compact
+card and the expanded card. Writes use the five routes above and
+[`execute_wish`](file:///home/src/wishenka/wishlists/store.py#L942-L997).
+This card adds no reservation route. The My reservations cabinet remains
+[`get_user_reservations`](file:///home/src/wishenka/wishlists/service.py)
+and [`MyReservationItemDTO`](file:///home/src/wishenka/wishlists/schemas.py#L75).
+The archive title row
+[`archived_items_section.html`](file:///home/src/wishenka/web/templates/partials/archived_items_section.html)
+is a separate list and has no giver controls.
+
+The list page `wishlist_detail.html` and the share page
+`share_wishlist.html` both extend `base.html` and include the card through
+`partials/items_list.html`. Quick-add, edit, move, reorder, and restore in
+[`items_ui.py`](file:///home/src/wishenka/web/routes/items_ui.py) render the
+same partial. The refresh target is the existing partial
+`GET /wishlists/{wishlist_id}/items/{item_id}/card`
+([`get_item_card_partial`](file:///home/src/wishenka/web/routes/sharing.py#L93)).
+
+`.item-giver` is rendered when `item.is_recipient` is false. That flag is
+`is_recipient` above, shared with `project_wish_item` and
+`can_reserve_item`. On a personal list the owner is the recipient of every
+wish, including a display-name-only wish, and the card omits the block.
+A display name is never compared to a user. On a collaborative list the
+block is omitted only for the caller whose `telegram_id` equals that
+wish's `recipient_user_id`. A recipient projection is
+`WishItemRecipientViewDTO` and has no booking fields, so the HTML contains
+no availability line, own line, or promise button.
+
+For a gifter the summary shows these lines together when they apply:
+
+- **Availability.** `Доступно: {available_quantity} из {quantity}` when
+  `available_quantity >= 1`. Otherwise the line is `Забронировано`.
+- **Own line.** When `is_reserved_by_me`, the line is
+  `Забронировано вами (N)`. `N` is `my_reserved_quantity`, the sum of the
+  caller's occupying promises (`ACTIVE` and `PURCHASED`). The suffix
+  ` · Куплено` is added only when `my_occupying_reservation_count == 1`
+  and `my_reservation_status` is `purchased`. That is the latest occupying
+  promise, and it is the only one. A bought latest promise beside another
+  occupying promise leaves the own line as `Забронировано вами (N)`.
+
+`my_reservation_id`, `my_reservation_status`, and
+`my_latest_reservation_quantity` come from `user_reservations[-1]` in
+[`project_wish_item`](file:///home/src/wishenka/wishlists/service.py#L121).
+Occupying rows are `ACTIVE` and `PURCHASED`. Store loads order them by id
+ascending, and the in-memory service appends on create, so `[-1]` is the
+highest id. The projection does not sort by `updated_at`.
+`my_occupying_reservation_count` is the length of that list.
+`my_reserved_quantity` is the sum of those quantities.
+
+Buttons render when `viewer_identified` and `wishlist_active` are both
+true (`can_promise` in the template). The list page, the share page, and
+the card partial pass the real values. Quick-add, edit, move, reorder,
+and restore pass both as true through `_editor_card_flags`, because those
+routes already required an identified caller and an active list. A guest
+still sees the availability line. The buttons stay off the guest card.
+
+| Control | Shown when | Request |
+| ------- | ---------- | ------- |
+| `Забронировать` | `can_promise`, item not archived, caller holds nothing, `available_quantity >= 1` | `POST` the prefix, JSON `{"quantity": N}` |
+| `Изменить` | `can_promise`, caller holds a promise, `my_latest_reservation_quantity + available_quantity > 1` | `PATCH /{my_reservation_id}`, JSON `{"quantity": N}` |
+| `Отменить бронь` | `can_promise` and the caller holds a promise | `POST /{my_reservation_id}/cancel` |
+| `Куплено` | those, and the latest status is `active` | `POST /{my_reservation_id}/purchase` |
+| `Вернуть в бронь` | those, and the latest status is `purchased` | `POST /{my_reservation_id}/undo-purchase` |
+
+The book form sends quantity `1` as a hidden field when one unit is free,
+and a select of `1..available_quantity` otherwise. The selected book
+option is `1`. `Изменить` selects `1..latest + available` and the selected
+option is `my_latest_reservation_quantity`, the latest row's size. The
+combined own-line total is a separate number. `Куплено` and
+`Вернуть в бронь` follow that latest row even when the own line has no
+`Куплено` suffix. An archived item omits `Забронировать`. Cancel,
+purchase, and undo stay for a caller who already holds units, when
+`can_promise` is true. `Изменить` stays only when that ceiling is greater
+than 1. Editor controls (edit, move, archive) stay in
+`.item-card-details`.
+
+Quantity forms set `hx-ext="json-enc"` (`json-enc.js` for HTMX 1.9.12,
+loaded from `base.html`) so the body is `ReservationQuantityDTO`.
+`Изменить` also sets `hx-include="closest form"` on the button. Every
+promise control sets `hx-swap="none"`, so HTMX leaves the JSON body out of
+the card. The refresh script below decides whether to replace the card.
+`.item-giver` and its controls set `data-no-toggle`. `toggleWishCard` in
+`base.html` ignores clicks on `a`, `button`, `input`, `select`,
+`textarea`, and `[data-no-toggle]`, so a control click does not collapse
+an expanded card before that refresh.
+
+#### Refresh
+
+`htmx:afterRequest` in
+[`base.html`](file:///home/src/wishenka/web/templates/base.html)
+runs when the control path contains `/reservations`.
+
+- **HTTP 200 or 201.** The script requests
+  `GET /wishlists/{wishlist_id}/items/{item_id}/card` with `is_first` and
+  `is_last` copied from the card's data attributes, and with no `notice`.
+  `swapWishCard` replaces `#item-card-{id}` via `outerHTML`. The partial
+  always renders `.item-card-details` with `hidden`. When the swapped
+  summary had `aria-expanded="true"`, the script sets that attribute on
+  the new summary and clears `hidden` on the new details
+  (`nextDetails.hidden = false`). Edit, move, and archive stay visible.
+- **HTTP 409.** The same GET adds `notice=shortage` when the response
+  text contains `available`, and `notice=refused` otherwise. The card
+  does not echo `detail`. Shortage text is
+  `Бронь не изменилась. Свободно: {available_quantity}.`
+- **HTTP 401, 403, or 404.** The same GET adds `notice=refused`. The
+  sentence is `Бронь не изменилась.`
+- **HTTP 503.** The current card stays in place. The script does not
+  request the partial and does not read `detail`. It shows
+  `Желание занято, бронь не изменилась. Повторите попытку.` on
+  `[data-giver-busy]`. The sentence names nobody.
+
+[`get_item_card_partial`](file:///home/src/wishenka/web/routes/sharing.py#L93)
+passes `notice` into the template only when the projected item is
+`WishItemGifterViewDTO`. A recipient card omits `notice`, including
+`Бронь не изменилась.`
+
+`get_item_card_partial` renders the partial and writes no reservation
+event. Mutation logs stay on `wishenka.web.reservations`, from `execute`
+in `wishenka/web/routes/reservations.py`. The three refresh outcomes map
+to records that already exist: `reservation_action_completed` (200 or
+201), the matching refusal WARNING (`notice=refused` or
+`notice=shortage`), and `reservation_inventory_busy` (the busy sentence).
+
+#### Cookie CSRF on the card
+
+Cookie mutations need `Origin` and `X-CSRF-Token`
+([`BrowserSecurityMiddleware`](file:///home/src/wishenka/web/security.py#L21)).
+Bearer calls skip that check. When `body` has `data-viewer-identified`,
+`base.html` calls `GET /api/auth/csrf` after `DOMContentLoaded` and stores
+`csrf_token`. `htmx:configRequest` sets `X-CSRF-Token` on an unsafe
+request only after that value is non-empty. A click before the fetch
+returns, and a fetch that fails, sends no header.
+`BrowserSecurityMiddleware` answers HTTP 403
+`{"detail":"Invalid CSRF token"}`. The refresh script maps every 403 to
+`notice=refused`, so the card currently shows `Бронь не изменилась.`
+The promise handler does not run, and no row is stored. The follow-up is
+[WISHENKA-123](https://pypost.atlassian.net/browse/WISHENKA-123).
+The token stays out of the HTML.
+
 ---
 
 ## API & Usage
@@ -244,6 +398,10 @@ Cross-process exclusion remains `BEGIN IMMEDIATE` on the wish.
 | `POST`  | `/{reservation_id}/cancel`        | `200`   |
 | `POST`  | `/{reservation_id}/purchase`      | `200`   |
 | `POST`  | `/{reservation_id}/undo-purchase` | `200`   |
+
+The wish card sends these five calls from `.item-giver`. Which control
+sends which method is in
+[Wish-card giver controls](#6-wish-card-giver-controls).
 
 Create calls `create_reservation`. Quantity change calls
 `update_reservation_quantity`. Cancel calls `cancel_reservation`. Purchase
@@ -450,6 +608,9 @@ async def fulfill_item(service: WishlistService, item_id: int, author: Authentic
 ### HTTP route configuration
 
 The five promise routes add no environment variable and no second lock.
+The wish card adds none either. Cookie clicks on the card use the existing
+`GET /api/auth/csrf` token and `csrf_secret_key`, as in
+[Cookie CSRF on the card](#cookie-csrf-on-the-card).
 Authentication is the existing `get_current_user` dependency (session cookie
 or bearer token). A missing session is HTTP 401 before `execute_wish` runs.
 SQLite exclusion stays `BEGIN IMMEDIATE` with `busy_timeout` of 5000 ms, as
@@ -511,6 +672,10 @@ them includes a gifter id, name, or token.
 `operation` is the route function name: `create_reservation`,
 `update_reservation_quantity`, `cancel_reservation`,
 `purchase_reservation`, or `undo_reservation_purchase`.
+
+`GET /wishlists/{wishlist_id}/items/{item_id}/card` writes none of these
+records. The wish-card refresh reads that partial, or the browser shows
+the busy sentence, and the mutation log stays on this logger.
 
 `reservation_action_completed` is written only after the action returns the
 promise DTO. `reservation_action_refused`, `reservation_permission_denied`,
@@ -646,3 +811,44 @@ Key metrics derived from structured log events:
 - **Resolution**: Repeat the same action. Confirm
   `reservation_inventory_busy` on `wishenka.web.reservations` and
   `wishlist_inventory_busy` on `wishenka.wishlists.store`.
+
+### 11. Wish card left in place on HTTP 503
+
+- **Symptom**: A giver control on the wish card shows
+  `Желание занято, бронь не изменилась. Повторите попытку.` The card
+  markup is the one already on screen. The sentence names nobody.
+- **Cause**: The promise route returned HTTP 503 `InventoryBusyError`.
+  `htmx:afterRequest` in `base.html` does not replace the card and does
+  not request `GET .../card`. The server record is
+  `reservation_inventory_busy` on `wishenka.web.reservations`. The card
+  GET writes no mutation log.
+- **Resolution**: Repeat the same control. See
+  [Wish-card giver controls](#6-wish-card-giver-controls).
+
+### 12. Cookie click before the CSRF token (HTTP 403 shown as a refused booking)
+
+- **Symptom**: An identified cookie session clicks a giver control and the
+  card refreshes to `Бронь не изменилась.` The promise row is unchanged.
+- **Cause**: `base.html` stores `csrf_token` only after
+  `GET /api/auth/csrf` resolves. Until then, and when that GET fails,
+  `htmx:configRequest` sends no `X-CSRF-Token`.
+  `BrowserSecurityMiddleware` returns HTTP 403
+  `{"detail":"Invalid CSRF token"}`. The card maps every 403, including
+  this one, to `notice=refused`. The promise handler does not run.
+- **Resolution**: After the token is stored, the next click sends
+  `X-CSRF-Token`. Bearer calls skip the cookie check. The current card
+  still paints this 403 as a refused booking. The follow-up is
+  [WISHENKA-123](https://pypost.atlassian.net/browse/WISHENKA-123).
+
+### 13. Recipient card refresh shows no booking sentence
+
+- **Symptom**: A recipient's card refresh has no `giver-notice`, including
+  when the browser asked for `notice=refused` or `notice=shortage`.
+- **Cause**: `get_item_card_partial` passes `notice` only for
+  `WishItemGifterViewDTO`. On a personal list the owner is that recipient
+  for every wish, including a display-name-only wish. On a collaborative
+  list the recipient is `recipient_user_id` only. A display name is never
+  compared to a user.
+- **Resolution**: Expected. The recipient HTML omits `.item-giver`.
+  `get_item_card_partial` writes no reservation event. Mutation logs stay
+  on `wishenka.web.reservations`.

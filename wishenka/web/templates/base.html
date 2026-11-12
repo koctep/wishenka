@@ -7,9 +7,12 @@
     <link rel="stylesheet" href="/static/miniapp.css">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+    <script src="https://unpkg.com/htmx.org@1.9.12/dist/ext/json-enc.js"></script>
     <script>
     function toggleWishCard(event, summary) {
-        if (event.target.closest('a, button, input, select, textarea, [data-no-toggle]')) { return; }
+        if (event.target.closest(
+            'a, button, input, select, textarea, [data-no-toggle]'
+        )) { return; }
         if (event.type === 'keydown') { event.preventDefault(); }
         var expanded = summary.getAttribute('aria-expanded') === 'true';
         summary.setAttribute('aria-expanded', expanded ? 'false' : 'true');
@@ -25,7 +28,9 @@
             e.dataTransfer.effectAllowed = 'move';
         });
         document.addEventListener('dragover', function (e) {
-            if (dragged && e.target.closest && e.target.closest('#items-list')) { e.preventDefault(); }
+            if (dragged && e.target.closest && e.target.closest('#items-list')) {
+                e.preventDefault();
+            }
         });
         document.addEventListener('drop', function (e) {
             if (!dragged) { return; }
@@ -49,9 +54,82 @@
         });
         document.addEventListener('dragend', function () { dragged = null; });
     })();
+    document.addEventListener('DOMContentLoaded', function () {
+        if (!document.body.hasAttribute('data-viewer-identified')) { return; }
+        var csrfToken = '';
+        fetch('/api/auth/csrf', { credentials: 'same-origin' })
+            .then(function (response) { return response.ok ? response.json() : {}; })
+            .then(function (body) { csrfToken = (body && body.csrf_token) || ''; })
+            .catch(function () { csrfToken = ''; });
+        document.addEventListener('htmx:configRequest', function (evt) {
+            var verb = String((evt.detail && evt.detail.verb) || '').toUpperCase();
+            if (verb === 'GET' || verb === 'HEAD' || verb === 'OPTIONS' || !csrfToken) { return; }
+            evt.detail.headers['X-CSRF-Token'] = csrfToken;
+        });
+    });
+    function reservationRequestPath(elt) {
+        var node = elt;
+        while (node && node.getAttribute) {
+            var path = node.getAttribute('hx-post') || node.getAttribute('hx-patch');
+            if (path && path.indexOf('/reservations') !== -1) { return path; }
+            node = node.parentElement;
+        }
+        return '';
+    }
+    function swapWishCard(card, markup) {
+        var summary = card.querySelector('.item-card-summary');
+        var wasExpanded = summary.getAttribute('aria-expanded');
+        var cardId = card.id;
+        card.outerHTML = markup;
+        var nextCard = document.getElementById(cardId);
+        if (!nextCard) { return; }
+        if (wasExpanded === 'true') {
+            var nextSummary = nextCard.querySelector('.item-card-summary');
+            var nextDetails = nextCard.querySelector('.item-card-details');
+            if (nextSummary) { nextSummary.setAttribute('aria-expanded', 'true'); }
+            if (nextDetails) { nextDetails.hidden = false; }
+        }
+    }
+    document.addEventListener('htmx:afterRequest', function (evt) {
+        var elt = evt.detail.elt;
+        if (!reservationRequestPath(elt)) { return; }
+        var card = elt.closest ? elt.closest('.item-card') : null;
+        if (!card) { return; }
+        var xhr = evt.detail.xhr;
+        var status = xhr ? xhr.status : 0;
+        if (status === 503) {
+            var busy = card.querySelector('[data-giver-busy]');
+            if (busy) {
+                busy.hidden = false;
+                busy.textContent = 'Желание занято, бронь не изменилась. Повторите попытку.';
+            }
+            return;
+        }
+        var notice = '';
+        if (status === 409) {
+            var detail = xhr.responseText || '';
+            notice = detail.indexOf('available') === -1 ? 'refused' : 'shortage';
+        } else if (status === 401 || status === 403 || status === 404) {
+            notice = 'refused';
+        } else if (status !== 200 && status !== 201) {
+            return;
+        }
+        var wishlistId = card.getAttribute('data-wishlist-id');
+        var itemId = card.getAttribute('data-item-id');
+        var isFirst = card.getAttribute('data-is-first') === 'true';
+        var isLast = card.getAttribute('data-is-last') === 'true';
+        var url = '/wishlists/' + wishlistId + '/items/' + itemId + '/card'
+            + '?is_first=' + (isFirst ? 'true' : 'false')
+            + '&is_last=' + (isLast ? 'true' : 'false');
+        if (notice) { url += '&notice=' + notice; }
+        fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'text/html' } })
+            .then(function (response) { return response.text(); })
+            .then(function (markup) { swapWishCard(card, markup); });
+    });
     </script>
 </head>
-<body class="bg-gray-50 text-gray-900">
+<body class="bg-gray-50 text-gray-900"
+      {% if viewer_identified|default(false) %}data-viewer-identified="true"{% endif %}>
     <main class="container mx-auto px-4 py-6 max-w-lg">
         {% block content %}{% endblock %}
     </main>
