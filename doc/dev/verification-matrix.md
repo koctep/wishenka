@@ -4,8 +4,8 @@
 
 Checklist for WISHENKA-37. It records which invariant is checked where.
 WISHENKA-38 closed rows S5, S6, S8, and A3 with
-`tests/test_surprise_role_context.py`. Race and load (row R5) stay on
-WISHENKA-39. This file does not implement that suite.
+`tests/test_surprise_role_context.py`. WISHENKA-39 closed row R5 with
+the six checks in `tests/test_booking_ceiling_r5.py`.
 
 This file is the developer document for that checklist.
 `doc/dev/architecture.md` links it from the subsystem list. The service
@@ -19,18 +19,44 @@ new tests.
 
 What the matrix indexes is under Modules this matrix indexes: API exits,
 logs, the share page, and the tests named on each row. How to use a row
-is under How to read a row. Open suites are under Where the gaps live.
+is under How to read a row. Row coverage is under Where the gaps live.
 The three families follow those sections.
 
 ## How to read a row
 
 Each row has an identifier, the rule, the module that is the exit, the
 existing test, and the gap. A gap names the sibling that owns the suite.
-The share-link visit that creates no account is closed on A3. The open
-gap is R5, and it names WISHENKA-39.
+The share-link visit that creates no account is closed on A3. Row R5
+is closed by the six checks in `tests/test_booking_ceiling_r5.py`.
 
 "Covered" means the named test already asserts that row. A later
 end-to-end walk can still be open when the row says the walk is open.
+
+## Running R5 checks
+
+Run the R5 suite from the repository root:
+
+```bash
+make test PYTEST=".venv/bin/pytest tests/test_booking_ceiling_r5.py"
+```
+
+The suite uses temporary SQLite databases. It exercises the production
+`WishlistStore.execute_wish` path both in one process and with one spawned
+process per gifter; it does not require a running web server or external
+configuration.
+
+## R5 configuration and troubleshooting
+
+R5 intentionally has no runtime setting. Its bounded test inputs live in
+`tests/test_booking_ceiling_r5.py`: five gifters, two or three free units,
+three repeated contentions, and two load rounds. Its timeout markers and the
+barrier, join, queue-drain, and termination limits prevent an unbounded test.
+
+An `InsufficientQuantityError` is an expected losing booking attempt. An
+`InventoryBusyError`, a missing worker result, or a non-zero worker exit is a
+test failure: inspect the test output and the SQLite transaction settings
+(`BEGIN IMMEDIATE` and `busy_timeout`) before changing the product. Further
+locking or isolation work belongs to WISHENKA-49, not this verification suite.
 
 Accepted product behavior, repeated on the rows that record it:
 
@@ -98,7 +124,8 @@ developer would open, and the test that already calls it.
 
 The test modules cited by the rows below. Research in
 `ai-tasks/WISHENKA-37/20-architecture.md` lists each function.
-`GET /healthz` still does not close A3. The share visit does.
+`GET /healthz` still does not close A3. The share visit does. Row R5
+is `tests/test_booking_ceiling_r5.py`.
 
 ### Notifications
 
@@ -119,7 +146,8 @@ notification. This checklist does not add a sender.
 - WISHENKA-38 — one recipient walk closes S5, S6, and S8. A share
   visit closes A3. Both checks are in
   `tests/test_surprise_role_context.py`.
-- WISHENKA-39 — race and load tests (R5).
+- WISHENKA-39 — race and load ceiling (R5). The six checks are in
+  `tests/test_booking_ceiling_r5.py`.
 
 The free remainder indexed here is the one already computed in
 `project_wish_item`: requested quantity, minus received units, minus
@@ -152,10 +180,18 @@ WISHENKA-38 closed S5, S6, S8, and A3. The checks are in
   `test_share_link_visit_creates_no_account` opens the share link
   with no session. The visit creates no account.
 
-WISHENKA-39 owns the race and load checks:
+WISHENKA-39 closed R5 with `tests/test_booking_ceiling_r5.py`.
 
-- R5. Repeated contention, many gifters, and a load profile that keeps
-  the same ceiling. R1–R4 stay on the tests already named on those rows.
+- R5. One unit each and the whole remainder, on one store and on one
+  process per gifter. Repeated contention and the load profile keep
+  the same ceiling.
+  `test_one_copy_one_unit_each`,
+  `test_many_copies_one_unit_each`,
+  `test_one_copy_whole_remainder`,
+  `test_many_copies_whole_remainder`,
+  `test_repeated_contention_many_copies`, and
+  `test_load_profile_one_copy_and_many_copies`.
+  R1–R4 stay on the tests already named on those rows.
 
 ## Family 1. Surprise at every exit
 
@@ -582,16 +618,32 @@ Gap for these examples: none.
 ### R5. Race and load beyond R1–R4
 
 Repeated contention, many gifters, and a load profile that keeps the
-same ceiling.
+same ceiling. Five gifters book through `WishlistStore.execute_wish`.
+The units they book equal the free units. A refusal is
+`InsufficientQuantityError` and adds no row. `InventoryBusyError`
+fails the check.
 
-Modules: the same write path as R2 (`WishlistStore.execute_wish`). No
-load harness is present.
+Modules: the same write path as R2 (`WishlistStore.execute_wish` in
+`wishenka/wishlists/store.py`).
 
-Covered by: none. R1–R4 are the acceptance examples already shipped
-with the features and with WISHENKA-57.
+Covered by `tests/test_booking_ceiling_r5.py`:
 
-Gap: WISHENKA-39 owns the race and load tests. This matrix records the
-gap and does not implement the suite.
+- `test_one_copy_one_unit_each`
+- `test_many_copies_one_unit_each`
+- `test_one_copy_whole_remainder`
+- `test_many_copies_whole_remainder`
+- `test_repeated_contention_many_copies`
+- `test_load_profile_one_copy_and_many_copies`
+
+One-unit checks ask for one of two free units. Whole-remainder checks
+ask for all three free units. One-copy checks share one store.
+Many-copies checks use one process per gifter. Repeated contention
+runs three one-unit starts and three whole-remainder starts.
+The load profile runs two rounds of both shapes on one store and two
+rounds on many copies. R1–R4 stay on the tests already named on those
+rows.
+
+Gap: none.
 
 ## Family 3. Anonymous giver access by share link
 
