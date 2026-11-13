@@ -91,4 +91,7 @@
   форматирование и CI.
 - [`doc/dev/verification-matrix.md`](verification-matrix.md) — Verification
   matrix for surprise exits, the free-remainder ceiling, and anonymous
-  share-link access (WISHENKA-37). Records coverage and gaps.
+  share-link access (WISHENKA-37). S5, S6, and S8 are closed by
+  `test_recipient_walk_hides_booking_in_response_log_and_notice`, and
+  A3 by `test_share_link_visit_creates_no_account`, both in
+  `tests/test_surprise_role_context.py`. R5 stays on WISHENKA-39.

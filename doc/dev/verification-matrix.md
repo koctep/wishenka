@@ -3,8 +3,9 @@
 ## Overview
 
 Checklist for WISHENKA-37. It records which invariant is checked where.
-It records coverage and gaps and does not implement the WISHENKA-38 or
-WISHENKA-39 suites.
+WISHENKA-38 closed rows S5, S6, S8, and A3 with
+`tests/test_surprise_role_context.py`. Race and load (row R5) stay on
+WISHENKA-39. This file does not implement that suite.
 
 This file is the developer document for that checklist.
 `doc/dev/architecture.md` links it from the subsystem list. The service
@@ -25,8 +26,8 @@ The three families follow those sections.
 
 Each row has an identifier, the rule, the module that is the exit, the
 existing test, and the gap. A gap names the sibling that owns the suite.
-The gap that no test opens the share link and checks that the visit
-created no account names WISHENKA-38 (role-context end-to-end).
+The share-link visit that creates no account is closed on A3. The open
+gap is R5, and it names WISHENKA-39.
 
 "Covered" means the named test already asserts that row. A later
 end-to-end walk can still be open when the row says the walk is open.
@@ -97,13 +98,13 @@ developer would open, and the test that already calls it.
 
 The test modules cited by the rows below. Research in
 `ai-tasks/WISHENKA-37/20-architecture.md` lists each function.
-The health-check exclusion stays on A3.
+`GET /healthz` still does not close A3. The share visit does.
 
 ### Notifications
 
-No module under `wishenka/` sends a message to the recipient. S6 stays
-an open row. WISHENKA-38 owns that check. This checklist does not add
-a sender.
+No module under `wishenka/` sends a message to the recipient. S6 is
+closed because the recipient walk produces no recipient-facing
+notification. This checklist does not add a sender.
 
 ### Shipped behavior this matrix points at
 
@@ -115,8 +116,9 @@ a sender.
   `wishenka/web/routes/reservations_ui.py`.
 - WISHENKA-57 — shared quantity outcome when more than one copy accepts
   bookings. `wishenka/wishlists/store.py` (`execute_wish`).
-- WISHENKA-38 — end-to-end surprise-invariant tests (S5 combined check,
-  S6, S8, A3 share-link visit that creates no account).
+- WISHENKA-38 — one recipient walk closes S5, S6, and S8. A share
+  visit closes A3. Both checks are in
+  `tests/test_surprise_role_context.py`.
 - WISHENKA-39 — race and load tests (R5).
 
 The free remainder indexed here is the one already computed in
@@ -137,20 +139,18 @@ a profile is deleted, stay open product questions.
 ## Where the gaps live
 
 A row whose gap is none is covered by the tests named on that row. An
-open row names the sibling that owns the suite. This checklist records
-those gaps and does not implement either suite. The same gap text stays
-on each row below.
+open row names the sibling that owns the suite.
 
-WISHENKA-38 owns the end-to-end surprise checks:
+WISHENKA-38 closed S5, S6, S8, and A3. The checks are in
+`tests/test_surprise_role_context.py`.
 
-- S5. The named log checks are separate. No one scenario asserts the
-  recipient answer and the log of that same request together.
-- S6. No module sends a recipient notification, and no test inspects
-  notification text.
-- S8. No single walk covers the recipient answer, the notification when
-  a sender exists, and the log of that recipient request.
-- A3. No test opens the share link and checks that the visit created no
-  account. The health-check request is not that visit.
+- S5, S6, and S8.
+  `test_recipient_walk_hides_booking_in_response_log_and_notice`
+  is one owner read of a booked wish. It judges the answer, the log
+  of that request, and the absence of a recipient-facing notice.
+- A3.
+  `test_share_link_visit_creates_no_account` opens the share link
+  with no session. The visit creates no account.
 
 WISHENKA-39 owns the race and load checks:
 
@@ -342,10 +342,18 @@ Covered by:
   `test_wish_transaction_logs_domain_rollback_without_gifter`
 - `tests/test_wish_items_tma_ui.py`
   `test_tma_ui_observability_privacy_invariants`
+- `tests/test_surprise_role_context.py`
+  `test_recipient_walk_hides_booking_in_response_log_and_notice`
+  (the answer and the log of that same request)
 
-Gap: these checks are separate modules. No one scenario asserts the
-recipient answer and the log of that same request together. That
-combined check belongs to the WISHENKA-38 suite.
+That walk is one owner read. The body and every response header omit
+the gifter, the reservation, the booked quantity, the free remainder,
+and whether the gift has been bought. Requested quantity and received
+quantity may remain. The log of that request does not name the gifter.
+The separate checks listed above stay in place. The same test closes
+S6 and S8.
+
+Gap: none.
 
 Operator records of a gifter's own booking may still identify that
 gifter to operators. That stream is already checked by
@@ -357,7 +365,7 @@ Those records are an operator stream of the gifter's own action. They
 are a recipient exit only if a recipient path emits them. This matrix
 leaves that operator stream on the stories that shipped it.
 
-These tests do not assert this row.
+These neighboring checks do not assert this row.
 `tests/test_wishlist_roles_lifecycle.py`
 `test_warning_logging_on_access_denial_and_surprise_invariant` asserts
 warning event names only. `tests/test_wish_items_crud_api.py`
@@ -372,15 +380,23 @@ assert that a recipient log omits a gifter.
 
 A message the service sends the recipient about a wish, a receipt, an
 archive, or a reminder omits the gifter, the reservation, the booked
-quantity, and the free remainder.
+quantity, and the free remainder. The product has no such sender. The
+proof is that the recipient walk produces no recipient-facing
+notification.
 
 Modules: none. There is no notification sender in the product code.
 
-Covered by: none. There is no test that inspects notification text.
+Covered by:
 
-Gap: WISHENKA-38 owns the end-to-end surprise checks, including this
-exit. This task does not add a sender and does not write that suite.
-Any future message to the recipient stays on this row.
+- `tests/test_surprise_role_context.py`
+  `test_recipient_walk_hides_booking_in_response_log_and_notice`
+
+During that walk, captured records do not name a notification, an
+outbox enqueue, or a push, and the test database does not gain a
+`notification_outbox` or `user_notification_settings` table. The check
+passes on that absence. It does not look for notice copy.
+
+Gap: none. A later story that adds a sender stays on this row.
 
 ### S7. Public list answer for an unidentified visitor
 
@@ -415,15 +431,24 @@ to an unidentified opener is accepted product behavior (A2).
 
 ### S8. One walk across exits
 
-For one booked wish, the recipient answer, the recipient notification
-when a sender exists, and the log of that recipient request satisfy S1,
-S5, and S6 together.
+For one booked wish, one recipient request meets the response rule, the
+log rule, and the absence of a recipient-facing notification together.
 
-Modules: the same exits as S1, S5, and S6. No module joins them.
+Modules: `get_item` in `wishenka/web/routes/items.py`, the request log
+from `RequestLoggingMiddleware` in `wishenka/web/app.py`, and
+`project_wish_item` in `wishenka/wishlists/service.py`. No notification
+module is on this walk.
 
-Covered by: no single test.
+Covered by:
 
-Gap: WISHENKA-38.
+- `tests/test_surprise_role_context.py`
+  `test_recipient_walk_hides_booking_in_response_log_and_notice`
+
+The caller is the owner of a personal list and therefore the recipient,
+including a wish that has only a display name. The same test closes S5
+and S6.
+
+Gap: none.
 
 ## Family 2. Concurrent booking and the free-remainder ceiling
 
@@ -647,6 +672,8 @@ Gap: none.
 ### A3. No unnamed promise
 
 A promise attempt without a session is rejected and stores nothing.
+Opening the list by the share link, with the visitor unidentified,
+creates no account.
 
 Modules:
 
@@ -654,6 +681,8 @@ Modules:
   depend on `get_current_user`.
 - `wishenka/users/store.py` and `wishenka/web/routes/auth.py` — a user
   row is written on Telegram authentication, not on a public read.
+- `wishenka/web/routes/sharing.py` — `view_public_share`
+  (`GET /share/{public_token}`) does not insert a user.
 
 Covered by:
 
@@ -661,13 +690,19 @@ Covered by:
   `test_unauthenticated_create_is_rejected`
 - `tests/test_reservation_actions_api.py`
   `test_unauthenticated_mutation_is_rejected`
+- `tests/test_surprise_role_context.py`
+  `test_share_link_visit_creates_no_account`
+  (unidentified `GET /share/{public_token}`; the `users` count is
+  unchanged; the log has no `user_created` event)
 
-Gap: no test opens the share link and checks that the visit created no
-account. `tests/test_auth_user_store.py`
-`test_guest_request_does_not_create_user` hits a health check
-(`GET /healthz`), so it is not this scenario. WISHENKA-38 owns this
-missing check (role-context end-to-end). This task does not write that
-suite.
+Gap: none. `tests/test_auth_user_store.py`
+`test_guest_request_does_not_create_user` hits `GET /healthz`, so that
+request does not close this row. The promise refusals above do not
+close the visit. The share-visit test does. That response shows the
+free remainder (`Доступно:`) and does not show `Забронировать`. Row A2
+stays on
+`tests/test_wish_card_giver_controls.py`
+`test_anonymous_share_shows_availability_without_a_book_control`.
 
 ### A4. Two public exits for one link
 
