@@ -171,6 +171,20 @@ class ItemConcurrencyCoordinator:
   and changes nothing. `asyncio.Lock` does not cover another request or
   another process.
 
+**WISHENKA-49 verification**:
+
+- This database transaction is the cross-process reservation boundary; do not
+  add a second process-local lock around `execute_wish`.
+- Run its bounded regression contract from the repository root:
+
+  ```bash
+  make test PYTEST=".venv/bin/pytest tests/test_booking_ceiling_r5.py"
+  ```
+
+  The R5 suite covers same-process and spawned-process contention. A busy
+  writer is an explicit retryable `InventoryBusyError`, never a partial
+  reservation.
+
 ### 3. Role-Aware DTO Projections & Zero-Leak Guarantees
 
 To enforce the **Surprise Invariant**,
