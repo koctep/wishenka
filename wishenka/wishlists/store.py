@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
+import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -24,6 +26,7 @@ from wishenka.wishlists.exceptions import (
     WishlistError,
     WishlistNotFoundError,
 )
+from wishenka.wishlists.migrations import migration_lock_path, upgrade_to_head
 from wishenka.wishlists.models import (
     Reservation,
     ReservationStatus,
@@ -54,7 +57,6 @@ def _configure_immediate_transactions(sync_engine: Engine) -> None:
         dbapi_connection.isolation_level = None
         cursor = dbapi_connection.cursor()
         try:
-            cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.execute("PRAGMA busy_timeout=5000")
         finally:
@@ -329,199 +331,40 @@ class WishlistStore:
         if not database_url.startswith(prefix):
             raise ValueError("Wishlist storage requires SQLite")
         path = database_url[len(prefix) :]
+        # Alembic opens a synchronous connection, while aiosqlite uses a distinct
+        # asynchronous one.  SQLite's ``:memory:`` databases are connection-local,
+        # so back it with an isolated temporary file and let both engines share it.
+        self._temporary_database_path: Path | None = None
+        if path == ":memory:":
+            descriptor, temporary_path = tempfile.mkstemp(prefix="wishenka-", suffix=".sqlite")
+            os.close(descriptor)
+            self._temporary_database_path = Path(temporary_path)
+            database_url = f"{prefix}{temporary_path}"
+            path = temporary_path
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self.database_url = database_url
         self.engine = create_async_engine(
             database_url, connect_args={"timeout": 5}, hide_parameters=True
         )
         _configure_immediate_transactions(self.engine.sync_engine)
 
     async def initialize(self) -> None:
-        """Create the normalized schema without modifying existing records."""
+        """Bring the wishlist database to Alembic head before it is used."""
         try:
-            await self._initialize()
-        except SQLAlchemyError:
-            pass
-        else:
-            return
-        raise RuntimeError("Unable to initialize wishlist storage")
+            await upgrade_to_head(self.database_url)
+        except (OSError, RuntimeError, ValueError, SQLAlchemyError) as exc:
+            raise RuntimeError("Unable to initialize wishlist storage") from exc
 
-    async def _initialize(self) -> None:
-        async with self.engine.begin() as conn:
-            await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
-            await conn.exec_driver_sql("PRAGMA foreign_keys=ON")
-            await conn.exec_driver_sql("PRAGMA busy_timeout=5000")
-
-            # Check if legacy schema with JSON payload is present and migrate
-            cursor = await conn.execute(text("PRAGMA table_info(wl_lists)"))
-            existing_cols = [r[1] for r in cursor.fetchall()]
-            if "payload" in existing_cols:
-                for tbl in (
-                    "wl_reservations",
-                    "wl_items",
-                    "wl_members",
-                    "wl_favorites",
-                    "wl_view_history",
-                    "wl_tokens",
-                    "wl_invite_tokens",
-                    "wl_counters",
-                    "wl_lists",
-                ):
-                    await conn.exec_driver_sql(f"DROP TABLE IF EXISTS {tbl}")
-
-            ddl_statements = (
-                """
-                CREATE TABLE IF NOT EXISTS wl_lists (
-                    id INTEGER PRIMARY KEY,
-                    owner_id INTEGER NOT NULL,
-                    owner_name TEXT NOT NULL DEFAULT '',
-                    title TEXT NOT NULL,
-                    description TEXT,
-                    event_title TEXT,
-                    event_date TEXT,
-                    is_collaborative INTEGER NOT NULL DEFAULT 0,
-                    warn_on_delete_reserved INTEGER NOT NULL DEFAULT 1,
-                    status TEXT NOT NULL DEFAULT 'active',
-                    public_token TEXT NOT NULL,
-                    invite_token TEXT NOT NULL,
-                    invite_token_expires_at TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """,
-                "CREATE INDEX IF NOT EXISTS idx_wl_lists_owner ON wl_lists(owner_id)",
-                (
-                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_wl_lists_public_token "
-                    "ON wl_lists(public_token)"
-                ),
-                (
-                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_wl_lists_invite_token "
-                    "ON wl_lists(invite_token)"
-                ),
-                "CREATE INDEX IF NOT EXISTS idx_wl_lists_status ON wl_lists(status)",
-                """
-                CREATE TABLE IF NOT EXISTS wl_members (
-                    id INTEGER PRIMARY KEY,
-                    wishlist_id INTEGER NOT NULL REFERENCES wl_lists(id) ON DELETE CASCADE,
-                    user_id INTEGER NOT NULL,
-                    role TEXT NOT NULL DEFAULT 'member',
-                    joined_at TEXT NOT NULL
-                )
-                """,
-                (
-                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_wl_members_unique "
-                    "ON wl_members(wishlist_id, user_id)"
-                ),
-                "CREATE INDEX IF NOT EXISTS idx_wl_members_user ON wl_members(user_id)",
-                """
-                CREATE TABLE IF NOT EXISTS wl_items (
-                    id INTEGER PRIMARY KEY,
-                    wishlist_id INTEGER NOT NULL REFERENCES wl_lists(id) ON DELETE CASCADE,
-                    recipient_user_id INTEGER,
-                    recipient_name TEXT,
-                    title TEXT NOT NULL,
-                    description TEXT,
-                    link TEXT,
-                    price INTEGER,
-                    currency TEXT NOT NULL DEFAULT 'RUB',
-                    quantity INTEGER NOT NULL DEFAULT 1,
-                    received_quantity INTEGER NOT NULL DEFAULT 0,
-                    image_url TEXT,
-                    store_name TEXT,
-                    store_icon_url TEXT,
-                    priority TEXT NOT NULL DEFAULT 'medium',
-                    category TEXT,
-                    display_order INTEGER NOT NULL DEFAULT 0,
-                    is_archived INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """,
-                "CREATE INDEX IF NOT EXISTS idx_wl_items_wishlist ON wl_items(wishlist_id)",
-                "CREATE INDEX IF NOT EXISTS idx_wl_items_recipient ON wl_items(recipient_user_id)",
-                """
-                CREATE TABLE IF NOT EXISTS wl_reservations (
-                    id INTEGER PRIMARY KEY,
-                    wish_item_id INTEGER NOT NULL REFERENCES wl_items(id) ON DELETE CASCADE,
-                    user_id INTEGER NOT NULL,
-                    quantity INTEGER NOT NULL DEFAULT 1,
-                    status TEXT NOT NULL DEFAULT 'active',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """,
-                (
-                    "CREATE INDEX IF NOT EXISTS idx_wl_reservations_item "
-                    "ON wl_reservations(wish_item_id)"
-                ),
-                "CREATE INDEX IF NOT EXISTS idx_wl_reservations_user ON wl_reservations(user_id)",
-                (
-                    "CREATE INDEX IF NOT EXISTS idx_wl_reservations_status "
-                    "ON wl_reservations(status)"
-                ),
-                """
-                CREATE TABLE IF NOT EXISTS wl_favorites (
-                    user_id INTEGER NOT NULL,
-                    wishlist_id INTEGER NOT NULL REFERENCES wl_lists(id) ON DELETE CASCADE,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY (user_id, wishlist_id)
-                )
-                """,
-                "CREATE INDEX IF NOT EXISTS idx_wl_favorites_user ON wl_favorites(user_id)",
-                """
-                CREATE TABLE IF NOT EXISTS wl_view_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    wishlist_id INTEGER NOT NULL REFERENCES wl_lists(id) ON DELETE CASCADE,
-                    viewed_at TEXT NOT NULL
-                )
-                """,
-                (
-                    "CREATE UNIQUE INDEX IF NOT EXISTS wl_view_history_user_wl "
-                    "ON wl_view_history(user_id, wishlist_id)"
-                ),
-                (
-                    "CREATE INDEX IF NOT EXISTS idx_wl_view_history_user_time "
-                    "ON wl_view_history(user_id, viewed_at DESC)"
-                ),
-                """
-                CREATE TABLE IF NOT EXISTS wl_tokens (
-                    token TEXT PRIMARY KEY,
-                    wishlist_id INTEGER NOT NULL,
-                    active INTEGER NOT NULL DEFAULT 1
-                )
-                """,
-                (
-                    "CREATE INDEX IF NOT EXISTS idx_wl_tokens_wishlist "
-                    "ON wl_tokens(wishlist_id, active)"
-                ),
-                "CREATE TABLE IF NOT EXISTS wl_invite_tokens (token TEXT PRIMARY KEY)",
-                (
-                    "CREATE TABLE IF NOT EXISTS wl_counters "
-                    "(name TEXT PRIMARY KEY, value INTEGER NOT NULL)"
-                ),
-            )
-            for statement in ddl_statements:
-                await conn.exec_driver_sql(statement)
-
-            cursor_lists = await conn.execute(text("PRAGMA table_info(wl_lists)"))
-            cols_lists = [r[1] for r in cursor_lists.fetchall()]
-            if cols_lists and "warn_on_delete_reserved" not in cols_lists:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE wl_lists ADD COLUMN "
-                    "warn_on_delete_reserved INTEGER NOT NULL DEFAULT 1"
-                )
-
-            cursor_items = await conn.execute(text("PRAGMA table_info(wl_items)"))
-            cols_items = [r[1] for r in cursor_items.fetchall()]
-            if cols_items and "display_order" not in cols_items:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE wl_items ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0"
-                )
-            await conn.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS idx_wl_items_order "
-                "ON wl_items(wishlist_id, display_order)"
-            )
+    async def dispose(self) -> None:
+        """Dispose connections and remove this store's owned temporary database."""
+        await self.engine.dispose()
+        if self._temporary_database_path is not None:
+            try:
+                self._temporary_database_path.unlink(missing_ok=True)
+                migration_lock_path(self._temporary_database_path).unlink(missing_ok=True)
+            finally:
+                self._temporary_database_path = None
 
     async def _read(self, conn: AsyncConnection) -> tuple[WishlistService, _StorageSnapshot]:
         service = WishlistService()

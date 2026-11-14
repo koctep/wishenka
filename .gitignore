@@ -41,3 +41,6 @@ htmlcov/
 .vscode/
 *.swp
 *.swo
+
+# Migration lock sidecars
+*.migrate.lock

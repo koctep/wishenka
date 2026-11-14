@@ -13,11 +13,15 @@
 - **Telegram Bot:** aiogram v3 (асинхронный бот)
 - **Интерфейс Mini App (TMA):** Server-Side Rendering (FastAPI + Jinja2 + HTMX / Alpine.js) + Telegram WebApp JS script
 - **СУБД:** Встраиваемая SQLite с `aiosqlite`
-  - `PRAGMA journal_mode = WAL;` (параллельное чтение без блокировки писателей)
-  - `PRAGMA foreign_keys = ON;` (каскадная целостность)
-  - `PRAGMA busy_timeout = 5000;`
+  - `PRAGMA journal_mode = WAL;` (параллельное чтение без блокировки писателей) — постоянное состояние файла БД: выбирается один раз при старте миграций вишлистов, а не на каждом соединении
+  - `PRAGMA foreign_keys = ON;` (каскадная целостность; задаётся на каждом соединении)
+  - `PRAGMA busy_timeout = 5000;` (на каждом соединении)
   - запись инвентаря одного желания стартует с `Connection.begin()`; слушатель `begin` выполняет `BEGIN IMMEDIATE` при `isolation_level = None`
 - **ORM и миграции:** SQLAlchemy 2.0 (Async) + Alembic
+  - Схема таблиц `wl_*` хранилища вишлистов создаётся и меняется только версионными ревизиями Alembic (`wishenka/wishlists/alembic/versions/`); ad-hoc `ALTER TABLE` в коде хранилища нет.
+  - `WishlistStore.initialize()` при старте приводит БД к head: распознаёт и штампует legacy-схему без изменения данных, применяет `upgrade head`, выбирает WAL. Параллельный старт нескольких процессов сериализуется файлом `<db>.migrate.lock` (`fcntl`, только POSIX, ожидание до 60 с).
+  - Для `:memory:` хранилище использует изолированный временный файл, который удаляется в `WishlistStore.dispose()`.
+  - Подробности, добавление ревизии и диагностика: [`doc/dev/migrations.md`](migrations.md).
 - **Парсинг ссылок:** httpx + BeautifulSoup4 (с защитой от SSRF)
 - **Очередь сообщений:** Встроенный Transactional Outbox в SQLite + асинхронный воркер
 
@@ -82,6 +86,7 @@
   `ReservationStatus.COMPLETED`. Гарантия Surprise Invariant и личный
   кабинет дарителя «Мои бронирования». Исключение записи — wish-scoped
   транзакция SQLite, а не `asyncio.Lock`.
+- [`doc/dev/migrations.md`](migrations.md) — Миграции БД вишлистов (Alembic): ревизии, усыновление legacy-схемы, межпроцессная блокировка, выбор WAL, журналирование, диагностика и ограничения (WISHENKA-111).
 - [`doc/dev/items.md`](items.md) — Домен элементов желаний: универсальный ввод (текст, ссылки, шеринг), каскадный парсинг метаданных (JSON-LD, OpenGraph, Microdata), graceful fallback при антибот-защите, штучный учет и wish-scoped запись инвентаря.
 - [`doc/dev/auth.md`](auth.md) — Аутентификация Telegram Mini App, валидация initData и
   сессионные токены.

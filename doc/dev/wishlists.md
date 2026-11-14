@@ -133,8 +133,10 @@ override the router's service.
 
 `WISHENKA_DATABASE_URL` selects the SQLite database and defaults to
 `sqlite+aiosqlite:///data/wishenka.db`. The application initializes the normalized relational
-schema and WAL mode during lifespan startup, creates parent directories for a file database,
-and disposes the engine at shutdown. `WISHENKA_SQLITE_DB_PATH` is a separate setting and does not
+schema during lifespan startup by running Alembic migrations to head (a recognized legacy database
+is adopted without data loss; see [migrations.md](migrations.md)), selects WAL mode in that
+migration startup, creates parent directories for a file database, and disposes the engine at
+shutdown (`WishlistStore.dispose()`). `WISHENKA_SQLITE_DB_PATH` is a separate setting and does not
 configure this store. All workers must point to the same database file to share state. The store
 applies a five-second SQLite busy timeout (`busy_timeout = 5000`) and serializes each mutation with
 `BEGIN IMMEDIATE`.
@@ -148,7 +150,9 @@ mutations (`UPDATE`, `INSERT`, `DELETE WHERE id = :id`). See
 [Persistence Architecture](#persistence-architecture-sqlite-wal--repositories) below for details.
 
 If startup reports `Unable to initialize wishlist storage`, verify the database URL, directory
-permissions and SQLite availability. A generic `Wishlist storage operation failed` indicates a
+permissions and SQLite availability, then inspect the exception chain and the
+`wishlist_migration_failed` log record (unsupported legacy schema, migration lock timeout; see
+[migrations.md](migrations.md#troubleshooting)). A generic `Wishlist storage operation failed` indicates a
 sanitized database failure; inspect storage health and contention without logging SQL parameters or
 tokens. If a shared link returns 404, check whether it was rotated or the list was deleted; request
 a new link from an owner or admin. A 409 on modification indicates an archived list or an invalid
@@ -752,7 +756,7 @@ granular async queries, and relationship cascade deletion.
 ```
 +-----------------------------------------------------------------------------------------+
 |                        WishlistStore (Unit of Work Boundary)                           |
-|  - Manages SQLite connection lifecycle, WAL mode, foreign keys, and busy timeout        |
+|  - Manages SQLite connection lifecycle, foreign keys, and busy timeout (WAL: migrations)|
 |  - BEGIN IMMEDIATE write transaction serialization and TokenCollision retries          |
 |  - Snapshot diffing: computes row-level INSERT / UPDATE / DELETE sets                   |
 +-----------------------------------------------------------------------------------------+
@@ -1048,7 +1052,8 @@ relational architecture, `WishlistStore` coordinates atomic row-level persistenc
 
 #### SQLite WAL Mode & Lock Primitives
 - **WAL Journaling (`PRAGMA journal_mode = WAL`)**: Allows concurrent reads to proceed concurrently
-  with active write transactions without blocking or lock contention.
+  with active write transactions without blocking or lock contention. It is persistent file state,
+  selected once by the migration startup rather than on each connection.
 - **Immediate Write Transactions (`BEGIN IMMEDIATE`)**: State mutations begin with `BEGIN IMMEDIATE`
   to acquire an SQLite write lock at the start of the transaction, eliminating mid-transaction
   upgrade deadlocks (`SQLITE_BUSY`).

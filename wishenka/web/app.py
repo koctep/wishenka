@@ -176,7 +176,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 cache.clear()
                 app.state.item_preview_service = None
                 await client.aclose()
-                await app.state.wishlist_store.engine.dispose()
+                await app.state.wishlist_store.dispose()
                 await app.state.user_store.dispose()
                 logger.info("Wishenka web application shutting down")
 

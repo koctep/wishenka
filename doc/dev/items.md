@@ -398,8 +398,8 @@ FastAPI APIRouter mounted at `/api/wishlists/{wishlist_id}/items` providing HTTP
 Located in [`wishenka/wishlists/db_models.py`](file:///home/src/wishenka/wishlists/db_models.py), [`wishenka/wishlists/store.py`](file:///home/src/wishenka/wishlists/store.py), and [`wishenka/wishlists/repository.py`](file:///home/src/wishenka/wishlists/repository.py):
 
 - **Column**: `display_order INTEGER NOT NULL DEFAULT 0` on table `wl_items`.
-- **Index**: `CREATE INDEX IF NOT EXISTS idx_wl_items_order ON wl_items(wishlist_id, display_order)`.
-- **Dynamic Schema Migration**: On startup, `WishlistStore._init_db` inspects `PRAGMA table_info(wl_items)` and executes `ALTER TABLE wl_items ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0` if absent, followed by creating `idx_wl_items_order`.
+- **Index**: `CREATE INDEX idx_wl_items_order ON wl_items(wishlist_id, display_order)` (a plain `CREATE INDEX` run once by the `add_item_order_index` revision).
+- **Schema Migration**: The column and the index are created by the Alembic revisions `add_display_order` and `add_item_order_index` (see [migrations.md](migrations.md)). `WishlistStore.initialize()` brings the database to the Alembic head on startup; a legacy database that lacks them is stamped at the matching revision and upgraded without rewriting rows. The old runtime `ALTER TABLE` is removed.
 - **Deterministic Ordering**: Repository selects sort by `ORDER BY display_order ASC, id ASC`.
 
 #### Wish-scoped inventory transaction
@@ -408,7 +408,7 @@ Inventory changes for one wish share the SQLite file across service copies. The 
 
 [`_configure_immediate_transactions`](file:///home/src/wishenka/wishlists/store.py#L48-L68) attaches to `engine.sync_engine`:
 
-- On `connect`, `isolation_level = None` so the sqlite3 driver does not emit its own `BEGIN`. The same connect sets `PRAGMA journal_mode=WAL`, `PRAGMA foreign_keys=ON`, and `PRAGMA busy_timeout=5000`.
+- On `connect`, `isolation_level = None` so the sqlite3 driver does not emit its own `BEGIN`. The same connect sets `PRAGMA foreign_keys=ON` and `PRAGMA busy_timeout=5000`. `PRAGMA journal_mode=WAL` is persistent database state and is selected once by the migration startup, not by this hook (see [migrations.md](migrations.md)).
 - On `begin`, the listener sets `PRAGMA busy_timeout=5000` and then emits `BEGIN IMMEDIATE`. The listener runs because code calls `Connection.begin()`.
 
 [`_immediate`](file:///home/src/wishenka/wishlists/store.py#L1262-L1273) opens a connection, calls `await conn.begin()`, runs the work, and `COMMIT`s. Any `BaseException` rolls the transaction back when it is still open, then re-raises. A failed attempt leaves the wish at the last commit.
@@ -620,7 +620,7 @@ All HTMX UI endpoints are defined in [`wishenka/web/routes/items_ui.py`](file://
 | `GET` | `/web/wishlists/{wishlist_id}/items/{item_id}/archive-confirm` | `archive_confirm_ui` | None | `partials/item_archive_modal.html` | Confirmation modal; warns about active reservations when `warn_on_delete_reserved` is set. |
 
 Notes: `Wishlist.warn_on_delete_reserved` (bool, default `True`, `wl_lists.warn_on_delete_reserved`)
-is persisted by the store and added to existing databases by an `ALTER TABLE` migration. Archive and
+is persisted by the store; the column is created by the Alembic revision `add_warn_on_delete_reserved` (see [migrations.md](migrations.md)). Archive and
 restore responses include an OOB swap of `#archived-items-section`. Events: `ui_items_reordered`,
 `ui_item_moved`, `ui_items_reorder_rejected`, `ui_item_archive_confirm_opened`, `ui_item_archived`,
 `ui_item_restored`. See [miniapp.md](miniapp.md) section 9.8 for the UI behaviour.
@@ -995,7 +995,7 @@ Set on the wishlist engine in [`_configure_immediate_transactions`](file:///home
 
 | Setting | Value | Where |
 | --- | --- | --- |
-| `PRAGMA journal_mode` | `WAL` | `connect` |
+| `PRAGMA journal_mode` | `WAL` | migration startup (`upgrade_to_head_sync`), once per database file; not set by `connect` |
 | `PRAGMA foreign_keys` | `ON` | `connect` |
 | `PRAGMA busy_timeout` | `5000` (milliseconds) | `connect`, and again in the `begin` listener before `BEGIN IMMEDIATE` |
 | `isolation_level` | `None` | `connect`, so sqlite3 does not emit its own `BEGIN` |

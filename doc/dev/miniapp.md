@@ -456,7 +456,7 @@ wish items without full-page reloads.
     ids must be an exact permutation of the active items, otherwise `400`.
 - **Archive flow**: `GET .../items/{item_id}/archive-confirm` (`archive_confirm_ui`) opens
   `partials/item_archive_modal.html`; it warns about active reservations when the wishlist flag
-  `warn_on_delete_reserved` is true (default `1`; column added to `wl_lists` by the store migration).
+  `warn_on_delete_reserved` is true (default `1`; column added to `wl_lists` by the Alembic revision `add_warn_on_delete_reserved`, see [migrations.md](migrations.md)).
   `POST .../archive` and `.../restore` also refresh `#archived-items-section` via an OOB swap.
 
 ---

@@ -162,7 +162,7 @@ class ItemConcurrencyCoordinator:
 
 - Several service copies write one SQLite file. The shared exclusion is
   `Connection.begin()` on the wishlist engine. The `begin` listener emits
-  `BEGIN IMMEDIATE` (`isolation_level = None`, `PRAGMA journal_mode = WAL`,
+  `BEGIN IMMEDIATE` (`isolation_level = None`, WAL selected at migration startup,
   `PRAGMA busy_timeout = 5000`).
 - A second writer waits on that reserved lock. The quantity check runs
   inside the transaction, so two calls cannot both commit the same free
