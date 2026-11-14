@@ -806,7 +806,8 @@ def _raise_http(exc: Exception) -> NoReturn:
     ) from exc
 
 
-_NOT_FOUND_ERRORS = (
+# Domain errors that `_raise_http` translates: archived -> 409, all others -> 404.
+_DOMAIN_ERRORS = (
     WishlistNotFoundError,
     WishlistDeletedError,
     ItemNotFoundError,
@@ -819,7 +820,7 @@ async def _reordered_response(
     request: Request,
     wishlist_id: int,
     user: AuthenticatedUser,
-    reorder: Callable[[WishlistService, list[int]], list[int]],
+    reorder: Callable[[list[int]], list[int]],
 ) -> HTMLResponse:
     """Apply a reorder computed from the current order and render the new list."""
 
@@ -829,14 +830,15 @@ async def _reordered_response(
         wl = await svc.get_wishlist_by_id(wishlist_id)
         _ensure_member_and_active(wl, user)
         current = await svc.list_wish_items(wishlist_id=wishlist_id, actor=user)
-        new_ids = reorder(svc, [it.id for it in current])
-        if new_ids != [it.id for it in current]:
+        current_ids = [it.id for it in current]
+        new_ids = reorder(current_ids)
+        if new_ids != current_ids:
             await svc.reorder_wish_items(wishlist_id=wishlist_id, actor=user, item_ids=new_ids)
         return await svc.list_wish_items(wishlist_id=wishlist_id, actor=user)
 
     try:
         items = await _execute(request, action)
-    except _NOT_FOUND_ERRORS as exc:
+    except _DOMAIN_ERRORS as exc:
         _raise_http(exc)
     except ValueError as exc:
         logger.warning(
@@ -866,7 +868,7 @@ async def reorder_items_ui(
     item_ids: Annotated[list[int], Form()],
 ) -> Response:
     """Persist a full manual order of active items and return the re-rendered list."""
-    response = await _reordered_response(request, wishlist_id, user, lambda _svc, _cur: item_ids)
+    response = await _reordered_response(request, wishlist_id, user, lambda _current: item_ids)
     logger.info(
         "Items in wishlist %s reordered via UI by actor %s",
         wishlist_id,
@@ -892,7 +894,7 @@ async def move_item_ui(
 ) -> Response:
     """Move one item a single step up or down and return the re-rendered list."""
 
-    def compute(_svc: WishlistService, current: list[int]) -> list[int]:
+    def compute(current: list[int]) -> list[int]:
         if item_id not in current:
             raise ItemNotFoundError(f"Item {item_id} not found")
         idx = current.index(item_id)
@@ -944,7 +946,7 @@ async def archive_confirm_ui(
 
     try:
         item, has_locked, warn_pref = await _execute(request, action)
-    except _NOT_FOUND_ERRORS as exc:
+    except _DOMAIN_ERRORS as exc:
         _raise_http(exc)
 
     show_warning = has_locked and warn_pref
@@ -1002,7 +1004,7 @@ async def archive_item_ui(
 
     try:
         archived = await _execute(request, action)
-    except _NOT_FOUND_ERRORS as exc:
+    except _DOMAIN_ERRORS as exc:
         _raise_http(exc)
 
     logger.info(
@@ -1052,7 +1054,7 @@ async def restore_item_ui(
 
     try:
         restored_item, archived = await _execute(request, action)
-    except _NOT_FOUND_ERRORS as exc:
+    except _DOMAIN_ERRORS as exc:
         _raise_http(exc)
 
     logger.info(

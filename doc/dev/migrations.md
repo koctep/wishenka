@@ -35,6 +35,13 @@ Revision chain (linear):
 3. `add_display_order` - `wl_items.display_order INTEGER NOT NULL DEFAULT 0`.
 4. `add_item_order_index` (head) - index `idx_wl_items_order ON wl_items(wishlist_id, display_order)`.
 
+Column convention: after `upgrade_to_head()` every column above is guaranteed to exist, so the
+store and repository code reads `warn_on_delete_reserved` and `display_order` directly. Do not
+probe rows with `hasattr`/`getattr` and do not substitute defaults for a missing column. A missing
+column is a schema bug and surfaces as an `AttributeError` (HTTP 500), not as a silent default.
+Keep `None` guards for values that are nullable in the database. A new column goes in through a new
+revision, see [Adding a new revision](#adding-a-new-revision).
+
 Startup flow (`WishlistStore.initialize()` -> `upgrade_to_head()` -> `upgrade_to_head_sync()`,
 run in `asyncio.to_thread` so the event loop is not blocked):
 

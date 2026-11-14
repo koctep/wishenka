@@ -378,9 +378,7 @@ class WishlistStore:
         l_rows = (await conn.execute(l_stmt)).all()
         for r in l_rows:
             warn_pref = (
-                bool(r.warn_on_delete_reserved)
-                if hasattr(r, "warn_on_delete_reserved") and r.warn_on_delete_reserved is not None
-                else True
+                bool(r.warn_on_delete_reserved) if r.warn_on_delete_reserved is not None else True
             )
             wl = Wishlist(
                 id=int(r.id),
@@ -432,11 +430,7 @@ class WishlistStore:
         for ir in i_rows:
             rec_uid = int(ir.recipient_user_id) if ir.recipient_user_id is not None else None
             price = int(ir.price) if ir.price is not None else None
-            disp_order = (
-                int(ir.display_order)
-                if hasattr(ir, "display_order") and ir.display_order is not None
-                else 0
-            )
+            disp_order = int(ir.display_order) if ir.display_order is not None else 0
             item = WishItem(
                 id=int(ir.id),
                 wishlist_id=int(ir.wishlist_id),
@@ -890,7 +884,7 @@ class WishlistStore:
         if wishlist_row is None:
             raise WishlistNotFoundError(f"Wishlist {item_row.wishlist_id} not found")
 
-        warn_raw = getattr(wishlist_row, "warn_on_delete_reserved", None)
+        warn_raw = wishlist_row.warn_on_delete_reserved
         wishlist = Wishlist(
             id=int(wishlist_row.id),
             owner_id=int(wishlist_row.owner_id),

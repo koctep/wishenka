@@ -41,9 +41,7 @@ def _row_to_wishlist(row: Row[Any]) -> Wishlist:
     created = _parse_dt(row.created_at) or datetime.now(UTC)
     updated = _parse_dt(row.updated_at) or datetime.now(UTC)
     warn_pref = (
-        bool(row.warn_on_delete_reserved)
-        if hasattr(row, "warn_on_delete_reserved") and row.warn_on_delete_reserved is not None
-        else True
+        bool(row.warn_on_delete_reserved) if row.warn_on_delete_reserved is not None else True
     )
     return Wishlist(
         id=int(row.id),
@@ -99,7 +97,7 @@ def _row_to_item(row: Row[Any]) -> WishItem:
         store_icon_url=str(row.store_icon_url) if row.store_icon_url is not None else None,
         priority=ItemPriority(row.priority),
         category=str(row.category) if row.category is not None else None,
-        display_order=int(getattr(row, "display_order", 0) or 0),
+        display_order=int(row.display_order or 0),
         is_archived=bool(row.is_archived),
         created_at=created,
         updated_at=updated,
