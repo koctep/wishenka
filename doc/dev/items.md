@@ -546,6 +546,10 @@ WishlistError
   $$\text{available\_quantity} = \max(0, \text{quantity} - \text{received\_quantity} - \text{reserved\_quantity})$$
   A new promise or a larger one that would make this remainder negative raises `InsufficientQuantityError`. The earlier promise stays as it was.
 - **Receipt cap**: `record_item_fulfillment` adds received units up to requested minus units already received. It does not close the promise and is not limited by occupied units. After a successful receipt, occupied plus received may exceed the requested quantity. A later promise still uses the free remainder.
+
+> **Planned change (WISHENKA-22 spec, not yet implemented):** `record_item_fulfillment`
+> will also refuse an archived wish, a wish on an archived or deleted list and a wish with
+> nothing remaining, and will write a dated receipt record. See [gift-receipt.md](gift-receipt.md).
 - **Reduction Lock**: A wishlist creator or editor cannot reduce the requested `quantity` below occupied plus received:
   $$\text{requested\_quantity} \ge \text{reserved\_quantity} + \text{received\_quantity}$$
   Attempting to reduce below this threshold raises [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L44) and returns HTTP 409 Conflict. The wish-scoped transaction rolls back, so the stored quantity stays at the last commit.
@@ -569,6 +573,11 @@ WishlistError
 - **Booking & Mutation Freeze**: Archived items cannot be booked or edited; attempting to modify an archived item raises [`WishlistArchivedError`](file:///home/src/wishenka/wishlists/exceptions.py#L18) (HTTP 409 Conflict).
 - **Listing Exclusion**: Archived items are hidden from default item listings (`include_archived=False`) and excluded from active reordering permutations.
 - **Tail Restoration**: Restoring an item (`POST /api/wishlists/{wishlist_id}/items/{item_id}/restore`) unsets `is_archived = False` and sets its `display_order` to `max(active_orders, default=-1) + 1`, appending it cleanly to the end of the active list.
+
+> **Planned change (WISHENKA-22 spec, not yet implemented):** for a wish with received units,
+> archive and restore will act on the unreceived part only, archive will be refused for a fully
+> received wish, and the active-list predicate becomes "not archived and remaining above zero".
+> See [gift-receipt.md](gift-receipt.md).
 
 ### 4. Collaborative Wishlist Targeting & Surprise Invariant
 

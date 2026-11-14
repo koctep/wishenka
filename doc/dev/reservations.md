@@ -121,6 +121,10 @@ stateDiagram-v2
   `ReservationStatus.COMPLETED`. There is no `FULFILLED` status. The promise
   stays `ACTIVE` or `PURCHASED`.
 
+> **Planned change (WISHENKA-22 spec, not yet implemented):** this stays true, and receipt will
+> also notify each giver with an open promise through an outbox. See
+> [gift-receipt.md](gift-receipt.md).
+
 > [!IMPORTANT]
 > Both `ACTIVE` and `PURCHASED` states contribute to
 > [`reserved_quantity`](file:///home/src/wishenka/wishlists/models.py#L122).
@@ -522,6 +526,10 @@ quantity plus the wish's `available_quantity`. The selected option
 is this row's quantity. Cancel, purchase, and undo are buttons with
 `hx-post` and `hx-swap="none"`. HTMX does not insert the JSON body.
 
+> **Planned change (WISHENKA-22 spec, not yet implemented):** the cabinet will also show the four
+> actions and a «received» marker for a fully received wish on an active list, and the wish card
+> will show no giver controls for it. See [gift-receipt.md](gift-receipt.md).
+
 An archived list keeps the row and «К желанию», shows
 «Вишлист в архиве», and omits the four actions. The four writes on
 an archived list return HTTP 409 (`WishlistArchivedError`). A
@@ -863,6 +871,10 @@ All reservation operations emit structured logs using `wishenka.wishlists` logge
 | `invalid_reservation_transition` | WARNING | `event`, `reservation_id`, `from_status`, `to_status` | Emitted on invalid status leap (e.g. from `CANCELLED` to `PURCHASED`) |
 | `reservation_already_cancelled` | WARNING | `event`, `reservation_id`, `user_id`, `actor_id` | Emitted when cancelling an already cancelled reservation |
 | `reservation_not_found` | WARNING | `event`, `reservation_id`, `actor_id` | Emitted when accessing non-existent reservation ID |
+
+> **Planned change (WISHENKA-22 spec, not yet implemented):** WISHENKA-23 either keeps
+> `item_fulfilled` as is or renames it to `receipt_recorded`, never emitting both for one act.
+> See [gift-receipt.md](gift-receipt.md).
 
 > [!NOTE]
 > In compliance with the Surprise Invariant, log records emitted during recipient interactions (e.g. viewing personal wishlist details) never include gifter identities, reservation IDs, or booking status.

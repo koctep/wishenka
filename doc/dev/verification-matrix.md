@@ -434,6 +434,11 @@ passes on that absence. It does not look for notice copy.
 
 Gap: none. A later story that adds a sender stays on this row.
 
+**Planned change (WISHENKA-22 spec, not yet implemented):** WISHENKA-23 will replace the
+absence check for `notification_outbox` and `user_notification_settings` with a stronger
+recipient-walk check, because the tables will exist. See
+[gift-receipt.md](gift-receipt.md).
+
 ### S7. Public list answer for an unidentified visitor
 
 The public list answer omits the free remainder. It also omits the

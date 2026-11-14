@@ -74,6 +74,10 @@
 - `user_notification_settings` — настройки оповещений.
 - `notification_outbox` — очередь отправки сообщений ботом.
 
+**Planned change (WISHENKA-22 spec, not yet implemented):** уведомление дарителям о получении
+подарка станет ещё одним производителем в `notification_outbox`, а настройки будут действовать
+на двух уровнях (пользователь и вишлист). См. [`doc/dev/gift-receipt.md`](gift-receipt.md).
+
 ---
 
 ## 4. Документация подсистем и доменов
