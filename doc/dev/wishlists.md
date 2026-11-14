@@ -279,13 +279,18 @@ directory structure follows a modular component layout:
 
 ```
 wishenka/web/templates/
-├── base.html             # Master layout with viewport, CSS, Telegram SDK, HTMX
+├── base.html             # Master layout with viewport, CSS, Telegram SDK, HTMX, wishlist.js
 ├── share_wishlist.html   # Full page public view for gifters and recipients
 ├── invite_preview.html   # Full page collaborator preview and friendly error screen
 └── partials/
     ├── item_card.html    # Gift item card partial with Surprise Invariant
     ├── member_list.html  # Collaborator member list with owner removal actions
     └── share_modal.html  # Modal dialog for link sharing and regeneration
+
+wishenka/web/static/
+├── miniapp.css           # Shared styles
+├── miniapp.js            # Mini App SPA script (loaded only by the Mini App shell)
+└── wishlist.js           # Card toggle and drag-and-drop reorder (loaded by base.html)
 ```
 
 #### Template Specifications
@@ -293,12 +298,18 @@ wishenka/web/templates/
 1. **`base.html`**:
    - Master document providing HTML5 doctype, UTF-8 charset, responsive viewport metadata.
    - Loads Telegram Web App SDK (`telegram-web-app.js`) and HTMX 1.9.12 runtime.
+   - Loads the static script `<script src="/static/wishlist.js" defer>` after HTMX. It owns the
+     wish-card toggle and drag-and-drop reorder; the wishlist id for reordering comes from
+     `data-wishlist-id` on `#items-list` (`wishlist_detail.html` and `share_wishlist.html`).
+     Details: [miniapp.md](miniapp.md#981-client-script-staticwishlistjs-wishenka-108).
+     The CSRF and reservation handlers stay in one inline script in `base.html`.
    - Provides Jinja2 template extension blocks: `{% block title %}` and `{% block content %}`.
 
 2. **`share_wishlist.html`**:
    - Extends `base.html`.
    - Displays wishlist header (title, owner name, description, event title and date).
-   - Iterates over `wishlist.items` and includes `partials/item_card.html` for each item.
+   - Iterates over `wishlist.items` and includes `partials/item_card.html` for each item;
+     the list container is `<section id="items-list" data-wishlist-id="{{ wishlist.id }}">`.
    - Shows empty-state guidance if no items are present.
 
 3. **`invite_preview.html`**:
@@ -313,8 +324,8 @@ wishenka/web/templates/
    - Encapsulates an individual gift item inside
      `<div class="card item-card" id="item-card-{{ item.id }}">`.
    - The compact row is `.item-card-summary` (`aria-expanded="false"`). The expanded body is
-     `.item-card-details`, rendered with `hidden`. `toggleWishCard` in `base.html` clears
-     `hidden` to expand the same card.
+     `.item-card-details`, rendered with `hidden`. The delegated toggle in `static/wishlist.js`
+     clears `hidden` to expand the same card (no inline handlers on the card).
    - Displays item title, optional formatted price with currency, description, quantity, and
      external link (`rel="noopener noreferrer"`).
    - Giver controls are one `.item-giver` block in the summary, guarded by

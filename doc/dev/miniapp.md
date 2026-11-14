@@ -71,6 +71,10 @@ wishlists domain service and security middleware to satisfy four primary goals:
   parameters (`startapp`, hash/query), manages views, and performs API calls with session cookies
   and CSRF headers. Uses safe DOM manipulation (`textContent`) rather than HTML string interpolation
   to prevent Cross-Site Scripting (XSS).
+- **Wishlist Page Script (`static/wishlist.js`)**: Second static script, loaded by `base.html` on
+  server-rendered wishlist pages (not by the Mini App shell, which loads only `miniapp.js`).
+  Implements the card toggle and drag-and-drop reorder. See
+  [9.8.1](#981-client-script-staticwishlistjs-wishenka-108).
 - **Security Middleware (`BrowserSecurityMiddleware`)**: Defined in
   [`wishenka.web.security`](../../wishenka/web/security.py). Protects cookie-authenticated mutation
   requests against Cross-Site Request Forgery (CSRF) and Cross-Origin attacks.
@@ -440,16 +444,18 @@ wish items without full-page reloads.
   includes `partials/item_card.html` per item (`is_first`/`is_last` drive disabled move buttons).
   Archived items render below via `partials/archived_items_section.html` (owner/editor only).
 - **Compact/expanded**: `.item-card-summary` is the compact row (`aria-expanded` starts `false`).
-  `.item-card-details` is rendered with `hidden`. `toggleWishCard(event, summary)` in `base.html`
-  clears `hidden` to expand and sets it to collapse. Clicks on `a, button, input, select,
-  textarea` or any `[data-no-toggle]` element do not toggle the card. Giver controls are
+  `.item-card-details` is rendered with `hidden`. The delegated toggle in
+  [`wishlist.js`](../../wishenka/web/static/wishlist.js) clears `hidden` to expand and sets it to
+  collapse. Clicks on
+  `a, button, input, select, textarea` or any `[data-no-toggle]` element do not toggle the card.
+  Giver controls are
   `.item-giver` inside that summary, so they stay on screen while the card is expanded. A
   successful promise refresh keeps an expanded card expanded by clearing `hidden` on the new
   details. The control list, own line, recipient omission, HTTP 503 busy sentence, and cookie
   CSRF behavior are in [reservations.md](reservations.md#6-wish-card-giver-controls).
 - **Manual order** (editors only):
   - Buttons: `POST /web/wishlists/{id}/items/{item_id}/move?direction=up|down` (`move_item_ui`).
-  - Drag-and-drop: inline JS in `base.html` handles native HTML5 `dragstart/dragover/drop` on
+  - Drag-and-drop: `wishlist.js` handles native HTML5 `dragstart/dragover/drop` on
     `.item-card[draggable="true"]` inside `#items-list`, then posts the full order to
     `POST /web/wishlists/{id}/items/reorder` with repeated form field `item_ids` (`reorder_items_ui`).
   - Both return the re-rendered `partials/items_list.html` (`hx-target="#items-list"`). The submitted
@@ -458,6 +464,57 @@ wish items without full-page reloads.
   `partials/item_archive_modal.html`; it warns about active reservations when the wishlist flag
   `warn_on_delete_reserved` is true (default `1`; column added to `wl_lists` by the Alembic revision `add_warn_on_delete_reserved`, see [migrations.md](migrations.md)).
   `POST .../archive` and `.../restore` also refresh `#archived-items-section` via an OOB swap.
+
+##### 9.8.1. Client Script (`static/wishlist.js`, WISHENKA-108)
+
+[`wishenka/web/static/wishlist.js`](../../wishenka/web/static/wishlist.js) replaced the toggle and
+drag-and-drop code that used to be inline in `base.html` and the `onclick`/`onkeydown` attributes of
+`partials/item_card.html`. It is a classic script wrapped in an IIFE with `'use strict'`; it exposes
+no globals (`toggleWishCard` is no longer a global function).
+
+- **Loading**: `base.html` has `<script src="/static/wishlist.js" defer></script>` after the htmx
+  and `json-enc` tags and before the remaining inline script. `defer` runs it after parsing, so
+  the order after htmx is kept. All listeners sit on `document` (delegation), so cards that
+  appear after an htmx swap or `swapWishCard` need no re-binding.
+- **Toggle**: delegated `click` and `keydown` (`Enter` or Space) on the closest
+  `.item-card-summary`. The event is ignored when its target is inside
+  `a, button, input, select, textarea, [data-no-toggle]`. `preventDefault()` runs only for
+  `keydown` on a non-interactive target, so Space does not scroll the page. The handler flips
+  `aria-expanded` on the summary and `hidden` on the sibling `.item-card-details`.
+- **Drag-and-drop reorder**: delegated `dragstart`, `dragover`, `drop`, `dragend` on
+  `.item-card[draggable="true"]` inside `#items-list`. On `drop` the script moves the dragged card
+  before or after the target (by the vertical midpoint of the target) and posts the card order
+  (`data-item-id` of every `.item-card`) with `htmx.ajax('POST', ...)`, target `#items-list`,
+  swap `innerHTML`, field `item_ids`.
+- **Wishlist id**: read at drop time from `#items-list[data-wishlist-id]`, rendered by
+  `wishlist_detail.html` and `share_wishlist.html` as `{{ wishlist.id }}`. The value must match
+  `^\d+$`. The URL is no longer derived from `window.location`. No htmx swap replaces
+  `#items-list` itself (all swaps target its inner HTML), so the attribute survives re-renders.
+- **Skip path**: if the id is missing or not numeric, or `window.htmx` is not loaded, the card is
+  not moved, no request is sent, and the script writes one `console.warn`. The text is
+  `wishlist.js: reorder skipped: ` followed by the causes joined with `; `. The causes are
+  `#items-list[data-wishlist-id] is not numeric (got "<value>")` and
+  `window.htmx is not loaded (CDN blocked or script order)`. Nothing is logged on the server for
+  this case.
+- **Server events** for the reorder request (unchanged): `ui_items_reordered` (INFO,
+  `POST .../items/reorder`), `ui_item_moved` (INFO, move buttons) and `ui_items_reorder_rejected`
+  (WARNING, `reason=invalid_permutation`, HTTP 400).
+- **Caching**: `BrowserSecurityMiddleware` sends `Cache-Control: no-store` on every response,
+  including `/static/*`, so `wishlist.js` is downloaded on each page load and a fix reaches users
+  at once. No cache-busting URL is used. Revisiting the policy is WISHENKA-139.
+- **Still inline**: `base.html` keeps one inline `<script>` (CSRF fetch, reservation handlers,
+  `swapWishCard`), and the modal partials keep inline `onclick` handlers
+  (`item_edit_modal.html`, `item_archive_modal.html`, `item_preview_card.html`). Moving them out
+  is WISHENKA-140.
+- **Known limits**: the reorder URL `/web/wishlists/{id}/items/reorder` is hardcoded in the script
+  (WISHENKA-141). HTML5 drag events do not fire on most touch devices, so touch reordering relies
+  on the move buttons until WISHENKA-109.
+- **Tests**: `tests/test_wishlist_static_script.py` checks that `/static/wishlist.js` is served,
+  that `base.html` no longer inlines toggle or drag-and-drop code, that the cards carry no inline
+  handlers, that `#items-list` has `data-wishlist-id`, and that no hx-swap replaces
+  `#items-list`. Assertions on the script body are string matches, so they are brittle (a comment
+  can satisfy them); there is no automated run of the JS or of the `console.warn` path. Browser
+  tests are WISHENKA-110.
 
 ---
 

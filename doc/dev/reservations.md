@@ -332,10 +332,11 @@ loaded from `base.html`) so the body is `ReservationQuantityDTO`.
 `Изменить` also sets `hx-include="closest form"` on the button. Every
 promise control sets `hx-swap="none"`, so HTMX leaves the JSON body out of
 the card. The refresh script below decides whether to replace the card.
-`.item-giver` and its controls set `data-no-toggle`. `toggleWishCard` in
-`base.html` ignores clicks on `a`, `button`, `input`, `select`,
-`textarea`, and `[data-no-toggle]`, so a control click does not collapse
-an expanded card before that refresh.
+`.item-giver` and its controls set `data-no-toggle`. The delegated toggle in
+[`wishlist.js`](../../wishenka/web/static/wishlist.js) ignores clicks on `a`,
+`button`, `input`, `select`, `textarea`, and `[data-no-toggle]`, so a control
+click does not collapse an expanded card before that refresh. The toggle is
+described in [miniapp.md](miniapp.md#981-client-script-staticwishlistjs-wishenka-108).
 
 #### Refresh
 

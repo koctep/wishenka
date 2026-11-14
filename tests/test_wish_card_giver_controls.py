@@ -499,7 +499,7 @@ def _restores_open_details(after_swap: str, flag: str) -> bool:
 def assert_expanded_refresh_clears_hidden(page_html: str) -> None:
     """Require the served page to reopen details after a successful card swap."""
     script = inline_script(page_html)
-    assert "toggleWishCard" in script, "could not read the served page script"
+    assert "swapWishCard" in script, "could not read the served page script"
     swap_at = script.find("outerHTML")
     assert swap_at != -1, "served page has no outerHTML refresh; expanded details stay hidden"
     reads = list(_ARIA_READ.finditer(script, 0, swap_at))

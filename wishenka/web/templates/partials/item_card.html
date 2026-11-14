@@ -10,11 +10,7 @@
          role="button"
          tabindex="0"
          aria-expanded="false"
-         aria-controls="item-details-{{ item.id }}"
-         onclick="toggleWishCard(event, this)"
-         onkeydown="if (event.key === 'Enter' || event.key === ' ') {
-                        toggleWishCard(event, this);
-                    }">
+         aria-controls="item-details-{{ item.id }}">
         <div class="flex items-center gap-3">
             {% if item.image_url %}
             <img src="{{ item.image_url }}"

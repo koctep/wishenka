@@ -133,7 +133,11 @@ def test_vertical_list_compact_and_inline_expanded_card_anatomy(
     # Compact summary structure and inline toggle attributes
     assert "item-card-summary" in html
     assert 'aria-expanded="false"' in html
-    assert "toggleWishCard" in html
+    assert 'src="/static/wishlist.js"' in html
+    assert "onclick" not in html
+    static_js = client.get("/static/wishlist.js")
+    assert static_js.status_code == 200
+    assert "toggleWishCard" in static_js.text
     assert f'id="item-card-{item_rich_id}"' in html
     assert f'id="item-card-{item_fallback_id}"' in html
 
