@@ -8,9 +8,10 @@ gains touch rules and drop-indicator classes.
 Groups A, C and D are red on the current code; group B and the marked guards
 are green by design and protect behaviour that must survive the change.
 
-The script and stylesheet checks are string/regex inspections only: they prove
-the tokens and rules exist, not that the gesture works. Gesture behaviour is
-covered by the manual checklist and a later browser test (WISHENKA-110).
+The remaining script and stylesheet checks are string/regex inspections only (Telegram SDK
+tokens, ``-webkit-touch-callout``, guards). Gesture behaviour and computed styles are covered by
+the browser tests of WISHENKA-110 (``test_wishlist_*_browser.py``); the string checks they
+replaced were removed.
 
 No network and no browser: only ``TestClient`` requests and text inspection.
 """
@@ -43,40 +44,20 @@ EXPECTED_EXTERNAL_SCRIPTS = {
     "https://unpkg.com/htmx.org@1.9.12/dist/ext/json-enc.js",
 }
 
-SCRIPT_TOKENS = [
-    "pointerdown",
-    "pointermove",
-    "pointerup",
-    "pointercancel",
-    "lostpointercapture",
-    "setPointerCapture",
-    "elementFromPoint",
-    "'touch'",
-    "'Escape'",
-    "requestAnimationFrame",
-    "visibilitychange",
-    "htmx:beforeSwap",
+# Telegram SDK tokens stay string checks: the SDK is out of the browser tests' scope
+# (WISHENKA-110, item 19); remove with WISHENKA-143. Gesture tokens (pointer events, Escape,
+# visibilitychange, htmx:beforeSwap, class names, submitReorder ...) are covered by the browser
+# tests in ``test_wishlist_touch_reorder_browser.py``.
+SDK_TOKENS = [
     "disableVerticalSwipes",
     "enableVerticalSwipes",
     "isVersionAtLeast",
     "HapticFeedback",
-    ".item-drag-handle",
-    "is-touch-dragging",
-    "drop-before",
-    "drop-after",
-    "pointerType",
-    "submitReorder",
-    "isAfterMidpoint",
 ]
 
-HANDLE_DECLARATIONS = [
-    "touch-action: none",
-    "user-select: none",
-    "-webkit-touch-callout: none",
-    "min-width: 44px",
-]
-
-FEEDBACK_CLASSES = [".is-touch-dragging", ".drop-before", ".drop-after"]
+# ``-webkit-touch-callout`` is iOS-only and cannot be seen in computed styles of desktop Chromium;
+# touch-action, user-select and the 44px size are checked as computed styles in the browser tests.
+HANDLE_DECLARATIONS = ["-webkit-touch-callout: none"]
 
 
 @dataclass(frozen=True)
@@ -163,14 +144,6 @@ def css_declarations(css: str, selector: str) -> str | None:
     return " ".join(" ".join(body.split()) for body in bodies)
 
 
-def css_has_rule_for(css: str, class_selector: str) -> bool:
-    """Return True when any rule selector mentions ``class_selector``."""
-    for match in re.finditer(r"([^{}]+)\{[^{}]*\}", css):
-        if re.search(re.escape(class_selector) + r"(?![\w-])", match.group(1)):
-            return True
-    return False
-
-
 # --- A. Owner markup: handle moves into the summary (red) ----------------------
 
 
@@ -238,12 +211,12 @@ def test_no_new_third_party_scripts(seeded: Seeded) -> None:
 # --- C. /static/wishlist.js tokens (red; string checks only) -------------------
 
 
-@pytest.mark.parametrize("token", SCRIPT_TOKENS)
-def test_wishlist_script_contains_token(seeded: Seeded, token: str) -> None:
-    """wishlist.js contains the token required by the touch-drag design.
+@pytest.mark.parametrize("token", SDK_TOKENS)
+def test_wishlist_script_contains_sdk_token(seeded: Seeded, token: str) -> None:
+    """wishlist.js contains the Telegram SDK token required by the touch-drag design.
 
-    This is a string check: it proves the token is present, not that the gesture
-    behaves correctly. Red today: none of these tokens exist in the script.
+    This is a string check: it proves the token is present, not that the SDK integration
+    behaves correctly (out of scope of the browser tests, WISHENKA-143).
     """
     body = fetch_static(seeded, "wishlist.js")
     assert token in body, f"wishlist.js lacks {token!r}"
@@ -264,21 +237,10 @@ def test_wishlist_script_has_single_reorder_submit_point(seeded: Seeded) -> None
 
 @pytest.mark.parametrize("declaration", HANDLE_DECLARATIONS)
 def test_css_drag_handle_declares_touch_rules(seeded: Seeded, declaration: str) -> None:
-    """``.item-drag-handle`` rule carries the touch declaration.
-
-    Red today for all but ``touch-action: none`` (already present, so that
-    parametrized case is a green guard): the rule lacks the rest.
-    """
+    """``.item-drag-handle`` rule carries the iOS-only touch declaration (no browser check)."""
     block = css_declarations(fetch_static(seeded, "miniapp.css"), ".item-drag-handle")
     assert block is not None, "no .item-drag-handle rule"
     assert declaration in block, f".item-drag-handle lacks {declaration!r}: {block!r}"
-
-
-@pytest.mark.parametrize("class_selector", FEEDBACK_CLASSES)
-def test_css_has_drag_feedback_rule(seeded: Seeded, class_selector: str) -> None:
-    """miniapp.css defines a rule for each drag feedback class (red today)."""
-    css = fetch_static(seeded, "miniapp.css")
-    assert css_has_rule_for(css, class_selector), f"no rule for {class_selector}"
 
 
 def test_css_summary_does_not_block_touch_scroll(seeded: Seeded) -> None:

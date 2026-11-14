@@ -577,22 +577,26 @@ no globals (`toggleWishCard` is no longer a global function).
     from a long press on Chrome Android, pull-to-refresh and the autoscroll speed are not verified
     on real devices; the manual checklist is WISHENKA-143. Tidying of the script (long lines,
     module split, palette variables) is WISHENKA-144.
-- **Tests**: `tests/test_wishlist_static_script.py` checks that `/static/wishlist.js` is served,
-  that `base.html` no longer inlines toggle or drag-and-drop code, that the cards carry no inline
-  handlers, that `#items-list` has `data-wishlist-id`, and that no hx-swap replaces
-  `#items-list`. Assertions on the script body are string matches, so they are brittle (a comment
-  can satisfy them); there is no automated run of the JS or of the `console.warn` path. Browser
-  tests are WISHENKA-110. `tests/test_wishlist_touch_reorder.py` (WISHENKA-109) checks, by string
-  matches on `wishlist.js` and `miniapp.css` and by markup checks on `partials/item_card.html`,
-  that the handle is in the summary only for editors, that the script uses the Pointer Events,
-  Telegram and class tokens, and that the CSS declarations exist. These checks are weak by design
-  (a comment can satisfy them) and do not run the gesture. No behavioural test is committed
-  (WISHENKA-110); the gesture was checked once with a throwaway Chromium touch-emulation run, which
-  is not a real touch stack.
+- **Tests**: behavioural browser tests drive a real headless Chromium over CDP, offline, against a
+  per-test server and database: `tests/test_wishlist_cards_browser.py` (card toggle),
+  `tests/test_wishlist_mouse_reorder_browser.py` (mouse drag-and-drop) and
+  `tests/test_wishlist_touch_reorder_browser.py` (touch reorder and its cancel paths), 53 tests in
+  all. Their design, fixtures, fidelity limits, diagnostics and mutation proof are in
+  [testing.md](testing.md). The htmx used there is an offline stub and touch is synthesized, so
+  neither the real htmx wiring nor a real touch stack is covered. The string and CSS guards that
+  were kept are weak by design (a comment can satisfy them): `tests/test_wishlist_static_script.py`
+  checks that `/static/wishlist.js` is served, that `base.html` no longer inlines toggle or
+  drag-and-drop code, that the cards carry no inline handlers, that `#items-list` has
+  `data-wishlist-id` and that no hx-swap replaces `#items-list`; `tests/test_wishlist_touch_reorder.py`
+  (WISHENKA-109) checks the four Telegram SDK tokens in `wishlist.js`, `-webkit-touch-callout: none`,
+  that the summary does not block touch scrolling, the single `submitReorder` call point and the
+  markup of `partials/item_card.html` (the handle is in the summary only for editors).
 - **Related debts**: WISHENKA-139 (`no-store` caching of the growing `wishlist.js`), WISHENKA-140
   (inline scripts; reuse the Telegram SDK wrapper), WISHENKA-141 (hardcoded reorder URL; the change
   stays inside `submitReorder`), WISHENKA-142 (list jump when an expanded card is dragged),
-  WISHENKA-143 (real-device checklist), WISHENKA-144 (tidying).
+  WISHENKA-143 (real-device checklist), WISHENKA-144 (tidying), WISHENKA-145 (real htmx smoke test
+  instead of the stub), WISHENKA-146 (shared CDP driver for the older browser modules, `websockets`
+  range), WISHENKA-147 (CI upload of failure diagnostics).
 
 ---
 

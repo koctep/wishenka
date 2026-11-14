@@ -28,7 +28,6 @@ from wishenka.wishlists.service import WishlistService
 pytestmark = pytest.mark.timeout(30)
 
 OWNER_ID = 101
-EXCLUSION_SELECTOR = "a, button, input, select, textarea, [data-no-toggle]"
 PAGES = ["owner", "share"]
 
 
@@ -121,27 +120,15 @@ def test_page_loads_wishlist_script_deferred_after_htmx(seeded: Seeded, page: st
 
 
 def test_static_wishlist_script_content(seeded: Seeded) -> None:
-    """GET /static/wishlist.js serves the toggle and DnD behaviour."""
+    """GET /static/wishlist.js is served as JavaScript.
+
+    The behaviour (toggle, drag-and-drop, reorder request, wishlist id source) is checked in
+    a real browser by ``test_wishlist_cards_browser.py`` and the ``*_reorder_browser.py`` modules
+    (WISHENKA-110), not by searching the source text.
+    """
     resp = seeded.client.get("/static/wishlist.js")
     assert resp.status_code == 200
     assert "javascript" in resp.headers["content-type"]
-    body = resp.text
-    for marker in (
-        "toggleWishCard",
-        EXCLUSION_SELECTOR,
-        "'Enter'",
-        "' '",
-        ".item-card-summary",
-        "dragstart",
-        "dragover",
-        "drop",
-        "dragend",
-        "/items/reorder",
-    ):
-        assert marker in body, f"wishlist.js lacks {marker!r}"
-    assert "wishlistId" in body or "data-wishlist-id" in body
-    assert "location.pathname" not in body
-    assert "window.location" not in body
 
 
 # --- C. item_card without inline handlers --------------------------------------

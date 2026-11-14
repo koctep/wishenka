@@ -3,8 +3,9 @@
 ## Overview
 
 Тесты с маркером `browser` управляют настоящим Chromium/Chrome через Chrome DevTools Protocol (CDP):
-`tests/test_wishlist_management_browser.py` и `tests/test_wishlist_sections_ui.py`. Для них нужен
-исполняемый браузер. Раньше его отсутствие приводило к пропуску тестов и «зелёному» прогону.
+`tests/test_wishlist_management_browser.py`, `tests/test_wishlist_sections_ui.py` и три модуля
+поведенческих тестов списка желаний (раздел «Browser UI-тесты списка желаний (WISHENKA-110)» ниже).
+Для них нужен исполняемый браузер. Раньше его отсутствие приводило к пропуску тестов и «зелёному» прогону.
 
 Теперь поведение такое:
 
@@ -181,9 +182,191 @@ export WISHENKA_CHROMIUM_BIN=/path/to/chrome
 Выполните `WISHENKA_SKIP_BROWSER_TESTS=1 make test`. В CI это не действует; не используйте опции
 отбора вроде `-m "not browser"` (см. выше).
 
+## Browser UI-тесты списка желаний (WISHENKA-110)
+
+Поведенческие тесты `wishlist.js` и карточек желаний: они запускают настоящий headless Chromium,
+открывают страницы приложения и проверяют результат в DOM и в запросах к серверу. Они заменили
+большую часть слабых строковых проверок скрипта и CSS (что осталось, см. ниже). Playwright не
+используется, хотя в заголовке задачи он назван: драйвер собственный (решение и причины в
+`ai-tasks/WISHENKA-110/20-architecture.md`, пересмотр: см. «Выбор: CDP вместо Playwright»).
+
+### Что покрыто
+
+Всего 53 теста в трёх модулях; в каждом `pytestmark = [pytest.mark.timeout(45), pytest.mark.browser]`.
+
+| Модуль | Тестов | Что проверяет |
+| --- | --- | --- |
+| `tests/test_wishlist_cards_browser.py` | 21 | Раскрытие карточек: клик, Enter и Space (у Space `preventDefault` и нет прокрутки), прочие клавиши не раскрывают, соседние карточки не затрагиваются, вложенные элементы из `TOGGLE_EXCLUSION` не раскрывают, раскрытие работает после замены списка через `htmx.ajax`, страница по общей ссылке (share page), офлайн-гарантия (`test_page_loads_offline_with_real_assets`). |
+| `tests/test_wishlist_mouse_reorder_browser.py` | 13 | Нативный HTML5 drag-and-drop мышью: сброс до и после середины цели, один запрос `/items/reorder` с полным порядком, идентификатор списка берётся из `data-wishlist-id`, сброс на себя или вне списка ничего не делает, пропуск отправки с ровно одним `console.warn`, повторная перестановка без перезагрузки, на share page нет ручки и перестановки. |
+| `tests/test_wishlist_touch_reorder_browser.py` | 19 | Перестановка касанием за ручку: перетаскивание и обратная связь, отмена (`pointercancel`, `lostpointercapture`, `blur`, `visibilitychange`, замена списка по `htmx:beforeSwap`, Escape), второй палец, вертикальный свайп вне ручки прокручивает страницу, один запрос на жест, следующий тап после окна подавления клика (400 мс) раскрывает карточку, вычисленные стили ручки. |
+
+### Устройство
+
+| Файл | Назначение |
+| --- | --- |
+| `tests/browser_cdp.py` | Собственный драйвер на `websockets.sync` без потоков: один читатель событий. `CdpBrowser` (запуск Chromium с временным профилем, `new_page`, `stop`: terminate, `wait(5)`, kill) и `CdpPage` (навигация, `evaluate`, `wait_for`, клик, клавиши, мышь и нативный drag-and-drop через `Input.setInterceptDrags`, касания с несколькими пальцами, `snapshot`, `screenshot`). Ожидания ограничены по времени; `PageWaitTimeout` наследует `AssertionError`. |
+| `tests/browser_helpers.py` | Общие помощники трёх модулей: `Seeded`, селекторы (`card`, `summary`, `title`, `handle`), `assert_order`, `assert_cards`, `assert_clean_console`, `assert_gesture_clean`, `begin_touch_drag`, `retarget_touch_drag`, `wait_suppression_window_over` и др. |
+| `tests/browser_assets/htmx_stub.js` | Офлайн-заглушка htmx (собственный код): только `htmx.ajax`. |
+| `tests/conftest.py` | Фикстуры (ниже). |
+
+Фикстуры `tests/conftest.py`:
+
+- `chromium_browser` (сессия): один Chromium на весь прогон; путь даёт `chromium_executable`, поэтому
+  при отсутствии браузера тесты падают с сообщением WISHENKA-124.
+- `migrated_db_template` (сессия): база с применёнными миграциями Alembic создаётся один раз;
+  в каждый тест копируется только файл `.db`.
+- `wishlist_server` (тест): `uvicorn.Server` в потоке на `127.0.0.1` со случайным портом и своей копией
+  базы; остановка ограничена по времени (`SERVER_STOP_TIMEOUT`).
+- `seed_wishlist(titles, *, quantities=None)`: фабрика, создаёт список и желания через REST (httpx);
+  возвращает `Seeded` с идентификаторами и токенами.
+- `wishlist_page(seeded, *, as_user="owner" | "viewer", viewport=(412, 800))` и
+  `share_page(seeded, *, as_user=None | "viewer", viewport=(412, 800))`: фабрики, открывают вкладку
+  и страницу; касания включаются вызовом `page.enable_touch()`.
+- `_browser_pages` (тест): закрывает вкладки; при падении пишет диагностику (см. ниже).
+
+### Запуск
+
+```bash
+make deps-browser
+.venv/bin/pytest tests/test_wishlist_cards_browser.py \
+  tests/test_wishlist_mouse_reorder_browser.py \
+  tests/test_wishlist_touch_reorder_browser.py
+.venv/bin/pytest -m browser   # все браузерные тесты
+```
+
+`make test` и `make check` запускают их вместе с остальными тестами. Три модуля занимают около
+35-40 с, в CI это добавляется к шагу `make check`.
+
+### Офлайн-гарантия
+
+Тесты не ходят в сеть. `base.html` подключает три внешних адреса, драйвер перехватывает их через
+`Fetch.enable` и отвечает локально: `https://unpkg.com/htmx.org@1.9.12` отдаётся заглушкой
+`htmx_stub.js`, `.../dist/ext/json-enc.js` и `https://telegram.org/js/telegram-web-app.js` пустым
+телом (HTTP 200). Любой другой внешний запрос блокируется (`BlockedByClient`) и попадает в
+`page.external_requests`; `test_page_loads_offline_with_real_assets` проверяет, что список пуст.
+Запросы к `127.0.0.1` и `localhost` проходят и записываются в `page.requests` со статусом ответа.
+Адреса продублированы в `tests/browser_cdp.py` (`HTMX_URL`, `JSON_ENC_URL`, `TELEGRAM_URL`) и должны
+совпадать с `base.html`: при расхождении запрос блокируется, и тесты падают со снимком страницы.
+Смена версии htmx требует правки в обоих местах.
+
+### Пределы достоверности
+
+- Заглушка htmx не обрабатывает атрибуты `hx-*`, не вызывает `htmx:configRequest`, всегда делает
+  `innerHTML`-замену (значение `swap` только записывается в `window.__ajaxCalls`). Поэтому тесты,
+  которым нужна замена списка, вызывают `window.htmx.ajax(...)` явно, а не нажимают кнопки
+  перемещения. Ошибка в `hx-post`/`hx-target` кнопок или изменение событий htmx при обновлении
+  библиотеки тестами не поймаются (WISHENKA-145).
+- Аутентификация через Bearer (`Network.setExtraHTTPHeaders`), а не cookie-сессия: путь CSRF не
+  проверяется.
+- Касания синтезируются через `Input.dispatchTouchEvent`; это не настоящий стек касаний устройства.
+  Поведение в Telegram WebView, автопрокрутка у краёв и порядок вызовов Telegram SDK не
+  проверяются (чек-лист на устройствах: WISHENKA-143). `visibilitychange` и `blur` тесты
+  отправляют как синтетические события окна.
+- `label` не входит в `TOGGLE_EXCLUSION` (`a, button, input, select, textarea, [data-no-toggle]`);
+  `test_nested_controls_do_not_toggle` проверяет реальный набор и `label` не утверждает.
+- Константа окна подавления клика `CLICK_SUPPRESS_MS = 400` продублирована в
+  `tests/browser_helpers.py`; если окно в `wishlist.js` вырастет, тест следующего тапа упадёт, если
+  уменьшится, тест просто будет ждать дольше.
+
+### Диагностика при падении
+
+- В отчёт pytest падающего теста добавляется секция `Page N diagnostics` со снимком
+  `CdpPage.snapshot()`: адрес, `scrollY`, порядок и состояние карточек, классы, вызовы `ajax`,
+  последние 20 записей консоли и запросов, внешние запросы, ошибки драйвера.
+- В `tmp_path` теста записываются `diagnostics-N.txt` (тот же снимок) и `failure-N.png`
+  (скриншот), где `N` номер вкладки. Пути не печатаются; найдите их в
+  `/tmp/pytest-of-<пользователь>/` либо задайте `--basetemp`.
+- В CI эти файлы не выгружаются, снимок есть только в логе (WISHENKA-147).
+
+### Таймауты и маркеры
+
+Три новых модуля объявляют `pytestmark = [pytest.mark.timeout(45), pytest.mark.browser]`; это
+договорённость для браузерных тестов (по инфраструктурному контракту обычные модули используют 10 или
+30 с, см. `infrastructure.md`, раздел 4.1). Охранный тест
+`tests/test_browser_prerequisites.py::test_new_browser_modules_declare_marker_and_timeout` разбирает
+AST каждого `tests/test_*_browser.py`: маркер `browser` на модуле или на каждом тесте и модульный
+`timeout(45)`; он же требует наличия трёх модулей, поэтому переименование модуля нужно
+отразить в `NEW_BROWSER_MODULES`. `tests/test_wishlist_sections_ui.py` (таймаут 60 с) под
+шаблон имени не попадает. Внутри драйвера есть свои пределы: команда CDP 10 с (`COMMAND_TIMEOUT`),
+загрузка страницы 10 с, `wait_for` по умолчанию 5 с; цепочка ожиданий может превысить 45 с, и тогда
+pytest-timeout сработает раньше, чем появится сообщение `PageWaitTimeout`.
+
+### Проверка стабильности
+
+Один раз, не как гейт CI: три модуля прогнаны 10 раз подряд, 10 из 10 `53 passed`, без падений и
+нестабильных тестов; время одного прогона 34.9-39.6 с (в среднем около 37 с), после прогонов процессов
+Chromium и uvicorn не осталось. Среда: Chromium 156, Debian 13, Python 3.13. В CI прогон ещё не
+выполнялся (WISHENKA-135).
+
+### Проверка чувствительности (mutation proof)
+
+Метод: временная правка `wishenka/web/static/wishlist.js` одной мутацией, прогон трёх модулей,
+откат командой `git checkout -- wishenka/web/static/wishlist.js` в `finally`; после серии
+`git diff --exit-code -- wishenka/` пуст. Каждая мутация ловится утверждением (упавшим тестом).
+
+| Мутация | Результат |
+| --- | --- |
+| M1: сравнение с серединой `>` на `<` | 12 красных |
+| M2: идентификаторы собираются до `insertBefore` | 11 красных |
+| M3: убран ранний выход по `TOGGLE_EXCLUSION` | 8 красных |
+| M4a: отключён обработчик Escape | 2 красных |
+| M5: второй `submitReorder` в `pointerup` | 4 красных |
+| M6: убран `console.warn` | 3 красных |
+| M7-M14 (`details.hidden = !expanded`, `preventDefault` у клавиши, `lostpointercapture`, `visibilitychange`, `blur`, проверка `target === dragged`, сброс флага подавления таймером, отмена вторым пальцем) | по 1-14 красных |
+| M4b: убран слушатель `pointercancel` | выжила (19 зелёных) |
+| M11: убран слушатель `htmx:beforeSwap` | выжила (19 зелёных) |
+
+Выжившие M4b и M11 объясняются кодом, а не слабостью теста: после `touchCancel` и после замены списка
+браузер всё равно доставляет `lostpointercapture`, а его слушатель вызывает тот же `cancelTouchDrag`.
+Комбинации (`pointercancel` с `lostpointercapture`, `beforeSwap` с `lostpointercapture`) ловятся
+(5 и 2 красных теста), но изолировать один слушатель нельзя без тестового шва в `wishlist.js`.
+Решение о комментарии или шве: WISHENKA-144. Метод можно повторить при существенной правке
+`wishlist.js`.
+
+### Что осталось от строковых проверок
+
+Слабые проверки содержимого скрипта и CSS заменены поведенческими тестами. Сохранены
+(они проходят и на комментарии): `test_wishlist_script_contains_sdk_token` (четыре токена SDK:
+`disableVerticalSwipes`, `enableVerticalSwipes`, `isVersionAtLeast`, `HapticFeedback`, которых
+браузерные тесты не видят из-за пустого SDK), `-webkit-touch-callout: none`,
+`test_css_summary_does_not_block_touch_scroll`,
+`test_wishlist_script_has_single_reorder_submit_point`, проверки разметки, ответ 200 и тип
+`javascript` для `/static/wishlist.js`, `test_cards_have_no_inline_event_handlers`.
+
+### Выбор: CDP вместо Playwright
+
+Драйвер на CDP выбран, чтобы не тянуть зависимость (колесо около 53 МБ, greenlet) и пару версий
+Playwright с системным Chromium; тесты уже использовали CDP напрямую. Цена: около 670 строк
+собственного кода, экспериментальный метод `Input.setInterceptDrags`, обходные решения для
+инерции касаний Chromium и момента доставки `lostpointercapture` (описаны в комментариях драйвера).
+Поводы пересмотреть:
+
+- число браузерных тестов выросло примерно за 100 или появился второй тип страниц, которому нужна
+  настоящая навигация htmx;
+- понадобилась возможность, которую Playwright даёт из коробки (трассировка, видео, подмена сети);
+- `websockets` удалит параметр `legacy`. Драйвер подключается через
+  `websockets.sync.client.connect(..., legacy=True)`, а `pyproject.toml` требует только
+  `websockets>=13.0`; диапазон версий нужно согласовать с этим параметром (WISHENKA-146).
+
+### Устранение неполадок набора
+
+- **Chromium не найден:** тесты падают на setup с сообщением «Chromium is required for browser UI
+  tests» (WISHENKA-124); см. раздел «Troubleshooting» выше.
+- **`PageWaitTimeout: ...`:** это `AssertionError` с описанием ожидаемого условия; снимок страницы
+  в секции `Page N diagnostics` показывает порядок карточек, вызовы `ajax`, консоль и запросы. Если
+  в `external requests` есть адрес, проверьте совпадение адресов с `base.html`.
+- **Нестабильные касания:** в синтезированных касаниях драйвер делает паузы (16 мс после каждого
+  движения, 60 мс перед `touchEnd`), иначе Chromium запускает инерцию и «съедает» следующий тап;
+  в `wait_for` для опущенных пальцев отправляется смещение на 0.01 px, чтобы Chromium доставил
+  `lostpointercapture`. Не убирайте паузы; на медленном раннере проверьте тесты
+  `test_next_tap_after_suppression_window_toggles` и `test_vertical_swipe_outside_handle_scrolls_not_reorders`.
+- **Остались процессы или занят порт:** порт сервера выбирается случайным, процессы закрываются в
+  `finally`. После убитого (SIGKILL) прогона может остаться Chromium с временным профилем:
+  `pkill -f chromium-profile` завершит такие процессы (путь профиля содержит `chromium-profile`).
+
 ## Известные ограничения
 
-Пункты отслежены в Jira (источник: `ai-tasks/WISHENKA-124/60-tech-debt.md`):
+Пункты отслежены в Jira (источники: `ai-tasks/WISHENKA-124/60-tech-debt.md` и `ai-tasks/WISHENKA-110/60-tech-debt.md`):
 
 - [WISHENKA-135](https://pypost.atlassian.net/browse/WISHENKA-135): браузер на раннере CI не
   проверен реальным прогоном (имя и путь в образе `ubuntu-latest` не подтверждены); запасной шаг
@@ -197,9 +380,18 @@ export WISHENKA_CHROMIUM_BIN=/path/to/chrome
 - [WISHENKA-138](https://pypost.atlassian.net/browse/WISHENKA-138): проба устойчива не полностью:
   таймаут нельзя настроить, до четырёх зависших кандидатов могут занять 40 с из 45 с лимита теста,
   stderr обрезается до 300 символов, определение snap идёт по подстроке.
+- [WISHENKA-145](https://pypost.atlassian.net/browse/WISHENKA-145): заглушка htmx не покрывает
+  настоящий htmx, `hx-*` и путь CSRF; нужен один дымовой тест на реальной библиотеке без сети.
+- [WISHENKA-146](https://pypost.atlassian.net/browse/WISHENKA-146): два старых браузерных модуля не
+  используют общий драйвер `tests/browser_cdp.py`; диапазон версий `websockets` не согласован с
+  `legacy=True`.
+- [WISHENKA-147](https://pypost.atlassian.net/browse/WISHENKA-147): скриншоты и `diagnostics-N.txt`
+  не выгружаются из CI, один и тот же снимок выводится дважды.
 - [WISHENKA-126](https://pypost.atlassian.net/browse/WISHENKA-126): неотслеживаемый файл `core` в
   корне репозитория (не в `.gitignore`); при коммите добавляйте файлы по явным путям.
 
 Прочие осознанные ограничения: поддерживается только Linux; автоматическая установка только на
-Debian (`ID=debian`, пакет `chromium`); код CDP остаётся дублированным в двух браузерных тестах;
+Debian (`ID=debian`, пакет `chromium`); код CDP остаётся дублированным в двух старых браузерных модулях (`test_wishlist_management_browser.py`,
+`test_wishlist_sections_ui.py`); общий драйвер `tests/browser_cdp.py` для них не применён
+(миграция: WISHENKA-146);
 `candidate_names()` дублируется в этом документе.

@@ -11,6 +11,7 @@ Contract under test (see ai-tasks/WISHENKA-124/20-architecture.md):
 No network and no real Chromium are needed: browsers are fake shell scripts in ``tmp_path``.
 """
 
+import ast
 import importlib
 import importlib.util
 import re
@@ -450,3 +451,82 @@ def test_ci_and_makefile_do_not_hide_browser_tests() -> None:
     for path in (CI_YML, MAKEFILE):
         found = FORBIDDEN.search(path.read_text(encoding="utf-8"))
         assert found is None, f"{path.name} hides browser tests: {found and found.group(0)!r}"
+
+
+# --- Group I: browser test modules declare marker and timeout (WISHENKA-110) -------------------
+
+BROWSER_MODULE_TIMEOUT = 45
+NEW_BROWSER_MODULES = {
+    "test_wishlist_cards_browser.py",
+    "test_wishlist_mouse_reorder_browser.py",
+    "test_wishlist_touch_reorder_browser.py",
+}
+
+
+def _mark_name(node: ast.expr) -> tuple[str, ast.Call | None] | None:
+    """Return ``(name, call)`` for ``pytest.mark.<name>`` or ``pytest.mark.<name>(...)``."""
+    call = node if isinstance(node, ast.Call) else None
+    target = call.func if call is not None else node
+    if (
+        isinstance(target, ast.Attribute)
+        and isinstance(target.value, ast.Attribute)
+        and target.value.attr == "mark"
+        and isinstance(target.value.value, ast.Name)
+        and target.value.value.id == "pytest"
+    ):
+        return target.attr, call
+    return None
+
+
+def _module_marks(tree: ast.Module) -> list[tuple[str, ast.Call | None]]:
+    """Marks assigned to module-level ``pytestmark`` (single mark, list or tuple)."""
+    marks: list[tuple[str, ast.Call | None]] = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "pytestmark" for t in node.targets
+        ):
+            values = (
+                node.value.elts if isinstance(node.value, ast.List | ast.Tuple) else [node.value]
+            )
+            marks.extend(m for v in values if (m := _mark_name(v)) is not None)
+    return marks
+
+
+def _tests_marked_browser(tree: ast.Module) -> bool:
+    """True when every top-level ``test_*`` function carries ``@pytest.mark.browser``."""
+    tests = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")]
+    return bool(tests) and all(
+        any((m := _mark_name(d)) is not None and m[0] == "browser" for d in fn.decorator_list)
+        for fn in tests
+    )
+
+
+def test_new_browser_modules_declare_marker_and_timeout() -> None:
+    """Every ``tests/test_*_browser.py`` is marked ``browser`` with ``timeout(45)`` (no Chromium).
+
+    Green by design once the WISHENKA-110 modules comply: this is a guard, not a repro. The
+    ``browser`` mark may be module-level (``pytestmark``) or on every test function (the older
+    ``test_wishlist_management_browser.py`` style); the timeout must be the module-level 45 s.
+    """
+    tests_dir = Path(__file__).resolve().parent
+    modules = sorted(tests_dir.glob("test_*_browser.py"))
+    missing = NEW_BROWSER_MODULES - {m.name for m in modules}
+    assert not missing, f"browser test modules not found: {sorted(missing)}"
+    problems: list[str] = []
+    for module in modules:
+        tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
+        marks = _module_marks(tree)
+        has_browser = any(name == "browser" for name, _ in marks) or _tests_marked_browser(tree)
+        timeouts = [
+            call.args[0].value
+            for name, call in marks
+            if name == "timeout"
+            and call is not None
+            and call.args
+            and isinstance(call.args[0], ast.Constant)
+        ]
+        if not has_browser:
+            problems.append(f"{module.name}: no 'browser' marker")
+        if BROWSER_MODULE_TIMEOUT not in timeouts:
+            problems.append(f"{module.name}: pytestmark lacks timeout({BROWSER_MODULE_TIMEOUT})")
+    assert not problems, "; ".join(problems)
