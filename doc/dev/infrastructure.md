@@ -17,7 +17,8 @@ wishenka/
 ├── doc/
 │   └── dev/                   # Документация для разработчиков
 │       ├── architecture.md    # Высокоуровневая архитектура сервиса
-│       └── infrastructure.md  # Инфраструктура, Makefile, линтеры и CI
+│       ├── infrastructure.md  # Инфраструктура, Makefile, линтеры и CI
+│       └── testing.md         # Browser UI-тесты и подготовка Chromium
 ├── in-docs/                   # Функциональные спецификации продукта
 ├── specs/                     # Высокоуровневые концепции и роли
 ├── tests/                     # Автоматизированные тесты (Pytest)
@@ -51,6 +52,7 @@ wishenka/
 | `make help` | Отображает интерактивный список всех доступных команд с кратким описанием (действие по умолчанию). |
 | `make venv` | Создает виртуальное окружение `.venv` (если отсутствует) и обновляет `pip`. |
 | `make deps` | Создает `.venv` и устанавливает проект в editable-режиме вместе с dev-зависимостями (`pip install -e ".[dev]"`). |
+| `make deps-browser` | Готовит Chromium/Chrome для browser UI-тестов: находит и проверяет браузер, на Debian без браузера ставит `chromium` через `apt-get`. Не входит в `make test` и `make check`; подробности в [testing.md](testing.md). |
 | `make build` | Проверяет синтаксическую корректность и компилируемость Python-файлов через `python -m compileall`. |
 | `make analyze` | Запускает полный статический анализ: линтер `ruff check`, проверку стиля `ruff format --check` и статический анализатор типов `mypy`. |
 | `make format` | Автоматически форматирует код (`ruff format`) и применяет безопасные автофиксы (`ruff check --fix`). |
@@ -220,7 +222,10 @@ curl http://localhost:8000/healthz
 1. **Checkout repository**: клонирование репозитория через `actions/checkout@v4`.
 2. **Set up Python 3.12**: развертывание среды Python 3.12 с кэшированием pip-зависимостей (`actions/setup-python@v5`).
 3. **Install dependencies**: вызов `make deps` для установки проекта и dev-пакетов.
-4. **Run Quality Gate**: вызов `make check`, который последовательно проверяет форматирование, линтер, строгую типизацию Mypy и запускает тесты Pytest.
+4. **Install browser for UI tests**: вызов `make deps-browser`: проверяет браузер, предустановленный в образе `ubuntu-latest`; если подходящего нет, шаг падает с понятным сообщением (см. [testing.md](testing.md)).
+5. **Run Quality Gate**: вызов `make check`, который последовательно проверяет форматирование, линтер, строгую типизацию Mypy и запускает тесты Pytest.
+
+Browser UI-тесты в CI не пропускаются: при отсутствии браузера они завершаются ошибкой, а `WISHENKA_SKIP_BROWSER_TESTS=1` в CI игнорируется.
 
 Любое предупреждение линтера, ошибка типов или упавший тест немедленно блокируют сборку.
 
@@ -258,7 +263,12 @@ def my_function(param: str) -> None: ...
 **Симптом:** При запуске в Docker сервис падает при попытке создать или открыть `data/wishenka.db`.  
 **Решение:** Контейнер запускается под непривилегированным пользователем `appuser` (UID 10001). Убедитесь, что директория `/app/data` смонтирована как volume `sqlite_data` (где права автоматически выставляются сервисом) или локальный каталог имеет права на запись для UID 10001.
 
-### 8.5. Пересоздание окружения «с нуля»
+### 8.5. Нет Chromium для browser UI-тестов (`Chromium is required for browser UI tests`, snap-заглушка)
+
+**Симптом:** браузерные тесты завершаются ERROR at setup, а `make deps-browser` выходит с кодом `2` (браузер не найден) или `3` (найден, но не запускается, например snap-заглушка `/usr/bin/chromium`).  
+**Решение:** выполните `make deps-browser` (на Debian пакет ставится автоматически). На Ubuntu и других системах установите Chromium из Debian или Google Chrome и задайте путь: `export WISHENKA_CHROMIUM_BIN=/path/to/chrome`. Snap Chromium не поддерживается. Локальный пропуск: `WISHENKA_SKIP_BROWSER_TESTS=1` (в CI не действует). Подробности: [testing.md](testing.md).
+
+### 8.6. Пересоздание окружения «с нуля»
 
 **Симптом:** Несогласованные зависимости или поврежденный `.venv`.  
 **Решение:**

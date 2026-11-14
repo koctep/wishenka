@@ -25,6 +25,10 @@ jobs:
         run: |
           make deps
 
+      - name: Install browser for UI tests
+        run: |
+          make deps-browser
+
       - name: Run Quality Gate (make check)
         run: |
           make check

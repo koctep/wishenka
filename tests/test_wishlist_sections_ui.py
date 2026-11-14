@@ -11,7 +11,6 @@ Asserts:
 
 import asyncio
 import json
-import shutil
 import socket
 import subprocess
 import threading
@@ -377,10 +376,11 @@ window.fetch = async (url, options = {}) => {
 """
 
 
-def test_mini_app_home_sections_and_badges_browser(tmp_path: Path) -> None:
+@pytest.mark.browser
+def test_mini_app_home_sections_and_badges_browser(
+    tmp_path: Path, chromium_executable: str
+) -> None:
     """Mini App home renders My Wishlists, Collaborating, and Favorites sections with badges."""
-    executable = shutil.which("chromium")
-    assert executable is not None, "Chromium is required to exercise the Mini App browser flow"
 
     settings = Settings(
         database_url=f"sqlite+aiosqlite:///{tmp_path / 'browser_sections.db'}",
@@ -405,7 +405,7 @@ def test_mini_app_home_sections_and_badges_browser(tmp_path: Path) -> None:
     profile = tmp_path / "chromium-profile"
     browser = subprocess.Popen(
         [
-            executable,
+            chromium_executable,
             "--headless",
             "--no-sandbox",
             "--disable-gpu",

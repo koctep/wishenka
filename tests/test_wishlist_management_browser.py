@@ -1,7 +1,6 @@
 """Browser regression for Mini App sharing and permission-aware controls."""
 
 import json
-import shutil
 import socket
 import subprocess
 import threading
@@ -75,10 +74,9 @@ def wait_for_load(ws: ClientConnection) -> None:
     raise AssertionError("Page did not load")
 
 
-def test_browser_copy_share_and_role_controls(tmp_path: Path) -> None:
+@pytest.mark.browser
+def test_browser_copy_share_and_role_controls(tmp_path: Path, chromium_executable: str) -> None:
     """Owner sharing uses the public link and member UI hides management controls."""
-    executable = shutil.which("chromium")
-    assert executable is not None, "Chromium is required to exercise the Mini App browser flow"
     settings = Settings(
         database_url=f"sqlite+aiosqlite:///{tmp_path / 'browser.db'}",
         telegram_bot_username="test_bot",
@@ -99,7 +97,7 @@ def test_browser_copy_share_and_role_controls(tmp_path: Path) -> None:
     profile = tmp_path / "chromium-profile"
     browser = subprocess.Popen(
         [
-            executable,
+            chromium_executable,
             "--headless",
             "--no-sandbox",
             "--disable-gpu",

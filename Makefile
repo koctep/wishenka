@@ -21,6 +21,18 @@ venv: ## Инициализировать виртуальное окружен�
 deps: venv ## Установить зависимости проекта и инструменты разработки
 	@$(PIP) install -e ".[dev]"
 
+.PHONY: deps-browser
+deps-browser: ## Подготовить Chromium/Chrome для browser UI-тестов (Debian: apt, иначе проверка)
+	@test -x $(PYTHON) || { echo "Нет $(PYTHON): сначала выполните 'make venv' или 'make deps'"; exit 1; }
+	@$(PYTHON) -m tests.browser_support; rc=$$?; \
+	if [ $$rc -eq 2 ] && [ -z "$$WISHENKA_CHROMIUM_BIN" ] \
+	  && [ "$$(. /etc/os-release 2>/dev/null; echo $$ID)" = debian ] \
+	  && command -v apt-get >/dev/null 2>&1; then \
+	  SUDO=""; [ "$$(id -u)" -eq 0 ] || SUDO=sudo; \
+	  $$SUDO apt-get update && $$SUDO apt-get install -y chromium \
+	  && $(PYTHON) -m tests.browser_support; \
+	else exit $$rc; fi
+
 .PHONY: build
 build: deps ## Проверить компилируемость исходного кода и сборку пакета
 	@$(PYTHON) -m compileall wishenka tests
