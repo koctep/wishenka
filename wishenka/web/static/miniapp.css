@@ -62,7 +62,32 @@ label { display: block; margin: .5rem 0; }
   height: 3rem;
   background: #f3e8ec;
 }
-.item-drag-handle { cursor: grab; padding: .5rem; touch-action: none; }
+.item-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  cursor: grab;
+  padding: .5rem;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.item-card.is-touch-dragging {
+  position: relative;
+  z-index: 10;
+  opacity: .85;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .25);
+  pointer-events: none;
+  will-change: transform;
+}
+.item-card.is-touch-dragging .item-card-details { display: none; }
+.item-card.drop-before { box-shadow: 0 -3px 0 0 #6d28d9; }
+.item-card.drop-after { box-shadow: 0 3px 0 0 #6d28d9; }
+body.is-touch-reordering { user-select: none; -webkit-user-select: none; }
+html.is-touch-reordering { overscroll-behavior-y: contain; }
 .btn-move-up, .btn-move-down { min-width: 44px; }
 .btn-move-up:disabled, .btn-move-down:disabled { opacity: .4; cursor: not-allowed; }
 .badge-category { background: #ede9fe; color: #6d28d9; }

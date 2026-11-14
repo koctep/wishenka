@@ -290,7 +290,7 @@ wishenka/web/templates/
 wishenka/web/static/
 ├── miniapp.css           # Shared styles
 ├── miniapp.js            # Mini App SPA script (loaded only by the Mini App shell)
-└── wishlist.js           # Card toggle and drag-and-drop reorder (loaded by base.html)
+└── wishlist.js           # Card toggle, mouse and touch drag-and-drop reorder (loaded by base.html)
 ```
 
 #### Template Specifications
@@ -299,8 +299,8 @@ wishenka/web/static/
    - Master document providing HTML5 doctype, UTF-8 charset, responsive viewport metadata.
    - Loads Telegram Web App SDK (`telegram-web-app.js`) and HTMX 1.9.12 runtime.
    - Loads the static script `<script src="/static/wishlist.js" defer>` after HTMX. It owns the
-     wish-card toggle and drag-and-drop reorder; the wishlist id for reordering comes from
-     `data-wishlist-id` on `#items-list` (`wishlist_detail.html` and `share_wishlist.html`).
+     wish-card toggle and drag-and-drop reorder (native drag for mouse, Pointer Events for touch);
+     the wishlist id for reordering comes from `data-wishlist-id` on `#items-list` (`wishlist_detail.html` and `share_wishlist.html`).
      Details: [miniapp.md](miniapp.md#981-client-script-staticwishlistjs-wishenka-108).
      The CSRF and reservation handlers stay in one inline script in `base.html`.
    - Provides Jinja2 template extension blocks: `{% block title %}` and `{% block content %}`.
@@ -326,6 +326,10 @@ wishenka/web/static/
    - The compact row is `.item-card-summary` (`aria-expanded="false"`). The expanded body is
      `.item-card-details`, rendered with `hidden`. The delegated toggle in `static/wishlist.js`
      clears `hidden` to expand the same card (no inline handlers on the card).
+   - For owners and editors (`can_edit_wishlist`) the collapsed summary starts with the drag handle
+     `.item-drag-handle` (`aria-hidden="true"`, `data-no-toggle`), the touch reorder grip
+     (WISHENKA-109, [miniapp.md](miniapp.md#981-client-script-staticwishlistjs-wishenka-108)). The
+     move up and move down buttons stay in the details as the keyboard path.
    - Displays item title, optional formatted price with currency, description, quantity, and
      external link (`rel="noopener noreferrer"`).
    - Giver controls are one `.item-giver` block in the summary, guarded by

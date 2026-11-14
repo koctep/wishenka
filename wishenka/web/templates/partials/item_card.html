@@ -12,6 +12,12 @@
          aria-expanded="false"
          aria-controls="item-details-{{ item.id }}">
         <div class="flex items-center gap-3">
+            {% if can_edit_wishlist %}
+            <span class="item-drag-handle"
+                  data-no-toggle
+                  aria-hidden="true"
+                  title="Перетащить">⠿</span>
+            {% endif %}
             {% if item.image_url %}
             <img src="{{ item.image_url }}"
                  alt="{{ item.title }}"
@@ -189,10 +195,6 @@
                     hx-swap="innerHTML">
                 ↓
             </button>
-            <span class="item-drag-handle"
-                  data-no-toggle
-                  aria-label="Перетащить"
-                  title="Перетащить">⠿</span>
             <button type="button"
                     class="btn-archive-confirm btn-archive-item text-xs text-red-600"
                     data-no-toggle

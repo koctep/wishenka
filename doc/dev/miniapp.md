@@ -448,16 +448,19 @@ wish items without full-page reloads.
   [`wishlist.js`](../../wishenka/web/static/wishlist.js) clears `hidden` to expand and sets it to
   collapse. Clicks on
   `a, button, input, select, textarea` or any `[data-no-toggle]` element do not toggle the card.
-  Giver controls are
+  Owners and editors also get a visible drag handle (`.item-drag-handle`, `⠿`) inside the collapsed
+  summary, before the thumbnail. It is rendered only under `can_edit_wishlist`, carries
+  `data-no-toggle`, and is the touch reorder grip (see 9.8.1). Giver controls are
   `.item-giver` inside that summary, so they stay on screen while the card is expanded. A
   successful promise refresh keeps an expanded card expanded by clearing `hidden` on the new
   details. The control list, own line, recipient omission, HTTP 503 busy sentence, and cookie
   CSRF behavior are in [reservations.md](reservations.md#6-wish-card-giver-controls).
 - **Manual order** (editors only):
   - Buttons: `POST /web/wishlists/{id}/items/{item_id}/move?direction=up|down` (`move_item_ui`).
-  - Drag-and-drop: `wishlist.js` handles native HTML5 `dragstart/dragover/drop` on
-    `.item-card[draggable="true"]` inside `#items-list`, then posts the full order to
-    `POST /web/wishlists/{id}/items/reorder` with repeated form field `item_ids` (`reorder_items_ui`).
+  - Drag-and-drop: `wishlist.js` handles native HTML5 `dragstart/dragover/drop` (mouse) and Pointer
+    Events (touch, WISHENKA-109) on `.item-card[draggable="true"]` inside `#items-list`, then posts
+    the full order to `POST /web/wishlists/{id}/items/reorder` with repeated form field `item_ids`
+    (`reorder_items_ui`). Both paths end in the same `submitReorder` function.
   - Both return the re-rendered `partials/items_list.html` (`hx-target="#items-list"`). The submitted
     ids must be an exact permutation of the active items, otherwise `400`.
 - **Archive flow**: `GET .../items/{item_id}/archive-confirm` (`archive_confirm_ui`) opens
@@ -481,11 +484,15 @@ no globals (`toggleWishCard` is no longer a global function).
   `a, button, input, select, textarea, [data-no-toggle]`. `preventDefault()` runs only for
   `keydown` on a non-interactive target, so Space does not scroll the page. The handler flips
   `aria-expanded` on the summary and `hidden` on the sibling `.item-card-details`.
-- **Drag-and-drop reorder**: delegated `dragstart`, `dragover`, `drop`, `dragend` on
-  `.item-card[draggable="true"]` inside `#items-list`. On `drop` the script moves the dragged card
-  before or after the target (by the vertical midpoint of the target) and posts the card order
-  (`data-item-id` of every `.item-card`) with `htmx.ajax('POST', ...)`, target `#items-list`,
-  swap `innerHTML`, field `item_ids`.
+- **Drag-and-drop reorder (mouse)**: delegated `dragstart`, `dragover`, `drop`, `dragend` on
+  `.item-card[draggable="true"]` inside `#items-list`. On `drop` the script computes the side with
+  `isAfterMidpoint` and calls `submitReorder`. Mouse and pen keep this native HTML5 path.
+- **Shared submit point**: `isAfterMidpoint(clientY, rect)` is true when the pointer is below the
+  vertical midpoint of the target card. `submitReorder(list, card, target, after)` checks the
+  wishlist id and htmx (the skip path below), moves the card before or after the target, collects
+  `data-item-id` of every `.item-card`, and posts it with `htmx.ajax('POST', ...)`, target
+  `#items-list`, swap `innerHTML`, field `item_ids`. It is the only place that calls `htmx.ajax`,
+  for mouse and touch alike.
 - **Wishlist id**: read at drop time from `#items-list[data-wishlist-id]`, rendered by
   `wishlist_detail.html` and `share_wishlist.html` as `{{ wishlist.id }}`. The value must match
   `^\d+$`. The URL is no longer derived from `window.location`. No htmx swap replaces
@@ -507,14 +514,85 @@ no globals (`toggleWishCard` is no longer a global function).
   (`item_edit_modal.html`, `item_archive_modal.html`, `item_preview_card.html`). Moving them out
   is WISHENKA-140.
 - **Known limits**: the reorder URL `/web/wishlists/{id}/items/reorder` is hardcoded in the script
-  (WISHENKA-141). HTML5 drag events do not fire on most touch devices, so touch reordering relies
-  on the move buttons until WISHENKA-109.
+  (WISHENKA-141). See also "Touch limits" below.
+- **Touch reorder (WISHENKA-109)**: HTML5 drag events do not fire on most touch devices, so the
+  script adds a Pointer Events gesture. It is limited to `pointerType === 'touch'`; mouse and pen
+  keep the native path (a pen `pointerdown` returns early and falls through).
+  - **Handle**: `.item-drag-handle` lives in the collapsed `.item-card-summary` (owner and editors
+    only, inside a card with `draggable="true"` in `#items-list`). It has `touch-action: none`,
+    `user-select: none`, `-webkit-touch-callout: none` and a 44 px minimum size in
+    [`miniapp.css`](../../wishenka/web/static/miniapp.css). The summary itself has no
+    `touch-action`, so a swipe elsewhere still scrolls the page.
+  - **Gesture**: `pointerdown` on the handle arms the gesture, calls `setPointerCapture` on the
+    handle (best effort) and disables Telegram swipes. The gesture becomes active when the pointer
+    moves 4 px (`DRAG_START_THRESHOLD_PX`). A tap on the handle (less than 4 px) does nothing: no
+    request, and no toggle (the handle is `data-no-toggle`). While active, the card follows the
+    finger with `transform: translateY(...)` (page scroll is added). `document.elementFromPoint`
+    finds the target card under the pointer, and `isAfterMidpoint` picks the side.
+  - **Drop**: `pointerup` of an active gesture calls `submitReorder` when there is a target card
+    other than the dragged one, and the dragged card is still a child of `#items-list`. A drop on
+    the card itself, or outside the cards, sends nothing. The DOM order is changed only inside
+    `submitReorder`, so a cancelled gesture leaves the list as it was.
+  - **Cancel triggers**: `pointercancel`, `lostpointercapture`, a `pointerdown` of a second pointer,
+    `Escape`, `visibilitychange` to hidden, window `blur`, and `htmx:beforeSwap` whose target is
+    `#items-list`. No request is sent and the state is cleaned (transform, classes, indicators,
+    capture, animation frame). While a gesture is in progress, `dragstart` and `contextmenu` are
+    cancelled with `preventDefault`.
+  - **Feedback classes**: `is-touch-dragging` on the moved card (raised, translucent, shadow,
+    `pointer-events: none`, `.item-card-details` hidden with `display: none`), `drop-before` and
+    `drop-after` on the target (3 px accent line above or below), and `is-touch-reordering` on
+    both `html` and `body` (`user-select: none`, `overscroll-behavior-y: contain` on `html`). The
+    details of an expanded card are hidden by CSS only: `hidden` and `aria-expanded` do not
+    change, but the list shifts up under the finger at drag start (WISHENKA-142).
+  - **Autoscroll**: a `requestAnimationFrame` loop scrolls the page by up to 14 px per frame when
+    the pointer is within 64 px of the top or bottom window edge (`AUTOSCROLL_EDGE_PX`,
+    `AUTOSCROLL_MAX_PX`), then updates the card position and the target. Speed is per frame, not
+    per second.
+  - **Click suppression**: after an active gesture ends (drop or cancel), the next capture-phase
+    `click` is swallowed (`preventDefault` and `stopPropagation`). If no click follows, the flag
+    expires after `CLICK_SUPPRESS_MS` (400 ms); a genuine tap inside that window is swallowed
+    too.
+  - **Telegram integration**: `window.Telegram.WebApp` is optional. On `pointerdown` the script
+    calls `disableVerticalSwipes()` only when `isVersionAtLeast('7.7')` (Bot API 7.7) and
+    `isVerticalSwipesEnabled === true`. When the gesture ends it calls `enableVerticalSwipes()`
+    only if this gesture disabled them, so swipes disabled elsewhere stay disabled. Haptics need
+    `isVersionAtLeast('6.1')` and `HapticFeedback`: `impactOccurred('light')` when the gesture
+    becomes active, `selectionChanged()` when the target card changes. Every SDK call is in
+    `try/catch`; a failure never blocks the reorder.
+  - **Console warnings**: besides the reorder skip warning above, a failing SDK call writes one
+    `console.warn` per page load:
+    `wishlist.js: Telegram SDK call failed (<call>); later failures are not reported`, where
+    `<call>` is `disableVerticalSwipes`, `enableVerticalSwipes`,
+    `HapticFeedback.impactOccurred` or `HapticFeedback.selectionChanged`, followed by the caught
+    error as a second argument.
+  - **Server events**: unchanged. A touch drop posts the same request as a mouse drop, so
+    `ui_items_reordered` and `ui_items_reorder_rejected` apply as before. Nothing new is logged on
+    the server or sent to a client telemetry endpoint.
+  - **Accessibility**: the handle is decorative (`aria-hidden="true"`, `title="Перетащить"`). The
+    move up and move down buttons in the card details stay the keyboard and screen-reader way to
+    reorder.
+  - **Touch limits**: clients older than Bot API 7.7 cannot disable vertical swipes, so a downward
+    swipe on the handle may still minimise the Mini App there. A swipe that starts on the Telegram
+    header still closes it. The first-touch timing of `disableVerticalSwipes()`, native `dragstart`
+    from a long press on Chrome Android, pull-to-refresh and the autoscroll speed are not verified
+    on real devices; the manual checklist is WISHENKA-143. Tidying of the script (long lines,
+    module split, palette variables) is WISHENKA-144.
 - **Tests**: `tests/test_wishlist_static_script.py` checks that `/static/wishlist.js` is served,
   that `base.html` no longer inlines toggle or drag-and-drop code, that the cards carry no inline
   handlers, that `#items-list` has `data-wishlist-id`, and that no hx-swap replaces
   `#items-list`. Assertions on the script body are string matches, so they are brittle (a comment
   can satisfy them); there is no automated run of the JS or of the `console.warn` path. Browser
-  tests are WISHENKA-110.
+  tests are WISHENKA-110. `tests/test_wishlist_touch_reorder.py` (WISHENKA-109) checks, by string
+  matches on `wishlist.js` and `miniapp.css` and by markup checks on `partials/item_card.html`,
+  that the handle is in the summary only for editors, that the script uses the Pointer Events,
+  Telegram and class tokens, and that the CSS declarations exist. These checks are weak by design
+  (a comment can satisfy them) and do not run the gesture. No behavioural test is committed
+  (WISHENKA-110); the gesture was checked once with a throwaway Chromium touch-emulation run, which
+  is not a real touch stack.
+- **Related debts**: WISHENKA-139 (`no-store` caching of the growing `wishlist.js`), WISHENKA-140
+  (inline scripts; reuse the Telegram SDK wrapper), WISHENKA-141 (hardcoded reorder URL; the change
+  stays inside `submitReorder`), WISHENKA-142 (list jump when an expanded card is dragged),
+  WISHENKA-143 (real-device checklist), WISHENKA-144 (tidying).
 
 ---
 
@@ -660,3 +738,12 @@ The following settings configure the Mini App and web security layer:
 - **Cause**: `item_ids` is not an exact permutation of active items (stale page after another
   editor archived/added an item), or the card is not `draggable="true"` (non-editor view).
 - **Solution**: Reload the wishlist page and retry; logged as `ui_items_reorder_rejected`.
+
+### 12. Touch Drag Does Nothing or the Mini App Minimises
+- **Cause**: The gesture did not start on `.item-drag-handle` (only the handle starts it; a swipe on
+  the rest of the card scrolls), the pointer is a pen or mouse (native HTML5 drag applies), or the
+  reorder was skipped (see the `console.warn` texts in 9.8.1). Telegram older than Bot API 7.7
+  cannot disable vertical swipes, so the Mini App can minimise on a downward swipe.
+- **Solution**: Start from the `⠿` handle of a collapsed card, or use the move up and move down
+  buttons in the card details. A tap shorter than 4 px does nothing by design. A drop on the card
+  itself is ignored. After a drag, a tap within 400 ms is swallowed; tap again.
