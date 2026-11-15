@@ -1,0 +1,35 @@
+<section id="gifted-items-section"{% if oob %} hx-swap-oob="outerHTML"{% endif %}>
+    {% if gifted_rows is none %}
+    <p class="gifted-error" role="status">Не удалось загрузить «Подаренные». Обновите страницу.</p>
+    {% elif gifted_rows %}
+    <details class="gifted-items-details">
+        <summary>Подаренные ({{ gifted_rows|length }})</summary>
+        <ul id="gifted-items-list">
+            {% for row in gifted_rows %}
+            <li class="gifted-item" id="gifted-item-{{ row.item_id }}">
+                <span class="gifted-item-title">{{ row.title }}</span>
+                {% if row.price %}<span class="gifted-item-price">{{ row.price }}</span>{% endif %}
+                {% if row.recipient_name %}
+                <span class="gifted-item-recipient">Для: {{ row.recipient_name }}</span>
+                {% endif %}
+                <span class="gifted-item-count">
+                    Получено: {{ row.received }} из {{ row.requested }}
+                </span>
+                <ul class="gifted-receipts">
+                    {% for act in row.acts %}
+                    <li>
+                        {% if act.approximate -%}
+                        ≈ {{ act.day }} (дата примерная)
+                        {%- else -%}
+                        {{ act.day }}
+                        {%- endif %}
+                        — {{ act.quantity }} шт.
+                    </li>
+                    {% endfor %}
+                </ul>
+            </li>
+            {% endfor %}
+        </ul>
+    </details>
+    {% endif %}
+</section>

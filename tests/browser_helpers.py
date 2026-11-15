@@ -11,6 +11,8 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from urllib.parse import parse_qs
 
+import httpx
+
 from tests.browser_cdp import CdpPage, RecordedRequest, TouchPoint
 
 # Mirror of CLICK_SUPPRESS_MS in wishenka/web/static/wishlist.js (the constant is private to the
@@ -240,3 +242,53 @@ def wait_suppression_window_over(page: CdpPage) -> None:
     now = float(page.evaluate("performance.now()"))
     until = now + CLICK_SUPPRESS_MS + CLICK_SUPPRESS_MARGIN_MS
     page.wait_for("click suppression window elapsed", f"performance.now() > {until}", timeout=3.0)
+
+
+# --- WISHENKA-24: receipt dialog helpers ----------------------------------------------------------
+
+
+def record_receipt(base_url: str, seeded: Seeded, item_id: str, quantity: int) -> None:
+    """Record a receipt through the REST API with the owner's Bearer token (test setup only)."""
+    response = httpx.post(
+        f"{base_url}/api/wishlists/{seeded.wishlist_id}/items/{item_id}/receipts",
+        json={"quantity": quantity},
+        headers={"Authorization": f"Bearer {seeded.owner_token}"},
+        timeout=10,
+    )
+    assert response.status_code == 201, (
+        f"receipt setup failed: {response.status_code} {response.text}"
+    )
+
+
+def archive_item_rest(base_url: str, seeded: Seeded, item_id: str) -> None:
+    """Archive a wish through the REST API with the owner's Bearer token (test setup only)."""
+    response = httpx.post(
+        f"{base_url}/api/wishlists/{seeded.wishlist_id}/items/{item_id}/archive",
+        headers={"Authorization": f"Bearer {seeded.owner_token}"},
+        timeout=10,
+    )
+    assert response.status_code == 200, f"archive setup failed: {response.status_code}"
+
+
+def open_receipt_dialog(page: CdpPage, seeded: Seeded, item_id: str) -> None:
+    """Open the receipt dialog like the real button does (the htmx stub ignores ``hx-get``).
+
+    The dialog is requested with ``htmx.ajax`` into ``#item-modal-container``; the wait is bounded.
+    """
+    url = f"/web/wishlists/{seeded.wishlist_id}/items/{item_id}/receipt"
+    page.evaluate(
+        f"void window.htmx.ajax('GET', {js_str(url)},"
+        " {target: '#item-modal-container', swap: 'innerHTML'})"
+    )
+    settle(page)
+    page.wait_for("receipt dialog opened", "!!document.querySelector('#item-receipt-modal')")
+
+
+def posts_to(page: CdpPage, suffix: str) -> list[RecordedRequest]:
+    """Network POSTs whose path ends with ``suffix``."""
+    return [r for r in page.requests if r.method == "POST" and r.path.endswith(suffix)]
+
+
+def scroll_to(page: CdpPage, selector: str) -> None:
+    """Scroll the first match into the viewport so a mouse click can reach it."""
+    page.evaluate(f"document.querySelector({js_str(selector)}).scrollIntoView({{block: 'center'}})")

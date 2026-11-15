@@ -30,6 +30,7 @@ from wishenka.web.routes.items import router as items_router
 from wishenka.web.routes.items_ui import router as items_ui_router
 from wishenka.web.routes.miniapp import router as miniapp_router
 from wishenka.web.routes.receipts import router as receipts_router
+from wishenka.web.routes.receipts_ui import router as receipts_ui_router
 from wishenka.web.routes.reservations import router as reservations_router
 from wishenka.web.routes.reservations_ui import router as reservations_ui_router
 from wishenka.web.routes.sharing import router as sharing_router
@@ -264,6 +265,7 @@ def create_app(
     app.include_router(receipts_router)
     app.include_router(reservations_ui_router)
     app.include_router(items_ui_router)
+    app.include_router(receipts_ui_router)
     app.include_router(wishlist_router)
     app.include_router(sharing_router)
 

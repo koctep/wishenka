@@ -1,0 +1,376 @@
+"""Receipt dialog and receipt command of the Mini App (WISHENKA-24, page layer only).
+
+``GET`` opens the dialog, ``POST`` records the receipt and answers with out-of-band fragments.
+Refusals use the statuses of the JSON route (``receipts._REFUSALS``, read-only), the marker header
+``X-Receipt-Refusal`` and fixed Russian sentences. No booking or giver data is rendered or logged.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends, Form, Request, Response, status
+from fastapi.responses import HTMLResponse
+from markupsafe import Markup
+
+from wishenka.auth.dependencies import get_current_user
+from wishenka.auth.models import AuthenticatedUser
+from wishenka.web.gifted_view import (
+    NOTHING_REMAINING_TEXT,
+    RECEIPT_REFUSAL_HEADER,
+    GiftedRow,
+    oob_text,
+    read_gifted_rows,
+)
+from wishenka.web.routes.items_ui import _editor_card_flags, _execute, _items_list_html
+from wishenka.web.routes.receipts import _REFUSALS
+from wishenka.web.templates import templates
+from wishenka.wishlists.exceptions import (
+    InventoryBusyError,
+    ItemNotFoundError,
+    NothingRemainingError,
+    PermissionDeniedError,
+    QuantityAboveRemainingError,
+    WishArchivedError,
+    WishlistArchivedError,
+    WishlistError,
+)
+from wishenka.wishlists.models import WishlistStatus
+from wishenka.wishlists.policy import WishlistAccessPolicy
+from wishenka.wishlists.schemas import WishItemGifterViewDTO, WishItemRecipientViewDTO
+from wishenka.wishlists.service import WishlistService
+
+router = APIRouter(prefix="/web/wishlists/{wishlist_id}", tags=["receipts-ui"])
+logger = logging.getLogger("wishenka.web.receipts_ui")
+User = Annotated[AuthenticatedUser, Depends(get_current_user)]
+
+BUSY = "busy"
+_SENTENCES: dict[str, str] = {
+    "quantity_invalid": "Укажите целое число не меньше 1.",
+    "quantity_above_remaining": "Нельзя отметить больше, чем осталось. Осталось: {n}.",
+    "nothing_remaining": NOTHING_REMAINING_TEXT,
+    "wish_archived": "Желание в архиве. Восстановите его, чтобы отметить получение.",
+    "wishlist_not_active": "Вишлист не активен, отметить получение нельзя.",
+    "forbidden": "У вас нет права отмечать получение в этом вишлисте.",
+    "not_found": "Желание не найдено. Обновите страницу.",
+    BUSY: "Не удалось сохранить отметку сейчас. Повторите попытку.",
+}
+_WITH_REMAINING = (QuantityAboveRemainingError, NothingRemainingError)
+
+
+def _classify(exc: Exception) -> tuple[int, str] | None:
+    """Return ``(HTTP status, closed reason)`` of a refusal, or ``None`` for any other error."""
+    for error_type, http_status, reason, _message in _REFUSALS:
+        if isinstance(exc, error_type):
+            return http_status, reason
+    return None
+
+
+def _sentence(reason: str, exc: Exception | None = None) -> str:
+    """Russian sentence of a reason; the remaining quantity comes from the exception."""
+    return _SENTENCES[reason].format(n=getattr(exc, "remaining_quantity", 0))
+
+
+def _log(level: int, event: str, message: str, ids: tuple[int, int, int], **extra: Any) -> None:
+    """Write one UI record with the fields allowed by WISHENKA-22 (ids are list, wish, actor)."""
+    wishlist_id, item_id, actor_id = ids
+    logger.log(
+        level,
+        message,
+        extra={
+            "event": event,
+            "wishlist_id": wishlist_id,
+            "item_id": item_id,
+            "actor_id": actor_id,
+            **extra,
+        },
+    )
+
+
+def _log_refusal(
+    event: str, ids: tuple[int, int, int], reason: str, http_status: int, exc: Exception
+) -> None:
+    """Log a refusal; ``remaining_quantity`` only for the two reasons that carry it."""
+    extra: dict[str, Any] = {"reason": reason, "http_status": http_status}
+    if isinstance(exc, _WITH_REMAINING):
+        extra["remaining_quantity"] = exc.remaining_quantity
+    _log(logging.WARNING, event, "Receipt refused", ids, **extra)
+
+
+def _ids(wishlist_id: int, item_id: int, user: AuthenticatedUser) -> tuple[int, int, int]:
+    """Log identifiers of one request."""
+    return wishlist_id, item_id, user.telegram_id
+
+
+def _refusal_fragment(
+    http_status: int, reason: str, sentence: str, extra_html: str = ""
+) -> HTMLResponse:
+    """Refusal response: the sentence in ``#receipt-feedback`` (OOB) plus the marker header."""
+    body = extra_html or str(oob_text("receipt-feedback", sentence))
+    return HTMLResponse(
+        content=body, status_code=http_status, headers={RECEIPT_REFUSAL_HEADER: reason}
+    )
+
+
+def _dialog_html(wishlist_id: int, item_id: int, title: str, remaining: int, **context: Any) -> str:
+    """Render the receipt dialog; ``title`` is empty for a viewer who is not a member."""
+    return templates.get_template("partials/item_receipt_modal.html").render(
+        {
+            "wishlist_id": wishlist_id,
+            "item_id": item_id,
+            "item_title": title,
+            "remaining": remaining,
+            **context,
+        }
+    )
+
+
+@dataclass(frozen=True)
+class _Opened:
+    """Advisory state of a member's dialog request; ``refusal`` is the guard that failed."""
+
+    title: str
+    remaining: int
+    refusal: Exception | None
+
+
+async def _check_receipt_open(
+    svc: WishlistService, wishlist_id: int, item_id: int, user: AuthenticatedUser
+) -> _Opened:
+    """Guards of the service in its order; a non-member raises, a member gets the verdict."""
+    wishlist = await svc.get_wishlist_by_id(wishlist_id)
+    item = next((wish for wish in wishlist.items if wish.id == item_id), None)
+    if item is None:
+        raise ItemNotFoundError(f"Item {item_id} not found")
+    if not WishlistAccessPolicy.resolve_context(user, wishlist).is_member:
+        raise PermissionDeniedError("Actor cannot fulfill items in this wishlist")
+    refusal: Exception | None = None
+    if wishlist.status != WishlistStatus.ACTIVE:
+        refusal = WishlistArchivedError(f"Wishlist {wishlist_id} is archived")
+    elif item.is_archived:
+        refusal = WishArchivedError()
+    elif item.remaining_quantity == 0:
+        refusal = NothingRemainingError()
+    return _Opened(item.title, item.remaining_quantity, refusal)
+
+
+def _blocked_dialog(
+    http_status: int,
+    reason: str,
+    ids: tuple[int, int, int],
+    title: str,
+    exc: Exception | None,
+    extra_html: str = "",
+) -> HTMLResponse:
+    """The dialog in blocked state (sentence, no form) with the marker header."""
+    wishlist_id, item_id, _actor = ids
+    body = _dialog_html(
+        wishlist_id, item_id, title, 0, blocked=True, feedback=_sentence(reason, exc)
+    )
+    return HTMLResponse(
+        content=f"{body}\n{extra_html}",
+        status_code=http_status,
+        headers={RECEIPT_REFUSAL_HEADER: reason},
+    )
+
+
+@router.get("/items/{item_id}/receipt", response_class=HTMLResponse)
+async def get_receipt_dialog(
+    wishlist_id: int, item_id: int, request: Request, user: User
+) -> Response:
+    """Open the receipt dialog; a stale card gets the blocked dialog with the contract status."""
+    ids = _ids(wishlist_id, item_id, user)
+    title = ""
+    remaining = 0
+    refusal: Exception | None
+    try:
+        opened = await _execute(
+            request, lambda svc: _check_receipt_open(svc, wishlist_id, item_id, user)
+        )
+        title, remaining, refusal = opened.title, opened.remaining, opened.refusal
+    except WishlistError as exc:
+        refusal = exc
+    if refusal is None:
+        _log(logging.INFO, "ui_receipt_form_opened", "Receipt dialog opened", ids)
+        return HTMLResponse(_dialog_html(wishlist_id, item_id, title, remaining, selected=1))
+    if isinstance(refusal, InventoryBusyError):
+        http_status, reason = 503, BUSY
+    else:
+        verdict = _classify(refusal)
+        if verdict is None:
+            raise refusal
+        http_status, reason = verdict
+    _log_refusal("ui_receipt_form_refused", ids, reason, http_status, refusal)
+    extra = ""
+    if isinstance(refusal, NothingRemainingError):
+        extra = (
+            await _effect_fragments(request, user, ids, reason, refusal, title, dialog_oob=False)
+            or ""
+        )
+    return _blocked_dialog(http_status, reason, ids, title, refusal, extra)
+
+
+type _View = WishItemRecipientViewDTO | WishItemGifterViewDTO
+
+
+@dataclass(frozen=True)
+class _State:
+    """Committed state read for the response: the viewer's active list and the gifted rows."""
+
+    items: list[_View]
+    gifted: list[GiftedRow] | None
+
+    def shown(self, item_id: int) -> _View | None:
+        """The wish as a card of the active list, ``None`` when it left the list."""
+        return next((item for item in self.items if item.id == item_id), None)
+
+
+async def _read_state(svc: WishlistService, wishlist_id: int, user: AuthenticatedUser) -> _State:
+    """Read the active list and the gifted rows (fail-soft) for the viewer."""
+    items = await svc.list_wish_items(wishlist_id=wishlist_id, actor=user)
+    return _State(items, await read_gifted_rows(svc, wishlist_id, user))
+
+
+@dataclass(frozen=True)
+class _Receipt:
+    """Result of an accepted receipt."""
+
+    title: str
+    remaining: int
+    state: _State
+
+
+def _quantity_of(raw: str) -> int:
+    """Parse the form value; text that is not a whole number becomes 0, which the service
+    refuses as ``quantity_invalid`` after its membership and state guards."""
+    text = raw.strip()
+    return int(text) if re.fullmatch(r"-?[0-9]{1,9}", text) else 0
+
+
+def _card_oob(request: Request, wishlist_id: int, item: _View, items: list[_View]) -> str:
+    """The card of ``item`` as an out-of-band replacement with first/last flags of ``items``."""
+    position = [wish.id for wish in items].index(item.id)
+    return templates.get_template("partials/item_card.html").render(
+        {
+            "request": request,
+            "item": item,
+            "wishlist_id": wishlist_id,
+            "can_edit_wishlist": True,
+            "card_oob": True,
+            "is_first": position == 0,
+            "is_last": position == len(items) - 1,
+            **_editor_card_flags(),
+        }
+    )
+
+
+def _list_oob(request: Request, wishlist_id: int, items: list[_View]) -> Markup:
+    """Replace the content of ``#items-list`` (flags and the empty-list text come along)."""
+    html = _items_list_html(request, wishlist_id, items)
+    return Markup('<div hx-swap-oob="innerHTML:#items-list">{}</div>').format(Markup(html))
+
+
+def _gifted_oob(request: Request, gifted: list[GiftedRow] | None) -> str:
+    """The «Подаренные» section as an out-of-band replacement."""
+    return templates.get_template("partials/gifted_items_section.html").render(
+        {"request": request, "gifted_rows": gifted, "oob": True}
+    )
+
+
+async def _effect_fragments(
+    request: Request,
+    user: AuthenticatedUser,
+    ids: tuple[int, int, int],
+    reason: str,
+    exc: Exception,
+    title: str = "",
+    *,
+    dialog_oob: bool = True,
+) -> str | None:
+    """Fragments that show the current state after a refusal; ``None`` degrades to the sentence.
+
+    The refused transaction was rolled back, so this is one more read-only action. It is best
+    effort: a domain or busy error here never replaces the status or sentence of the refusal.
+    """
+    wishlist_id, item_id, _actor = ids
+    try:
+        state = await _execute(request, lambda svc: _read_state(svc, wishlist_id, user))
+    except WishlistError:
+        return None
+    sentence = _sentence(reason, exc)
+    shown = state.shown(item_id)
+    if reason == "quantity_above_remaining":
+        if shown is None:
+            return None
+        card = _card_oob(request, wishlist_id, shown, state.items)
+        dialog = _dialog_html(
+            wishlist_id,
+            item_id,
+            shown.title,
+            shown.remaining_quantity or 0,
+            feedback=sentence,
+            oob=True,
+            selected=1,
+        )
+        return f"{card}\n{dialog}"
+    gifted = state.gifted or []
+    title = title or next((row.title for row in gifted if row.item_id == item_id), "")
+    parts = [_list_oob(request, wishlist_id, state.items), _gifted_oob(request, state.gifted)]
+    if dialog_oob:
+        parts.append(
+            _dialog_html(wishlist_id, item_id, title, 0, blocked=True, feedback=sentence, oob=True)
+        )
+    return "\n".join(parts)
+
+
+@router.post(
+    "/items/{item_id}/receipt",
+    response_class=HTMLResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def record_receipt_ui(
+    wishlist_id: int,
+    item_id: int,
+    request: Request,
+    user: User,
+    quantity: Annotated[str, Form()] = "",
+) -> Response:
+    """Record a receipt and answer with out-of-band fragments (dialog, notice, card or list)."""
+    ids = _ids(wishlist_id, item_id, user)
+    count = _quantity_of(quantity)
+
+    async def action(svc: WishlistService) -> _Receipt:
+        item = await svc.record_item_fulfillment(item_id, user, count, wishlist_id=wishlist_id)
+        return _Receipt(
+            item.title, item.remaining_quantity, await _read_state(svc, wishlist_id, user)
+        )
+
+    try:
+        done = await _execute(request, action)
+    except InventoryBusyError:
+        _log(logging.WARNING, "receipt_inventory_busy", "Receipt busy", ids)
+        return _refusal_fragment(status.HTTP_503_SERVICE_UNAVAILABLE, BUSY, _sentence(BUSY))
+    except WishlistError as exc:
+        verdict = _classify(exc)
+        if verdict is None:
+            raise
+        http_status, reason = verdict
+        _log_refusal("receipt_refused", ids, reason, http_status, exc)
+        extra = None
+        if isinstance(exc, _WITH_REMAINING):
+            extra = await _effect_fragments(request, user, ids, reason, exc)
+        return _refusal_fragment(http_status, reason, _sentence(reason, exc), extra or "")
+    _log(logging.INFO, "receipt_recorded_http", "Receipt recorded", ids)
+    state = done.state
+    shown = state.shown(item_id)
+    main = (
+        _card_oob(request, wishlist_id, shown, state.items)
+        if shown is not None and done.remaining > 0
+        else _list_oob(request, wishlist_id, state.items)
+    )
+    notice = oob_text("list-notice", f"Отмечено получено: {count} шт. («{done.title}»)")
+    parts = [oob_text("item-modal-container"), notice, main, _gifted_oob(request, state.gifted)]
+    return HTMLResponse("\n".join(parts), status_code=status.HTTP_201_CREATED)

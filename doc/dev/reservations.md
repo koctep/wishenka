@@ -530,10 +530,15 @@ is this row's quantity. Cancel, purchase, and undo are buttons with
 
 Backend of the cabinet for a fully received wish: `MyReservationItemDTO.is_fully_received` and
 `CabinetRow.wish_received` are set, and `CabinetRow.offer_actions` is true for a wish that is
-archived or fully received on an active list, so the four actions render for it. **Not
-implemented (WISHENKA-24):** no template renders the «received» marker (`wish_received`), and the
-wish card still shows its giver controls for a fully received wish.
-See [gift-receipt.md](gift-receipt.md).
+archived or fully received on an active list, so the four actions render for it.
+`reservations_list.html` renders `wish_received` as `p.reservation-wish-received` «Желание
+получено владельцем» (WISHENKA-24), omits the link «К желанию» for such a row, and leaves the
+status text of the promise unchanged (a purchased promise stays «куплено»). A partly received
+wish has no marker and keeps the link. The wish card of a fully received wish shows no giver
+controls: `can_promise` in `item_card.html` requires `not item.is_fully_received`, and a stale
+giver card that is refreshed into a different answer becomes the neutral text «Желание больше
+недоступно. Обновите страницу.» (`swapWishCard` wrapper in `wishlist.js`). See
+[gift-receipt.md](gift-receipt.md#owner-card-archive-and-cabinet).
 
 An archived list keeps the row and «К желанию», shows
 «Вишлист в архиве», and omits the four actions. The four writes on

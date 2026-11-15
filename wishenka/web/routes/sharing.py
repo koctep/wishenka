@@ -130,6 +130,7 @@ async def get_item_card_partial(
             "viewer_identified": current_user is not None,
             "wishlist_active": wishlist.status == WishlistStatus.ACTIVE,
             "can_edit_wishlist": WishlistAccessPolicy.can_add_or_edit_item(context_user, wishlist),
+            "is_member": context_user.is_member,
             "notice": visible_notice,
             "is_first": is_first,
             "is_last": is_last,

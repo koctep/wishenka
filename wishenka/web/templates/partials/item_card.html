@@ -5,7 +5,8 @@
      data-wishlist-id="{{ card_wishlist_id }}"
      data-is-first="{{ 'true' if is_first else 'false' }}"
      data-is-last="{{ 'true' if is_last else 'false' }}"
-     {% if can_edit_wishlist %}draggable="true"{% endif %}>
+     {% if can_edit_wishlist %}draggable="true"{% endif %}
+     {% if card_oob %}hx-swap-oob="true"{% endif %}>
     <div class="item-card-summary flex justify-between items-center gap-2 p-3"
          role="button"
          tabindex="0"
@@ -36,7 +37,11 @@
                     {% elif item.priority|string == 'low' %}
                     <span class="badge badge-priority-low">Низкий приоритет</span>
                     {% endif %}
-                    {% if item.quantity > 1 %}
+                    {% if is_member and item.received_quantity > 0 %}
+                    <span class="badge badge-quantity badge-received">
+                        Осталось {{ item.remaining_quantity }} из {{ item.quantity }}
+                    </span>
+                    {% elif item.quantity > 1 %}
                     <span class="badge badge-quantity">×{{ item.quantity }}</span>
                     {% endif %}
                     {% if item.recipient_name %}
@@ -51,7 +56,8 @@
                 {% if not item.is_recipient %}
                 {% set reservation_prefix = "/api/wishlists/" ~ card_wishlist_id
                     ~ "/items/" ~ item.id ~ "/reservations" %}
-                {% set can_promise = giver_viewer and giver_list_active %}
+                {% set can_promise = giver_viewer and giver_list_active
+                    and not item.is_fully_received|default(false) %}
                 {% set change_ceiling = item.my_latest_reservation_quantity
                     + item.available_quantity %}
                 {% set bought_mark = item.my_occupying_reservation_count == 1
@@ -153,7 +159,13 @@
         {% endif %}
 
         <div class="item-meta mt-2 flex flex-wrap gap-2 text-xs text-gray-500">
+            {% if is_member and item.received_quantity > 0 %}
+            <span class="item-quantity-requested">Запрошено: {{ item.quantity }}</span>
+            <span class="item-quantity-received">Получено: {{ item.received_quantity }}</span>
+            <span class="item-quantity-remaining">Осталось: {{ item.remaining_quantity }}</span>
+            {% else %}
             <span class="item-quantity">Количество: {{ item.quantity }}</span>
+            {% endif %}
             {% if item.link %}
             <a href="{{ item.link }}"
                target="_blank"
@@ -167,6 +179,16 @@
         {% if can_edit_wishlist %}
         {% set item_web = "/web/wishlists/" ~ card_wishlist_id ~ "/items/" ~ item.id %}
         <div class="item-actions mt-3 flex flex-wrap items-center gap-2" data-no-toggle>
+            {% if item.remaining_quantity > 0 %}
+            <button type="button"
+                    class="btn-receipt-item text-xs text-green-700"
+                    data-no-toggle
+                    hx-get="{{ item_web }}/receipt"
+                    hx-target="#item-modal-container"
+                    hx-swap="innerHTML">
+                Получено
+            </button>
+            {% endif %}
             <button type="button"
                     class="btn-edit-item text-xs text-blue-600 underline"
                     data-no-toggle

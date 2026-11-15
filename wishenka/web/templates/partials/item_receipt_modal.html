@@ -1,0 +1,35 @@
+<div class="modal-backdrop receipt-backdrop" id="item-receipt-modal" data-receipt-modal
+     {% if oob %}hx-swap-oob="outerHTML" {% endif %}role="dialog" aria-labelledby="receipt-title">
+    <div class="modal-sheet receipt-sheet">
+        <h2 id="receipt-title">Отметить получение</h2>
+        {% if item_title %}<p class="receipt-wish">{{ item_title }}</p>{% endif %}
+        {% if not blocked %}<p class="receipt-remaining">Осталось: {{ remaining }}</p>{% endif %}
+        <div id="receipt-feedback" class="receipt-feedback" role="alert">{{ feedback }}</div>
+        {% if blocked %}
+        <button type="button" class="btn-modal-close" data-modal-close>Закрыть</button>
+        {% else %}
+        {% set chosen = selected|default(1) %}
+        <form data-receipt-form method="post"
+              action="/web/wishlists/{{ wishlist_id }}/items/{{ item_id }}/receipt">
+            {% if remaining > 1 %}
+            <label for="receipt-quantity">Сколько штук получено</label>
+            <select id="receipt-quantity" name="quantity" data-receipt-quantity
+                    data-remaining="{{ remaining }}">
+                {% for n in range(1, remaining + 1) %}
+                <option value="{{ n }}"{% if n == chosen %} selected{% endif %}>{{ n }}</option>
+                {% endfor %}
+            </select>
+            <p class="receipt-summary" data-receipt-summary aria-live="polite">
+                Будет отмечено получено: {{ chosen }} шт. из {{ remaining }} оставшихся
+            </p>
+            {% else %}
+            <input type="hidden" name="quantity" value="1">
+            <p class="receipt-summary" data-receipt-summary>Будет отмечено получено: 1 шт.</p>
+            {% endif %}
+            <p class="receipt-final">Это действие нельзя отменить.</p>
+            <button type="submit" class="btn-receipt-confirm">Отметить полученным</button>
+            <button type="button" class="btn-modal-close" data-modal-close>Отмена</button>
+        </form>
+        {% endif %}
+    </div>
+</div>

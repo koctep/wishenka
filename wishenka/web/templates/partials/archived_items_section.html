@@ -7,6 +7,9 @@
             <div class="archived-item flex justify-between items-center py-2"
                  id="archived-item-{{ item.id }}">
                 <span class="archived-item-title">{{ item.title }}</span>
+                {% if item.received_quantity > 0 %}
+                <span class="archived-item-remaining">Осталось {{ item.remaining_quantity }}</span>
+                {% endif %}
                 {% if item.price is not none %}
                 <span class="archived-item-price text-sm">{{ item.price }} {{ item.currency or "RUB" }}</span>
                 {% endif %}

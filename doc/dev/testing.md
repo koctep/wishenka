@@ -3,8 +3,10 @@
 ## Overview
 
 Тесты с маркером `browser` управляют настоящим Chromium/Chrome через Chrome DevTools Protocol (CDP):
-`tests/test_wishlist_management_browser.py`, `tests/test_wishlist_sections_ui.py` и три модуля
-поведенческих тестов списка желаний (раздел «Browser UI-тесты списка желаний (WISHENKA-110)» ниже).
+`tests/test_wishlist_management_browser.py`, `tests/test_wishlist_sections_ui.py`, три модуля
+поведенческих тестов списка желаний (раздел «Browser UI-тесты списка желаний (WISHENKA-110)» ниже)
+и модуль диалога получения `tests/test_receipt_modal_browser.py` (WISHENKA-24, раздел «Диалог
+получения (WISHENKA-24)»).
 Для них нужен исполняемый браузер. Раньше его отсутствие приводило к пропуску тестов и «зелёному» прогону.
 
 Теперь поведение такое:
@@ -192,7 +194,8 @@ export WISHENKA_CHROMIUM_BIN=/path/to/chrome
 
 ### Что покрыто
 
-Всего 53 теста в трёх модулях; в каждом `pytestmark = [pytest.mark.timeout(45), pytest.mark.browser]`.
+Всего 53 теста в трёх модулях (модуль WISHENKA-24 описан ниже); в каждом
+`pytestmark = [pytest.mark.timeout(45), pytest.mark.browser]`.
 
 | Модуль | Тестов | Что проверяет |
 | --- | --- | --- |
@@ -205,8 +208,8 @@ export WISHENKA_CHROMIUM_BIN=/path/to/chrome
 | Файл | Назначение |
 | --- | --- |
 | `tests/browser_cdp.py` | Собственный драйвер на `websockets.sync` без потоков: один читатель событий. `CdpBrowser` (запуск Chromium с временным профилем, `new_page`, `stop`: terminate, `wait(5)`, kill) и `CdpPage` (навигация, `evaluate`, `wait_for`, клик, клавиши, мышь и нативный drag-and-drop через `Input.setInterceptDrags`, касания с несколькими пальцами, `snapshot`, `screenshot`). Ожидания ограничены по времени; `PageWaitTimeout` наследует `AssertionError`. |
-| `tests/browser_helpers.py` | Общие помощники трёх модулей: `Seeded`, селекторы (`card`, `summary`, `title`, `handle`), `assert_order`, `assert_cards`, `assert_clean_console`, `assert_gesture_clean`, `begin_touch_drag`, `retarget_touch_drag`, `wait_suppression_window_over` и др. |
-| `tests/browser_assets/htmx_stub.js` | Офлайн-заглушка htmx (собственный код): только `htmx.ajax`. |
+| `tests/browser_helpers.py` | Общие помощники модулей: `Seeded`, селекторы (`card`, `summary`, `title`, `handle`), `assert_order`, `assert_cards`, `assert_clean_console`, `assert_gesture_clean`, `begin_touch_drag`, `retarget_touch_drag`, `wait_suppression_window_over` и др.; для диалога получения (WISHENKA-24) добавлены `record_receipt`, `archive_item_rest`, `open_receipt_dialog`, `posts_to`, `scroll_to`. |
+| `tests/browser_assets/htmx_stub.js` | Офлайн-заглушка htmx (собственный код): только `htmx.ajax`; расширена в WISHENKA-24 (раздел «Диалог получения (WISHENKA-24)»). |
 | `tests/conftest.py` | Фикстуры (ниже). |
 
 Фикстуры `tests/conftest.py`:
@@ -251,8 +254,10 @@ make deps-browser
 
 ### Пределы достоверности
 
-- Заглушка htmx не обрабатывает атрибуты `hx-*`, не вызывает `htmx:configRequest`, всегда делает
-  `innerHTML`-замену (значение `swap` только записывается в `window.__ajaxCalls`). Поэтому тесты,
+- Заглушка htmx не обрабатывает атрибуты `hx-*`, не вызывает `htmx:configRequest`, делает
+  `innerHTML`-замену (значение `swap` записывается в `window.__ajaxCalls`; единственное
+  исключение `swap: 'none'`, добавленное в WISHENKA-24; внеполосные элементы применяются
+  отдельно). Поэтому тесты,
   которым нужна замена списка, вызывают `window.htmx.ajax(...)` явно, а не нажимают кнопки
   перемещения. Ошибка в `hx-post`/`hx-target` кнопок или изменение событий htmx при обновлении
   библиотеки тестами не поймаются (WISHENKA-145).
@@ -267,6 +272,39 @@ make deps-browser
 - Константа окна подавления клика `CLICK_SUPPRESS_MS = 400` продублирована в
   `tests/browser_helpers.py`; если окно в `wishlist.js` вырастет, тест следующего тапа упадёт, если
   уменьшится, тест просто будет ждать дольше.
+
+### Диалог получения (WISHENKA-24)
+
+Модуль `tests/test_receipt_modal_browser.py` (`pytestmark = [pytest.mark.timeout(45),
+pytest.mark.browser]`, девять тестов B-1 - B-6) проверяет настоящие `receipt.js`, `wishlist.js`,
+разметку и CSS страницы; htmx заменён заглушкой. Заглушка не обрабатывает `hx-*`, поэтому тесты
+сами вызывают `htmx.ajax` (клик по `hx-get` кнопки карточки покрыт тестами разметки). Тесты:
+сводка количества и закрытие без запроса; частичное и полное получение обновляют страницу; второй
+тап не шлёт второй запрос; отказ, затем общая фраза об ошибке; `busy` оставляет диалог и
+выбранное количество; переопределение `beforeSwap` закрытое (только заголовок
+`X-Receipt-Refusal` из закрытого набора); устаревшая карточка дарителя; устаревшая перестановка
+(`X-Reorder-Refusal`); ошибка без маркера не даёт уведомления и перезагрузки (ожидание 2 с).
+Охранный тест `test_new_browser_modules_declare_marker_and_timeout` проверяет и этот модуль
+(по маске `test_*_browser.py`), но множество `NEW_BROWSER_MODULES` по-прежнему содержит только три
+модуля WISHENKA-110.
+
+Что добавлено в заглушку (`htmx_stub.js`): `htmx:beforeSwap` получает `detail.xhr` (`status`,
+`responseText`, `getResponseHeader`), `shouldSwap` и `isError`, обработчики могут их менять;
+непринятый ответ отбрасывается, а при `isError` вызывается `htmx:responseError`; `swap: 'none'`;
+внеполосные (`hx-swap-oob`) замены принятого ответа. Расхождения с настоящим htmx 1.9.12, которые
+остаются: ворота запроса в тесте второго тапа держат `window.fetch`, а настоящий htmx использует
+XHR; проверки `assert_clean_console` упали бы под настоящим htmx, который пишет `console.error`
+на каждый непринятый 4xx; заглушка не принимает ничего со статусом от 400, поэтому слова её
+заголовка «all additive» не вполне верны; `hx-get` кнопки, классы `htmx-request` и заголовок CSRF
+не проверяются. Закрывают WISHENKA-145 и WISHENKA-162.
+
+Серверные тесты слоя страниц (без браузера): `tests/test_receipt_ui_routes.py`,
+`test_receipt_card_ui.py`, `test_gifted_section_ui.py`, `test_cabinet_received_marker.py`,
+`test_receipt_static_script.py`, `test_receipt_ui_observability.py`, помощник
+`tests/receipt_ui_support.py`; описание: `doc/dev/gift-receipt.md`, раздел «Mini App UI
+(WISHENKA-24)». Хеш SHA-256 встроенного скрипта `base.html` закреплён тестом
+`test_inline_script_is_unchanged_and_free_of_receipt_code`: осознанная правка скрипта
+(WISHENKA-140) требует обновить хеш.
 
 ### Диагностика при падении
 

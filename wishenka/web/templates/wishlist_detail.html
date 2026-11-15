@@ -24,9 +24,17 @@
         {% endif %}
     </header>
 
+    {% if is_member %}
+    <div id="list-notice" role="status" aria-live="polite"></div>
+    {% endif %}
+
     <section class="wishlist-items" id="items-list" data-wishlist-id="{{ wishlist.id }}">
         {% with items=wishlist.items %}{% include "partials/items_list.html" %}{% endwith %}
     </section>
+
+    {% if can_view_gifted %}
+        {% with oob=false %}{% include "partials/gifted_items_section.html" %}{% endwith %}
+    {% endif %}
 
     {% if can_edit_wishlist %}
         {% with archived_items=wishlist.archived_items, oob=false %}

@@ -5,7 +5,8 @@
 Checklist for WISHENKA-37. It records which invariant is checked where.
 WISHENKA-38 closed rows S5, S6, S8, and A3 with
 `tests/test_surprise_role_context.py`. WISHENKA-39 closed row R5 with
-the six checks in `tests/test_booking_ceiling_r5.py`.
+the six checks in `tests/test_booking_ceiling_r5.py`. WISHENKA-24 added
+row S9 for the receipt page layer.
 
 This file is the developer document for that checklist.
 `doc/dev/architecture.md` links it from the subsystem list. The service
@@ -148,6 +149,10 @@ notification. This checklist does not add a sender.
   `tests/test_surprise_role_context.py`.
 - WISHENKA-39 — race and load ceiling (R5). The six checks are in
   `tests/test_booking_ceiling_r5.py`.
+- WISHENKA-24 — receipt dialog, owner card, «Подаренные» section and
+  cabinet marker in the Mini App. `wishenka/web/routes/receipts_ui.py`,
+  `wishenka/web/gifted_view.py`, `wishenka/web/static/receipt.js`.
+  Row S9.
 
 The free remainder indexed here is the one already computed in
 `project_wish_item`: requested quantity, minus received units, minus
@@ -498,6 +503,82 @@ including a wish that has only a display name. The same test closes S5
 and S6.
 
 Gap: none.
+
+### S9. Receipt page layer (WISHENKA-24)
+
+The receipt dialog, the owner card after a receipt, the «Подаренные»
+section, every refusal and out-of-band fragment, the cabinet marker and
+the logs of these requests omit the gifter, the reservation, the booked
+quantity and the purchase fact. The section is shown to members only.
+
+Modules:
+
+- `wishenka/web/routes/receipts_ui.py` — `GET` and `POST`
+  `/web/wishlists/{wishlist_id}/items/{item_id}/receipt`. Logger
+  `wishenka.web.receipts_ui`.
+- `wishenka/web/gifted_view.py` — `GiftedRow` (no promise or giver
+  field), `read_gifted_rows`, `oob_text`.
+- `wishenka/web/routes/items_ui.py` — `_nothing_remaining_response`
+  (stale archive and restore), `has_received`, the `is_member` flag.
+- `wishenka/web/templates/partials/item_receipt_modal.html`,
+  `gifted_items_section.html`, `item_card.html`,
+  `reservations_list.html`.
+- `wishenka/web/static/receipt.js` and `wishlist.js` — script side,
+  `textContent` only.
+
+Covered by (the Definition of Done item of `ai-tasks/WISHENKA-24` in
+brackets):
+
+- (1, 3) `tests/test_receipt_ui_routes.py`
+  `test_get_modal_content_for_member`,
+  `test_get_modal_refusals_blocked_state`,
+  `test_post_refusals_by_reason`,
+  `test_post_busy_is_503_and_changes_nothing`,
+  `test_ui_reason_table_matches_json_route`
+- (1) `tests/test_receipt_card_ui.py`
+  `test_receipt_button_for_members_on_active_list` and
+  `test_receipt_button_absent_for_giver_anonymous_share_and_archived_list`
+- (2) `tests/test_receipt_ui_routes.py`
+  `test_post_partial_receipt_fragments` and
+  `test_post_full_receipt_removes_card_and_fixes_flags`
+- (4) `tests/test_receipt_modal_browser.py`
+  `test_second_tap_sends_no_second_request`
+- (5, 6, 7) `tests/test_gifted_section_ui.py`
+  `test_section_shown_to_owner_admin_member_with_count`,
+  `test_section_absent_for_giver_anonymous_share_and_stranger`,
+  `test_entry_content_and_order`, `test_approximate_date_marked`
+- (8) `tests/test_receipt_card_ui.py`
+  `test_archive_confirm_text_only_for_received_part`,
+  `test_restore_returns_remaining_and_leaves_gifted_data`,
+  `test_stale_archive_and_restore_of_received_wish_is_oob_409`
+- (9) `tests/test_cabinet_received_marker.py` (six tests)
+- (10) `tests/test_receipt_card_ui.py`
+  `test_giver_card_fully_received_has_no_booking_controls` and
+  `tests/test_receipt_modal_browser.py` `test_stale_giver_card_is_neutral`
+- (11) `tests/test_receipt_ui_routes.py`
+  `test_get_modal_has_no_booking_data` and
+  `test_post_co_author_and_recipient_views`,
+  `tests/test_receipt_card_ui.py` `test_owner_card_has_no_booking_data`,
+  `tests/test_gifted_section_ui.py`
+  `test_section_has_no_controls_or_booking_data`
+- (13) `tests/test_receipt_static_script.py`
+  `test_pages_and_partials_carry_no_inline_handlers` and
+  `test_inline_script_is_unchanged_and_free_of_receipt_code`
+- (16) `tests/test_receipt_ui_routes.py` `test_ui_logging_once_per_outcome`
+  and `tests/test_receipt_ui_observability.py`
+  `test_full_ui_flow_log_contract` (three promised givers, a scan of every
+  record of the flow)
+
+Details of the flow, the `X-Receipt-Refusal` set and the invariants are in
+[gift-receipt.md](gift-receipt.md#mini-app-ui-wishenka-24).
+
+Gap: the browser tests run an htmx stub, not real htmx, so the markup
+wiring of `hx-get` and the CSRF header are not asserted together with the
+script (WISHENKA-145, WISHENKA-162). The label and the alert region of
+Definition of Done item 14 are asserted in markup by
+`test_get_modal_content_for_member`; keyboard operation is not driven by
+a test, and the limits of focus and focus trap are not tested
+(WISHENKA-161).
 
 ## Family 2. Concurrent booking and the free-remainder ceiling
 

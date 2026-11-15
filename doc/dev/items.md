@@ -564,7 +564,9 @@ WishlistError
   one dated row in `wl_receipts` in the same transaction. The author check is now plain list
   membership (owner, admin or member). The HTTP route is
   `POST /api/wishlists/{wishlist_id}/items/{item_id}/receipts`. See
-  [gift-receipt.md](gift-receipt.md). The receipt screen is WISHENKA-24 (not implemented).
+  [gift-receipt.md](gift-receipt.md). The receipt dialog, the owner card and the «Подаренные»
+  section (WISHENKA-24) are Mini App routes that call this service method; see
+  [gift-receipt.md](gift-receipt.md#mini-app-ui-wishenka-24).
 - **Reduction Lock**: A wishlist creator or editor cannot reduce the requested `quantity` below occupied plus received:
   $$\text{requested\_quantity} \ge \text{reserved\_quantity} + \text{received\_quantity}$$
   Attempting to reduce below this threshold raises [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L44) and returns HTTP 409 Conflict. The wish-scoped transaction rolls back, so the stored quantity stays at the last commit.
@@ -598,7 +600,11 @@ WishlistError
   (HTTP 409 on the archive and restore routes). Partly received wishes log INFO
   `wish_archived_partial` or `wish_restored_partial`; the refusal logs WARNING
   `wish_archive_refused`. Legacy archived rows that were fully received are cleared by the
-  migration `add_gift_receipts`. See [gift-receipt.md](gift-receipt.md).
+  migration `add_gift_receipts`. In the Mini App (`items_ui.py`), a stale archive or restore of a
+  fully received wish is a 409 with `X-Receipt-Refusal: nothing_remaining` and an out-of-band
+  body (`_nothing_remaining_response`); the archive confirmation dialog gets a note about the
+  received part (`has_received`), the archive section shows «Осталось N», and the stale reorder
+  400 carries `X-Reorder-Refusal: stale_order`. See [gift-receipt.md](gift-receipt.md).
 
 ### 4. Collaborative Wishlist Targeting & Surprise Invariant
 

@@ -20,6 +20,8 @@
   const CLICK_SUPPRESS_MS = 400;
   const SWIPES_MIN_VERSION = '7.7';
   const HAPTIC_MIN_VERSION = '6.1';
+  const REORDER_REFUSAL_HEADER = 'X-Reorder-Refusal';
+  const STALE_RELOAD_DELAY_MS = 800;
 
   /** @type {Element | null} Card currently being dragged with the mouse. */
   let dragged = null;
@@ -522,6 +524,46 @@
     if (touchDrag && swapTarget && swapTarget.id === 'items-list') {
       cancelTouchDrag();
     }
+  });
+
+  /*
+   * A refresh of a card that is gone or changed (for example a fully received wish) answers with
+   * something other than the same card; the neutral text replaces it instead of the raw answer.
+   * The inline script of base.html defines `swapWishCard`; it is wrapped, not edited.
+   */
+  const originalSwapWishCard = window.swapWishCard;
+  if (typeof originalSwapWishCard === 'function') {
+    window.swapWishCard = (card, markup) => {
+      const holder = document.createElement('template');
+      holder.innerHTML = String(markup);
+      const root = holder.content.firstElementChild;
+      if (root && root.id === card.id && root.classList.contains('item-card')) {
+        originalSwapWishCard(card, markup);
+        return;
+      }
+      const gone = document.createElement('p');
+      gone.className = 'item-card-unavailable';
+      gone.setAttribute('role', 'status');
+      gone.textContent = 'Желание больше недоступно. Обновите страницу.';
+      card.replaceWith(gone);
+    };
+  }
+
+  // A stale reorder answers 400 with a marker header (not swapped by htmx): show a neutral
+  // notice and reload so the list matches the server again.
+  document.addEventListener('htmx:responseError', (event) => {
+    const detail = event.detail;
+    if (!detail || !detail.xhr || typeof detail.xhr.getResponseHeader !== 'function') {
+      return;
+    }
+    if (detail.xhr.getResponseHeader(REORDER_REFUSAL_HEADER) !== 'stale_order') {
+      return;
+    }
+    const notice = document.getElementById('list-notice');
+    if (notice) {
+      notice.textContent = 'Список изменился. Обновляем.';
+    }
+    window.setTimeout(() => window.location.reload(), STALE_RELOAD_DELAY_MS);
   });
 
   document.addEventListener(

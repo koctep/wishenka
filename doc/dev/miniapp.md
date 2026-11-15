@@ -333,6 +333,14 @@ wish items without full-page reloads.
     both `#quick-add-bar` and the per-card `.btn-edit-item` triggers are omitted from the DOM.
   - All mutating UI endpoints enforce `_ensure_member_and_active`, returning `404 Not Found` for
     non-members and `409 Conflict` if the wishlist is archived.
+- **Receipt context (WISHENKA-24)**: the page also gets `is_member` (`ctx.is_member`),
+  `can_view_gifted` (`WishlistAccessPolicy.can_view_gifted`, a member of a non-deleted list) and
+  `gifted_rows` (read only when `can_view_gifted`, `None` on a domain error). For a member the
+  template renders `<div id="list-notice" role="status" aria-live="polite">` above `#items-list`
+  (the target of the receipt notice and of the stale-reorder notice), and for `can_view_gifted`
+  the section `#gifted-items-section` right after `#items-list`. The empty
+  `<div id="item-modal-container">` is the target of every modal, including the receipt dialog.
+  Details: [gift-receipt.md](gift-receipt.md#mini-app-ui-wishenka-24).
 
 #### 9.2. Universal Quick Add Bar (`partials/item_quick_add.html`)
 - **Template**: [`wishenka/web/templates/partials/item_quick_add.html`](../../wishenka/web/templates/partials/item_quick_add.html).
@@ -438,11 +446,26 @@ wish items without full-page reloads.
 - **Restore**: `POST /web/wishlists/{wishlist_id}/items/{item_id}/restore` (`restore_item_ui`).
   Calls `WishlistService.restore_wish_item` (appending the item to the tail of active items while
   retaining reservations) and returns `200 OK` with the rendered `partials/item_card.html`.
+- **Fully received wish (WISHENKA-24)**: both routes answer `409` with the header
+  `X-Receipt-Refusal: nothing_remaining` and a body made only of `hx-swap-oob` elements (dialog
+  closed, `#list-notice` text, refreshed list, archive section and «Подаренные»), not the old
+  JSON `detail`. The archive dialog adds a note about the received part when the wish has
+  received units, and an archived wish with received units shows «Осталось N» in the archive
+  section. See [gift-receipt.md](gift-receipt.md#stale-states).
 
 #### 9.8. Vertical Items List: Compact/Expanded Cards, Manual Order, Archived Section (WISHENKA-15)
 - **Layout**: `wishlist_detail.html` renders `#items-list` from `partials/items_list.html`, which
   includes `partials/item_card.html` per item (`is_first`/`is_last` drive disabled move buttons).
   Archived items render below via `partials/archived_items_section.html` (owner/editor only).
+  The «Подаренные» section (`partials/gifted_items_section.html`, members only) sits between the
+  list and the archive section.
+- **Receipt (WISHENKA-24)**: for a list member a wish with received units shows the badge
+  «Осталось N из M» and the details «Запрошено», «Получено», «Осталось» instead of `×M` and
+  «Количество». The button `.btn-receipt-item` («Получено», in `.item-actions`, while
+  `remaining_quantity > 0`) opens the receipt dialog with `hx-get` into
+  `#item-modal-container`. A giver card of a fully received wish has no promise controls.
+  The flow, routes, refusals and invariants are in
+  [gift-receipt.md](gift-receipt.md#mini-app-ui-wishenka-24).
 - **Compact/expanded**: `.item-card-summary` is the compact row (`aria-expanded` starts `false`).
   `.item-card-details` is rendered with `hidden`. The delegated toggle in
   [`wishlist.js`](../../wishenka/web/static/wishlist.js) clears `hidden` to expand and sets it to
@@ -491,8 +514,8 @@ no globals (`toggleWishCard` is no longer a global function).
   vertical midpoint of the target card. `submitReorder(list, card, target, after)` checks the
   wishlist id and htmx (the skip path below), moves the card before or after the target, collects
   `data-item-id` of every `.item-card`, and posts it with `htmx.ajax('POST', ...)`, target
-  `#items-list`, swap `innerHTML`, field `item_ids`. It is the only place that calls `htmx.ajax`,
-  for mouse and touch alike.
+  `#items-list`, swap `innerHTML`, field `item_ids`. It is the only place of this script that
+  calls `htmx.ajax`, for mouse and touch alike (`receipt.js` has its own single call).
 - **Wishlist id**: read at drop time from `#items-list[data-wishlist-id]`, rendered by
   `wishlist_detail.html` and `share_wishlist.html` as `{{ wishlist.id }}`. The value must match
   `^\d+$`. The URL is no longer derived from `window.location`. No htmx swap replaces
@@ -577,11 +600,25 @@ no globals (`toggleWishCard` is no longer a global function).
     from a long press on Chrome Android, pull-to-refresh and the autoscroll speed are not verified
     on real devices; the manual checklist is WISHENKA-143. Tidying of the script (long lines,
     module split, palette variables) is WISHENKA-144.
+- **Receipt additions (WISHENKA-24)**: the `swapWishCard` wrapper (a refresh that is not the same
+  `.item-card` becomes `p.item-card-unavailable` «Желание больше недоступно. Обновите
+  страницу.») and the `htmx:responseError` listener that reacts only to the header
+  `X-Reorder-Refusal: stale_order` (notice «Список изменился. Обновляем.» in `#list-notice`, then
+  `window.location.reload()` after `STALE_RELOAD_DELAY_MS` = 800 ms). Both guard a missing
+  function or `xhr`.
+- **Dialog script (`static/receipt.js`, WISHENKA-24)**: a second classic script, loaded
+  `<script src="/static/receipt.js" defer>` after `wishlist.js` in `base.html`; IIFE, delegated
+  listeners on `document`, texts via `textContent` only, no inline handler. It owns the quantity
+  summary, dialog dismissal and focus, the single in-flight `htmx.ajax('POST', ...)` of the
+  receipt and the guarded `htmx:beforeSwap` override keyed on `X-Receipt-Refusal` (htmx 1.9.12
+  does not swap 4xx and 5xx). See
+  [gift-receipt.md](gift-receipt.md#why-htmxbeforeswap-is-overridden).
 - **Tests**: behavioural browser tests drive a real headless Chromium over CDP, offline, against a
   per-test server and database: `tests/test_wishlist_cards_browser.py` (card toggle),
   `tests/test_wishlist_mouse_reorder_browser.py` (mouse drag-and-drop) and
   `tests/test_wishlist_touch_reorder_browser.py` (touch reorder and its cancel paths), 53 tests in
-  all. Their design, fixtures, fidelity limits, diagnostics and mutation proof are in
+  all, plus the nine tests of `tests/test_receipt_modal_browser.py` (WISHENKA-24). Their design,
+  fixtures, fidelity limits, diagnostics and mutation proof are in
   [testing.md](testing.md). The htmx used there is an offline stub and touch is synthesized, so
   neither the real htmx wiring nor a real touch stack is covered. The string and CSS guards that
   were kept are weak by design (a comment can satisfy them): `tests/test_wishlist_static_script.py`
@@ -596,7 +633,8 @@ no globals (`toggleWishCard` is no longer a global function).
   stays inside `submitReorder`), WISHENKA-142 (list jump when an expanded card is dragged),
   WISHENKA-143 (real-device checklist), WISHENKA-144 (tidying), WISHENKA-145 (real htmx smoke test
   instead of the stub), WISHENKA-146 (shared CDP driver for the older browser modules, `websockets`
-  range), WISHENKA-147 (CI upload of failure diagnostics).
+  range), WISHENKA-147 (CI upload of failure diagnostics). UI debts of the receipt story:
+  WISHENKA-160 to 165 (list in [gift-receipt.md](gift-receipt.md#follow-up-tickets-of-the-ui)).
 
 ---
 
@@ -633,6 +671,8 @@ no globals (`toggleWishCard` is no longer a global function).
 | `/web/wishlists/{wishlist_id}/items/reorder` | `POST` | Yes | Yes | Persists full manual order (`item_ids`); returns items list. |
 | `/web/wishlists/{wishlist_id}/items/{item_id}/move?direction=up\|down` | `POST` | Yes | Yes | Moves item one step; returns items list. |
 | `/web/wishlists/{wishlist_id}/items/{item_id}/archive-confirm` | `GET` | Yes | No | Renders archive confirmation modal. |
+| `/web/wishlists/{wishlist_id}/items/{item_id}/receipt` | `GET` | Yes | No | Renders the receipt dialog; a refusal is the blocked dialog with `X-Receipt-Refusal`. |
+| `/web/wishlists/{wishlist_id}/items/{item_id}/receipt` | `POST` | Yes | Yes | Records a receipt; answers with OOB fragments (201) or a marked refusal. |
 | `/web/reservations/card` | `GET` | Yes | No | Home card. Badge is distinct wishes. |
 | `/web/reservations` | `GET` | Yes | No | Cabinet page of the caller's promises. |
 | `/web/reservations/list` | `GET` | Yes | No | Cabinet list partial used on refresh. |
@@ -654,6 +694,12 @@ The HTMX wish item UI router (`wishenka.web.items_ui`) emits structured telemetr
 | `ui_item_edit_saved` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `quantity`, `has_recipient` | Wish item edits persisted via detailed edit modal. |
 | `ui_item_archived` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id` | Wish item archived via HTMX UI. |
 | `ui_item_restored` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id` | Archived wish item restored via HTMX UI. |
+
+The receipt router (`wishenka.web.receipts_ui`, WISHENKA-24) writes `ui_receipt_form_opened`,
+`ui_receipt_form_refused`, `receipt_recorded_http`, `receipt_refused` and
+`receipt_inventory_busy` with `wishlist_id`, `item_id`, `actor_id` and, for refusals, `reason`,
+`http_status` and (two reasons only) `remaining_quantity`. No `user_id`, quantity or title. The
+table is in [gift-receipt.md](gift-receipt.md#log-events-of-the-ui).
 
 ### Telemetry Privacy Invariants
 - **Zero Raw URLs Logged**: Only the normalized hostname (`domain`, e.g., `ozon.ru`) and canonical
@@ -742,6 +788,8 @@ The following settings configure the Mini App and web security layer:
 - **Cause**: `item_ids` is not an exact permutation of active items (stale page after another
   editor archived/added an item), or the card is not `draggable="true"` (non-editor view).
 - **Solution**: Reload the wishlist page and retry; logged as `ui_items_reorder_rejected`.
+  The stale-order 400 carries `X-Reorder-Refusal: stale_order`; `wishlist.js` then shows a notice
+  in `#list-notice` and reloads the page by itself after 800 ms.
 
 ### 12. Touch Drag Does Nothing or the Mini App Minimises
 - **Cause**: The gesture did not start on `.item-drag-handle` (only the handle starts it; a swipe on
@@ -751,3 +799,12 @@ The following settings configure the Mini App and web security layer:
 - **Solution**: Start from the `⠿` handle of a collapsed card, or use the move up and move down
   buttons in the card details. A tap shorter than 4 px does nothing by design. A drop on the card
   itself is ignored. After a drag, a tap within 400 ms is swallowed; tap again.
+
+### 13. Receipt Dialog Shows Only a Generic Sentence or Nothing
+- **Cause**: htmx 1.9.12 does not swap 4xx and 5xx answers. The dialog shows a refusal only when
+  the answer carries `X-Receipt-Refusal` with a value of the closed set (`receipt.js`
+  `REFUSAL_REASONS`); an unmarked error (network, 500) gives «Не удалось сохранить отметку.
+  Повторите попытку.». The same default hides the errors of the older edit and archive modals
+  (WISHENKA-160).
+- **Solution**: Check the response headers of the `/web/.../receipt` request. See
+  [gift-receipt.md](gift-receipt.md#refusals-and-the-marker-header).

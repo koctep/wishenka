@@ -9,6 +9,7 @@ from typing import Annotated, Any, NoReturn, cast
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse
+from markupsafe import Markup
 
 from wishenka.auth.dependencies import get_current_user, get_optional_current_user
 from wishenka.auth.models import AuthenticatedUser
@@ -16,6 +17,13 @@ from wishenka.items.classifier import UniversalInputClassifier
 from wishenka.items.models import InputType, ItemPriority
 from wishenka.items.parser import extract_domain
 from wishenka.items.service import ItemPreviewService
+from wishenka.web.gifted_view import (
+    NOTHING_REMAINING_TEXT,
+    RECEIPT_REFUSAL_HEADER,
+    GiftedRow,
+    oob_text,
+    read_gifted_rows,
+)
 from wishenka.web.templates import templates
 from wishenka.wishlists.exceptions import (
     CannotReduceQuantityBelowReservedError,
@@ -25,6 +33,7 @@ from wishenka.wishlists.exceptions import (
     PermissionDeniedError,
     WishlistArchivedError,
     WishlistDeletedError,
+    WishlistError,
     WishlistNotFoundError,
 )
 from wishenka.wishlists.models import Wishlist, WishlistStatus
@@ -52,8 +61,8 @@ async def _execute[T](request: Request, action: Callable[[WishlistService], Awai
 
 
 def _editor_card_flags() -> dict[str, bool]:
-    """Flags for a card rendered after an identified active-list check."""
-    return {"viewer_identified": True, "wishlist_active": True}
+    """Flags for a card rendered after an identified active-list check (a list member)."""
+    return {"viewer_identified": True, "wishlist_active": True, "is_member": True}
 
 
 def _ensure_member_and_active(wishlist: Wishlist, user: AuthenticatedUser) -> None:
@@ -120,15 +129,33 @@ async def view_wishlist_detail(
 ) -> Response:
     """Render main TMA wishlist detail page with RBAC-gated Quick Add Bar and edit triggers."""
 
-    async def action(svc: WishlistService) -> tuple[WishlistDetailViewDTO, bool, bool]:
+    async def action(
+        svc: WishlistService,
+    ) -> tuple[WishlistDetailViewDTO, bool, bool, bool, bool, list[GiftedRow] | None]:
         wl = await svc.get_wishlist_by_id(wishlist_id)
         dto = await svc.get_wishlist_view(wishlist_id, current_user)
         ctx = WishlistAccessPolicy.resolve_context(current_user, wl)
         can_edit_wishlist = WishlistAccessPolicy.can_add_or_edit_item(ctx, wl)
-        return dto, can_edit_wishlist, wl.status == WishlistStatus.ACTIVE
+        can_view_gifted = WishlistAccessPolicy.can_view_gifted(ctx, wl)
+        gifted = await read_gifted_rows(svc, wishlist_id, current_user) if can_view_gifted else None
+        return (
+            dto,
+            can_edit_wishlist,
+            wl.status == WishlistStatus.ACTIVE,
+            ctx.is_member,
+            can_view_gifted,
+            gifted,
+        )
 
     try:
-        dto, can_edit_wishlist, wishlist_active = await _execute(request, action)
+        (
+            dto,
+            can_edit_wishlist,
+            wishlist_active,
+            is_member,
+            can_view_gifted,
+            gifted_rows,
+        ) = await _execute(request, action)
     except (WishlistNotFoundError, WishlistDeletedError) as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -145,6 +172,9 @@ async def view_wishlist_detail(
             "can_edit_wishlist": can_edit_wishlist,
             "viewer_identified": current_user is not None,
             "wishlist_active": wishlist_active,
+            "is_member": is_member,
+            "can_view_gifted": can_view_gifted,
+            "gifted_rows": gifted_rows,
         },
     )
 
@@ -807,12 +837,51 @@ def _raise_http(exc: Exception) -> NoReturn:
     ) from exc
 
 
-def _raise_nothing_remaining(exc: NothingRemainingError) -> NoReturn:
-    """Answer 409 with a fixed message for archiving or restoring a fully received wish."""
-    raise HTTPException(
+async def _nothing_remaining_response(
+    request: Request, wishlist_id: int, user: AuthenticatedUser
+) -> HTMLResponse:
+    """Stale archive or restore of a fully received wish: 409 with out-of-band fragments only.
+
+    Every top-level element carries ``hx-swap-oob`` so nothing lands in the card or list target.
+    The refreshed list, archive and gifted sections are one extra read; a failed read degrades
+    to the dialog close and the notice.
+    """
+
+    async def action(
+        svc: WishlistService,
+    ) -> tuple[
+        list[WishItemRecipientViewDTO | WishItemGifterViewDTO],
+        list[WishItemRecipientViewDTO],
+        list[GiftedRow] | None,
+    ]:
+        items = await svc.list_wish_items(wishlist_id=wishlist_id, actor=user)
+        view = await svc.get_wishlist_view(wishlist_id, user)
+        return items, view.archived_items, await read_gifted_rows(svc, wishlist_id, user)
+
+    parts: list[str] = [
+        oob_text("item-modal-container"),
+        oob_text("list-notice", NOTHING_REMAINING_TEXT),
+    ]
+    try:
+        items, archived, gifted = await _execute(request, action)
+    except WishlistError:
+        pass
+    else:
+        list_html = _items_list_html(request, wishlist_id, items)
+        parts.append(
+            Markup('<div hx-swap-oob="innerHTML:#items-list">{}</div>').format(Markup(list_html))
+        )
+        parts.append(_archived_section_html(request, wishlist_id, archived))
+        parts.append(
+            templates.get_template("partials/gifted_items_section.html").render(
+                {"request": request, "gifted_rows": gifted, "oob": True}
+            )
+        )
+    return HTMLResponse(
+        content="\n".join(parts),
         status_code=status.HTTP_409_CONFLICT,
-        detail="Nothing remains to receive",
-    ) from exc
+        headers={RECEIPT_REFUSAL_HEADER: "nothing_remaining"},
+    )
 
 
 # Domain errors that `_raise_http` translates: archived -> 409, all others -> 404.
@@ -823,6 +892,9 @@ _DOMAIN_ERRORS = (
     PermissionDeniedError,
     WishlistArchivedError,
 )
+
+# Marker of the stale reorder 400 (read by wishlist.js); a closed value, not a receipt reason.
+REORDER_REFUSAL_HEADER = "X-Reorder-Refusal"
 
 
 async def _reordered_response(
@@ -865,6 +937,7 @@ async def _reordered_response(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid item order",
+            headers={REORDER_REFUSAL_HEADER: "stale_order"},
         ) from exc
     return HTMLResponse(content=_items_list_html(request, wishlist_id, items))
 
@@ -982,6 +1055,7 @@ async def archive_confirm_ui(
             "wishlist_id": wishlist_id,
             "show_gifter_warning": show_warning,
             "warn_on_delete_reserved": warn_pref,
+            "has_received": item.received_quantity > 0,
         },
     )
 
@@ -1013,8 +1087,8 @@ async def archive_item_ui(
 
     try:
         archived = await _execute(request, action)
-    except NothingRemainingError as exc:
-        _raise_nothing_remaining(exc)
+    except NothingRemainingError:
+        return await _nothing_remaining_response(request, wishlist_id, user)
     except _DOMAIN_ERRORS as exc:
         _raise_http(exc)
 
@@ -1065,8 +1139,8 @@ async def restore_item_ui(
 
     try:
         restored_item, archived = await _execute(request, action)
-    except NothingRemainingError as exc:
-        _raise_nothing_remaining(exc)
+    except NothingRemainingError:
+        return await _nothing_remaining_response(request, wishlist_id, user)
     except _DOMAIN_ERRORS as exc:
         _raise_http(exc)
 

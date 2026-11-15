@@ -1,11 +1,13 @@
 # Gift Receipt and the «Подаренные» Section
 
-> **Status: BACKEND IMPLEMENTED by WISHENKA-23; frontend (receipt screen, «Подаренные» section,
-> cabinet UI) is WISHENKA-24 — not implemented.**
+> **Status: BACKEND IMPLEMENTED by WISHENKA-23; Mini App UI IMPLEMENTED by WISHENKA-24 (see
+> [Mini App UI](#mini-app-ui-wishenka-24)).**
 
 The backend is the receipt command, the gifted read, the derived views, the receipt history, the
-giver notice path (outbox, worker, sender) and the migrations. No template or script calls the
-two new routes yet. The cabinet marker (`wish_received`) is computed but no template renders it.
+giver notice path (outbox, worker, sender) and the migrations. The Mini App page layer
+(WISHENKA-24) calls the domain service directly through its own HTML routes and does not call the
+two JSON routes. It adds the receipt dialog, the owner card, the «Подаренные» section and the
+cabinet marker, and changes no domain rule, storage, migration or JSON interface.
 
 Sources of truth, in order: `in-docs/spec.md` (sections 7.2, 7.3), `ai-tasks/WISHENKA-22/`
 (specification), `ai-tasks/WISHENKA-23/20-architecture.md` (design, governs where it differs from
@@ -49,16 +51,16 @@ came.
 
 ### Not implemented
 
-- Receipt screen, «Подаренные» section, cabinet marker UI, wish-card changes: WISHENKA-24.
 - Notification settings screen (only tables and lookup exist): WISHENKA-34.
 - Metrics exporter: WISHENKA-84 (the metrics are derived from logs and SQL, see Logging).
 - Undo or correction of a receipt: WISHENKA-153. The act is final.
 - Product decisions (assumptions A to D, public «already gifted» label, history after list
   deletion, co-author who is the recipient, edit-form quantity lock): WISHENKA-154.
-- Follow-up debt (all Low): WISHENKA-155 (one digit-free `quantity_invalid` message), 156 (opt-in
-  real-Telegram smoke test, two-process worker race test), 157 (log-contract and test hardening),
-  158 (split receipt code out of `service.py`, unify the two flush call sites in `store.py`), 159
-  (fail-closed `wl is not None` guards).
+- Follow-up debt of the UI story: see [Follow-up tickets](#follow-up-tickets-of-the-ui).
+- Follow-up debt of the backend (all Low): WISHENKA-155 (one digit-free `quantity_invalid`
+  message), 156 (opt-in real-Telegram smoke test, two-process worker race test), 157 (log-contract
+  and test hardening), 158 (split receipt code out of `service.py`, unify the two flush call sites
+  in `store.py`), 159 (fail-closed `wl is not None` guards).
 
 ## Architecture
 
@@ -197,9 +199,10 @@ list is archived. Order: newest receipt first (a wish without records falls back
   older constructors keep working.
 - **Cabinet row** (`CabinetRow` in `web/routes/reservations_ui.py`): new `wish_received` (the wish
   is fully received) and `offer_actions = (wish archived or wish received) and list not archived`.
-  The four promise actions are therefore offered for a received wish on an active list. No
-  template renders `wish_received` yet (WISHENKA-24). Hiding the giver controls on the wish card
-  of a fully received wish is a WISHENKA-24 task as well.
+  The four promise actions are therefore offered for a received wish on an active list.
+  `reservations_list.html` renders `wish_received` as the marker «Желание получено владельцем»
+  (WISHENKA-24, see the UI section). The wish card of a fully received wish shows no giver
+  controls (`item_card.html`, `can_promise` requires `not item.is_fully_received`).
 - **Public and wishlist projection** (`projection` in `web/routes/wishlists.py`): each item now
   has `remaining_quantity` and `is_active`, and a wish that is not `is_active` (archived or fully
   received) is omitted for anonymous, public-link and non-member viewers. Members still get all
@@ -207,7 +210,8 @@ list is archived. Order: newest receipt first (a wish without records falls back
   listed for non-members.
 - **Archive and restore** (`items.py` `execute`, `items_ui.py`): `NothingRemainingError` is a 409
   with the fixed message "Nothing remains to receive" on the archive and restore routes for a
-  fully received wish.
+  fully received wish. The Mini App HTML routes (`items_ui.py`) no longer answer with that JSON
+  detail: they answer 409 with out-of-band fragments only (see the UI section).
 
 ## Notice path
 
@@ -327,6 +331,289 @@ tests.
 `receipt_notice_purge_failed` and never fails the cycle; INFO `receipt_notice_rows_purged` (`rows`)
 is logged only when rows were deleted. It runs only while `background_cleanup_enabled` is true.
 
+## Mini App UI (WISHENKA-24)
+
+The page layer on top of the contract above. Sources: `ai-tasks/WISHENKA-24/10-requirements.md`
+(U-1 to U-21, N-1 to N-8), `20-architecture.md`, `50-observability.md`, `60-tech-debt.md`. Where
+this section and the code differ, the code wins.
+
+### Components
+
+| File | Role |
+| ---- | ---- |
+| `wishenka/web/routes/receipts_ui.py` | Router `/web/wishlists/{wishlist_id}` (tag `receipts-ui`): the dialog (`get_receipt_dialog`) and the command (`record_receipt_ui`). Included in `create_app` after `items_ui_router`. |
+| `wishenka/web/gifted_view.py` | `RECEIPT_REFUSAL_HEADER` (`X-Receipt-Refusal`), `NOTHING_REMAINING_TEXT`, the escaping helper `oob_text`, the view models `GiftedAct`, `GiftedRow`, `utc_day`, `build_gifted_rows`, and `read_gifted_rows` (fail-soft). |
+| `wishenka/web/templates/partials/item_receipt_modal.html` | The dialog, context `wishlist_id`, `item_id`, `item_title`, `remaining`, `selected`, `feedback`, `blocked`, `oob`. |
+| `wishenka/web/templates/partials/gifted_items_section.html` | The «Подаренные» section, context `gifted_rows`, `oob`. |
+| `wishenka/web/static/receipt.js` | Dialog behaviour (classic script in an IIFE, `defer`, after `wishlist.js`). |
+| `wishenka/web/static/wishlist.js` | Two additions: the `swapWishCard` wrapper and the `htmx:responseError` listener for a stale reorder. |
+| `partials/item_card.html`, `archived_items_section.html`, `item_archive_modal.html`, `reservations_list.html`, `wishlist_detail.html`, `base.html`, `static/miniapp.css` | Owner card, archive texts, cabinet marker, page wiring, script tag, styles. |
+| `items_ui.py`, `sharing.py` | `is_member` card flag, `_nothing_remaining_response`, `REORDER_REFUSAL_HEADER`, `has_received`. |
+
+### Routes
+
+Both routes need a session (`get_current_user`, 401 without one). The POST is a cookie-session
+mutation, so it needs the CSRF token; the inline script of `base.html` adds `X-CSRF-Token` to
+every non-GET htmx request in `htmx:configRequest` once the token is fetched.
+
+- **`GET /web/wishlists/{wishlist_id}/items/{item_id}/receipt`** opens the dialog. It is
+  advisory: it reads the wish (`get_wishlist_by_id`) and applies the service guards in order
+  (unknown wish, not a member, list not active, wish archived, nothing remaining) without
+  writing. A member of an active list with remaining units gets 200 and the form (INFO
+  `ui_receipt_form_opened`). Any guard that fails gets the same dialog in the blocked state
+  (sentence and a close button, no form, no title for a non-member), the status of the JSON
+  route and the header `X-Receipt-Refusal`. `nothing_remaining` also carries the list and
+  «Подаренные» fragments as out-of-band elements (the stale card leaves the list). A non-member
+  of a deleted list gets `wishlist_not_active` (404) instead of `forbidden`, because
+  `get_wishlist_by_id` raises before membership can be checked.
+- **`POST /web/wishlists/{wishlist_id}/items/{item_id}/receipt`** (form field `quantity`) calls
+  `WishlistService.record_item_fulfillment(item_id, user, quantity, wishlist_id=...)` and then
+  reads the committed state in the same `_execute`. Text that is not a whole number is passed
+  as 0, so the service refuses it as `quantity_invalid` after its membership and state guards
+  (`_quantity_of`). Success is 201 with out-of-band fragments only:
+  1. `#item-modal-container` emptied (the dialog closes);
+  2. `#list-notice`: «Отмечено получено: N шт. («title»)» (the text is escaped);
+  3. a partial receipt: the card of the wish with `hx-swap-oob="true"` (first and last flags
+     from the list); a full receipt: the whole `#items-list` (`innerHTML:#items-list`) because
+     the wish left the list and the flags and the empty text come along;
+  4. the «Подаренные» section (`outerHTML`).
+
+### Dialog flow
+
+1. The card button `.btn-receipt-item` («Получено») does `hx-get` on the GET route into
+   `#item-modal-container` (`innerHTML`). It is inside `.item-actions`, so only under
+   `can_edit_wishlist` (member of an active list), and only while `item.remaining_quantity > 0`.
+2. The dialog is `#item-receipt-modal` (`role="dialog"`, `aria-labelledby="receipt-title"`). With
+   remaining above 1 it has a labelled `<select id="receipt-quantity" name="quantity"
+   data-receipt-quantity>` with the options 1 to remaining and a summary line
+   (`[data-receipt-summary]`, `aria-live="polite"`); with 1 remaining it has a hidden field and
+   no choice. It states that the act cannot be undone. `#receipt-feedback` is `role="alert"`.
+3. `receipt.js` updates the summary on `change` (`updateSummary`), closes the dialog without a
+   request on `[data-modal-close]`, the backdrop and Escape (`closeDialog`, focus goes back to
+   the summary of the card that opened it), and moves focus into the dialog after a swap into
+   `#item-modal-container`.
+4. On `submit` of `form[data-receipt-form]` the script prevents the browser submit and calls
+   `htmx.ajax('POST', action, {target: '#receipt-feedback', swap: 'none', values: {quantity}})`
+   once (`submitReceipt`; this is the only `htmx.ajax` call of the script). The result arrives
+   through out-of-band elements only. While the request is open the form has `data-pending`
+   and `aria-busy`, the confirm button is disabled and a second submit does nothing. The
+   feedback is emptied at the start of every attempt. When the attempt ends (`finishAttempt`)
+   with the form still in the document and the feedback still empty, the generic sentence
+   «Не удалось сохранить отметку. Повторите попытку.» is shown; a form replaced by the answer
+   needs nothing.
+
+### Refusals and the marker header
+
+Every refusal of the receipt routes carries `X-Receipt-Refusal: <reason>`. The statuses come from
+the JSON route table, read-only, from `receipts._REFUSALS` (`_classify`). The sentences are
+`_SENTENCES` in `receipts_ui.py`. The closed set of the header:
+
+| `reason` | Status | Sentence |
+| -------- | :----: | -------- |
+| `quantity_invalid` | 400 | Укажите целое число не меньше 1. |
+| `quantity_above_remaining` | 409 | Нельзя отметить больше, чем осталось. Осталось: {n}. |
+| `nothing_remaining` | 409 | Это желание уже полностью получено. |
+| `wish_archived` | 409 | Желание в архиве. Восстановите его, чтобы отметить получение. |
+| `wishlist_not_active` | 409 or 404 | Вишлист не активен, отметить получение нельзя. |
+| `forbidden` | 403 | У вас нет права отмечать получение в этом вишлисте. |
+| `not_found` | 404 | Желание не найдено. Обновите страницу. |
+| `busy` | 503 | Не удалось сохранить отметку сейчас. Повторите попытку. |
+
+- `busy` is the UI mapping of `InventoryBusyError`. It is not in `_REFUSALS`; the constant is
+  `BUSY` in `receipts_ui.py`. The sentence is neutral and names no booking. The dialog stays
+  open and keeps the chosen quantity.
+- The remaining quantity in `quantity_above_remaining` is the one of the exception. After this
+  refusal the response also carries the refreshed card and the dialog (`oob`, `outerHTML`) with
+  the sentence, so the author sees the current remaining quantity. `nothing_remaining` carries
+  the list, «Подаренные» and the blocked dialog. This effect read is best effort: if it raises
+  a domain error, the status and the sentence of the refusal are unchanged and only the
+  sentence is shown (`_effect_fragments` returns `None`).
+- The set exists in three places that must agree: `receipts._REFUSALS` (plus `busy`),
+  `_SENTENCES` and `REFUSAL_REASONS` in `receipt.js`. `test_ui_reason_table_matches_json_route`
+  and `test_closed_reason_set_mirrors_the_refusal_table` guard it.
+- A refusal body is out-of-band only: the sentence is
+  `<div id="receipt-feedback" hx-swap-oob="innerHTML">`. No top-level element lands in the
+  `swap: 'none'` target.
+
+#### Why `htmx:beforeSwap` is overridden
+
+htmx 1.9.12 does not swap 4xx and 5xx responses: it fires `htmx:responseError` and drops the
+body, so the sentence and the out-of-band fragments of a refusal would never reach the page.
+`receipt.js` listens to `htmx:beforeSwap` on `document`. When the event has an `xhr` with
+`getResponseHeader` and the value of `X-Receipt-Refusal` is in `REFUSAL_REASONS`, it sets
+`detail.shouldSwap = true` and `detail.isError = false`. The key is only that header and only a
+value of the closed set, so every other error (network failure, an unmarked 500, a stale reorder
+400, any older modal) keeps the default htmx behaviour. Do not widen the condition to a status
+range. Real htmx still writes `console.error` for the unswapped 4xx of other requests; that is
+expected.
+
+### Stale states
+
+- **Stale card.** A giver-side refresh of a wish card goes through `window.swapWishCard`,
+  defined by the inline script of `base.html`. `wishlist.js` wraps it (only if it is a
+  function): when the answer is not an `.item-card` with the id of the card being replaced (for
+  example an error body for a wish that was fully received meanwhile), the card is replaced by
+  `p.item-card-unavailable` (`role="status"`) with the text «Желание больше недоступно.
+  Обновите страницу.». The raw answer is never shown.
+- **Stale reorder.** The reorder route answers 400 `Invalid item order` (JSON body unchanged)
+  and now adds the header `X-Reorder-Refusal: stale_order` (`REORDER_REFUSAL_HEADER` in
+  `items_ui.py`). It is a separate namespace from `X-Receipt-Refusal`: the two never meet.
+  The listener of `wishlist.js` on `htmx:responseError` checks that header, writes «Список
+  изменился. Обновляем.» into `#list-notice` (when it exists) and reloads the page after
+  `STALE_RELOAD_DELAY_MS` = 800 ms. An error without the header does nothing (tested).
+- **Stale archive and restore.** For a fully received wish `archive_item_ui` and
+  `restore_item_ui` answer 409 with `X-Receipt-Refusal: nothing_remaining` through
+  `_nothing_remaining_response`. The body is out-of-band only (every top-level element has
+  `hx-swap-oob`): `#item-modal-container` emptied, `#list-notice` with
+  «Это желание уже полностью получено.», and, when the one extra read succeeds, the list, the
+  archive section and «Подаренные». Nothing lands in the card or list target, so the htmx
+  default target never receives text. A failed read degrades to the dialog close and the
+  notice.
+
+### Owner card, archive and cabinet
+
+- **Flag `is_member`.** The card partial gets `is_member` from `ctx.is_member` (page, card
+  route in `sharing.py`) and `_editor_card_flags()` (UI routes). Only a member sees receipt
+  figures; a giver, an anonymous visitor and a share-page viewer keep `×M`.
+- **Card.** For a member and `received_quantity > 0` the badge is `badge-received`
+  «Осталось N из M» and the details have three spans: «Запрошено», «Получено», «Осталось».
+  Otherwise the old `×M` badge and «Количество: M». The giver block is guarded by
+  `can_promise`, which needs `not item.is_fully_received`, so a stale giver card has no
+  promise controls.
+- **Archive.** An archived wish with received units is listed with «Осталось N»
+  (`.archived-item-remaining`). The archive dialog adds the note «Архивируется только
+  неполученная часть: полученные штуки останутся в разделе «Подаренные».» when
+  `has_received` (set in `archive_confirm_ui` from `item.received_quantity > 0`).
+- **Cabinet.** `reservations_list.html` renders `p.reservation-wish-received` «Желание получено
+  владельцем» when `row.wish_received`, and omits the link «К желанию» for such a row. The
+  promise status text is not changed (a purchased promise stays «куплено»); a partly received
+  wish has no marker and keeps the link. The four promise actions stay governed by
+  `offer_actions`.
+
+### Section «Подаренные»
+
+- **Visibility.** `view_wishlist_detail` computes `can_view_gifted` with
+  `WishlistAccessPolicy.can_view_gifted(ctx, wishlist)` (a member of a non-deleted list) and
+  reads the rows only then. The section is not rendered for a giver, an anonymous or share-page
+  viewer, or a non-member, and it is shown on an archived list. It sits after `#items-list`,
+  before the archive section, and is separate from the archive.
+- **Content.** `<section id="gifted-items-section">`; with rows a `<details>` «Подаренные (N)»
+  with one `li.gifted-item#gifted-item-{id}` per wish: title, price (`"<price> <currency>"`,
+  `RUB` by default), «Для: <recipient>» when set, «Получено: K из M», and the acts, oldest
+  first as in `ReceiptEntryDTO`, each `dd.mm.yyyy — N шт.` (`utc_day`, UTC calendar day). An
+  approximate date (`is_approximate`, back-filled data) is shown as `≈ date (дата примерная)`.
+  Wish order is the service order (newest receipt first). With no rows the element is empty
+  (it stays as the target of out-of-band updates); when the read failed (`gifted_rows is
+  none`) it shows «Не удалось загрузить «Подаренные». Обновите страницу.».
+- **No data beyond the read.** `GiftedRow` has no promise, giver or booking field because
+  `GiftedItemDTO` has none; the section has no controls.
+- **Freshness.** Every receipt response carries the section as an out-of-band element, built by
+  `read_gifted_rows` (a domain error gives `None`, never a failed response).
+
+### Invariants for developers
+
+- **Surprise secrecy.** The dialog, the card badge, the gifted section, the notice, every
+  fragment and every log record omit giver, promise, booked quantity and purchase facts. Do not
+  add a field of `WishItemGifterViewDTO` or a reservation to these templates. Tests:
+  `test_get_modal_has_no_booking_data`, `test_owner_card_has_no_booking_data`,
+  `test_section_has_no_controls_or_booking_data`, `test_full_ui_flow_log_contract`.
+- **XSS.** All titles and sentences go through Jinja autoescape or `oob_text`
+  (`Markup.format`, which escapes arguments). The notice text with the title is built as a plain
+  string and passed to `oob_text` as an argument, so it is escaped too. `receipt.js`
+  writes only `textContent` and never server markup.
+- **CSP readiness.** This task adds no inline handler and no inline script. The only script tag
+  is `<script src="/static/receipt.js" defer>` after `wishlist.js`. The inline script of
+  `base.html` is unchanged; a test pins its SHA-256, so an intended edit (WISHENKA-140) needs a
+  conscious hash update in `test_inline_script_is_unchanged_and_free_of_receipt_code`. The
+  pre-existing `onclick` of the archive modal is left under WISHENKA-140.
+- **Dependency on private names.** `receipts_ui.py` imports `receipts._REFUSALS`
+  (`wishenka/web/routes/receipts.py`) and the private helpers `_editor_card_flags`, `_execute`,
+  `_items_list_html` from `items_ui.py`. WISHENKA-158 (receipt code split) must keep
+  `receipts._REFUSALS` importable; the rename to a public accessor is in WISHENKA-163.
+- **One record per outcome.** See the log events below.
+
+### Accepted limits
+
+- **S-3.** Focus is not returned to the card after a successful receipt: the dialog container
+  is emptied by the out-of-band swap and the card is replaced, `closeDialog` runs only for
+  Cancel, Escape and the backdrop. Keyboard and screen-reader users land on `body`.
+- **S-4.** No focus trap (Tab leaves the dialog to the page behind, which is not `inert`), no
+  `aria-modal`, the `<details>` of «Подаренные» collapses again after every out-of-band swap,
+  and the quantity `<select>` has one option per remaining unit (500 options for a wish of
+  500). None of these is tested.
+- The new Russian texts were written by the implementer only and are not reviewed by the
+  product owner; «шт.» does not decline.
+- Older modals (edit, archive) still show no 4xx or 5xx answers and have no CSS of their own;
+  this story fixed only its own paths (marked receipt refusals, stale reorder, stale archive and
+  restore). See WISHENKA-160.
+
+### Log events of the UI
+
+Logger `wishenka.web.receipts_ui`, every record has `extra={"event": ...}`, fixed messages, ids
+`wishlist_id`, `item_id`, `actor_id` only (no `operation`, `user_id`, `quantity`, title, giver).
+`remaining_quantity` only for `quantity_above_remaining` and `nothing_remaining`.
+
+| Event | Level | Written by | Extra keys besides ids |
+| ----- | ----- | ---------- | ---------------------- |
+| `ui_receipt_form_opened` | INFO | GET, dialog opened | none |
+| `ui_receipt_form_refused` | WARNING | GET, any refusal incl. `busy` | `reason`, `http_status`, `remaining_quantity`? |
+| `receipt_recorded_http` | INFO | POST, after commit and state read | none |
+| `receipt_refused` | WARNING | POST, refusal | `reason`, `http_status`, `remaining_quantity`? |
+| `receipt_inventory_busy` | WARNING | POST, `InventoryBusyError` | none |
+
+The stale archive and restore write no UI record (the service already writes
+`wish_archive_refused`); the stale reorder writes only the existing `ui_items_reorder_rejected`.
+`receipt_recorded_http`, `receipt_refused` and `receipt_inventory_busy` have the same names on
+`wishenka.web.receipts` (JSON route): tell the channel by logger name, and filter by logger in
+any metric. Details, audit and the metrics derivable from these events:
+`ai-tasks/WISHENKA-24/50-observability.md`. No client-side logging exists in `receipt.js` or the
+new `wishlist.js` code.
+
+### Browser tests and the htmx stub
+
+`tests/test_receipt_modal_browser.py` (module mark `timeout(45)` and `browser`) has nine
+browser tests: dialog summary and dismissal, partial and full receipt on the page, no second
+request on a second tap, refusal then generic failure, busy keeps the dialog and the quantity,
+the guarded closed `beforeSwap` override, a stale giver card, a stale reorder, and an unmarked
+error that shows no notice and does not reload. The helpers are `record_receipt`,
+`archive_item_rest`, `open_receipt_dialog`, `posts_to`, `scroll_to` in
+`tests/browser_helpers.py`. See [testing.md](testing.md).
+
+The tests run the own stub `tests/browser_assets/htmx_stub.js`, not real htmx, and the stub does
+not process `hx-*` attributes, so the tests start flows with `htmx.ajax`. The stub was extended
+by this story: `htmx:beforeSwap` carries `detail.xhr` (`status`, `responseText`,
+`getResponseHeader`), `shouldSwap` and `isError`; an unswapped error dispatches
+`htmx:responseError`; `swap: 'none'`; out-of-band swaps. Known divergences from real htmx
+1.9.12:
+
+- The in-flight gate of the double-tap test holds `window.fetch`, but real htmx sends XHR, so
+  the gate would not hold a request under the real library.
+- `assert_clean_console` in the receipt browser tests would fail under real htmx, which logs
+  `console.error` for every unswapped 4xx.
+- The stub swaps nothing for status 400 and above, so its header text that the additions are
+  "all additive" is not strictly true.
+- The connection `hx-get` on the card button, the `htmx-request` classes and the CSRF header
+  are not exercised; they were verified once by hand against real htmx in a scratch copy.
+
+Covered by WISHENKA-145 (real-htmx smoke test) and WISHENKA-162 (stub and assertions).
+
+### Follow-up tickets of the UI
+
+| Ticket | Subject |
+| ------ | ------- |
+| WISHENKA-160 | Bug (High): older modals show no 4xx/5xx answers and have no CSS (edit 409 and 503, archive 409, reorder 400); link to WISHENKA-90 |
+| WISHENKA-161 | Receipt dialog accessibility and mobile behaviour: focus after success (S-3), focus trap, `aria-modal`, `<details>`, option count (S-4) |
+| WISHENKA-162 | Stub docstring, XHR gate, console assertions (with WISHENKA-145) |
+| WISHENKA-163 | Web-layer structure: shared OOB helpers, private imports, page-state dataclass, constants module, notice text in the sentence table |
+| WISHENKA-164 | Wording review of the new Russian texts, quantity forms |
+| WISHENKA-165 | CSS tokens, `STALE_RELOAD_DELAY_MS`, one default currency |
+
+Existing tickets that cover related work: WISHENKA-145 (real htmx smoke test, stub fidelity),
+157 (log-contract hardening, shared event names), 158 (receipt code split; keep
+`receipts._REFUSALS` importable), 140 (inline script and `onclick`, SHA-256 pin), 118 (snapshot
+and writer cost: the page now reads the list three times), 33 (RU/EN rendering), 90 (global
+htmx error hooks).
+
 ## Configuration
 
 All settings are `wishenka.config.Settings` fields; environment names are the field name in upper
@@ -380,6 +667,7 @@ Every record sets `extra={"event": ...}`. The notice path correlates by `outbox_
 | `receipt_notice_send_failed`, `receipt_notice_retry_scheduled`, `receipt_notice_failed_terminal` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `attempt`, `error_class` |
 | `receipt_notice_late_write_ignored` | DEBUG | `wishenka.wishlists.notices` | `outbox_id` |
 | `receipt_notice_batch_processed` | DEBUG | `wishenka.wishlists.notices` | `rows` |
+| `ui_receipt_form_opened`, `ui_receipt_form_refused`, `receipt_recorded_http`, `receipt_refused`, `receipt_inventory_busy` | INFO or WARNING | `wishenka.web.receipts_ui` | ids only, see [Log events of the UI](#log-events-of-the-ui) |
 
 Rules:
 
@@ -468,8 +756,20 @@ metric uses a DEBUG event, and labels never use a user, wishlist, item or giver.
   and have `is_approximate = true`.
 - **Wishes missing in the public view.** Archived and fully received wishes are hidden from
   public-link and non-member viewers by design (`projection`).
+- **Receipt dialog shows nothing after a refusal.** The answer must carry `X-Receipt-Refusal`
+  with a value of the closed set, otherwise `receipt.js` leaves htmx at its default (4xx and 5xx
+  are not swapped) and the dialog shows the generic sentence. Check the response header of the
+  `/web/.../receipt` request and that `REFUSAL_REASONS` in `receipt.js` still equals the
+  `receipts._REFUSALS` reasons plus `busy`.
+- **Reorder error shows nothing, or the page reloads by itself.** The reload is the stale-order
+  handler (`X-Reorder-Refusal: stale_order`, 800 ms). Any other 400 on a page action is not
+  shown; that is WISHENKA-160.
+- **«Подаренные» is missing.** It is rendered only for a member of a non-deleted list, and the
+  element is empty when nothing was received. «Не удалось загрузить «Подаренные»» means
+  `read_gifted_rows` got a domain error; reload the page.
 - **Not built yet** (see Overview): undo (WISHENKA-153), settings screen (WISHENKA-34), metrics
-  exporter (WISHENKA-84), the UI (WISHENKA-24), product decisions (WISHENKA-154).
+  exporter (WISHENKA-84), product decisions (WISHENKA-154), the UI follow-ups WISHENKA-160 to
+  165.
 
 ## Tests
 
@@ -483,3 +783,12 @@ New modules, each with a module-level `pytest.mark.timeout`: `tests/test_gift_re
 and `test_shared_inventory_multiprocess.py` (a receipt on a fully received wish now raises
 `NothingRemainingError`, not a plain `ValueError`). The Telegram `Bot` is mocked everywhere; a live
 smoke test is WISHENKA-156.
+
+UI modules (WISHENKA-24), each with a module-level `pytest.mark.timeout`:
+`tests/test_receipt_ui_routes.py` (GET and POST routes, refusals by reason, busy, 401 and CSRF,
+reason table, logging), `test_receipt_card_ui.py` (owner card, button, archive texts, stale
+archive and restore, giver guard, stale reorder header), `test_gifted_section_ui.py`,
+`test_cabinet_received_marker.py`, `test_receipt_static_script.py` (script served and ordered,
+inline script hash, closed reason set, no inline handlers), `test_receipt_ui_observability.py`
+(full-flow log scan) and the browser module `test_receipt_modal_browser.py`; helper
+`tests/receipt_ui_support.py`. See [testing.md](testing.md).

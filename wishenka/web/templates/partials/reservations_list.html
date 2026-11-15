@@ -23,6 +23,9 @@
             <p class="reservation-item">{{ row.item_title }}</p>
             <p class="reservation-quantity">{{ row.quantity }}</p>
             <p class="reservation-status">{{ row.status_label }}</p>
+            {% if row.wish_received %}
+            <p class="reservation-wish-received">Желание получено владельцем</p>
+            {% endif %}
             {% if row.for_name %}
             <p class="reservation-for">Для: {{ row.for_name }}</p>
             {% endif %}
@@ -32,7 +35,9 @@
             {% if row.list_archived %}
             <p class="reservation-list-archived">Вишлист в архиве</p>
             {% endif %}
+            {% if not row.wish_received %}
             <a href="{{ row.wish_href }}">К желанию</a>
+            {% endif %}
             {% if row.offer_actions %}
             {% set patch_url = "/api/wishlists/" ~ row.wishlist_id
                 ~ "/items/" ~ row.wish_item_id
