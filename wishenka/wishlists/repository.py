@@ -126,6 +126,17 @@ class WishlistRepository:
     def __init__(self, conn: AsyncConnection) -> None:
         self.conn = conn
 
+    async def get_wishlist_header(self, wishlist_id: int) -> Wishlist | None:
+        """Load only the list metadata required for a cabinet row."""
+        stmt = text(
+            "SELECT id, owner_id, owner_name, title, description, event_title, "
+            "event_date, is_collaborative, warn_on_delete_reserved, status, "
+            "public_token, invite_token, invite_token_expires_at, "
+            "created_at, updated_at FROM wl_lists WHERE id = :id"
+        )
+        row = (await self.conn.execute(stmt, {"id": wishlist_id})).one_or_none()
+        return _row_to_wishlist(row) if row is not None else None
+
     async def get_wishlist(self, wishlist_id: int) -> Wishlist | None:
         """Fetch a single wishlist aggregate with members, items, and reservations."""
         stmt = text(

@@ -257,6 +257,7 @@ class WishlistService:
         self._wishlists: dict[int, Wishlist] = {}
         self._items: dict[int, WishItem] = {}
         self._reservations: dict[int, Reservation] = {}
+        self._reservations_by_user: dict[int, dict[int, None]] = {}
         self._concurrency_coordinator = ItemConcurrencyCoordinator()
         self._next_wishlist_id: int = 0
         self._next_member_id: int = 0
@@ -1649,7 +1650,7 @@ class WishlistService:
                 wish_item=item,
             )
             item.reservations.append(res)
-            self._reservations[res.id] = res
+            self._register_reservation(res)
             logger.info(
                 "Reservation %s created for item %s (quantity=%s) by gifter %s",
                 res.id,
@@ -2054,14 +2055,33 @@ class WishlistService:
             return f"Участник #{designated}"
         return (item.recipient_name or "").strip()
 
+    def _register_reservation(self, reservation: Reservation) -> None:
+        """Keep the authoritative reservation and its ordered user index in sync."""
+        previous = self._reservations.get(reservation.id)
+        if previous is not None and previous.user_id != reservation.user_id:
+            raise ValueError("A reservation cannot change its giver")
+        self._reservations[reservation.id] = reservation
+        self._reservations_by_user.setdefault(reservation.user_id, {})[reservation.id] = None
+
+    def _remove_reservation(self, reservation_id: int) -> None:
+        """Remove a reservation and its derived index membership."""
+        reservation = self._reservations.pop(reservation_id)
+        bucket = self._reservations_by_user[reservation.user_id]
+        del bucket[reservation_id]
+        if not bucket:
+            del self._reservations_by_user[reservation.user_id]
+
+    def _user_reservations(self, user_id: int) -> list[Reservation]:
+        return [self._reservations[rid] for rid in self._reservations_by_user.get(user_id, {})]
+
     async def get_user_reservations(
         self,
         user_id: int,
     ) -> list[MyReservationItemDTO]:
         """Fetch all active and purchased reservations for a gifter."""
         results: list[MyReservationItemDTO] = []
-        for res in self._reservations.values():
-            if res.user_id == user_id and res.status in (
+        for res in self._user_reservations(user_id):
+            if res.status in (
                 ReservationStatus.ACTIVE,
                 ReservationStatus.PURCHASED,
             ):
@@ -2104,9 +2124,8 @@ class WishlistService:
         """Fetch summary counts for the user's reservations badge."""
         active_res = [
             res
-            for res in self._reservations.values()
-            if res.user_id == user_id
-            and res.status in (ReservationStatus.ACTIVE, ReservationStatus.PURCHASED)
+            for res in self._user_reservations(user_id)
+            if res.status in (ReservationStatus.ACTIVE, ReservationStatus.PURCHASED)
         ]
         distinct_items = {res.wish_item_id for res in active_res}
         return UserReservationsSummaryDTO(

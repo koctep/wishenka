@@ -48,6 +48,7 @@ from wishenka.wishlists.models import (
     WishlistStatus,
 )
 from wishenka.wishlists.repository import WishlistRepository
+from wishenka.wishlists.schemas import MyReservationItemDTO, UserReservationsSummaryDTO
 from wishenka.wishlists.service import WishlistService
 
 T = TypeVar("T")
@@ -182,8 +183,21 @@ def _raise_for_storage_error(
     item_id: int | None = None,
     reservation_id: int | None = None,
     operation: str | None = None,
+    cabinet_operation: str | None = None,
 ) -> NoReturn:
     """Map a timed-out write lock before the generic storage failure."""
+    if cabinet_operation is not None:
+        if _is_sqlite_busy(exc):
+            logger.warning(
+                "Reservation cabinet read failed because the database was busy",
+                extra={"event": "reservation_cabinet_busy", "operation": cabinet_operation},
+            )
+            raise InventoryBusyError from exc
+        logger.error(
+            "Reservation cabinet read failed due to database error",
+            extra={"event": "reservation_cabinet_error", "operation": cabinet_operation},
+        )
+        raise RuntimeError("Wishlist storage operation failed") from exc
     scope = _wish_scope(item_id, reservation_id, operation)
     target = _wish_target(item_id, reservation_id)
     if _is_sqlite_busy(exc):
@@ -528,7 +542,7 @@ class WishlistStore:
                 created_at=_parse_dt(rr.created_at) or datetime.now(UTC),
                 updated_at=_parse_dt(rr.updated_at) or datetime.now(UTC),
             )
-            service._reservations[res.id] = res
+            service._register_reservation(res)
             if res.wish_item_id in service._items:
                 res.wish_item = service._items[res.wish_item_id]
                 res.wish_item.reservations.append(res)
@@ -1130,7 +1144,7 @@ class WishlistStore:
                 wish_item=item,
             )
             item.reservations.append(reservation)
-            service._reservations[reservation.id] = reservation
+            service._register_reservation(reservation)
 
         receipt_rows = (
             await conn.execute(
@@ -1235,6 +1249,53 @@ class WishlistStore:
                 {"value": service._next_reservation_id},
             )
         return written, await self._flush_receipt_effects(conn, service)
+
+    async def _cabinet_service(
+        self, conn: AsyncConnection, user_id: int, *, include_items: bool
+    ) -> WishlistService:
+        """Hydrate only the giver's reservations and their wishes in one transaction."""
+        repository = WishlistRepository(conn)
+        service = WishlistService()
+        reservations = await repository.list_user_reservations(user_id)
+        for reservation in reservations:
+            service._register_reservation(reservation)
+        if include_items:
+            wishlists: dict[int, Wishlist | None] = {}
+            for item_id in dict.fromkeys(res.wish_item_id for res in reservations):
+                item = await repository.get_item(item_id)
+                if item is None:
+                    continue
+                if item.wishlist_id not in wishlists:
+                    wishlists[item.wishlist_id] = await repository.get_wishlist_header(
+                        item.wishlist_id
+                    )
+                item.wishlist = wishlists[item.wishlist_id]
+                service._items[item.id] = item
+        return service
+
+    async def get_user_reservations(self, user_id: int) -> list[MyReservationItemDTO]:
+        """Read a giver's cabinet using indexed, transactionally consistent queries."""
+
+        async def work(conn: AsyncConnection) -> list[MyReservationItemDTO]:
+            service = await self._cabinet_service(conn, user_id, include_items=True)
+            return await service.get_user_reservations(user_id)
+
+        try:
+            return await self._immediate(work)
+        except SQLAlchemyError as exc:
+            _raise_for_storage_error(exc, cabinet_operation="reservations_list")
+
+    async def get_user_reservations_summary(self, user_id: int) -> UserReservationsSummaryDTO:
+        """Read a giver's reservation counts without hydrating unrelated data."""
+
+        async def work(conn: AsyncConnection) -> UserReservationsSummaryDTO:
+            service = await self._cabinet_service(conn, user_id, include_items=False)
+            return await service.get_user_reservations_summary(user_id)
+
+        try:
+            return await self._immediate(work)
+        except SQLAlchemyError as exc:
+            _raise_for_storage_error(exc, cabinet_operation="reservations_summary")
 
     async def execute(self, operation: Callable[[WishlistService], Awaitable[T]]) -> T:
         """Serialize reads and writes across workers and commit state atomically."""

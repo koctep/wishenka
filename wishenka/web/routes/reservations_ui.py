@@ -5,7 +5,6 @@ Writes stay on the five promise routes. This module groups and sorts.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Any, cast
@@ -17,8 +16,7 @@ from wishenka.auth.dependencies import get_current_user
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.web.templates import templates
 from wishenka.wishlists.models import ReservationStatus
-from wishenka.wishlists.schemas import MyReservationItemDTO, UserReservationsSummaryDTO
-from wishenka.wishlists.service import WishlistService
+from wishenka.wishlists.schemas import MyReservationItemDTO
 
 router = APIRouter(tags=["reservations-ui"])
 
@@ -58,14 +56,6 @@ class CabinetGroup:
     event_date: str | None
     list_archived: bool
     rows: tuple[CabinetRow, ...]
-
-
-async def _read[T](request: Request, action: Callable[[WishlistService], Awaitable[T]]) -> T:
-    """Run a read on the full snapshot, or on an injected in-memory service."""
-    injected = getattr(request.app.state, "wishlist_service", None)
-    if injected is not None:
-        return await action(injected)
-    return cast(T, await request.app.state.wishlist_store.execute(action))
 
 
 def _event_day(value: datetime | None) -> str | None:
@@ -148,20 +138,18 @@ def _list_context(
 async def _load_items(request: Request, user_id: int) -> list[MyReservationItemDTO]:
     """Load the caller's occupying promises."""
 
-    async def load(service: WishlistService) -> list[MyReservationItemDTO]:
-        return await service.get_user_reservations(user_id=user_id)
-
-    return await _read(request, load)
+    injected = getattr(request.app.state, "wishlist_service", None)
+    source = injected if injected is not None else request.app.state.wishlist_store
+    return cast(list[MyReservationItemDTO], await source.get_user_reservations(user_id=user_id))
 
 
 @router.get("/web/reservations/card", response_class=HTMLResponse)
 async def reservations_card(request: Request, current_user: User) -> Response:
     """Return the home card fragment. The badge is the distinct-wish count."""
 
-    async def load(service: WishlistService) -> UserReservationsSummaryDTO:
-        return await service.get_user_reservations_summary(user_id=current_user.telegram_id)
-
-    summary = await _read(request, load)
+    injected = getattr(request.app.state, "wishlist_service", None)
+    source = injected if injected is not None else request.app.state.wishlist_store
+    summary = await source.get_user_reservations_summary(user_id=current_user.telegram_id)
     return templates.TemplateResponse(
         request=request,
         name="partials/reservations_card.html",

@@ -455,6 +455,22 @@ promise. The web layer groups the rows by `wishlist_id`. Groups are
 ordered by `title.casefold()`, then `wishlist_id`. Rows inside a
 group follow `created_at`, then `reservation_id`.
 
+For an injected in-memory `WishlistService`, both cabinet methods select from an ordered
+user-to-reservation index. Registration and removal maintain the index; status and quantity
+remain on the authoritative reservation objects. For SQLite, the routes call
+`WishlistStore.get_user_reservations` or `get_user_reservations_summary` directly. These use
+the existing user index, and the list loads associated wishes and their occupants using the
+item index. They do not hydrate the full reservation table. No migration or new configuration
+is needed. Lookup is followed by work proportional to matching records and related wishes;
+SQLite index lookup is not strictly constant time.
+
+SQLite cabinet reads use one `BEGIN IMMEDIATE` transaction for a consistent snapshot. This
+also reserves a writer lock until the read completes. The summary counts qualifying records
+even if their wish is missing, while the list omits those records. Both preserve the existing
+caller filtering and response projection. See
+[WISHENKA-176](https://pypost.atlassian.net/browse/WISHENKA-176) for the batching and
+read-transaction follow-up.
+
 Each group shows the wishlist title. A non-empty event title, after
 stripping, is shown. An event date is shown as the UTC calendar day
 `YYYY-MM-DD`. A list without those fields omits them. An empty
@@ -594,6 +610,13 @@ cabinet action is `reservation_action_completed`. A refused refresh
 is the matching WARNING under
 [HTTP route logs](#http-route-logs). HTTP 503 is
 `reservation_inventory_busy`.
+
+On SQLite read failures, the store logger records `reservation_cabinet_busy` at WARNING or
+`reservation_cabinet_error` at ERROR. The `operation` is `reservations_list` or
+`reservations_summary`; these records contain no user identifiers or driver error text. If
+cabinet reads encounter a busy database, inspect concurrent writers and transaction duration;
+the existing SQLite busy timeout is 5000 ms. For other storage errors, inspect database health
+and application logs without adding reservation details to these events.
 
 ---
 
