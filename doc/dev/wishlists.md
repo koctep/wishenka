@@ -923,7 +923,13 @@ CREATE TABLE IF NOT EXISTS wl_counters (
   - All contained items in `wl_items` (and subsequently all reservations in `wl_reservations`).
   - All user bookmark entries in `wl_favorites`.
   - All user viewing history records in `wl_view_history`.
-- Deleting a wish item (`wl_items`) cascades to all its reservations (`wl_reservations`).
+- Deleting a wish item (`wl_items`) cascades to all its reservations (`wl_reservations`), its
+  receipt records (`wl_receipts`) and its notice queue rows (`notification_outbox`).
+- A soft-deleted list (`status = 'deleted'`) keeps its receipt records and queue rows: the cascade
+  fires only when `purge_archived_wishlists` removes the list row. Until then the gifted read
+  answers 404 `wishlist_not_active` and the notice worker settles queued rows as `skipped`
+  (`target_gone`). The list-level settings table `wl_list_notification_settings` cascades with the
+  list too. See [gift-receipt.md](gift-receipt.md).
 
 #### Unique Constraints & Indexing Strategy
 - **Unique Indexes**:
@@ -1019,8 +1025,9 @@ granular async operations over an active SQLAlchemy `AsyncConnection`.
   Permanently purges soft-deleted wishlists (`status = 'deleted'`) whose `updated_at <= threshold`.
   Deletes capability tokens from `wl_tokens` and `wl_invite_tokens`, then deletes the rows from
   `wl_lists` with `PRAGMA foreign_keys = ON`. Foreign key cascades automatically remove child
-  members (`wl_members`), items (`wl_items`), reservations (`wl_reservations`), favorites
-  (`wl_favorites`), and history entries (`wl_view_history`). Returns the number of purged wishlists.
+  members (`wl_members`), items (`wl_items`), reservations (`wl_reservations`), receipt records
+  (`wl_receipts`), notice queue rows (`notification_outbox`), favorites (`wl_favorites`), and
+  history entries (`wl_view_history`). Returns the number of purged wishlists.
 - `purge_deleted_wishlists(threshold: datetime) -> int`:
   Semantic alias forwarding directly to `purge_archived_wishlists`.
 
@@ -1159,6 +1166,7 @@ regular web request handling.
 |  1. store.cleanup_expired_tokens(now) -> revokes expired collaborator invite tokens     |
 |  2. cutoff = now - timedelta(days=settings.wishlist_retention_days)                     |
 |  3. store.purge_archived_wishlists(cutoff) -> permanently cascades soft-deleted lists   |
+|  3b. NoticeStore.purge_finished(now - receipt_notice_retention_days) (notice rows)      |
 |  4. Captures execution duration and returns CleanupStats(duration_ms, ...)              |
 +-----------------------------------------------------------------------------------------+
 ```
@@ -1179,10 +1187,14 @@ async def run_cleanup_cycle(
     store: WishlistStore,
     settings: Settings,
     now: datetime | None = None,
+    notice_store: NoticeStore | None = None,
 ) -> CleanupStats
 ```
 - Performs a complete cleanup cycle: revokes expired tokens and purges deleted wishlists older
-  than `settings.wishlist_retention_days`.
+  than `settings.wishlist_retention_days`. When `notice_store` is given (the application always
+  passes it) it also deletes finished `notification_outbox` rows older than
+  `settings.receipt_notice_retention_days`; a failure there is a WARNING
+  `receipt_notice_purge_failed` and does not fail the cycle.
 - Traps operational exceptions gracefully to prevent background loop termination, logging
   `background_cleanup_failed` with `exc_info=True`.
 - Emits structured audit log `background_cleanup_completed` on success.

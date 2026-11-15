@@ -21,11 +21,15 @@ from wishenka.items.preview_cache import PreviewCache
 from wishenka.items.service import ItemPreviewService
 from wishenka.items.ssrf import SSRFSafeTransport
 from wishenka.logging import configure_logging
+from wishenka.notices.sender import NoticeSender, build_sender
+from wishenka.notices.store import NoticeStore
+from wishenka.notices.worker import NoticeWorker
 from wishenka.users.store import UserStore
 from wishenka.web.routes.auth import router as auth_router
 from wishenka.web.routes.items import router as items_router
 from wishenka.web.routes.items_ui import router as items_ui_router
 from wishenka.web.routes.miniapp import router as miniapp_router
+from wishenka.web.routes.receipts import router as receipts_router
 from wishenka.web.routes.reservations import router as reservations_router
 from wishenka.web.routes.reservations_ui import router as reservations_ui_router
 from wishenka.web.routes.sharing import router as sharing_router
@@ -36,6 +40,7 @@ from wishenka.wishlists.service import WishlistService
 from wishenka.wishlists.store import WishlistStore
 
 logger = logging.getLogger("wishenka.web")
+notice_logger = logging.getLogger("wishenka.wishlists.notices")
 
 
 class ShareTokenAccessFilter(logging.Filter):
@@ -110,11 +115,54 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             raise
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def _start_notice_worker(app: FastAPI, settings: Settings, injected: NoticeSender | None) -> None:
+    """Start the notice worker task, or log why there is none (rows then stay ``pending``)."""
+    sender: NoticeSender | None = None
+    reason = "disabled_by_setting"
+    if settings.receipt_notice_worker_enabled:
+        sender = injected or build_sender(settings)
+        reason = "no_bot_token"
+    if sender is None:
+        notice_logger.info(
+            "Notice worker is not started",
+            extra={"event": "receipt_notice_worker_disabled", "reason": reason},
+        )
+        return
+    worker = NoticeWorker(app.state.notice_store, sender, settings)
+    app.state.notice_sender = sender
+    app.state.notice_task = asyncio.create_task(
+        worker.run(asyncio.Event()), name="receipt_notice_worker"
+    )
+    notice_logger.info("Notice worker started", extra={"event": "receipt_notice_worker_started"})
+
+
+async def _stop_notice_worker(app: FastAPI) -> None:
+    """Cancel the notice worker task, close its sender and log the stop."""
+    task: asyncio.Task[None] | None = app.state.notice_task
+    sender: NoticeSender | None = app.state.notice_sender
+    if task is None:
+        return
+    task.cancel()
+    try:
+        with suppress(asyncio.CancelledError):
+            await task
+    finally:
+        if sender is not None:
+            await sender.close()
+        notice_logger.info(
+            "Notice worker stopped", extra={"event": "receipt_notice_worker_stopped"}
+        )
+
+
+def create_app(
+    settings: Settings | None = None, notice_sender: NoticeSender | None = None
+) -> FastAPI:
     """Create and configure the FastAPI application instance.
 
     Args:
         settings: Application settings override. Defaults to Settings().
+        notice_sender: Sender of gift notices; tests pass a fake. Defaults to a Telegram bot
+            built from the settings, or no worker at all when no usable token is configured.
 
     Returns:
         Configured FastAPI application instance.
@@ -147,11 +195,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
             if settings.background_cleanup_enabled:
                 cleanup_task = asyncio.create_task(
-                    background_cleanup_worker(app.state.wishlist_store, settings),
+                    background_cleanup_worker(
+                        app.state.wishlist_store, settings, notice_store=app.state.notice_store
+                    ),
                     name="background_cleanup_worker",
                 )
                 app.state.background_cleanup_task = cleanup_task
                 app.state.cleanup_task = cleanup_task
+
+            _start_notice_worker(app, settings, notice_sender)
 
             logger.info(
                 "Wishenka web application starting up",
@@ -168,10 +220,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 app.state, "background_cleanup_task", None
             ) or getattr(app.state, "cleanup_task", None)
             try:
-                if running_task is not None:
-                    running_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await running_task
+                try:
+                    if running_task is not None:
+                        running_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await running_task
+                finally:
+                    await _stop_notice_worker(app)
             finally:
                 cache.clear()
                 app.state.item_preview_service = None
@@ -195,6 +250,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.background_cleanup_task = None
     app.state.cleanup_task = None
+    app.state.notice_store = NoticeStore(app.state.wishlist_store, settings)
+    app.state.notice_task = None
+    app.state.notice_sender = None
 
     app.add_middleware(RequestLoggingMiddleware)
     app.add_middleware(BrowserSecurityMiddleware)
@@ -203,6 +261,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(auth_router)
     app.include_router(items_router)
     app.include_router(reservations_router)
+    app.include_router(receipts_router)
     app.include_router(reservations_ui_router)
     app.include_router(items_ui_router)
     app.include_router(wishlist_router)

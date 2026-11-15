@@ -21,6 +21,7 @@ from wishenka.wishlists.exceptions import (
     CannotReduceQuantityBelowReservedError,
     InventoryBusyError,
     ItemNotFoundError,
+    NothingRemainingError,
     PermissionDeniedError,
     WishlistArchivedError,
     WishlistDeletedError,
@@ -806,6 +807,14 @@ def _raise_http(exc: Exception) -> NoReturn:
     ) from exc
 
 
+def _raise_nothing_remaining(exc: NothingRemainingError) -> NoReturn:
+    """Answer 409 with a fixed message for archiving or restoring a fully received wish."""
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="Nothing remains to receive",
+    ) from exc
+
+
 # Domain errors that `_raise_http` translates: archived -> 409, all others -> 404.
 _DOMAIN_ERRORS = (
     WishlistNotFoundError,
@@ -1004,6 +1013,8 @@ async def archive_item_ui(
 
     try:
         archived = await _execute(request, action)
+    except NothingRemainingError as exc:
+        _raise_nothing_remaining(exc)
     except _DOMAIN_ERRORS as exc:
         _raise_http(exc)
 
@@ -1054,6 +1065,8 @@ async def restore_item_ui(
 
     try:
         restored_item, archived = await _execute(request, action)
+    except NothingRemainingError as exc:
+        _raise_nothing_remaining(exc)
     except _DOMAIN_ERRORS as exc:
         _raise_http(exc)
 

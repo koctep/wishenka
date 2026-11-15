@@ -16,6 +16,7 @@ from typing import Any
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,17 @@ def _configured(database_url: str) -> Config:
     config.set_main_option("script_location", str(Path(__file__).with_name("alembic")))
     config.set_main_option("sqlalchemy.url", _sqlite_url(database_url))
     return config
+
+
+def head_revision(database_url: str = "sqlite+aiosqlite:///:memory:") -> str:
+    """Return the single head revision id of the Alembic script directory.
+
+    The URL is only needed to build the configuration; it is never opened.
+    """
+    head = ScriptDirectory.from_config(_configured(database_url)).get_current_head()
+    if head is None:
+        raise RuntimeError("Wishlist migrations have no head revision")
+    return head
 
 
 def _schema_signature(connection: sqlite3.Connection, table: str) -> tuple[Any, Any, Any]:

@@ -92,6 +92,21 @@ class Reservation:
 
 
 @dataclass
+class ReceiptRecord:
+    """One receipt act of a wish: how many units arrived and when.
+
+    The record never names a giver and never links to a reservation (Surprise Invariant).
+    ``is_approximate`` marks a date back-filled from legacy data, never an exact moment.
+    """
+
+    id: int = 0
+    wish_item_id: int = 0
+    quantity: int = 1
+    received_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    is_approximate: bool = False
+
+
+@dataclass
 class WishItem:
     """Individual wish item within a wishlist."""
 
@@ -117,6 +132,32 @@ class WishItem:
     reservations: list[Reservation] = field(default_factory=list)
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    receipts: list[ReceiptRecord] = field(default_factory=list)
+
+    @property
+    def remaining_quantity(self) -> int:
+        """Units the recipient has not received yet (never negative)."""
+        return max(0, self.quantity - self.received_quantity)
+
+    @property
+    def is_fully_received(self) -> bool:
+        """Whether every requested unit has been received."""
+        return self.received_quantity >= self.quantity
+
+    @property
+    def is_gifted(self) -> bool:
+        """Whether at least one unit has been received (belongs to the gifted section)."""
+        return self.received_quantity > 0
+
+    @property
+    def is_active(self) -> bool:
+        """Shared active predicate: neither archived nor fully received."""
+        return not self.is_archived and not self.is_fully_received
+
+    @property
+    def is_in_archive(self) -> bool:
+        """Archive membership: archived by hand and not fully received."""
+        return self.is_archived and not self.is_fully_received
 
     @property
     def reserved_quantity(self) -> int:
@@ -185,6 +226,7 @@ from wishenka.wishlists.schemas import (  # noqa: E402
 
 __all__ = [
     "ItemPriority",
+    "ReceiptRecord",
     "Reservation",
     "ReservationStatus",
     "ViewHistoryEntry",

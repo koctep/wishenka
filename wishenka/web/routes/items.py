@@ -13,6 +13,7 @@ from wishenka.wishlists.exceptions import (
     CannotReduceQuantityBelowReservedError,
     InventoryBusyError,
     ItemNotFoundError,
+    NothingRemainingError,
     PermissionDeniedError,
     WishlistArchivedError,
     WishlistDeletedError,
@@ -86,7 +87,11 @@ async def execute[T](
             extra={"event": "item_permission_denied", "operation": operation},
         )
         raise HTTPException(status_code=403, detail="Forbidden") from exc
-    except (WishlistArchivedError, CannotReduceQuantityBelowReservedError) as exc:
+    except (
+        WishlistArchivedError,
+        CannotReduceQuantityBelowReservedError,
+        NothingRemainingError,
+    ) as exc:
         logger.warning(
             "Item operation conflict: %s (%s)",
             operation,

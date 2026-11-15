@@ -351,7 +351,7 @@ Provides transactional domain operations for item lifecycle, piece-by-piece inve
     If violated, raises [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L44) and logs `item_quantity_reduction_rejected`. The open transaction rolls back, so the stored quantity stays at the last commit.
   - Computes `quantity_delta` and records modified fields list in structured event `item_updated`.
 - **Receipt and promises** (same wish-scoped transaction when the configured store is attached):
-  - [`record_item_fulfillment`](file:///home/src/wishenka/wishlists/service.py#L1861) adds `received_quantity`. The cap is requested minus units already received. The increment is refused with `ValueError` when it would pass that cap. Receipt does not cancel or complete the promise and is not capped by occupied units. After a successful receipt, occupied plus received may exceed the requested quantity.
+  - `record_item_fulfillment` (keyword-only `wishlist_id`) adds `received_quantity`, appends a dated `ReceiptRecord` and drafts the giver notices. The cap is requested minus units already received. It is refused with `QuantityAboveRemainingError` (a `ValueError`) above the cap and `NothingRemainingError` when nothing remains. Receipt does not cancel or complete the promise and is not capped by occupied units. After a successful receipt, occupied plus received may exceed the requested quantity.
   - [`create_reservation`](file:///home/src/wishenka/wishlists/service.py#L1337) and an increase in [`update_reservation_quantity`](file:///home/src/wishenka/wishlists/service.py#L1699) use the free remainder `available_quantity` $= \max(0, \text{requested} - \text{received} - \text{occupied})$. A larger promise raises [`InsufficientQuantityError`](file:///home/src/wishenka/wishlists/exceptions.py#L48). A later promise still uses that remainder after a receipt.
 - **Atomic Reordering Protocol ([`reorder_wish_items`](file:///home/src/wishenka/wishlists/service.py#L1044))**:
   - Verifies active wishlist state and caller permissions.
@@ -390,8 +390,8 @@ FastAPI APIRouter mounted at `/api/wishlists/{wishlist_id}/items` providing HTTP
     - [`InventoryBusyError`](file:///home/src/wishenka/wishlists/exceptions.py#L52) $\rightarrow$ **`503 Service Unavailable`** (`event="item_inventory_busy"`, plus `item_id` when the route passed one).
     - [`WishlistNotFoundError`](file:///home/src/wishenka/wishlists/exceptions.py#L12), [`WishlistDeletedError`](file:///home/src/wishenka/wishlists/exceptions.py#L20), [`ItemNotFoundError`](file:///home/src/wishenka/wishlists/exceptions.py#L32) $\rightarrow$ **`404 Not Found`** (`event="item_not_found"`).
     - [`PermissionDeniedError`](file:///home/src/wishenka/wishlists/exceptions.py#L8) $\rightarrow$ **`403 Forbidden`** (`event="item_permission_denied"`).
-    - [`WishlistArchivedError`](file:///home/src/wishenka/wishlists/exceptions.py#L16), [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L44) $\rightarrow$ **`409 Conflict`** (`event="item_conflict"`).
-    - `ValueError` (whitespace titles, invalid reorder permutations, a recipient who is not a member) $\rightarrow$ **`400 Bad Request`** (`event="item_validation_error"`). A receipt past the received cap raises the same `ValueError` from `record_item_fulfillment`; the store rolls that wish back and logs `wishlist_inventory_rolled_back` at `WARNING`.
+    - [`WishlistArchivedError`](file:///home/src/wishenka/wishlists/exceptions.py#L16), [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L44), `NothingRemainingError` $\rightarrow$ **`409 Conflict`** (`event="item_conflict"`).
+    - `ValueError` (whitespace titles, invalid reorder permutations, a recipient who is not a member) $\rightarrow$ **`400 Bad Request`** (`event="item_validation_error"`). The receipt route does not use this table: it maps its own closed refusals (see [gift-receipt.md](gift-receipt.md)). `NothingRemainingError` (archive or restore of a fully received wish) joins the `409` group here.
 
 ### 9. Relational Persistence & Ordering Index ([`wl_items`](file:///home/src/wishenka/wishlists/store.py))
 
@@ -494,7 +494,12 @@ WishlistError
   ├── WishlistNotFoundError
   ├── WishlistArchivedError
   ├── WishlistDeletedError
-  └── PermissionDeniedError
+  ├── PermissionDeniedError
+  └── WishRefusalError
+        ├── QuantityInvalidError
+        ├── QuantityAboveRemainingError
+        ├── NothingRemainingError
+        └── WishArchivedError
 ```
 
 ### Exception Reference
@@ -515,6 +520,11 @@ WishlistError
 | [`WishlistArchivedError`](file:///home/src/wishenka/wishlists/exceptions.py#L18) | `WishlistError` | None | `409` | Attempting to mutate an item in an archived wishlist or edit an archived item. |
 | [`WishlistDeletedError`](file:///home/src/wishenka/wishlists/exceptions.py#L22) | `WishlistError` | None | `404` | Parent wishlist is marked as deleted. |
 | [`PermissionDeniedError`](file:///home/src/wishenka/wishlists/exceptions.py#L26) | `WishlistError` | None | `403` | Caller lacks `can_add_or_edit_item` privilege for the wishlist. |
+| [`WishRefusalError`](file:///home/src/wishenka/wishlists/exceptions.py#L62) | `WishlistError` | `reason` | per subclass | Base of the closed set of receipt refusals; `reason` is the stable machine code. |
+| [`QuantityInvalidError`](file:///home/src/wishenka/wishlists/exceptions.py#L68) | `WishRefusalError`, `ValueError` | `reason` | `400` | Received quantity is below one (receipt route code `quantity_invalid`). |
+| [`QuantityAboveRemainingError`](file:///home/src/wishenka/wishlists/exceptions.py#L77) | `WishRefusalError`, `ValueError` | `reason`, `remaining_quantity` | `409` | Received quantity exceeds what remains to be received (`quantity_above_remaining`). |
+| [`NothingRemainingError`](file:///home/src/wishenka/wishlists/exceptions.py#L89) | `WishRefusalError` | `reason`, `remaining_quantity` (always 0) | `409` | The wish is fully received, so nothing is left to receive or restore (`nothing_remaining`). |
+| [`WishArchivedError`](file:///home/src/wishenka/wishlists/exceptions.py#L99) | `WishRefusalError` | `reason` | `409` | A receipt is recorded on an archived wish (`wish_archived`). |
 
 ---
 
@@ -547,9 +557,14 @@ WishlistError
   A new promise or a larger one that would make this remainder negative raises `InsufficientQuantityError`. The earlier promise stays as it was.
 - **Receipt cap**: `record_item_fulfillment` adds received units up to requested minus units already received. It does not close the promise and is not limited by occupied units. After a successful receipt, occupied plus received may exceed the requested quantity. A later promise still uses the free remainder.
 
-> **Planned change (WISHENKA-22 spec, not yet implemented):** `record_item_fulfillment`
-> will also refuse an archived wish, a wish on an archived or deleted list and a wish with
-> nothing remaining, and will write a dated receipt record. See [gift-receipt.md](gift-receipt.md).
+- **Receipt guards and record**: `record_item_fulfillment` also refuses a non-member
+  (`PermissionDeniedError`), a deleted list (`WishlistDeletedError`), an archived list
+  (`WishlistArchivedError`), an archived wish (`WishArchivedError`), a quantity below one
+  (`QuantityInvalidError`) and a wish with nothing remaining (`NothingRemainingError`), and writes
+  one dated row in `wl_receipts` in the same transaction. The author check is now plain list
+  membership (owner, admin or member). The HTTP route is
+  `POST /api/wishlists/{wishlist_id}/items/{item_id}/receipts`. See
+  [gift-receipt.md](gift-receipt.md). The receipt screen is WISHENKA-24 (not implemented).
 - **Reduction Lock**: A wishlist creator or editor cannot reduce the requested `quantity` below occupied plus received:
   $$\text{requested\_quantity} \ge \text{reserved\_quantity} + \text{received\_quantity}$$
   Attempting to reduce below this threshold raises [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L44) and returns HTTP 409 Conflict. The wish-scoped transaction rolls back, so the stored quantity stays at the last commit.
@@ -561,8 +576,8 @@ WishlistError
 - **Auto-Increment on Creation**: Newly created items receive `display_order = max(active_display_orders, default=-1) + 1`.
 - **1:1 Active Permutation**: When invoking `PUT /api/wishlists/{wishlist_id}/items/reorder`:
   1. The payload `item_ids` must contain no duplicates (`len(item_ids) == len(set(item_ids))`).
-  2. The set of `item_ids` must match **exactly** the set of all active (non-archived) items belonging to that wishlist:
-     $$\text{set}(item\_ids) == \{i.id \mid i \in \text{items}, \neg i.is\_archived\}$$
+  2. The set of `item_ids` must match **exactly** the set of all active items belonging to that wishlist. Active means `WishItem.is_active`: not archived and not fully received:
+     $$\text{set}(item\_ids) == \{i.id \mid i \in \text{items}, \neg i.is\_archived \land i.received < i.quantity\}$$
   3. If any active item is missing, or an extra/archived item ID is provided, the operation raises `ValueError` (HTTP 400 Bad Request) and logs `item_reorder_invalid`.
   4. On success, items are contiguously re-indexed to $0, 1, \dots, N-1$ matching the list order.
 
@@ -571,13 +586,19 @@ WishlistError
 - **Non-Destructive Soft-Delete**: Archiving an item (`POST /api/wishlists/{wishlist_id}/items/{item_id}/archive`) marks `is_archived = True`.
 - **Reservation Preservation**: Active and purchased reservations on the archived item remain intact in the database. Gifters who committed to a gift do not lose their reservation history or booking records.
 - **Booking & Mutation Freeze**: Archived items cannot be booked or edited; attempting to modify an archived item raises [`WishlistArchivedError`](file:///home/src/wishenka/wishlists/exceptions.py#L18) (HTTP 409 Conflict).
-- **Listing Exclusion**: Archived items are hidden from default item listings (`include_archived=False`) and excluded from active reordering permutations.
+- **Listing Exclusion**: Archived items are hidden from default item listings (`include_archived=False`) and excluded from active reordering permutations. Fully received wishes are hidden from both modes (`include_archived=True` returns every wish that is not fully received).
 - **Tail Restoration**: Restoring an item (`POST /api/wishlists/{wishlist_id}/items/{item_id}/restore`) unsets `is_archived = False` and sets its `display_order` to `max(active_orders, default=-1) + 1`, appending it cleanly to the end of the active list.
 
-> **Planned change (WISHENKA-22 spec, not yet implemented):** for a wish with received units,
-> archive and restore will act on the unreceived part only, archive will be refused for a fully
-> received wish, and the active-list predicate becomes "not archived and remaining above zero".
-> See [gift-receipt.md](gift-receipt.md).
+- **Received units**: the active-list predicate is `WishItem.is_active` (not archived and
+  `received_quantity < quantity`), shared by the list view, reorder, restore tail order and the
+  public projection. Archiving a partly received wish moves only its unreceived part to the
+  archive (`is_in_archive`: archived and not fully received); the received part stays in the
+  gifted read (`GET /api/wishlists/{wishlist_id}/gifted`). `archive_wish_item` of a fully
+  received wish and `restore_wish_item` with nothing remaining raise `NothingRemainingError`
+  (HTTP 409 on the archive and restore routes). Partly received wishes log INFO
+  `wish_archived_partial` or `wish_restored_partial`; the refusal logs WARNING
+  `wish_archive_refused`. Legacy archived rows that were fully received are cleared by the
+  migration `add_gift_receipts`. See [gift-receipt.md](gift-receipt.md).
 
 ### 4. Collaborative Wishlist Targeting & Surprise Invariant
 

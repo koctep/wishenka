@@ -33,7 +33,22 @@ Revision chain (linear):
    `wl_counters` with their indexes.
 2. `add_warn_on_delete_reserved` - `wl_lists.warn_on_delete_reserved INTEGER NOT NULL DEFAULT 1`.
 3. `add_display_order` - `wl_items.display_order INTEGER NOT NULL DEFAULT 0`.
-4. `add_item_order_index` (head) - index `idx_wl_items_order ON wl_items(wishlist_id, display_order)`.
+4. `add_item_order_index` - index `idx_wl_items_order ON wl_items(wishlist_id, display_order)`.
+5. `add_gift_receipts` - table `wl_receipts` (no giver column) and `idx_wl_receipts_item`;
+   back-fills one approximate record (`is_approximate = 1`, date = the wish's `updated_at`) per wish
+   with `received_quantity > 0` and no record; clears `is_archived` on fully received archived
+   rows. Idempotent, irreversible. Logs `legacy_receipts_backfilled` and
+   `legacy_archived_rows_normalised` (INFO, field `rows`).
+6. `add_notice_outbox` (head) - tables `notification_outbox`, `user_notification_settings`,
+   `wl_list_notification_settings` and `idx_notice_outbox_due`.
+
+Details of revisions 5 and 6 are in [gift-receipt.md](gift-receipt.md). The legacy-adoption map
+(`_REVISIONS`) still stops at `add_item_order_index`; adoption stamps that revision and
+`upgrade head` then applies revisions 5 and 6.
+
+`head_revision(database_url=...)` in `migrations.py` returns the head id from the script
+directory without opening a database (the URL only builds the config, default in-memory). Tests
+derive the expected head from it instead of a literal.
 
 Column convention: after `upgrade_to_head()` every column above is guaranteed to exist, so the
 store and repository code reads `warn_on_delete_reserved` and `display_order` directly. Do not
@@ -118,7 +133,7 @@ without the "Unable to initialize wishlist storage" wrapper. The migrations-leve
    ```
 
    The file lands in `wishenka/wishlists/alembic/versions/` as `<rev-id>_<slug>.py`; Alembic
-   fills `down_revision` with the current head (`add_item_order_index` at the time of writing),
+   fills `down_revision` with the current head (`add_notice_outbox` at the time of writing),
    keep the chain linear. The existing revisions use descriptive string ids and plain
    `<rev-id>.py` file names, so rename the generated file to match.
 2. Implement `upgrade()` with `op.execute(...)` or `op.add_column(...)`. For SQLite, use
@@ -242,12 +257,14 @@ Current state of the `downgrade()` functions:
 
 | Revision | `downgrade()` |
 | --- | --- |
+| `add_notice_outbox` | Works: drops the three notice tables (queued notices are lost) |
+| `add_gift_receipts` | Raises `NotImplementedError` (irreversible: the normalised archived rows cannot be told apart and the receipt history would be lost) |
 | `add_item_order_index` | Works: `DROP INDEX idx_wl_items_order` |
 | `add_display_order` | Raises `NotImplementedError` (SQLite cannot drop a column without a table rebuild) |
 | `add_warn_on_delete_reserved` | Raises `NotImplementedError` (same reason) |
 | `base_normalized` | Drops all nine baseline tables in reverse dependency order and destroys all wishlist data; no guard |
 
-So a downgrade from head stops after the index and fails at `add_display_order`. Never run
+So a downgrade from head drops the notice tables, then fails at `add_gift_receipts`. Never run
 `alembic downgrade base` on a database with data; restore from a backup instead.
 
 ## Testing
@@ -255,7 +272,8 @@ So a downgrade from head stops after the index and fails at `add_display_order`.
 | Module | Covers |
 | --- | --- |
 | `tests/test_wishlist_alembic_migrations.py` | Legacy database adopted at head with rows preserved; fresh and `:memory:` stores reach the same head; `dispose()` removes the temporary file; the application lifespan disposes its `:memory:` store; rejection of a legacy schema with an ascending history index and of a malformed `display_order` marker |
-| `tests/test_wishlist_migrations_concurrency.py` | Several processes start concurrently on one file, fresh and legacy `base_normalized` |
+| `tests/test_wishlist_migrations_concurrency.py` | Several processes start concurrently on one file, fresh and legacy `base_normalized`; the expected head is `head_revision()` |
+| `tests/test_gift_receipt_migration.py` | Back-fill and normalisation, repeatable upgrade, no giver column, irreversible downgrade, cascade on purge |
 | `tests/test_wishlist_migrations_observability.py` | `started`/`completed` events, `legacy_schema_adopted` with `revision`, `failed` with re-raise, no paths in log fields |
 
 Run them with the project test target (see [infrastructure.md](infrastructure.md)), for example:

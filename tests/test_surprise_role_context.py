@@ -50,7 +50,7 @@ _GIVER_FIELDS = (
 _PURCHASE_MARKS = ("purchased", "Куплено", "bought")
 _NOTICE_MARKS = ("notification", "outbox", "push")
 _LOG_FIELDS = set(logging.makeLogRecord({}).__dict__) | {"message", "asctime"}
-_NOTICE_TABLES = ("notification_outbox", "user_notification_settings")
+_RECEIPT_COLUMNS = {"id", "wish_item_id", "quantity", "received_at", "is_approximate"}
 
 
 def make_user(
@@ -94,13 +94,17 @@ def user_count(app: FastAPI) -> int:
     return int(row[0])
 
 
-def notification_tables(app: FastAPI) -> list[str]:
-    """Return notification tables if the walk created any."""
-    placeholders = ", ".join("?" for _ in _NOTICE_TABLES)
-    query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (" + placeholders + ")"
+def notice_rows(app: FastAPI) -> list[sqlite3.Row]:
+    """Return every row of the notice queue (the table exists since the outbox revision)."""
     with sqlite3.connect(_db_path(app)) as conn:
-        rows = conn.execute(query, _NOTICE_TABLES).fetchall()
-    return [str(row[0]) for row in rows]
+        conn.row_factory = sqlite3.Row
+        return conn.execute("SELECT * FROM notification_outbox").fetchall()
+
+
+def receipt_columns(app: FastAPI) -> set[str]:
+    """Return the column names of the receipt history table."""
+    with sqlite3.connect(_db_path(app)) as conn:
+        return {str(row[1]) for row in conn.execute("PRAGMA table_info(wl_receipts)")}
 
 
 def _gifter_marks() -> tuple[str, ...]:
@@ -189,7 +193,12 @@ def test_recipient_walk_hides_booking_in_response_log_and_notice(
         notice_text = f"{getattr(record, 'event', '')} {record.getMessage()}".casefold()
         for mark in _NOTICE_MARKS:
             assert mark not in notice_text
-    assert notification_tables(app) == []
+    # The receipt was recorded before any booking existed: nobody is a giver, so any row (above
+    # all one for the owner, who is the recipient) would be a leak (R-8.3).
+    rows = notice_rows(app)
+    assert rows == []
+    assert all(row["giver_user_id"] != _OWNER_ID for row in rows)
+    assert receipt_columns(app) <= _RECEIPT_COLUMNS
 
 
 def test_share_link_visit_creates_no_account(

@@ -1,11 +1,19 @@
 """Pydantic schemas and DTOs with strict role-aware projections."""
 
 from datetime import datetime
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from wishenka.items.models import ItemPriority
 from wishenka.wishlists.models import ReservationStatus, WishlistRole, WishlistStatus
+
+
+def _remaining_from(data: dict[str, Any]) -> int:
+    """Return ``max(0, quantity - received_quantity)`` using the DTO field defaults."""
+    quantity: int = data.get("quantity", 1)
+    received: int = data.get("received_quantity", 0)
+    return max(0, quantity - received)
 
 
 class WishItemRecipientViewDTO(BaseModel):
@@ -34,6 +42,15 @@ class WishItemRecipientViewDTO(BaseModel):
     recipient_user_id: int | None = None
     recipient_name: str | None = None
     is_recipient: bool = True
+    remaining_quantity: int | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_remaining(cls, data: Any) -> Any:
+        """Fill ``remaining_quantity`` from the quantities when it is not given."""
+        if isinstance(data, dict) and data.get("remaining_quantity") is None:
+            return {**data, "remaining_quantity": _remaining_from(data)}
+        return data
 
 
 class WishItemGifterViewDTO(BaseModel):
@@ -70,6 +87,23 @@ class WishItemGifterViewDTO(BaseModel):
     recipient_user_id: int | None = None
     recipient_name: str | None = None
     is_recipient: bool = False
+    remaining_quantity: int | None = None
+    is_fully_received: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_receipt_facts(cls, data: Any) -> Any:
+        """Fill ``remaining_quantity`` and ``is_fully_received`` when they are not given."""
+        if not isinstance(data, dict):
+            return data
+        derived = dict(data)
+        if derived.get("remaining_quantity") is None:
+            derived["remaining_quantity"] = _remaining_from(data)
+        if "is_fully_received" not in derived:
+            derived["is_fully_received"] = data.get("received_quantity", 0) >= data.get(
+                "quantity", 1
+            )
+        return derived
 
 
 class MyReservationItemDTO(BaseModel):
@@ -96,6 +130,40 @@ class MyReservationItemDTO(BaseModel):
     created_at: datetime
     updated_at: datetime
     change_ceiling: int = 0
+    is_fully_received: bool = False
+
+
+class ReceiptEntryDTO(BaseModel):
+    """One receipt act in the gifted history; no giver, no reservation."""
+
+    model_config = ConfigDict(frozen=True)
+
+    received_at: datetime
+    quantity: int
+    is_approximate: bool = False
+
+
+class GiftedItemDTO(BaseModel):
+    """A received wish for the authors; carries no promise or giver field."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: int
+    title: str
+    description: str | None = None
+    link: str | None = None
+    image_url: str | None = None
+    price: int | None = None
+    currency: str = "RUB"
+    store_name: str | None = None
+    store_icon_url: str | None = None
+    recipient_user_id: int | None = None
+    recipient_name: str | None = None
+    quantity: int = 1
+    received_quantity: int = 0
+    remaining_quantity: int = 0
+    is_archived: bool = False
+    receipts: list[ReceiptEntryDTO] = Field(default_factory=list)
 
 
 class UserReservationsSummaryDTO(BaseModel):
@@ -117,6 +185,26 @@ class ReservationQuantityDTO(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     quantity: int
+
+
+class ReceiptRequestDTO(BaseModel):
+    """Body of the receipt command: how many units were received now."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    quantity: int
+
+
+class ReceiptResultDTO(BaseModel):
+    """Outcome of a receipt command, recipient-safe (no promise or giver field)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    item: WishItemRecipientViewDTO
+    received_now: int
+    received_quantity: int
+    remaining_quantity: int
+    is_fully_received: bool
 
 
 class PromiseActionDTO(BaseModel):

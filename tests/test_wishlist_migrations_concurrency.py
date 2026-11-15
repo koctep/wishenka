@@ -7,13 +7,13 @@ from pathlib import Path
 import pytest
 
 from wishenka.wishlists.alembic.versions import base_normalized
-from wishenka.wishlists.migrations import upgrade_to_head_sync
+from wishenka.wishlists.migrations import head_revision, upgrade_to_head_sync
 
 pytestmark = pytest.mark.timeout(120)
 
 _PROCESSES = 4
 _TRIALS = 3
-_HEAD = "add_item_order_index"
+_HEAD = head_revision()
 _SEED_KEY = "legacy-seed"
 
 

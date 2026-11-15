@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from wishenka.config import Settings
+from wishenka.notices.store import NoticeStore
 from wishenka.wishlists.store import WishlistStore
 
 logger = logging.getLogger(__name__)
@@ -25,10 +26,29 @@ class CleanupStats:
     finished_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
+async def _purge_notices(notice_store: NoticeStore, settings: Settings, now: datetime) -> None:
+    """Delete finished notice rows past retention; a failure is a WARNING, never a cycle error."""
+    threshold = now - timedelta(days=settings.receipt_notice_retention_days)
+    try:
+        rows = await notice_store.purge_finished(threshold)
+    except Exception as err:
+        logger.warning(
+            "Purge of finished notice rows failed",
+            extra={"event": "receipt_notice_purge_failed", "error_class": type(err).__name__},
+        )
+        return
+    if rows > 0:
+        logger.info(
+            "Finished notice rows purged",
+            extra={"event": "receipt_notice_rows_purged", "rows": rows},
+        )
+
+
 async def run_cleanup_cycle(
     store: WishlistStore,
     settings: Settings,
     now: datetime | None = None,
+    notice_store: NoticeStore | None = None,
 ) -> CleanupStats:
     """Perform background cleanup of expired invite tokens and deleted wishlists.
 
@@ -43,6 +63,8 @@ async def run_cleanup_cycle(
         expired_count = await store.cleanup_expired_tokens(effective_now)
         retention_threshold = effective_now - timedelta(days=settings.wishlist_retention_days)
         purged_count = await store.purge_archived_wishlists(retention_threshold)
+        if notice_store is not None:
+            await _purge_notices(notice_store, settings, effective_now)
 
         duration_sec = time.perf_counter() - start_perf
         duration_ms = duration_sec * 1000.0
@@ -96,6 +118,7 @@ async def background_cleanup_worker(
     store: WishlistStore,
     settings: Settings,
     stop_event: asyncio.Event | None = None,
+    notice_store: NoticeStore | None = None,
 ) -> None:
     """Long-running background task executing cleanup cycles on schedule."""
     logger.info(
@@ -122,7 +145,7 @@ async def background_cleanup_worker(
                         pass
                 else:
                     await asyncio.sleep(settings.background_cleanup_interval_seconds)
-                await run_cleanup_cycle(store, settings)
+                await run_cleanup_cycle(store, settings, notice_store=notice_store)
             except asyncio.CancelledError:
                 break
             except Exception:

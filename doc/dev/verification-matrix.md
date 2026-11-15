@@ -416,28 +416,36 @@ assert that a recipient log omits a gifter.
 
 A message the service sends the recipient about a wish, a receipt, an
 archive, or a reminder omits the gifter, the reservation, the booked
-quantity, and the free remainder. The product has no such sender. The
-proof is that the recipient walk produces no recipient-facing
-notification.
+quantity, and the free remainder. The product sends no message to the
+recipient. The proof is that the recipient walk produces no
+recipient-facing notification and no queue row for the recipient.
 
-Modules: none. There is no notification sender in the product code.
+Modules: `wishenka/notices/` (queue store, worker, sender) and
+`wishenka/wishlists/service.py` (`_draft_receipt_notices`). The sender exists since
+WISHENKA-23, but only as a giver notice. The owner, who is the recipient, never gets a row.
 
 Covered by:
 
 - `tests/test_surprise_role_context.py`
   `test_recipient_walk_hides_booking_in_response_log_and_notice`
+- `tests/test_surprise_receipt_walk.py`
+  `test_recipient_walk_creates_no_notice_for_owner` and
+  `test_second_walk_receipt_and_gifted_read_hide_the_booking`
 
-During that walk, captured records do not name a notification, an
-outbox enqueue, or a push, and the test database does not gain a
-`notification_outbox` or `user_notification_settings` table. The check
-passes on that absence. It does not look for notice copy.
-
-Gap: none. A later story that adds a sender stays on this row.
-
-**Planned change (WISHENKA-22 spec, not yet implemented):** WISHENKA-23 will replace the
-absence check for `notification_outbox` and `user_notification_settings` with a stronger
-recipient-walk check, because the tables will exist. See
+During the first walk, captured records do not name a notification, an
+outbox enqueue, or a push (event name and message). The tables now exist, so the
+former absence check was replaced by two assertions: `notice_rows` returns no
+row of `notification_outbox` (and none for the owner), and `receipt_columns`
+shows `wl_receipts` has no column outside the fixed five (no giver).
+`test_recipient_walk_creates_no_notice_for_owner` repeats the empty-queue and
+column check after a receipt, a promise and a purchase. The second walk records
+a receipt on a promised wish and reads `GET .../gifted`: neither response nor
+captured log carries a gifter, a booking or a booked quantity. The checks do not
+look for notice copy. Notice-path log rules are in
 [gift-receipt.md](gift-receipt.md).
+
+Gap: the Telegram bot is mocked in every test, so the real sender is not
+exercised (WISHENKA-156).
 
 ### S7. Public list answer for an unidentified visitor
 

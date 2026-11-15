@@ -12,21 +12,34 @@ from typing import TYPE_CHECKING, Any
 
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.items.models import ItemPriority
+from wishenka.notices.models import (
+    EVENT_GIFT_RECEIVED,
+    SKIP_SETTING_LIST,
+    SKIP_SETTING_USER,
+    STATUS_SKIPPED,
+    NoticeDraft,
+    NoticeSettings,
+)
 from wishenka.wishlists.concurrency import ItemConcurrencyCoordinator
 from wishenka.wishlists.exceptions import (
     CannotReduceQuantityBelowReservedError,
     InsufficientQuantityError,
     InvalidInviteTokenError,
     ItemNotFoundError,
+    NothingRemainingError,
     PermissionDeniedError,
+    QuantityAboveRemainingError,
+    QuantityInvalidError,
     ReservationError,
     ReservationNotFoundError,
     SelfReservationError,
+    WishArchivedError,
     WishlistArchivedError,
     WishlistDeletedError,
     WishlistNotFoundError,
 )
 from wishenka.wishlists.models import (
+    ReceiptRecord,
     Reservation,
     ReservationStatus,
     ViewHistoryEntry,
@@ -41,8 +54,10 @@ from wishenka.wishlists.models import (
 )
 from wishenka.wishlists.policy import WishlistAccessPolicy
 from wishenka.wishlists.schemas import (
+    GiftedItemDTO,
     MyReservationItemDTO,
     PromiseActionDTO,
+    ReceiptEntryDTO,
     UserReservationsSummaryDTO,
     WishItemGifterViewDTO,
     WishItemRecipientViewDTO,
@@ -118,6 +133,31 @@ def _transactional[T](method: Callable[..., Awaitable[T]]) -> Callable[..., Awai
     return invoke
 
 
+def recipient_view(item: WishItem) -> WishItemRecipientViewDTO:
+    """Build the recipient-safe view of a wish: no promise or giver field exists on it."""
+    return WishItemRecipientViewDTO(
+        id=item.id,
+        title=item.title,
+        description=item.description,
+        link=item.link,
+        image_url=item.image_url,
+        price=item.price,
+        currency=item.currency,
+        store_name=item.store_name,
+        store_icon_url=item.store_icon_url,
+        quantity=item.quantity,
+        received_quantity=item.received_quantity,
+        remaining_quantity=item.remaining_quantity,
+        priority=item.priority,
+        category=item.category,
+        display_order=item.display_order,
+        is_archived=item.is_archived,
+        recipient_user_id=item.recipient_user_id,
+        recipient_name=item.recipient_name,
+        is_recipient=True,
+    )
+
+
 def project_wish_item(
     item: WishItem,
     current_user: AuthenticatedUser | None = None,
@@ -125,26 +165,7 @@ def project_wish_item(
     """Project a WishItem into Recipient or Gifter view based on Surprise Invariant."""
     is_recip = WishlistAccessPolicy.is_recipient(current_user, item)
     if is_recip:
-        return WishItemRecipientViewDTO(
-            id=item.id,
-            title=item.title,
-            description=item.description,
-            link=item.link,
-            image_url=item.image_url,
-            price=item.price,
-            currency=item.currency,
-            store_name=item.store_name,
-            store_icon_url=item.store_icon_url,
-            quantity=item.quantity,
-            received_quantity=item.received_quantity,
-            priority=item.priority,
-            category=item.category,
-            display_order=item.display_order,
-            is_archived=item.is_archived,
-            recipient_user_id=item.recipient_user_id,
-            recipient_name=item.recipient_name,
-            is_recipient=True,
-        )
+        return recipient_view(item)
 
     active_or_purchased = [
         r
@@ -181,6 +202,8 @@ def project_wish_item(
         store_icon_url=item.store_icon_url,
         quantity=item.quantity,
         received_quantity=item.received_quantity,
+        remaining_quantity=item.remaining_quantity,
+        is_fully_received=item.is_fully_received,
         available_quantity=available_qty,
         is_fully_reserved=(available_qty == 0),
         is_reserved_by_me=(my_reserved_qty > 0),
@@ -241,6 +264,50 @@ class WishlistService:
         self._favorites: dict[tuple[int, int], WishlistFavorite] = {}
         self._view_history: list[ViewHistoryEntry] = []
         self._next_view_history_id: int = 0
+        # Effects of the current unit of work; the store flushes them with the transaction.
+        self._new_receipts: list[ReceiptRecord] = []
+        self._new_notices: list[NoticeDraft] = []
+        self._notice_settings: NoticeSettings = NoticeSettings()
+
+    def _notice_gate(
+        self, user_id: int, wishlist_id: int, event_type: str
+    ) -> tuple[bool, str | None]:
+        """Decide whether a giver wants a notice: list row, else user row, else on.
+
+        Returns ``(enabled, level)`` where ``level`` is ``"list"``, ``"user"`` or ``None`` for
+        the default. Reads only the settings loaded in the current transaction.
+        """
+        settings = self._notice_settings
+        by_list = settings.list.get((user_id, wishlist_id, event_type))
+        if by_list is not None:
+            return by_list, "list"
+        by_user = settings.user.get((user_id, event_type))
+        if by_user is not None:
+            return by_user, "user"
+        return True, None
+
+    def _draft_receipt_notices(self, item: WishItem, receipt: ReceiptRecord) -> None:
+        """Queue one notice draft per distinct promising giver, skipped when a setting says so."""
+        givers: list[int] = []
+        for reservation in item.reservations:
+            if (
+                reservation.status in (ReservationStatus.ACTIVE, ReservationStatus.PURCHASED)
+                and reservation.user_id not in givers
+                and not WishlistAccessPolicy.is_recipient_id(reservation.user_id, item)
+            ):
+                givers.append(reservation.user_id)
+        for giver_id in givers:
+            enabled, level = self._notice_gate(giver_id, item.wishlist_id, EVENT_GIFT_RECEIVED)
+            if enabled:
+                self._new_notices.append(NoticeDraft(giver_id, receipt))
+            else:
+                reason = SKIP_SETTING_LIST if level == "list" else SKIP_SETTING_USER
+                self._new_notices.append(NoticeDraft(giver_id, receipt, STATUS_SKIPPED, reason))
+
+    @property
+    def notice_drafts(self) -> tuple[NoticeDraft, ...]:
+        """Notices decided so far in this service (read-only snapshot for callers and tests)."""
+        return tuple(self._new_notices)
 
     @property
     def concurrency_coordinator(self) -> ItemConcurrencyCoordinator:
@@ -411,7 +478,7 @@ class WishlistService:
         wl = await self.get_wishlist_by_id(wishlist_id)
 
         active_items = sorted(
-            [item for item in wl.items if not item.is_archived],
+            [item for item in wl.items if item.is_active],
             key=lambda it: (it.display_order, it.created_at, it.id),
         )
         item_views: list[WishItemRecipientViewDTO | WishItemGifterViewDTO] = [
@@ -422,32 +489,10 @@ class WishlistService:
         archived_views: list[WishItemRecipientViewDTO] = []
         if ctx.is_member:
             archived_raw = sorted(
-                [item for item in wl.items if item.is_archived],
+                [item for item in wl.items if item.is_in_archive],
                 key=lambda it: (it.display_order, it.created_at, it.id),
             )
-            archived_views = [
-                WishItemRecipientViewDTO(
-                    id=item.id,
-                    title=item.title,
-                    description=item.description,
-                    link=item.link,
-                    image_url=item.image_url,
-                    price=item.price,
-                    currency=item.currency,
-                    store_name=item.store_name,
-                    store_icon_url=item.store_icon_url,
-                    quantity=item.quantity,
-                    received_quantity=item.received_quantity,
-                    priority=item.priority,
-                    category=item.category,
-                    display_order=item.display_order,
-                    is_archived=item.is_archived,
-                    recipient_user_id=item.recipient_user_id,
-                    recipient_name=item.recipient_name,
-                    is_recipient=True,
-                )
-                for item in archived_raw
-            ]
+            archived_views = [recipient_view(item) for item in archived_raw]
 
         can_edit = WishlistAccessPolicy.can_edit_settings(ctx, wl)
         can_archive = WishlistAccessPolicy.can_archive(ctx, wl)
@@ -1171,9 +1216,65 @@ class WishlistService:
     ) -> list[WishItemRecipientViewDTO | WishItemGifterViewDTO]:
         """List wishlist items projected according to caller's context and archive filter."""
         wl = await self.get_wishlist_by_id(wishlist_id)
-        filtered = [item for item in wl.items if include_archived or not item.is_archived]
+        filtered = [
+            item
+            for item in wl.items
+            if (not item.is_fully_received if include_archived else item.is_active)
+        ]
         sorted_items = sorted(filtered, key=lambda it: (it.display_order, it.id))
         return [project_wish_item(it, actor) for it in sorted_items]
+
+    async def list_gifted_items(
+        self,
+        wishlist_id: int,
+        actor: AuthenticatedUser | None,
+    ) -> list[GiftedItemDTO]:
+        """List received wishes with dated receipts for the list authors only.
+
+        Raises:
+            WishlistNotFoundError: Unknown list.
+            WishlistDeletedError: The list is deleted.
+            PermissionDeniedError: The actor is not a member of the list.
+        """
+        wl = await self.get_wishlist_by_id(wishlist_id)
+        ctx = WishlistAccessPolicy.resolve_context(actor, wl)
+        if not WishlistAccessPolicy.can_view_gifted(ctx, wl):
+            raise PermissionDeniedError("Only list authors can read the gifted wishes")
+        gifted = [item for item in wl.items if item.is_gifted]
+        gifted.sort(
+            key=lambda it: (
+                -max((r.received_at for r in it.receipts), default=it.updated_at).timestamp(),
+                it.id,
+            )
+        )
+        return [
+            GiftedItemDTO(
+                id=item.id,
+                title=item.title,
+                description=item.description,
+                link=item.link,
+                image_url=item.image_url,
+                price=item.price,
+                currency=item.currency,
+                store_name=item.store_name,
+                store_icon_url=item.store_icon_url,
+                recipient_user_id=item.recipient_user_id,
+                recipient_name=item.recipient_name,
+                quantity=item.quantity,
+                received_quantity=item.received_quantity,
+                remaining_quantity=item.remaining_quantity,
+                is_archived=item.is_archived,
+                receipts=[
+                    ReceiptEntryDTO(
+                        received_at=r.received_at,
+                        quantity=r.quantity,
+                        is_approximate=r.is_approximate,
+                    )
+                    for r in sorted(item.receipts, key=lambda r: (r.received_at, r.id))
+                ],
+            )
+            for item in gifted
+        ]
 
     async def reorder_wish_items(
         self,
@@ -1204,7 +1305,7 @@ class WishlistService:
             )
             raise PermissionDeniedError("Actor cannot reorder items in this wishlist")
 
-        active_items = [it for it in wl.items if not it.is_archived]
+        active_items = [it for it in wl.items if it.is_active]
         if len(item_ids) != len(set(item_ids)):
             reason = "Duplicate item IDs in reorder request"
             logger.warning(
@@ -1261,6 +1362,40 @@ class WishlistService:
         )
         return [project_wish_item(item_map[it_id], actor) for it_id in item_ids]
 
+    @staticmethod
+    def _log_archive_refused(wishlist_id: int, item_id: int, actor: AuthenticatedUser) -> None:
+        """WARNING for an archive or restore refused because nothing remains to receive."""
+        logger.warning(
+            "Archive or restore refused: nothing remains",
+            extra={
+                "event": "wish_archive_refused",
+                "wishlist_id": wishlist_id,
+                "item_id": item_id,
+                "actor_id": actor.telegram_id,
+                "reason": "nothing_remaining",
+            },
+        )
+
+    @staticmethod
+    def _log_partial_move(
+        event: str, verb: str, wishlist_id: int, item: WishItem, actor: AuthenticatedUser
+    ) -> None:
+        """INFO for archiving or restoring a partly received wish; silent for an untouched one."""
+        if item.received_quantity <= 0:
+            return
+        logger.info(
+            "Partly received wish %s",
+            verb,
+            extra={
+                "event": event,
+                "wishlist_id": wishlist_id,
+                "item_id": item.id,
+                "actor_id": actor.telegram_id,
+                "received_quantity": item.received_quantity,
+                "total_quantity": item.quantity,
+            },
+        )
+
     async def archive_wish_item(
         self,
         wishlist_id: int,
@@ -1298,6 +1433,9 @@ class WishlistService:
         item = self._items[item_id]
         if item.wishlist_id != wl.id:
             raise ItemNotFoundError(f"Item {item_id} not found in wishlist {wishlist_id}")
+        if item.is_fully_received:
+            self._log_archive_refused(wl.id, item.id, actor)
+            raise NothingRemainingError()
 
         if warn_on_delete_reserved is not None:
             wl.warn_on_delete_reserved = warn_on_delete_reserved
@@ -1320,6 +1458,7 @@ class WishlistService:
                 ),
             },
         )
+        self._log_partial_move("wish_archived_partial", "archived", wl.id, item, actor)
         return project_wish_item(item, actor)
 
     async def restore_wish_item(
@@ -1358,11 +1497,12 @@ class WishlistService:
         item = self._items[item_id]
         if item.wishlist_id != wl.id:
             raise ItemNotFoundError(f"Item {item_id} not found in wishlist {wishlist_id}")
+        if item.remaining_quantity == 0:
+            self._log_archive_refused(wl.id, item.id, actor)
+            raise NothingRemainingError()
 
         item.is_archived = False
-        active_orders = [
-            it.display_order for it in wl.items if not it.is_archived and it.id != item.id
-        ]
+        active_orders = [it.display_order for it in wl.items if it.is_active and it.id != item.id]
         item.display_order = max(active_orders, default=-1) + 1
         item.updated_at = datetime.now(UTC)
         wl.items.sort(key=lambda it: (it.display_order, it.id))
@@ -1381,6 +1521,7 @@ class WishlistService:
                 "new_display_order": item.display_order,
             },
         )
+        self._log_partial_move("wish_restored_partial", "restored", wl.id, item, actor)
         return project_wish_item(item, actor)
 
     async def create_reservation(
@@ -1944,6 +2085,7 @@ class WishlistService:
                         event_title=wl.event_title if wl else None,
                         event_date=wl.event_date if wl else None,
                         is_item_archived=item.is_archived,
+                        is_fully_received=item.is_fully_received,
                         is_wishlist_archived=(
                             wl.status == WishlistStatus.ARCHIVED if wl else False
                         ),
@@ -1977,9 +2119,27 @@ class WishlistService:
         item_id: int,
         actor: AuthenticatedUser,
         received_quantity: int,
+        *,
+        wishlist_id: int | None = None,
     ) -> WishItem:
-        """Record partial or full receipt of a gift by list author."""
-        if item_id not in self._items:
+        """Record a partial or full receipt of a gift by a list author.
+
+        Guards run in a fixed order, membership first so a non-author learns nothing about the
+        list or wish state. Effects are the counter, one ``ReceiptRecord`` queued for the store
+        and the notice drafts; the store persists all of them in the same transaction.
+
+        Raises:
+            ItemNotFoundError: Unknown wish, or ``wishlist_id`` does not match.
+            PermissionDeniedError: The actor is not a list member.
+            WishlistDeletedError: The list is deleted.
+            WishlistArchivedError: The list is archived.
+            WishArchivedError: The wish is archived.
+            QuantityInvalidError: ``received_quantity`` is below one.
+            NothingRemainingError: The wish is already fully received.
+            QuantityAboveRemainingError: ``received_quantity`` exceeds what remains.
+        """
+        item = self._items.get(item_id)
+        if item is None or (wishlist_id is not None and item.wishlist_id != wishlist_id):
             logger.warning(
                 "Record fulfillment failed: item %s not found",
                 item_id,
@@ -1992,11 +2152,10 @@ class WishlistService:
             )
             raise ItemNotFoundError(f"Item {item_id} not found")
 
-        item = self._items[item_id]
         wl = item.wishlist
         if wl is not None:
             ctx = WishlistAccessPolicy.resolve_context(actor, wl)
-            if not WishlistAccessPolicy.can_add_or_edit_item(ctx, wl):
+            if not ctx.is_member:
                 logger.warning(
                     "Actor %s denied permission to fulfill item %s in wishlist %s",
                     actor.telegram_id,
@@ -2012,17 +2171,23 @@ class WishlistService:
                     },
                 )
                 raise PermissionDeniedError("Actor cannot fulfill items in this wishlist")
+            if wl.status == WishlistStatus.DELETED:
+                raise WishlistDeletedError(f"Wishlist {wl.id} is deleted")
+            if wl.status == WishlistStatus.ARCHIVED:
+                raise WishlistArchivedError(f"Wishlist {wl.id} is archived")
 
+        if item.is_archived:
+            raise WishArchivedError("The wish is archived")
         if received_quantity < 1:
-            raise ValueError("Received quantity must be at least 1")
+            raise QuantityInvalidError()
 
         async with self._concurrency_coordinator.acquire(item_id):
-            remaining_unfulfilled = item.quantity - item.received_quantity
-            if received_quantity > remaining_unfulfilled:
+            remaining = item.remaining_quantity
+            if remaining == 0:
+                raise NothingRemainingError()
+            if received_quantity > remaining:
                 logger.warning(
-                    "Fulfillment quantity %s exceeds remaining unfulfilled %s for item %s",
-                    received_quantity,
-                    remaining_unfulfilled,
+                    "Fulfillment quantity exceeds the remaining quantity for item %s",
                     item_id,
                     extra={
                         "event": "fulfillment_quantity_exceeded",
@@ -2030,15 +2195,19 @@ class WishlistService:
                         "wishlist_id": wl.id if wl else None,
                         "user_id": actor.telegram_id,
                         "received_quantity": received_quantity,
-                        "remaining_unfulfilled": remaining_unfulfilled,
+                        "remaining_unfulfilled": remaining,
                     },
                 )
-                raise ValueError(
-                    f"Received quantity {received_quantity} exceeds "
-                    f"remaining unfulfilled {remaining_unfulfilled}"
-                )
+                raise QuantityAboveRemainingError(remaining)
+            now = datetime.now(UTC)
             item.received_quantity += received_quantity
-            item.updated_at = datetime.now(UTC)
+            item.updated_at = now
+            receipt = ReceiptRecord(
+                wish_item_id=item.id, quantity=received_quantity, received_at=now
+            )
+            item.receipts.append(receipt)
+            self._new_receipts.append(receipt)
+            self._draft_receipt_notices(item, receipt)
 
         logger.info(
             "Item %s fulfillment recorded: %s units by user %s",
@@ -2054,6 +2223,7 @@ class WishlistService:
                 "quantity": received_quantity,
                 "received_quantity": item.received_quantity,
                 "total_quantity": item.quantity,
+                "fully_received": item.is_fully_received,
             },
         )
         return item

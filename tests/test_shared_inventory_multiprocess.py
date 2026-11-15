@@ -599,7 +599,7 @@ async def test_receipt_is_not_capped_by_occupied_units(tmp_path: Path) -> None:
 
     refused = _run_copies(db_path, [_receipt(item_id, _OWNER_ID, _OWNER_NAME, 1)])
     assert refused[0]["status"] == "error", refused
-    assert refused[0]["error_type"] == "ValueError"
+    assert refused[0]["error_type"] == "NothingRemainingError"
     final = await _load(db_path, item_id)
     assert final.received == 1
     assert final.quantity == balance.quantity

@@ -116,14 +116,15 @@ stateDiagram-v2
 - **`PURCHASED`**: The gifter confirmed purchasing the gift in the physical world. Crucially, **`PURCHASED` reservations continue locking inventory** so other gifters cannot book the same units.
 - **`CANCELLED`**: The gifter cancelled the reservation or the parent wishlist was deleted. The reserved units are immediately released back to `available_quantity`. This is a terminal state.
 - **Receipt leaves the promise open**:
-  [`record_item_fulfillment`](file:///home/src/wishenka/wishlists/service.py#L1948)
-  only adds `received_quantity`. It does not cancel the reservation or set
-  `ReservationStatus.COMPLETED`. There is no `FULFILLED` status. The promise
+  [`record_item_fulfillment`](file:///home/src/wishenka/wishlists/service.py)
+  only adds `received_quantity` (and a dated `ReceiptRecord`). It does not cancel the
+  reservation or set `ReservationStatus.COMPLETED`. There is no `FULFILLED` status. The promise
   stays `ACTIVE` or `PURCHASED`.
 
-> **Planned change (WISHENKA-22 spec, not yet implemented):** this stays true, and receipt will
-> also notify each giver with an open promise through an outbox. See
-> [gift-receipt.md](gift-receipt.md).
+Receipt also notifies each giver with an open promise (`ACTIVE` or `PURCHASED`, the wish
+recipient excluded) through the `notification_outbox` queue, one notice per giver per act, subject
+to notification settings. A failed delivery never fails the receipt. See
+[gift-receipt.md](gift-receipt.md).
 
 > [!IMPORTANT]
 > Both `ACTIVE` and `PURCHASED` states contribute to
@@ -504,8 +505,9 @@ not render «Изменить», «Отменить бронь», «Куплен
 way. The card edits the latest promise. See
 [Wish-card giver controls](#6-wish-card-giver-controls).
 
-The four actions render only when the wish is archived and the list
-is active (`is_item_archived` and not `is_wishlist_archived`). Each
+The four actions render when the wish is archived or fully received
+and the list is active (`offer_actions` in `CabinetRow`, which the
+template uses to gate the whole action block). Each
 control posts that row's `reservation_id` on the five existing
 promise routes. Create stays on the wish card. An earlier promise
 keeps its own id.
@@ -526,9 +528,12 @@ quantity plus the wish's `available_quantity`. The selected option
 is this row's quantity. Cancel, purchase, and undo are buttons with
 `hx-post` and `hx-swap="none"`. HTMX does not insert the JSON body.
 
-> **Planned change (WISHENKA-22 spec, not yet implemented):** the cabinet will also show the four
-> actions and a «received» marker for a fully received wish on an active list, and the wish card
-> will show no giver controls for it. See [gift-receipt.md](gift-receipt.md).
+Backend of the cabinet for a fully received wish: `MyReservationItemDTO.is_fully_received` and
+`CabinetRow.wish_received` are set, and `CabinetRow.offer_actions` is true for a wish that is
+archived or fully received on an active list, so the four actions render for it. **Not
+implemented (WISHENKA-24):** no template renders the «received» marker (`wish_received`), and the
+wish card still shows its giver controls for a fully received wish.
+See [gift-receipt.md](gift-receipt.md).
 
 An archived list keeps the row and «К желанию», shows
 «Вишлист в архиве», and omits the four actions. The four writes on
@@ -622,7 +627,7 @@ The wish card sends these five calls from `.item-giver`. Which control
 sends which method is in
 [Wish-card giver controls](#6-wish-card-giver-controls).
 The cabinet sends the four mutation calls, each with that row's
-reservation id, only for an archived wish on an active list. See
+reservation id, only for an archived or fully received wish on an active list. See
 [My reservations cabinet](#7-my-reservations-cabinet).
 
 Create calls `create_reservation`. Quantity change calls
@@ -818,7 +823,9 @@ The HTTP card and page call these same methods. The badge text is
 
 ```python
 async def fulfill_item(service: WishlistService, item_id: int, author: AuthenticatedUser):
-    # Author records receipt of 2 units
+    # Author records receipt of 2 units. Refusals are WishRefusalError subclasses
+    # (NothingRemainingError, QuantityAboveRemainingError, ...); over HTTP use
+    # POST /api/wishlists/{wishlist_id}/items/{item_id}/receipts.
     item = await service.record_item_fulfillment(
         item_id=item_id,
         actor=author,
@@ -864,7 +871,7 @@ All reservation operations emit structured logs using `wishenka.wishlists` logge
 | `reservation_reverted` | INFO | `event`, `wishlist_id`, `item_id`, `user_id`, `reservation_id`, `quantity` | Emitted when a reservation is reverted from `PURCHASED` to `ACTIVE` |
 | `reservation_cancelled` | INFO | `event`, `wishlist_id`, `item_id`, `user_id`, `reservation_id`, `quantity` | Emitted when a reservation is cancelled and restocked |
 | `reservation_quantity_updated` | INFO | `event`, `wishlist_id`, `item_id`, `user_id`, `reservation_id`, `quantity`, `old_quantity` | Emitted when a reservation's quantity is increased or decreased |
-| `item_fulfilled` | INFO | `event`, `wishlist_id`, `item_id`, `user_id`, `quantity`, `received_quantity`, `total_quantity` | Emitted when an author records gift receipt and item fulfillment |
+| `item_fulfilled` | INFO | `event`, `wishlist_id`, `item_id`, `user_id`, `actor_id`, `quantity`, `received_quantity`, `total_quantity`, `fully_received` | Emitted when an author records gift receipt and item fulfillment (before the commit) |
 | `self_reservation_blocked` | WARNING | `event`, `wishlist_id`, `item_id`, `user_id`, `recipient_user_id` | Emitted when recipient attempts self-reservation (Surprise Invariant) |
 | `insufficient_quantity_blocked` | WARNING | `event`, `wishlist_id`, `item_id`, `user_id`, `requested_quantity`, `available_quantity` | Emitted when create or update reservation exceeds unallocated quantity |
 | `item_quantity_reduction_rejected`| WARNING | `event`, `item_id`, `wishlist_id`, `actor_id`, `requested_quantity`, `locked_quantity` | Emitted when author tries reducing desired quantity below locked reserve |
@@ -872,9 +879,9 @@ All reservation operations emit structured logs using `wishenka.wishlists` logge
 | `reservation_already_cancelled` | WARNING | `event`, `reservation_id`, `user_id`, `actor_id` | Emitted when cancelling an already cancelled reservation |
 | `reservation_not_found` | WARNING | `event`, `reservation_id`, `actor_id` | Emitted when accessing non-existent reservation ID |
 
-> **Planned change (WISHENKA-22 spec, not yet implemented):** WISHENKA-23 either keeps
-> `item_fulfilled` as is or renames it to `receipt_recorded`, never emitting both for one act.
-> See [gift-receipt.md](gift-receipt.md).
+`item_fulfilled` was kept (not renamed) and is the only domain event of a receipt act. The route
+adds `receipt_recorded_http`, `receipt_refused` and `receipt_inventory_busy` on
+`wishenka.web.receipts`. See [gift-receipt.md](gift-receipt.md).
 
 > [!NOTE]
 > In compliance with the Surprise Invariant, log records emitted during recipient interactions (e.g. viewing personal wishlist details) never include gifter identities, reservation IDs, or booking status.

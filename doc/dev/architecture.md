@@ -43,7 +43,8 @@
 
 Занятые штуки (`occupied`) — сумма `quantity` броней в статусах `ACTIVE` и `PURCHASED`. Правила одного желания считаются внутри этой транзакции:
 
-- Приход добавляет полученные штуки и ограничен `requested − received`.
+- Приход добавляет полученные штуки, пишет запись в `wl_receipts` и ограничен
+  `requested − received`; при нуле остатка отклоняется (`NothingRemainingError`).
   Он не отменяет бронь и не ставит `ReservationStatus.COMPLETED`. Статуса
   `FULFILLED` нет. Обещание остаётся открытым. После успешного прихода
   `occupied + received` может превысить запрошенное количество.
@@ -71,12 +72,18 @@
 - `reservations` — бронирования дарителей (id, wish_item_id, user_id, quantity, status: active/purchased/cancelled/completed).
 - `user_wishlist_favorites` — избранные списки дарителя.
 - `user_wishlist_views` — история недавних просмотров.
-- `user_notification_settings` — настройки оповещений.
-- `notification_outbox` — очередь отправки сообщений ботом.
+- `user_notification_settings` — настройки оповещений уровня пользователя (создана ревизией
+  `add_notice_outbox`).
+- `wl_list_notification_settings` — настройки оповещений уровня вишлиста (та же ревизия).
+- `notification_outbox` — очередь отправки сообщений ботом (та же ревизия).
+- `wl_receipts` — история получений желаний: количество и дата, без дарителя (ревизия
+  `add_gift_receipts`).
 
-**Planned change (WISHENKA-22 spec, not yet implemented):** уведомление дарителям о получении
-подарка станет ещё одним производителем в `notification_outbox`, а настройки будут действовать
-на двух уровнях (пользователь и вишлист). См. [`doc/dev/gift-receipt.md`](gift-receipt.md).
+Реализовано (WISHENKA-23): уведомление дарителям о получении подарка — производитель в
+`notification_outbox` внутри транзакции прихода, настройки действуют на двух уровнях (вишлист,
+затем пользователь, по умолчанию включено), отправку выполняет воркер в lifespan каждого
+веб-процесса и только при настоящем токене бота. Экранов настроек и интерфейса получения
+пока нет (WISHENKA-34, WISHENKA-24). См. [`doc/dev/gift-receipt.md`](gift-receipt.md).
 
 ---
 

@@ -105,7 +105,14 @@ def projection(
         "status": wishlist.status.value,
         "items": [],
     }
+    is_member = (
+        not public
+        and user is not None
+        and WishlistAccessPolicy.resolve_context(user, wishlist).is_member
+    )
     for item in wishlist.items:
+        if not is_member and not item.is_active:
+            continue
         result["items"].append(
             {
                 "id": item.id,
@@ -117,6 +124,8 @@ def projection(
                 "currency": item.currency,
                 "quantity": item.quantity,
                 "received_quantity": item.received_quantity,
+                "remaining_quantity": item.remaining_quantity,
+                "is_active": item.is_active,
                 "priority": item.priority.value,
                 "category": item.category,
                 "is_archived": item.is_archived,

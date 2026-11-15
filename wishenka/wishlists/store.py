@@ -19,6 +19,13 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from wishenka.items.models import ItemPriority
+from wishenka.notices.models import (
+    EVENT_GIFT_RECEIVED,
+    SKIP_SETTING_LIST,
+    STATUS_SKIPPED,
+    FlushedNotice,
+    NoticeSettings,
+)
 from wishenka.wishlists.exceptions import (
     InventoryBusyError,
     ItemNotFoundError,
@@ -28,6 +35,7 @@ from wishenka.wishlists.exceptions import (
 )
 from wishenka.wishlists.migrations import migration_lock_path, upgrade_to_head
 from wishenka.wishlists.models import (
+    ReceiptRecord,
     Reservation,
     ReservationStatus,
     ViewHistoryEntry,
@@ -46,6 +54,7 @@ T = TypeVar("T")
 # aiosqlite DEBUG logs include SQL bound parameters, including capabilities.
 logging.getLogger("aiosqlite").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+notice_logger = logging.getLogger("wishenka.wishlists.notices")
 
 
 def _configure_immediate_transactions(sync_engine: Engine) -> None:
@@ -305,6 +314,50 @@ _RESERVATION_UPDATE = text(
 )
 
 
+_RECEIPT_COLUMNS = "id, wish_item_id, quantity, received_at, is_approximate"
+
+
+def _log_flushed_notices(flushed: list[FlushedNotice]) -> None:
+    """Write the after-commit DEBUG record of each notice row; only the row id and gate."""
+    for notice in flushed:
+        if notice.status == STATUS_SKIPPED:
+            notice_logger.debug(
+                "Receipt notice skipped by a setting",
+                extra={
+                    "event": "receipt_notice_skipped",
+                    "outbox_id": notice.outbox_id,
+                    "gate": notice.gate,
+                },
+            )
+        else:
+            notice_logger.debug(
+                "Receipt notice queued",
+                extra={"event": "receipt_notice_created", "outbox_id": notice.outbox_id},
+            )
+
+
+def _receipt_from_row(row: Any) -> ReceiptRecord:
+    """Build a receipt record from a ``wl_receipts`` row."""
+    return ReceiptRecord(
+        id=int(row.id),
+        wish_item_id=int(row.wish_item_id),
+        quantity=int(row.quantity),
+        received_at=_parse_dt(row.received_at) or datetime.now(UTC),
+        is_approximate=bool(row.is_approximate),
+    )
+
+
+def _notice_settings_from_rows(user_rows: Any, list_rows: Any) -> NoticeSettings:
+    """Build the notice switches from the two settings tables (rows of those queries)."""
+    return NoticeSettings(
+        user={(int(r.user_id), str(r.event_type)): bool(r.enabled) for r in user_rows},
+        list={
+            (int(r.user_id), int(r.wishlist_id), str(r.event_type)): bool(r.enabled)
+            for r in list_rows
+        },
+    )
+
+
 @dataclass
 class _WishSnapshot:
     item_id: int
@@ -479,6 +532,31 @@ class WishlistStore:
                 res.wish_item = service._items[res.wish_item_id]
                 res.wish_item.reservations.append(res)
 
+        receipt_rows = (
+            await conn.execute(
+                text(f"SELECT {_RECEIPT_COLUMNS} FROM wl_receipts ORDER BY received_at ASC, id ASC")
+            )
+        ).all()
+        for receipt_row in receipt_rows:
+            receipt = _receipt_from_row(receipt_row)
+            if receipt.wish_item_id in service._items:
+                service._items[receipt.wish_item_id].receipts.append(receipt)
+        service._notice_settings = _notice_settings_from_rows(
+            (
+                await conn.execute(
+                    text("SELECT user_id, event_type, enabled FROM user_notification_settings")
+                )
+            ).all(),
+            (
+                await conn.execute(
+                    text(
+                        "SELECT user_id, wishlist_id, event_type, enabled "
+                        "FROM wl_list_notification_settings"
+                    )
+                )
+            ).all(),
+        )
+
         fav_rows = (
             await conn.execute(text("SELECT user_id, wishlist_id, created_at FROM wl_favorites"))
         ).all()
@@ -544,7 +622,7 @@ class WishlistStore:
         conn: AsyncConnection,
         service: WishlistService,
         snapshot: _StorageSnapshot,
-    ) -> None:
+    ) -> list[FlushedNotice]:
         current_wls = service._wishlists
         deleted_wls = snapshot.wishlists - set(current_wls.keys())
         for wid in deleted_wls:
@@ -759,6 +837,7 @@ class WishlistStore:
                 ),
                 {"name": name, "value": getattr(service, f"_next_{name}_id", 0)},
             )
+        flushed = await self._flush_receipt_effects(conn, service)
         logger.info(
             "Wishlist store committed changes: %d wishlists, %d items",
             len(current_wls),
@@ -775,6 +854,69 @@ class WishlistStore:
                 "deleted_reservations_count": len(deleted_res),
             },
         )
+        return flushed
+
+    async def _flush_receipt_effects(
+        self, conn: AsyncConnection, service: WishlistService
+    ) -> list[FlushedNotice]:
+        """Insert this transaction's receipt records and notice rows; return the notice rows.
+
+        The lists belong to a service created for one transaction, so they hold exactly its
+        effects. Any failure propagates and rolls the whole transaction back.
+        """
+        for receipt in service._new_receipts:
+            result = await conn.execute(
+                text(
+                    "INSERT INTO wl_receipts (wish_item_id, quantity, received_at, is_approximate) "
+                    "VALUES (:wish_item_id, :quantity, :received_at, :is_approximate)"
+                ),
+                {
+                    "wish_item_id": receipt.wish_item_id,
+                    "quantity": receipt.quantity,
+                    "received_at": _format_dt(receipt.received_at),
+                    "is_approximate": 1 if receipt.is_approximate else 0,
+                },
+            )
+            receipt.id = int(result.lastrowid)
+        flushed: list[FlushedNotice] = []
+        now = datetime.now(UTC)
+        for draft in service._new_notices:
+            wishlist_id = service._items[draft.receipt.wish_item_id].wishlist_id
+            result = await conn.execute(
+                text(
+                    "INSERT INTO notification_outbox (event_type, receipt_id, wishlist_id, "
+                    "wish_item_id, giver_user_id, status, skip_reason, next_attempt_at, "
+                    "created_at, updated_at) VALUES (:event_type, :receipt_id, :wishlist_id, "
+                    ":wish_item_id, :giver_user_id, :status, :skip_reason, :next_attempt_at, "
+                    ":now, :now)"
+                ),
+                {
+                    "event_type": EVENT_GIFT_RECEIVED,
+                    "receipt_id": draft.receipt.id,
+                    "wishlist_id": wishlist_id,
+                    "wish_item_id": draft.receipt.wish_item_id,
+                    "giver_user_id": draft.giver_user_id,
+                    "status": draft.status,
+                    "skip_reason": draft.skip_reason,
+                    "next_attempt_at": int(now.timestamp()),
+                    "now": _format_dt(now),
+                },
+            )
+            gate = (
+                None
+                if draft.skip_reason is None
+                else "list"
+                if draft.skip_reason == SKIP_SETTING_LIST
+                else "user"
+            )
+            flushed.append(
+                FlushedNotice(
+                    outbox_id=int(result.lastrowid),
+                    status=draft.status,
+                    gate=gate,
+                )
+            )
+        return flushed
 
     async def execute_wish(
         self,
@@ -790,9 +932,10 @@ class WishlistStore:
 
         resolved_item_id = item_id
         reservations_written = 0
+        flushed: list[FlushedNotice] = []
 
         async def work(conn: AsyncConnection) -> T:
-            nonlocal resolved_item_id, reservations_written
+            nonlocal resolved_item_id, reservations_written, flushed
             resolved_item_id = await self._resolve_wish_item_id(
                 conn,
                 item_id=item_id,
@@ -800,7 +943,7 @@ class WishlistStore:
             )
             service, snapshot = await self._load_wish(conn, resolved_item_id)
             result = await operation(service)
-            reservations_written = await self._persist_wish(conn, service, snapshot)
+            reservations_written, flushed = await self._persist_wish(conn, service, snapshot)
             return result
 
         try:
@@ -831,6 +974,7 @@ class WishlistStore:
                 "reservations_written": reservations_written,
             },
         )
+        _log_flushed_notices(flushed)
         return result
 
     async def _resolve_wish_item_id(
@@ -987,6 +1131,39 @@ class WishlistStore:
             item.reservations.append(reservation)
             service._reservations[reservation.id] = reservation
 
+        receipt_rows = (
+            await conn.execute(
+                text(
+                    f"SELECT {_RECEIPT_COLUMNS} FROM wl_receipts "
+                    "WHERE wish_item_id = :item_id ORDER BY received_at ASC, id ASC"
+                ),
+                {"item_id": item.id},
+            )
+        ).all()
+        item.receipts.extend(_receipt_from_row(row) for row in receipt_rows)
+        holders = "SELECT user_id FROM wl_reservations WHERE wish_item_id = :item_id"
+        service._notice_settings = _notice_settings_from_rows(
+            (
+                await conn.execute(
+                    text(
+                        "SELECT user_id, event_type, enabled FROM user_notification_settings "
+                        f"WHERE user_id IN ({holders})"
+                    ),
+                    {"item_id": item.id},
+                )
+            ).all(),
+            (
+                await conn.execute(
+                    text(
+                        "SELECT user_id, wishlist_id, event_type, enabled "
+                        "FROM wl_list_notification_settings "
+                        f"WHERE wishlist_id = :wishlist_id AND user_id IN ({holders})"
+                    ),
+                    {"item_id": item.id, "wishlist_id": wishlist.id},
+                )
+            ).all(),
+        )
+
         counter = await conn.scalar(
             text("SELECT value FROM wl_counters WHERE name = 'reservation'")
         )
@@ -1007,8 +1184,11 @@ class WishlistStore:
         conn: AsyncConnection,
         service: WishlistService,
         snapshot: _WishSnapshot,
-    ) -> int:
-        """Write the item, changed reservations, and the reservation counter only."""
+    ) -> tuple[int, list[FlushedNotice]]:
+        """Write the item, changed reservations, counter and receipt effects only.
+
+        Returns the number of reservation rows written and the notice rows flushed.
+        """
         item = service._items.get(snapshot.item_id)
         if item is not None and _item_state(item) != snapshot.item_state:
             await conn.execute(_ITEM_UPDATE, _item_bind(item))
@@ -1053,7 +1233,7 @@ class WishlistStore:
                 ),
                 {"value": service._next_reservation_id},
             )
-        return written
+        return written, await self._flush_receipt_effects(conn, service)
 
     async def execute(self, operation: Callable[[WishlistService], Awaitable[T]]) -> T:
         """Serialize reads and writes across workers and commit state atomically."""
@@ -1109,8 +1289,19 @@ class WishlistStore:
                     await conn.rollback()
                 raise
 
+    async def transaction(self, work: Callable[[AsyncConnection], Awaitable[T]]) -> T:
+        """Run ``work`` in one ``BEGIN IMMEDIATE`` transaction; commit on success, else roll back.
+
+        Public seam for components outside the domain service (the notice queue store) that
+        must serialise with receipts and promises without a second locking scheme.
+        """
+        return await self._immediate(work)
+
     async def _execute_once(self, operation: Callable[[WishlistService], Awaitable[T]]) -> T:
+        flushed: list[FlushedNotice] = []
+
         async def work(conn: AsyncConnection) -> T:
+            nonlocal flushed
             service, snapshot = await self._read(conn)
             previous = {wl.id: wl.public_token for wl in service._wishlists.values()}
             prior_invites = {wl.id: wl.invite_token for wl in service._wishlists.values()}
@@ -1148,10 +1339,12 @@ class WishlistStore:
                         text("INSERT INTO wl_tokens VALUES (:token, :id, 1)"),
                         {"token": wl.public_token, "id": wl.id},
                     )
-            await self._write(conn, service, snapshot)
+            flushed = await self._write(conn, service, snapshot)
             return result
 
-        return await self._immediate(work)
+        result = await self._immediate(work)
+        _log_flushed_notices(flushed)
+        return result
 
     async def cleanup_expired_tokens(self, now: datetime | None = None) -> int:
         """Revoke expired invite tokens across all wishlists."""

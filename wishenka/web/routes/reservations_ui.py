@@ -42,6 +42,7 @@ class CabinetRow:
     for_name: str
     wish_archived: bool
     list_archived: bool
+    wish_received: bool
     offer_actions: bool
     change_ceiling: int
     wish_href: str
@@ -76,7 +77,7 @@ def _event_day(value: datetime | None) -> str | None:
 
 
 def _row(item: MyReservationItemDTO) -> CabinetRow:
-    """Project one promise. Actions exist only for an archived wish on an active list."""
+    """Project one promise. Actions exist for an archived or received wish on an active list."""
     purchased = item.status == ReservationStatus.PURCHASED
     return CabinetRow(
         reservation_id=item.reservation_id,
@@ -88,7 +89,9 @@ def _row(item: MyReservationItemDTO) -> CabinetRow:
         for_name=item.recipient_name,
         wish_archived=item.is_item_archived,
         list_archived=item.is_wishlist_archived,
-        offer_actions=item.is_item_archived and not item.is_wishlist_archived,
+        wish_received=item.is_fully_received,
+        offer_actions=(item.is_item_archived or item.is_fully_received)
+        and not item.is_wishlist_archived,
         change_ceiling=item.change_ceiling,
         wish_href=f"/web/wishlists/{item.wishlist_id}#item-card-{item.wish_item_id}",
     )

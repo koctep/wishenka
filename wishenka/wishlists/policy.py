@@ -112,23 +112,31 @@ class WishlistAccessPolicy:
         return ctx.is_member
 
     @staticmethod
-    def is_recipient(user: AuthenticatedUser | None, item: WishItem) -> bool:
-        """Return whether this caller must not see booking facts for the wish.
+    def is_recipient_id(user_id: int | None, item: WishItem) -> bool:
+        """Return whether the Telegram id must not see booking facts for the wish.
 
         On a personal list the owner receives every wish, including one that
         only has a display name. A display name is never compared to a user.
         On a collaborative list the recipient is ``recipient_user_id`` only.
         """
-        if user is None:
+        if user_id is None:
             return False
         wishlist = item.wishlist
-        if (
-            wishlist is not None
-            and not wishlist.is_collaborative
-            and wishlist.owner_id == user.telegram_id
-        ):
+        if wishlist is not None and not wishlist.is_collaborative and wishlist.owner_id == user_id:
             return True
-        return item.recipient_user_id is not None and item.recipient_user_id == user.telegram_id
+        return item.recipient_user_id is not None and item.recipient_user_id == user_id
+
+    @staticmethod
+    def is_recipient(user: AuthenticatedUser | None, item: WishItem) -> bool:
+        """Return whether this caller must not see booking facts for the wish."""
+        return WishlistAccessPolicy.is_recipient_id(
+            None if user is None else user.telegram_id, item
+        )
+
+    @staticmethod
+    def can_view_gifted(ctx: UserWishlistContext, wishlist: Wishlist) -> bool:
+        """Only a member of a non-deleted wishlist may read the gifted section."""
+        return ctx.is_member and wishlist.status != WishlistStatus.DELETED
 
     @staticmethod
     def can_reserve_item(

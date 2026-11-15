@@ -57,3 +57,49 @@ class InventoryBusyError(WishlistError):
         message: str = "The wish was busy and the attempt changed nothing",
     ) -> None:
         super().__init__(message)
+
+
+class WishRefusalError(WishlistError):
+    """Base of the closed set of receipt refusals; ``reason`` is the stable machine code."""
+
+    reason = ""
+
+
+class QuantityInvalidError(WishRefusalError, ValueError):
+    """Raised when a received quantity is below one."""
+
+    reason = "quantity_invalid"
+
+    def __init__(self, message: str = "Quantity must be a positive whole number") -> None:
+        super().__init__(message)
+
+
+class QuantityAboveRemainingError(WishRefusalError, ValueError):
+    """Raised when a received quantity exceeds what remains to be received."""
+
+    reason = "quantity_above_remaining"
+
+    def __init__(
+        self, remaining_quantity: int, message: str = "Quantity is above the remaining quantity"
+    ) -> None:
+        super().__init__(message)
+        self.remaining_quantity = remaining_quantity
+
+
+class NothingRemainingError(WishRefusalError):
+    """Raised when a wish is fully received and nothing is left to receive or restore."""
+
+    reason = "nothing_remaining"
+
+    def __init__(self, message: str = "Nothing remains to receive") -> None:
+        super().__init__(message)
+        self.remaining_quantity = 0
+
+
+class WishArchivedError(WishRefusalError):
+    """Raised when a receipt is recorded on an archived wish."""
+
+    reason = "wish_archived"
+
+    def __init__(self, message: str = "The wish is archived") -> None:
+        super().__init__(message)
