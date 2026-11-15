@@ -170,6 +170,19 @@ checks with `make test PYTEST_ARGS='-n 0 tests/test_item_concurrency_lifetime.py
   and changes nothing. `asyncio.Lock` does not cover another request or
   another process.
 
+The bounded SQLite regression tests exercise both contention and writer waiting:
+
+```bash
+make test PYTEST_ARGS='-n 0 tests/test_wishlists_sqlite_repo.py'
+```
+
+The first test releases 50 distinct gifter attempts together for a single unit, checks WAL and
+the 5000 ms busy timeout, and verifies one active reservation and 49 insufficient-quantity
+refusals. Unexpected storage errors fail the test. The second holds a SQLite write transaction,
+checks that another reservation waits, then releases the lock and checks that it succeeds. These
+are bounded synthetic tests, not a production throughput benchmark. If the wait test fails,
+inspect SQLite journal and timeout configuration and concurrent writer activity.
+
 **WISHENKA-49 verification**:
 
 - This database transaction is the cross-process reservation boundary; do not

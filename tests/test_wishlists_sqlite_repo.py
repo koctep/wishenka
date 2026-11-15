@@ -1,5 +1,6 @@
 """Failing reproduction tests for WISHENKA-48: SQLite WAL schema and async repository."""
 
+import asyncio
 import importlib
 from pathlib import Path
 from typing import Any, cast
@@ -8,6 +9,7 @@ import pytest
 from sqlalchemy import event, text
 
 from wishenka.auth.models import AuthenticatedUser
+from wishenka.wishlists.exceptions import InsufficientQuantityError
 from wishenka.wishlists.models import Wishlist
 from wishenka.wishlists.service import WishlistService
 from wishenka.wishlists.store import WishlistStore
@@ -202,3 +204,128 @@ async def test_atomic_reservation_allocation_and_rollback(tmp_path: Path) -> Non
 
     await store.execute(check_item)
     await store.engine.dispose()
+
+
+@pytest.mark.timeout(60)
+async def test_fifty_concurrent_reservations_do_not_overbook(tmp_path: Path) -> None:
+    """Fifty distinct gifters compete for one unit through SQLite transactions."""
+    store = WishlistStore(f"sqlite+aiosqlite:///{tmp_path / 'race.db'}")
+    owner = AuthenticatedUser(telegram_id=1, first_name="Owner")
+    gate = asyncio.Event()
+    ready = asyncio.Event()
+    ready_count = 0
+
+    try:
+        await store.initialize()
+
+        async def setup(service: WishlistService) -> int:
+            wishlist = await service.create_wishlist(owner=owner, title="Race")
+            item = await service.add_wish_item(
+                wishlist_id=wishlist.id, actor=owner, title="Gift", quantity=1
+            )
+            return item.id
+
+        item_id = await store.execute(setup)
+        async with store.engine.connect() as conn:
+            assert (await conn.execute(text("PRAGMA journal_mode"))).scalar_one() == "wal"
+            assert (await conn.execute(text("PRAGMA busy_timeout"))).scalar_one() == 5000
+
+        async def attempt(user_id: int) -> tuple[str, int]:
+            nonlocal ready_count
+            ready_count += 1
+            if ready_count == 50:
+                ready.set()
+            await gate.wait()
+            user = AuthenticatedUser(telegram_id=user_id, first_name="Giver")
+
+            async def reserve(service: WishlistService) -> int:
+                reservation = await service.create_reservation(
+                    item_id=item_id, user=user, quantity=1
+                )
+                return reservation.id
+
+            try:
+                result = await store.execute_wish(reserve, item_id=item_id)
+            except InsufficientQuantityError:
+                return ("refused", user_id)
+            return ("success", result)
+
+        tasks = [asyncio.create_task(attempt(user_id)) for user_id in range(100, 150)]
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=5)
+            gate.set()
+            outcomes = await asyncio.wait_for(asyncio.gather(*tasks), timeout=40)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        successes = [result for status, result in outcomes if status == "success"]
+        assert len(successes) == 1
+        assert sum(status == "refused" for status, _ in outcomes) == 49
+        async with store.engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT id, quantity, status FROM wl_reservations "
+                        "WHERE wish_item_id = :item_id"
+                    ),
+                    {"item_id": item_id},
+                )
+            ).all()
+        assert len(rows) == 1
+        assert rows[0].id == successes[0]
+        assert rows[0].quantity == 1
+        assert rows[0].status == "active"
+    finally:
+        await store.engine.dispose()
+
+
+@pytest.mark.timeout(30)
+async def test_reservation_waits_for_sqlite_writer(tmp_path: Path) -> None:
+    """A second connection waits for the held write lock and then books successfully."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'wait.db'}"
+    holder = WishlistStore(db_url)
+    waiter = WishlistStore(db_url)
+    owner = AuthenticatedUser(telegram_id=1, first_name="Owner")
+    giver = AuthenticatedUser(telegram_id=2, first_name="Giver")
+    begin_attempted = asyncio.Event()
+    pending: asyncio.Task[int] | None = None
+    try:
+        await holder.initialize()
+
+        async def setup(service: WishlistService) -> int:
+            wishlist = await service.create_wishlist(owner=owner, title="Wait")
+            item = await service.add_wish_item(
+                wishlist_id=wishlist.id, actor=owner, title="Gift", quantity=1
+            )
+            return item.id
+
+        item_id = await holder.execute(setup)
+
+        @event.listens_for(waiter.engine.sync_engine, "before_cursor_execute")
+        def on_statement(conn, cursor, statement, parameters, context, executemany):
+            if statement.strip().upper() == "BEGIN IMMEDIATE":
+                begin_attempted.set()
+
+        async def reserve(service: WishlistService) -> int:
+            reservation = await service.create_reservation(item_id=item_id, user=giver, quantity=1)
+            return reservation.id
+
+        async with holder.engine.connect() as conn:
+            transaction = await conn.begin()
+            try:
+                pending = asyncio.create_task(waiter.execute_wish(reserve, item_id=item_id))
+                await asyncio.wait_for(begin_attempted.wait(), timeout=5)
+                done, _ = await asyncio.wait({pending}, timeout=0.2)
+                assert not done, "reservation did not wait while the writer held its lock"
+            finally:
+                await transaction.rollback()
+        assert await asyncio.wait_for(pending, timeout=5) > 0
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+        await waiter.engine.dispose()
+        await holder.engine.dispose()
