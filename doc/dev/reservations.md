@@ -142,26 +142,20 @@ to notification settings. A failed delivery never fails the receipt. See
 The `asyncio.Lock` lives on that instance. It is not shared across requests
 or processes, and it is not the cross-process exclusion.
 
-Exclusion is the wish-scoped SQLite transaction. The class below is only the per-instance lock:
+Exclusion is the wish-scoped SQLite transaction. For work sharing one coordinator, acquire the
+per-item lock with `async with coordinator.acquire(item_id):`. Different item IDs can proceed
+independently. The short master lock protects only lookup and creation of item locks.
 
-```python
-class ItemConcurrencyCoordinator:
-    """Coordinates per-item critical sections using keyed asyncio.Lock instances."""
+The coordinator keeps item locks in a `WeakValueDictionary`. Each active acquisition, including
+one waiting for the lock, retains a strong reference until its context exits. Once no acquisition
+or other strong reference remains, the lock and its registry entry can be collected; a later
+acquisition creates a new lock. Collection timing depends on the Python runtime. No cleanup task
+or configuration is required. Do not manually evict an apparently unlocked entry: a waiter or
+caller may still hold its reference, and a replacement would break mutual exclusion.
 
-    def __init__(self) -> None:
-        self._locks: dict[int, asyncio.Lock] = {}
-        self._master_lock = asyncio.Lock()
-
-    @asynccontextmanager
-    async def acquire(self, item_id: int) -> AsyncIterator[None]:
-        async with self._master_lock:
-            if item_id not in self._locks:
-                self._locks[item_id] = asyncio.Lock()
-            lock = self._locks[item_id]
-
-        async with lock:
-            yield
-```
+For unexpected memory growth, check for long-lived holders, waiting operations and other strong
+references before assuming inactive locks are retained. Run the focused lifetime and concurrency
+checks with `make test PYTEST_ARGS='-n 0 tests/test_item_concurrency_lifetime.py'`.
 
 **Wish-scoped SQLite exclusion**:
 
