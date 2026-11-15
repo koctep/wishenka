@@ -18,6 +18,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
+from wishenka.currency import DEFAULT_CURRENCY
 from wishenka.items.models import ItemPriority
 from wishenka.notices.models import (
     EVENT_GIFT_RECEIVED,
@@ -493,7 +494,7 @@ class WishlistStore:
                 description=str(ir.description) if ir.description is not None else None,
                 link=str(ir.link) if ir.link is not None else None,
                 price=price,
-                currency=str(ir.currency or "RUB"),
+                currency=str(ir.currency or DEFAULT_CURRENCY),
                 quantity=int(ir.quantity),
                 received_quantity=int(ir.received_quantity),
                 image_url=str(ir.image_url) if ir.image_url is not None else None,
@@ -1086,7 +1087,7 @@ class WishlistStore:
             description=None if item_row.description is None else str(item_row.description),
             link=None if item_row.link is None else str(item_row.link),
             price=None if item_row.price is None else int(item_row.price),
-            currency=str(item_row.currency or "RUB"),
+            currency=str(item_row.currency or DEFAULT_CURRENCY),
             quantity=int(item_row.quantity),
             received_quantity=int(item_row.received_quantity),
             image_url=None if item_row.image_url is None else str(item_row.image_url),

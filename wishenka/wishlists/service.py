@@ -11,6 +11,7 @@ from inspect import iscoroutinefunction, signature
 from typing import TYPE_CHECKING, Any
 
 from wishenka.auth.models import AuthenticatedUser
+from wishenka.currency import DEFAULT_CURRENCY
 from wishenka.items.models import ItemPriority
 from wishenka.notices.models import (
     EVENT_GIFT_RECEIVED,
@@ -917,7 +918,7 @@ class WishlistService:
         description: str | None = None,
         link: str | None = None,
         price: int | None = None,
-        currency: str = "RUB",
+        currency: str = DEFAULT_CURRENCY,
         quantity: int = 1,
         recipient_user_id: int | None = None,
         recipient_name: str | None = None,

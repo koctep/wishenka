@@ -2,6 +2,7 @@
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from wishenka.currency import DEFAULT_CURRENCY
 from wishenka.items.models import InputType, ItemPriority
 
 
@@ -16,7 +17,7 @@ class ItemPreviewDTO(BaseModel):
     description: str | None = None
     image_url: str | None = None
     price: int | None = None
-    currency: str = "RUB"
+    currency: str = DEFAULT_CURRENCY
     store_name: str | None = None
     store_icon_url: str | None = None
     is_fallback: bool = False
@@ -33,7 +34,7 @@ class CreateItemDTO(BaseModel):
     link: str | None = Field(default=None, max_length=2048)
     image_url: str | None = Field(default=None, max_length=2048)
     price: int | None = Field(default=None, ge=0, le=999_999_999)
-    currency: str = Field(default="RUB", max_length=10)
+    currency: str = Field(default=DEFAULT_CURRENCY, max_length=10)
     quantity: int = Field(default=1, ge=1, le=1000)
     priority: ItemPriority = Field(default=ItemPriority.MEDIUM)
     category: str | None = Field(default=None, max_length=50)

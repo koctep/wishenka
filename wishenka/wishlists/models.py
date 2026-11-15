@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 
+from wishenka.currency import DEFAULT_CURRENCY
 from wishenka.items.models import ItemPriority
 
 
@@ -116,7 +117,7 @@ class WishItem:
     description: str | None = None
     link: str | None = None
     price: int | None = None
-    currency: str = "RUB"
+    currency: str = DEFAULT_CURRENCY
     quantity: int = 1
     received_quantity: int = 0
     image_url: str | None = None

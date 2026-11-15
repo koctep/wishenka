@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from wishenka.currency import DEFAULT_CURRENCY
 from wishenka.items.models import ItemPriority
 from wishenka.wishlists.models import (
     Reservation,
@@ -89,7 +90,7 @@ def _row_to_item(row: Row[Any]) -> WishItem:
         description=str(row.description) if row.description is not None else None,
         link=str(row.link) if row.link is not None else None,
         price=price,
-        currency=str(row.currency or "RUB"),
+        currency=str(row.currency or DEFAULT_CURRENCY),
         quantity=int(row.quantity),
         received_quantity=int(row.received_quantity),
         image_url=str(row.image_url) if row.image_url is not None else None,

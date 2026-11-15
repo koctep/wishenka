@@ -9,6 +9,7 @@ from urllib.parse import urljoin, urlsplit
 
 from bs4 import BeautifulSoup
 
+from wishenka.currency import DEFAULT_CURRENCY
 from wishenka.items.models import ExtractedMetadata
 
 logger = logging.getLogger("wishenka.items")
@@ -112,14 +113,14 @@ def parse_price(raw_price: Any) -> int | None:
 def normalize_currency(raw_currency: str | None) -> str:
     """Normalize raw currency symbol or string into ISO 4217 uppercase code."""
     if not raw_currency:
-        return "RUB"
+        return DEFAULT_CURRENCY
     cleaned = raw_currency.strip().lower()
     if cleaned in CURRENCY_MAP:
         return CURRENCY_MAP[cleaned]
     upper = raw_currency.strip().upper()
     if len(upper) == 3 and upper.isalpha():
         return upper
-    return "RUB"
+    return DEFAULT_CURRENCY
 
 
 def extract_domain(url: str | None) -> str | None:

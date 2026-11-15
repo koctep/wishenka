@@ -88,6 +88,32 @@ wishlists domain service and security middleware to satisfy four primary goals:
 
 ---
 
+## Presentation tokens and currency defaults
+
+`wishenka/currency.py` defines `DEFAULT_CURRENCY` (`RUB`) and the ordered
+`CURRENCY_OPTIONS` for the edit form: RUB, USD, EUR, KZT and BYN. Import the default for
+new Python fallback paths instead of repeating it. `wishenka/web/templates.py` registers both
+constants as Jinja globals, so item, preview, archive and edit partials can use them in direct
+and out-of-band renders. Existing explicit currencies remain unchanged; the options list does
+not impose a new validation rule. Historical migration defaults are intentionally unchanged.
+
+`static/miniapp.css` owns semantic dimensions, layer and receipt color tokens. The receipt sheet,
+nested form and select use Telegram's `--tg-theme-bg-color` and `--tg-theme-text-color` as a
+pair, with light fallbacks outside Telegram. The confirm button uses fixed green and white,
+and the notice has its own explicit foreground/background pair. CSS responds to changed theme variables without a separate dark-mode switch. The
+`STALE_RELOAD_DELAY_MS` constant in `static/wishlist.js` remains 800 ms; it controls reload
+following a stale-order refusal.
+
+To investigate unreadable receipt text, inspect the computed foreground and background on the
+sheet, nested form and controls, and check that Telegram supplies a coherent pair of theme
+variables. Representative light, dark and fallback palettes are covered by
+`tests/test_receipt_theme_browser.py`; arbitrary custom palettes are not guaranteed to have
+sufficient contrast. `tests/test_currency_defaults.py` checks defaults and explicit currencies
+across views and DTO boundaries. These constants and presentation tokens have no environment
+settings; change the source definitions when their defaults or choices must change.
+
+---
+
 ## Security & CSRF Architecture
 
 Because the Mini App operates in an embedded browser environment using cookie authentication

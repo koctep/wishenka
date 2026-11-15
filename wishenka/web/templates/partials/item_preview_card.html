@@ -5,7 +5,7 @@
     {% if preview.price is not none %}
     <input type="hidden" name="price" value="{{ preview.price }}" />
     {% endif %}
-    <input type="hidden" name="currency" value="{{ preview.currency or 'RUB' }}" />
+    <input type="hidden" name="currency" value="{{ preview.currency or DEFAULT_CURRENCY }}" />
     {% if preview.image_url %}
     <input type="hidden" name="image_url" value="{{ preview.image_url }}" />
     {% endif %}
@@ -44,7 +44,7 @@
                 <div class="preview-title font-semibold text-sm mt-1">{{ preview.title }}</div>
                 {% if preview.price is not none %}
                 <div class="preview-price text-xs font-bold text-primary mt-1">
-                    {{ preview.price }} {{ preview.currency or "RUB" }}
+                    {{ preview.price }} {{ preview.currency or DEFAULT_CURRENCY }}
                 </div>
                 {% endif %}
                 {% endif %}

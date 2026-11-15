@@ -148,7 +148,7 @@
         </div>
         {% if item.price is not none %}
         <span class="item-price font-bold text-primary">
-            {{ item.price }} {{ item.currency or "RUB" }}
+            {{ item.price }} {{ item.currency or DEFAULT_CURRENCY }}
         </span>
         {% endif %}
     </div>

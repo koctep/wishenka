@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from markupsafe import Markup
 
 from wishenka.auth.models import AuthenticatedUser
+from wishenka.currency import DEFAULT_CURRENCY
 from wishenka.wishlists.exceptions import WishlistError
 from wishenka.wishlists.schemas import GiftedItemDTO
 from wishenka.wishlists.service import WishlistService
@@ -55,7 +56,9 @@ def build_gifted_rows(items: list[GiftedItemDTO]) -> list[GiftedRow]:
         GiftedRow(
             item_id=item.id,
             title=item.title,
-            price=None if item.price is None else f"{item.price} {item.currency or 'RUB'}",
+            price=(
+                None if item.price is None else f"{item.price} {item.currency or DEFAULT_CURRENCY}"
+            ),
             recipient_name=item.recipient_name,
             received=item.received_quantity,
             requested=item.quantity,

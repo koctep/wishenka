@@ -5,6 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from wishenka.currency import DEFAULT_CURRENCY
 from wishenka.items.models import ItemPriority
 from wishenka.wishlists.models import ReservationStatus, WishlistRole, WishlistStatus
 
@@ -30,7 +31,7 @@ class WishItemRecipientViewDTO(BaseModel):
     link: str | None = None
     image_url: str | None = None
     price: int | None = None
-    currency: str = "RUB"
+    currency: str = DEFAULT_CURRENCY
     store_name: str | None = None
     store_icon_url: str | None = None
     quantity: int = 1
@@ -67,7 +68,7 @@ class WishItemGifterViewDTO(BaseModel):
     link: str | None = None
     image_url: str | None = None
     price: int | None = None
-    currency: str = "RUB"
+    currency: str = DEFAULT_CURRENCY
     store_name: str | None = None
     store_icon_url: str | None = None
     quantity: int = 1
@@ -120,7 +121,7 @@ class MyReservationItemDTO(BaseModel):
     item_link: str | None = None
     item_image_url: str | None = None
     item_price: int | None = None
-    currency: str = "RUB"
+    currency: str = DEFAULT_CURRENCY
     reserved_quantity: int
     status: ReservationStatus
     event_title: str | None = None
@@ -154,7 +155,7 @@ class GiftedItemDTO(BaseModel):
     link: str | None = None
     image_url: str | None = None
     price: int | None = None
-    currency: str = "RUB"
+    currency: str = DEFAULT_CURRENCY
     store_name: str | None = None
     store_icon_url: str | None = None
     recipient_user_id: int | None = None

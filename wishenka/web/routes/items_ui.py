@@ -13,6 +13,7 @@ from markupsafe import Markup
 
 from wishenka.auth.dependencies import get_current_user, get_optional_current_user
 from wishenka.auth.models import AuthenticatedUser
+from wishenka.currency import DEFAULT_CURRENCY
 from wishenka.items.classifier import UniversalInputClassifier
 from wishenka.items.models import InputType, ItemPriority
 from wishenka.items.parser import extract_domain
@@ -270,7 +271,7 @@ async def quick_add_item(
     title: Annotated[str | None, Form()] = None,
     link: Annotated[str | None, Form()] = None,
     price: Annotated[str | None, Form()] = None,
-    currency: Annotated[str, Form()] = "RUB",
+    currency: Annotated[str, Form()] = DEFAULT_CURRENCY,
     image_url: Annotated[str | None, Form()] = None,
     store_name: Annotated[str | None, Form()] = None,
     description: Annotated[str | None, Form()] = None,
@@ -311,7 +312,7 @@ async def quick_add_item(
             image_url=clean_image,
             store_name=store_name.strip() if store_name and store_name.strip() else None,
             price=parsed_price,
-            currency=(currency or "RUB").strip() or "RUB",
+            currency=(currency or DEFAULT_CURRENCY).strip() or DEFAULT_CURRENCY,
             quantity=quantity,
             priority=parsed_priority,
             category=clean_cat,
@@ -390,7 +391,7 @@ async def get_new_item_modal(
     title: str | None = None,
     link: str | None = None,
     price: int | None = None,
-    currency: str = "RUB",
+    currency: str = DEFAULT_CURRENCY,
     image_url: str | None = None,
     description: str | None = None,
     quantity: int = 1,
@@ -433,7 +434,7 @@ async def get_new_item_modal(
         "title": resolved_title,
         "link": resolved_link,
         "price": price,
-        "currency": currency or "RUB",
+        "currency": currency or DEFAULT_CURRENCY,
         "quantity": max(1, quantity),
         "description": description or "",
         "image_url": image_url or "",
@@ -500,7 +501,7 @@ async def get_edit_item_modal(
             "description": item.description or "",
             "link": item.link or "",
             "price": item.price,
-            "currency": item.currency or "RUB",
+            "currency": item.currency or DEFAULT_CURRENCY,
             "quantity": item.quantity,
             "priority": item.priority.value,
             "category": item.category or "",
@@ -587,7 +588,7 @@ async def submit_edit_item(
     title: Annotated[str, Form()] = "",
     link: Annotated[str | None, Form()] = None,
     price: Annotated[str | None, Form()] = None,
-    currency: Annotated[str, Form()] = "RUB",
+    currency: Annotated[str, Form()] = DEFAULT_CURRENCY,
     quantity: Annotated[int, Form()] = 1,
     description: Annotated[str | None, Form()] = None,
     image_url: Annotated[str | None, Form()] = None,
@@ -619,7 +620,7 @@ async def submit_edit_item(
         "description": clean_desc or "",
         "link": clean_link or "",
         "price": parsed_price,
-        "currency": (currency or "RUB").strip() or "RUB",
+        "currency": (currency or DEFAULT_CURRENCY).strip() or DEFAULT_CURRENCY,
         "quantity": quantity,
         "priority": parsed_priority.value,
         "category": clean_cat or "",
@@ -653,7 +654,7 @@ async def submit_edit_item(
             link=clean_link,
             image_url=clean_image,
             price=parsed_price,
-            currency=(currency or "RUB").strip() or "RUB",
+            currency=(currency or DEFAULT_CURRENCY).strip() or DEFAULT_CURRENCY,
             quantity=quantity,
             priority=parsed_priority,
             category=clean_cat,

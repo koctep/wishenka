@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from enum import StrEnum
 
+from wishenka.currency import DEFAULT_CURRENCY
+
 
 class ItemPriority(StrEnum):
     """Priority level for wish items."""
@@ -29,7 +31,7 @@ class ExtractedMetadata:
     description: str | None = None
     image_url: str | None = None
     price: int | None = None
-    currency: str = "RUB"
+    currency: str = DEFAULT_CURRENCY
     store_name: str | None = None
     store_icon_url: str | None = None
     raw_html_title: str | None = None

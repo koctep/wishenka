@@ -64,8 +64,8 @@
                 <div class="form-group w-28">
                     <label for="item-currency-select">Валюта</label>
                     <select id="item-currency-select" name="currency">
-                        {% for code, label in [('RUB', 'RUB (₽)'), ('USD', 'USD ($)'), ('EUR', 'EUR (€)'), ('KZT', 'KZT (₸)'), ('BYN', 'BYN (Br)')] %}
-                        <option value="{{ code }}" {% if (form.currency or 'RUB') == code %}selected{% endif %}>
+                        {% for code, label in CURRENCY_OPTIONS %}
+                        <option value="{{ code }}" {% if (form.currency or DEFAULT_CURRENCY) == code %}selected{% endif %}>
                             {{ label }}
                         </option>
                         {% endfor %}

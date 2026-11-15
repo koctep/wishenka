@@ -606,7 +606,7 @@ Covered by WISHENKA-145 (real-htmx smoke test) and WISHENKA-162 (stub and assert
 | WISHENKA-162 | Stub docstring, XHR gate, console assertions (with WISHENKA-145) |
 | WISHENKA-163 | Web-layer structure: shared OOB helpers, private imports, page-state dataclass, constants module, notice text in the sentence table |
 | WISHENKA-164 | Wording review of the new Russian texts, quantity forms |
-| WISHENKA-165 | CSS tokens, `STALE_RELOAD_DELAY_MS`, one default currency |
+| WISHENKA-165 | Implemented: CSS tokens, `STALE_RELOAD_DELAY_MS`, one default currency |
 
 Existing tickets that cover related work: WISHENKA-145 (real htmx smoke test, stub fidelity),
 157 (log-contract hardening, shared event names), 158 (receipt code split; keep
@@ -769,7 +769,7 @@ metric uses a DEBUG event, and labels never use a user, wishlist, item or giver.
   `read_gifted_rows` got a domain error; reload the page.
 - **Not built yet** (see Overview): undo (WISHENKA-153), settings screen (WISHENKA-34), metrics
   exporter (WISHENKA-84), product decisions (WISHENKA-154), the UI follow-ups WISHENKA-160 to
-  165.
+  164.
 
 ## Tests
 
