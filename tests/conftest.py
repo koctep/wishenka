@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import contextlib
+import faulthandler
 import os
 import shutil
 import socket
+import sys
+import tempfile
 import threading
 import time
+import uuid
 from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import pytest
 
+from tests import xdist_support
 from tests.browser_support import check_chromium
 
 if TYPE_CHECKING:
@@ -27,6 +32,7 @@ OWNER_TELEGRAM_ID = 101
 VIEWER_TELEGRAM_ID = 202
 SERVER_START_TIMEOUT = 8.0
 SERVER_STOP_TIMEOUT = 8.0
+SESSION_END_DUMP_SECONDS = 120
 
 
 @pytest.fixture(scope="session")
@@ -47,6 +53,91 @@ class BrowserServer:
     base_url: str
     owner_token: str
     viewer_token: str
+
+
+# --- parallel run and fast test storage (WISHENKA-166) ----------------------------------------
+
+_RUN_DIRS: pytest.StashKey[list[Path]] = pytest.StashKey()
+_EXIT_STATUS: pytest.StashKey[int] = pytest.StashKey()
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_xdist_auto_num_workers(config: pytest.Config) -> int:
+    """Cap ``-n auto`` by CPUs, free memory and storage speed (optional: xdist may be absent)."""
+    workers, warning = xdist_support.plan_workers(os.environ)
+    if warning is not None:
+        sys.stderr.write(f"WARNING: {warning}\n")
+    return workers
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_configure(config: pytest.Config) -> None:
+    """Controller only: put ``tmp_path`` and ``tempfile`` on fast storage, keep a disk directory.
+
+    Workers inherit ``TMPDIR`` and ``WISHENKA_TEST_DISK_TMPDIR`` from the controller and get their
+    ``basetemp`` from it, so nothing is decided twice.
+    """
+    if hasattr(config, "workerinput"):
+        return
+    disk_base = os.environ.get(xdist_support.ENV_DISK_TMPDIR) or tempfile.gettempdir()
+    os.environ[xdist_support.ENV_DISK_TMPDIR] = disk_base
+    xdist_support.remove_stale_disk_dirs(Path(disk_base))
+    plan = xdist_support.plan_storage(os.environ)
+    if plan.basetemp is None or plan.tmpdir is None or config.option.basetemp:
+        return  # no fast storage, or the user chose ``--basetemp``: leave pytest's defaults
+    xdist_support.remove_stale(plan.basetemp.parent)
+    plan.tmpdir.mkdir(parents=True, exist_ok=True)
+    os.environ["TMPDIR"] = str(plan.tmpdir)
+    tempfile.tempdir = str(plan.tmpdir)
+    config.option.basetemp = str(plan.basetemp)
+    config.stash[_RUN_DIRS] = [plan.basetemp, plan.tmpdir]
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Remember the result; arm a stack dump in case teardown or worker shutdown hangs."""
+    session.config.stash[_EXIT_STATUS] = int(exitstatus)
+    faulthandler.dump_traceback_later(SESSION_END_DUMP_SECONDS, exit=False)
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """Controller only: remove the fast directories after a green run, keep them on failure."""
+    faulthandler.cancel_dump_traceback_later()
+    directories = config.stash.get(_RUN_DIRS, [])
+    if not directories:
+        return
+    if config.stash.get(_EXIT_STATUS, 1) == 0:
+        for directory in directories:
+            shutil.rmtree(directory, ignore_errors=True)
+
+
+def pytest_terminal_summary(terminalreporter: Any, exitstatus: int, config: pytest.Config) -> None:
+    """Controller only: after a failed run say where the test files were kept (in report order)."""
+    directories = config.stash.get(_RUN_DIRS, [])
+    if directories and exitstatus != 0:
+        terminalreporter.write_line(
+            f"test files kept for diagnosis: {directories[0]} "
+            "(the next run removes it once this process is gone)"
+        )
+
+
+@pytest.fixture(scope="session")
+def _default_db_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return tmp_path_factory.mktemp("default-db")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_default_database(
+    _default_db_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """Keep ``Settings()`` away from the repository's ``data/wishenka.db`` (hazard H1).
+
+    Tests that build ``Settings()`` without arguments would otherwise write one shared file, which
+    is unsafe under xdist and mutates the working tree. Explicit ``database_url=`` still wins.
+    """
+    database = _default_db_dir / f"{uuid.uuid4().hex}.db"
+    monkeypatch.setenv("WISHENKA_DATABASE_URL", f"sqlite+aiosqlite:///{database}")
+    monkeypatch.setenv("WISHENKA_SQLITE_DB_PATH", str(database))
+    yield
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -72,19 +163,29 @@ def _test_failed(request: pytest.FixtureRequest) -> bool:
     return report is not None and report.failed
 
 
+@pytest.fixture
+def chromium_profile_dir() -> Iterator[Path]:
+    """Chromium profile directory on disk (up to 100 MiB, tmpfs is small), removed after."""
+    path = xdist_support.disk_mkdtemp("chromium")
+    try:
+        yield path / "profile"
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 @pytest.fixture(scope="session")
-def chromium_browser(
-    chromium_executable: str, tmp_path_factory: pytest.TempPathFactory
-) -> Iterator[CdpBrowser]:
-    """One headless Chromium for the whole session (temp profile, bounded shutdown)."""
+def chromium_browser(chromium_executable: str) -> Iterator[CdpBrowser]:
+    """One headless Chromium for the whole session (disk profile, bounded shutdown)."""
     from tests.browser_cdp import CdpBrowser
 
+    profile_root = xdist_support.disk_mkdtemp("chromium")
     browser = CdpBrowser()
-    browser.start(chromium_executable, tmp_path_factory.mktemp("chromium-profile"))
     try:
+        browser.start(chromium_executable, profile_root / "profile")
         yield browser
     finally:
         browser.stop()
+        shutil.rmtree(profile_root, ignore_errors=True)
 
 
 @pytest.fixture(scope="session")

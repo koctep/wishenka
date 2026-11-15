@@ -21,7 +21,7 @@ new tests.
 What the matrix indexes is under Modules this matrix indexes: API exits,
 logs, the share page, and the tests named on each row. How to use a row
 is under How to read a row. Row coverage is under Where the gaps live.
-The three families follow those sections.
+The three product families follow those sections; Family 4 (WISHENKA-166) indexes the test infrastructure.
 
 ## How to read a row
 
@@ -943,3 +943,41 @@ Covered by:
   `test_share_token_access_filter_redaction`
 
 Gap: none.
+
+## Family 4. Parallel test run (WISHENKA-166)
+
+This family indexes the Definition of Done of WISHENKA-166 against the
+checks that prove it. It covers test infrastructure only, not a product
+invariant. The developer description is in `doc/dev/testing.md`, section
+"Параллельный запуск тестов (WISHENKA-166)". Evidence and measured
+figures: `ai-tasks/WISHENKA-166/40-development.md`.
+
+### P1. Fast, equal and safe full run
+
+`make test` runs concurrently, finishes within 120 s on the reference
+machine (6 cores, 5909 MiB), passes the same set of tests as the serial
+run, and leaves nothing behind.
+
+Modules:
+
+- `Makefile` — targets `test`, `test-serial`, `test-bench`.
+- `tests/xdist_support.py` — worker cap, storage plan, stale cleanup.
+- `tests/conftest.py` — controller hooks, default database isolation.
+- `tests/browser_cdp.py` — `launch_chromium`, `stop_chromium`,
+  `read_debug_port`.
+- `tests/bench_suite.py` — wall time, memory, passed-set comparison.
+
+Covered by:
+
+- `tests/test_parallel_run_contract.py` — 16 cases for the Makefile
+  wiring, `pyproject.toml`, `xdist_support` helpers and the CDP port
+  file wait.
+- `python -m tests.bench_suite --budget 120` — DoD 1, 2, 8, 9: six runs
+  of 814 tests, 48.9 to 55.3 s wall, equal passed sets, no leftovers.
+- `make test-serial` — DoD 3: 814 passed in about 114 s.
+- `make analyze` — DoD 10 static part.
+
+Gap: the 120 s budget is proven only on the reference machine; CI and
+slow storage are not measured. Reaping of Chromium, stale-directory
+cleanup, the slow-storage fallback and the Makefile hint have no tests
+(D-1 to D-5, D-9 of `ai-tasks/WISHENKA-166/60-tech-debt.md`).

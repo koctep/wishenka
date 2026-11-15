@@ -56,8 +56,10 @@ wishenka/
 | `make build` | Проверяет синтаксическую корректность и компилируемость Python-файлов через `python -m compileall`. |
 | `make analyze` | Запускает полный статический анализ: линтер `ruff check`, проверку стиля `ruff format --check` и статический анализатор типов `mypy`. |
 | `make format` | Автоматически форматирует код (`ruff format`) и применяет безопасные автофиксы (`ruff check --fix`). |
-| `make test` | Запускает набор автоматизированных тестов с помощью `pytest`. |
-| `make check` | **Единый Quality Gate**: последовательно выполняет `make analyze` и `make test`. Обязателен перед созданием коммита. |
+| `make test` | Запускает полный набор тестов параллельно: `pytest -n $(PYTEST_JOBS) --dist loadfile $(PYTEST_ARGS)` (`pytest-xdist`, число воркеров по ядрам и памяти, файлы тестов на `/dev/shm`) под защитой по времени `TEST_WALL_LIMIT` (600 с). Около 45-55 с на 6 ядрах вместо 16 минут. Переменные: `PYTEST_JOBS` (по умолчанию `auto`), `PYTEST_ARGS`, `TEST_WALL_LIMIT`. Подробности: [testing.md](testing.md), раздел «Параллельный запуск тестов (WISHENKA-166)». |
+| `make test-serial` | Строго последовательный запуск (`-n 0`) для отладки: `make test-serial PYTEST_ARGS="tests/x.py::test_name"`. |
+| `make test-bench` | Запускает `make test` один раз и печатает `nproc`, `free -m`, время, минимум памяти и итог относительно бюджета 120 с. |
+| `make check` | **Единый Quality Gate**: последовательно выполняет `make analyze` и параллельный `make test`. Обязателен перед созданием коммита. |
 | `make run` | Запускает локальный сервер разработки `uvicorn wishenka.main:app` с флагом `--reload` на порту 8000. |
 | `make clean` | Очищает артефакты сборки, кэши инструментов (`.pytest_cache`, `.ruff_cache`, `.mypy_cache`) и байткод `__pycache__`. |
 
@@ -223,7 +225,7 @@ curl http://localhost:8000/healthz
 2. **Set up Python 3.12**: развертывание среды Python 3.12 с кэшированием pip-зависимостей (`actions/setup-python@v5`).
 3. **Install dependencies**: вызов `make deps` для установки проекта и dev-пакетов.
 4. **Install browser for UI tests**: вызов `make deps-browser`: проверяет браузер, предустановленный в образе `ubuntu-latest`; если подходящего нет, шаг падает с понятным сообщением (см. [testing.md](testing.md)).
-5. **Run Quality Gate**: вызов `make check`, который последовательно проверяет форматирование, линтер, строгую типизацию Mypy и запускает тесты Pytest.
+5. **Run Quality Gate**: вызов `make check`, который последовательно проверяет форматирование, линтер, строгую типизацию Mypy и запускает тесты Pytest параллельно (`pytest-xdist`); число воркеров определяется по числу ядер и памяти раннера, время на `ubuntu-latest` ещё не измерено (раздел «Параллельный запуск тестов (WISHENKA-166)» в [testing.md](testing.md)).
 
 Browser UI-тесты в CI не пропускаются: при отсутствии браузера они завершаются ошибкой, а `WISHENKA_SKIP_BROWSER_TESTS=1` в CI игнорируется.
 

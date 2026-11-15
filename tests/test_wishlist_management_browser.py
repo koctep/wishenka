@@ -2,7 +2,6 @@
 
 import json
 import socket
-import subprocess
 import threading
 import time
 from pathlib import Path
@@ -13,6 +12,7 @@ import pytest
 import uvicorn
 from websockets.sync.client import ClientConnection, connect
 
+from tests.browser_cdp import launch_chromium, read_debug_port, stop_chromium
 from wishenka.config import Settings
 from wishenka.web.app import create_app
 
@@ -75,7 +75,9 @@ def wait_for_load(ws: ClientConnection) -> None:
 
 
 @pytest.mark.browser
-def test_browser_copy_share_and_role_controls(tmp_path: Path, chromium_executable: str) -> None:
+def test_browser_copy_share_and_role_controls(
+    tmp_path: Path, chromium_executable: str, chromium_profile_dir: Path
+) -> None:
     """Owner sharing uses the public link and member UI hides management controls."""
     settings = Settings(
         database_url=f"sqlite+aiosqlite:///{tmp_path / 'browser.db'}",
@@ -94,8 +96,8 @@ def test_browser_copy_share_and_role_controls(tmp_path: Path, chromium_executabl
     while not server.started and time.monotonic() < deadline:
         time.sleep(0.05)
     assert server.started, "Local test server did not start"
-    profile = tmp_path / "chromium-profile"
-    browser = subprocess.Popen(
+    profile = chromium_profile_dir
+    browser = launch_chromium(
         [
             chromium_executable,
             "--headless",
@@ -105,17 +107,15 @@ def test_browser_copy_share_and_role_controls(tmp_path: Path, chromium_executabl
             "--remote-debugging-port=0",
             f"--user-data-dir={profile}",
             "about:blank",
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        ]
     )
     try:
         debug_file = profile / "DevToolsActivePort"
         deadline = time.monotonic() + 8
-        while not debug_file.exists() and time.monotonic() < deadline:
+        while read_debug_port(debug_file) is None and time.monotonic() < deadline:
             time.sleep(0.05)
-        assert debug_file.exists(), "Chromium debugging endpoint did not start"
-        debug_port = int(debug_file.read_text(encoding="utf-8").splitlines()[0])
+        debug_port = read_debug_port(debug_file)
+        assert debug_port is not None, "Chromium debugging endpoint did not start"
         debug_url = f"http://127.0.0.1:{debug_port}"
         target = httpx.put(f"{debug_url}/json/new?about:blank", timeout=5).json()
         with connect(target["webSocketDebuggerUrl"], open_timeout=5, close_timeout=5) as ws:
@@ -222,12 +222,7 @@ def test_browser_copy_share_and_role_controls(tmp_path: Path, chromium_executabl
             assert "Party" in member["body"], "Member must be able to see the list"
             assert not member["managerControl"], "Member can see manager-only controls"
     finally:
-        browser.terminate()
-        try:
-            browser.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            browser.kill()
-            browser.wait(timeout=5)
+        stop_chromium(browser)
         server.should_exit = True
         thread.join(timeout=8)
         listen.close()

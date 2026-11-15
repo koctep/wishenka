@@ -4,6 +4,11 @@ PYTHON := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 UVICORN := $(VENV)/bin/uvicorn
 PYTEST := $(VENV)/bin/pytest
+PYTEST_JOBS ?= auto
+PYTEST_ARGS ?=
+# Hang guard (not a per-test timeout): the whole parallel run must end within this many seconds.
+TEST_WALL_LIMIT ?= 600
+TEST_TIMEOUT := $(shell command -v timeout >/dev/null 2>&1 && echo "timeout -k 30 $(TEST_WALL_LIMIT)")
 RUFF := $(VENV)/bin/ruff
 MYPY := $(VENV)/bin/mypy
 
@@ -52,9 +57,21 @@ format: deps ## Автоматически отформатировать код
 	@$(RUFF) check --fix wishenka tests
 
 .PHONY: test
-test: deps ## Запустить полный набор автоматизированных тестов
-	@echo "==> Running Pytest test suite..."
-	@$(PYTEST)
+test: deps ## Запустить полный набор тестов параллельно (xdist, быстрое хранилище)
+	@echo "==> Running Pytest test suite in parallel..."
+	@$(TEST_TIMEOUT) $(PYTEST) -n $(PYTEST_JOBS) --dist loadfile $(PYTEST_ARGS); rc=$$?; \
+	if [ $$rc -eq 124 ] || [ $$rc -eq 137 ]; then \
+	  echo "==> make test: stopped after the $(TEST_WALL_LIMIT) s wall-clock limit or killed (exit $$rc); find the stuck test in the last lines above; reproduce: make test-serial PYTEST_ARGS=--timeout=120 plus the test ids (prints stacks)" >&2; \
+	fi; exit $$rc
+
+.PHONY: test-serial
+test-serial: deps ## Запустить тесты строго последовательно (отладка): PYTEST_ARGS="tests/x.py::t"
+	@echo "==> Running Pytest test suite serially..."
+	@$(PYTEST) -n 0 $(PYTEST_ARGS)
+
+.PHONY: test-bench
+test-bench: ## Замерить время make test относительно бюджета 120 с (nproc, free -m)
+	@$(PYTHON) -m tests.bench_suite --budget 120
 
 .PHONY: check
 check: analyze test ## Единый Quality Gate (статический анализ + тесты)

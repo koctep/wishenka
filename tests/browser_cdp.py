@@ -10,12 +10,17 @@ any other external request is blocked and listed in ``external_requests``.
 
 from __future__ import annotations
 
+import atexit
 import base64
 import contextlib
 import dataclasses
 import json
+import os
+import shutil
+import signal
 import subprocess
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -587,6 +592,72 @@ class CdpPage:
             httpx.get(f"{self._debug_url}/json/close/{self._target_id}", timeout=5)
 
 
+_LIVE_BROWSERS: set[subprocess.Popen[bytes]] = set()
+TERMINATE_TIMEOUT = 5.0
+
+
+def launch_chromium(command: Sequence[str]) -> subprocess.Popen[bytes]:
+    """Start a Chromium process that cannot outlive the test run (WISHENKA-166, hazard H9).
+
+    ``setpriv --pdeathsig KILL`` (when available) makes the kernel kill the browser if the launching
+    thread dies, even by ``SIGKILL``; ``start_new_session`` gives it its own process group so that
+    ``stop_chromium`` and the ``atexit`` hook can kill the whole tree. Without ``setpriv`` a
+    ``SIGKILL`` of the test process can leave an orphan. ``preexec_fn`` is avoided on purpose: it
+    is unsafe in a multi-threaded process.
+    """
+    setpriv = shutil.which("setpriv")
+    argv = [setpriv, "--pdeathsig", "KILL", *command] if setpriv else list(command)
+    process = subprocess.Popen(
+        argv,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    _LIVE_BROWSERS.add(process)
+    return process
+
+
+def _kill_group(process: subprocess.Popen[bytes]) -> None:
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signal.SIGKILL)
+
+
+def stop_chromium(process: subprocess.Popen[bytes]) -> None:
+    """``terminate``, bounded ``wait``, then kill the whole process group (children included)."""
+    _LIVE_BROWSERS.discard(process)
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(TERMINATE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(TERMINATE_TIMEOUT)
+    _kill_group(process)
+
+
+def _kill_live_browsers() -> None:
+    for process in list(_LIVE_BROWSERS):
+        _kill_group(process)
+    _LIVE_BROWSERS.clear()
+
+
+atexit.register(_kill_live_browsers)
+
+
+def read_debug_port(port_file: Path) -> int | None:
+    """Port from ``DevToolsActivePort`` once Chromium has written its first line, else ``None``.
+
+    Chromium creates the file before it writes the port, so existence alone is not readiness.
+    """
+    try:
+        lines = port_file.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    if lines and lines[0].strip().isdigit():
+        return int(lines[0])
+    return None
+
+
 class CdpBrowser:
     """One headless Chromium process shared by the session."""
 
@@ -604,9 +675,10 @@ class CdpBrowser:
         self._launch()
 
     def _launch(self) -> None:
+        self.stop()  # a dead process may have left children: reap its whole group
         self._generation += 1
         profile = self._profile_root / f"run{self._generation}"
-        process = subprocess.Popen(
+        process = launch_chromium(
             [
                 self._executable,
                 "--headless",
@@ -616,21 +688,22 @@ class CdpBrowser:
                 "--remote-debugging-port=0",
                 f"--user-data-dir={profile}",
                 "about:blank",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            ]
         )
         self._process = process
         port_file = profile / "DevToolsActivePort"
         deadline = time.monotonic() + 10
-        while not port_file.exists() and time.monotonic() < deadline:
+        port = read_debug_port(port_file)
+        while port is None and time.monotonic() < deadline:
             if process.poll() is not None:
-                raise AssertionError(f"Chromium exited early with code {process.returncode}")
+                code = process.returncode
+                self.stop()
+                raise AssertionError(f"Chromium exited early with code {code}")
             time.sleep(0.05)
-        if not port_file.exists():
+            port = read_debug_port(port_file)
+        if port is None:
             self.stop()
             raise AssertionError("Chromium debugging endpoint did not start within 10 s")
-        port = int(port_file.read_text(encoding="utf-8").splitlines()[0])
         self._debug_url = f"http://127.0.0.1:{port}"
 
     def ensure_alive(self) -> None:
@@ -658,14 +731,8 @@ class CdpBrowser:
         return page
 
     def stop(self) -> None:
-        """``terminate``, ``wait(5)``, then ``kill``; remove nothing but the process."""
+        """Stop the process and its group (bounded); the profile directory is the caller's."""
         process = self._process
         self._process = None
-        if process is None or process.poll() is not None:
-            return
-        process.terminate()
-        try:
-            process.wait(5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(5)
+        if process is not None:
+            stop_chromium(process)

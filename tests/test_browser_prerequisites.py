@@ -16,17 +16,35 @@ import importlib
 import importlib.util
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
 import tomllib
+from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 import pytest
 
+from tests import xdist_support
+
 pytestmark = pytest.mark.timeout(30)
+
+
+@pytest.fixture
+def tmp_path() -> Iterator[Path]:
+    """Override: the fake browsers are executed, so they live on the exec-capable disk area.
+
+    The fast pytest base (tmpfs) is mounted ``noexec`` (WISHENKA-166, hazard H3).
+    """
+    path = xdist_support.disk_mkdtemp("prereq")
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CI_YML = ROOT / ".github" / "workflows" / "ci.yml"

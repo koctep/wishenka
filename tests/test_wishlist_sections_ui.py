@@ -12,7 +12,6 @@ Asserts:
 import asyncio
 import json
 import socket
-import subprocess
 import threading
 import time
 from collections.abc import Iterator
@@ -26,6 +25,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from websockets.sync.client import ClientConnection, connect
 
+from tests.browser_cdp import launch_chromium, read_debug_port, stop_chromium
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
@@ -378,7 +378,7 @@ window.fetch = async (url, options = {}) => {
 
 @pytest.mark.browser
 def test_mini_app_home_sections_and_badges_browser(
-    tmp_path: Path, chromium_executable: str
+    tmp_path: Path, chromium_executable: str, chromium_profile_dir: Path
 ) -> None:
     """Mini App home renders My Wishlists, Collaborating, and Favorites sections with badges."""
 
@@ -402,8 +402,8 @@ def test_mini_app_home_sections_and_badges_browser(
         time.sleep(0.05)
     assert server.started, "Uvicorn test server did not start"
 
-    profile = tmp_path / "chromium-profile"
-    browser = subprocess.Popen(
+    profile = chromium_profile_dir
+    browser = launch_chromium(
         [
             chromium_executable,
             "--headless",
@@ -413,18 +413,16 @@ def test_mini_app_home_sections_and_badges_browser(
             "--remote-debugging-port=0",
             f"--user-data-dir={profile}",
             "about:blank",
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        ]
     )
     try:
         debug_file = profile / "DevToolsActivePort"
         deadline = time.monotonic() + 8
-        while not debug_file.exists() and time.monotonic() < deadline:
+        while read_debug_port(debug_file) is None and time.monotonic() < deadline:
             time.sleep(0.05)
-        assert debug_file.exists(), "Chromium debugging endpoint did not start"
+        debug_port = read_debug_port(debug_file)
+        assert debug_port is not None, "Chromium debugging endpoint did not start"
 
-        debug_port = int(debug_file.read_text(encoding="utf-8").splitlines()[0])
         debug_url = f"http://127.0.0.1:{debug_port}"
         target = httpx.put(f"{debug_url}/json/new?about:blank", timeout=5).json()
 
@@ -503,8 +501,7 @@ def test_mini_app_home_sections_and_badges_browser(
             )
 
     finally:
-        browser.terminate()
-        browser.wait(timeout=5)
+        stop_chromium(browser)
 
 
 def re_search(pattern: str, text: str) -> bool:

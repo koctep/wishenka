@@ -32,6 +32,7 @@ dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
     "pytest-timeout>=2.3.1",
+    "pytest-xdist>=3.6",
     "websockets>=13.0",
     "ruff>=0.8.0",
     "mypy>=1.13.0",
@@ -80,6 +81,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "-v --strict-markers"
+tmp_path_retention_policy = "failed"
 markers = [
     "browser: tests that drive a real Chromium over CDP",
 ]
