@@ -1243,6 +1243,16 @@ In accordance with security requirements:
 - **Cause**: Another writer held the SQLite reserved lock until `busy_timeout` (5000 ms) elapsed. `execute_wish` rolled the transaction back and raised `InventoryBusyError`. This is the shared write path. Redis and `asyncio.Lock` do not exclude the other process.
 - **Resolution**: Submit the same change again. Confirm `wishlist_inventory_busy` at `WARNING` on `wishenka.wishlists.store`, and `item_inventory_busy` or `ui_item_edit_busy` on the route logger. A quantity or membership refusal stays HTTP 409 or 400 and logs `wishlist_inventory_rolled_back` at `WARNING`. A non-busy `SQLAlchemyError` logs `wishlist_inventory_rolled_back` at `ERROR` only when the wish key is present. A full-snapshot `execute` that omits the id and the operation logs `wishlist_store_error` at `ERROR`. Both become `RuntimeError` (`Wishlist storage operation failed`).
 
+To verify both HTTP responses, run:
+
+```bash
+make test PYTEST_ARGS='-n 0 tests/test_item_busy_responses.py'
+```
+
+These tests inject `InventoryBusyError` into the store, exercise the real HTTP handlers, and
+check response privacy, preserved form fields, and the unchanged item. They do not simulate an
+actual SQLite lock; the module has an explicit 30-second timeout.
+
 ### 9. Reorder Permutation Validation Failure (`ValueError` / HTTP 400 Bad Request)
 - **Symptom**: `PUT /api/wishlists/{wishlist_id}/items/reorder` returns `400 Bad Request` with detail `"Reorder list must contain exactly all active item IDs for this wishlist"` or `"Duplicate item IDs in reorder request"`.
 - **Cause**: The submitted `item_ids` array contains duplicates, omits one or more active items, or includes archived/foreign item IDs.
