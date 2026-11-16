@@ -7,6 +7,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
 from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
@@ -351,3 +358,57 @@ def test_share_token_access_filter_redaction() -> None:
     assert filter_.filter(rec4) is True
     assert "secret-public-token-12345" not in rec4.getMessage()
     assert "/share/{token}" in rec4.getMessage()
+
+
+@pytest.mark.timeout(30)
+def test_uvicorn_access_log_redacts_public_view_token(tmp_path: Path) -> None:
+    """Exercise the actual server access formatter and application startup filter."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    env = os.environ.copy()
+    env["WISHENKA_DATABASE_URL"] = f"sqlite+aiosqlite:///{tmp_path / 'access.db'}"
+    env["WISHENKA_BACKGROUND_CLEANUP_ENABLED"] = "false"
+    env["WISHENKA_RECEIPT_NOTICE_WORKER_ENABLED"] = "false"
+    log_path = tmp_path / "server.log"
+    token = "private-access-capability"
+    url = f"http://127.0.0.1:{port}/api/public/wishlists/{token}/view?credential=secret"
+    with log_path.open("w+") as output:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "uvicorn",
+                "wishenka.main:app",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+            ],
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            env=env,
+        )
+        try:
+            deadline = time.monotonic() + 15
+            while True:
+                try:
+                    with urllib.request.urlopen(url, timeout=1):
+                        pass
+                except urllib.error.HTTPError as exc:
+                    assert exc.code == 404
+                    break
+                except urllib.error.URLError:
+                    assert process.poll() is None and time.monotonic() < deadline
+                    time.sleep(0.1)
+            process.terminate()
+            process.wait(timeout=5)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+        output.seek(0)
+        logs = output.read()
+    assert "/api/public/wishlists/{token}" in logs
+    assert token not in logs
+    assert "credential=secret" not in logs

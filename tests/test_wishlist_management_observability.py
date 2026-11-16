@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
+from wishenka.logging import JsonFormatter
 from wishenka.web.app import create_app
 from wishenka.wishlists.service import WishlistService
 
@@ -56,6 +57,31 @@ def setup_app(tmp_path: Path) -> Iterator[Setup]:
 
 def bearer(sessions: SessionTokenService, user_id: int) -> dict[str, str]:
     return {"Authorization": f"Bearer {sessions.create_token(user_id, f'User{user_id}')}"}
+
+
+def test_public_entry_logs_safe_outcomes(
+    setup_app: Setup, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Entry logs distinguish outcomes without including capability tokens or wishlist data."""
+    client, _, _, _, token = setup_app
+    invalid = "nonexistent-sensitive-capability"
+    with caplog.at_level(logging.INFO, logger="wishenka.web.wishlists"):
+        assert client.get(f"/api/public/wishlists/{token}/view").status_code == 200
+        assert client.get(f"/api/public/wishlists/{invalid}/view").status_code == 404
+    records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) in {"public_entry_viewed", "public_entry_unavailable"}
+    ]
+    assert [getattr(record, "event", None) for record in records] == [
+        "public_entry_viewed",
+        "public_entry_unavailable",
+    ]
+    assert getattr(records[0], "identified", None) is False
+    rendered = " ".join(JsonFormatter().format(record) for record in records)
+    assert token not in rendered
+    assert invalid not in rendered
+    assert "Birthday Wishlist" not in rendered
 
 
 def test_miniapp_shell_requested_log(setup_app: Setup, caplog: pytest.LogCaptureFixture) -> None:

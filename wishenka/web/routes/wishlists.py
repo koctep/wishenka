@@ -8,8 +8,9 @@ from typing import Annotated, Any, Literal, cast
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from wishenka.auth.dependencies import get_current_user
+from wishenka.auth.dependencies import get_current_user, get_optional_current_user
 from wishenka.auth.models import AuthenticatedUser
+from wishenka.web.routes.reservations import execute as execute_reservation
 from wishenka.wishlists.exceptions import (
     InvalidInviteTokenError,
     PermissionDeniedError,
@@ -19,11 +20,13 @@ from wishenka.wishlists.exceptions import (
 )
 from wishenka.wishlists.models import Wishlist, WishlistRole, WishlistStatus
 from wishenka.wishlists.policy import WishlistAccessPolicy
-from wishenka.wishlists.service import WishlistService
+from wishenka.wishlists.schemas import PromiseActionDTO, ReservationQuantityDTO
+from wishenka.wishlists.service import WishlistService, project_reservation_action, recipient_view
 
 router = APIRouter()
 logger = logging.getLogger("wishenka.web.wishlists")
 User = Annotated[AuthenticatedUser, Depends(get_current_user)]
+OptionalUser = Annotated[AuthenticatedUser | None, Depends(get_optional_current_user)]
 
 
 class WishlistInput(BaseModel):
@@ -547,6 +550,56 @@ async def public_wishlist(request: Request, token: str) -> dict[str, Any]:
         return projection(wl, None, True)
 
     return await execute(request, action)
+
+
+@router.get("/api/public/wishlists/{token}/view")
+async def public_wishlist_view(request: Request, token: str, user: OptionalUser) -> dict[str, Any]:
+    """Return the domain's role-specific view without membership or invite secrets."""
+
+    async def action(service: WishlistService) -> dict[str, Any]:
+        try:
+            view = await service.get_wishlist_by_public_token(token, user)
+        except (WishlistNotFoundError, WishlistDeletedError, PermissionDeniedError):
+            logger.warning(
+                "Public wishlist entry unavailable", extra={"event": "public_entry_unavailable"}
+            )
+            raise
+        items = view.items
+        if user is None:
+            # An unauthenticated link visitor could be the recipient.
+            wishlist = await service.get_wishlist_by_id(view.id)
+            items_by_id = {item.id: item for item in wishlist.items}
+            items = [recipient_view(items_by_id[item.id]) for item in items]
+        logger.info(
+            "Public wishlist entry viewed",
+            extra={"event": "public_entry_viewed", "identified": user is not None},
+        )
+        return {
+            "id": view.id,
+            "title": view.title,
+            "description": view.description,
+            "status": view.status.value,
+            "identified": user is not None,
+            "items": [item.model_dump(mode="json") for item in items],
+        }
+
+    return await execute(request, action)
+
+
+@router.post("/api/public/wishlists/{token}/items/{item_id}/reservations", status_code=201)
+async def reserve_from_public_link(
+    request: Request, token: str, item_id: int, payload: ReservationQuantityDTO, user: User
+) -> PromiseActionDTO:
+    """Resolve capability and reserve within the same transactional operation."""
+
+    async def action(service: WishlistService) -> PromiseActionDTO:
+        view = await service.get_wishlist_by_public_token(token, user)
+        reservation = await service.create_reservation(
+            item_id, user, payload.quantity, wishlist_id=view.id
+        )
+        return project_reservation_action(reservation, user)
+
+    return await execute_reservation(request, action, item_id=item_id)
 
 
 def member_projection(wishlist: Wishlist) -> list[dict[str, Any]]:

@@ -330,18 +330,49 @@ async function showList(id) {
     status('');
   } catch (_) { status('Could not load this wishlist'); }
 }
+function unavailableLink() {
+  const language = bridge?.initDataUnsafe?.user?.language_code || navigator.language || '';
+  const ru = language.toLowerCase().startsWith('ru');
+  root.replaceChildren(
+    node('h1', ru ? 'Ссылка недоступна' : 'This link is unavailable'),
+    node('p', ru ? 'Вернитесь в меню и выберите другое действие.' :
+      'Return to the menu and choose another action.'),
+    button(ru ? 'Главное меню' : 'Home menu', async () => {
+      try { await bootstrap(); await showHome(); }
+      catch (_) { status('Open this app in Telegram to sign in.'); }
+    })
+  );
+  status('');
+}
 async function publicView(token) {
   root.replaceChildren(node('h1', 'Loading wishlist'));
+  try { await bootstrap(); } catch (_) { /* Guest view remains available. */ }
   try {
-    const list = await api(`/api/public/wishlists/${encodeURIComponent(token)}`);
-    root.replaceChildren(
-      node('h1', list.name || 'Untitled wishlist'),
-      node('p', list.description || ''),
-    );
-    for (const item of list.items || []) root.append(node('p', item.title));
+    const list = await api(`/api/public/wishlists/${encodeURIComponent(token)}/view`);
+    root.replaceChildren(node('h1', list.title || 'Untitled wishlist'),
+      node('p', list.description || ''));
+    for (const item of list.items || []) {
+      const section = node('section');
+      section.append(node('h2', item.title));
+      if (list.identified && list.status === 'active' && !item.is_recipient &&
+          !item.is_archived && !item.is_fully_received && !item.is_reserved_by_me &&
+          item.available_quantity > 0) {
+        section.append(button('Reserve', async () => {
+          try {
+            await api(
+              `/api/public/wishlists/${encodeURIComponent(token)}/items/${item.id}/reservations`,
+              {method: 'POST', body: JSON.stringify({quantity: 1})}
+            );
+            await publicView(token);
+            status('Reserved');
+          } catch (_) { status('Could not reserve this wish. Please try again.'); }
+        }));
+      }
+      root.append(section);
+    }
     root.append(sharePanel(token, 'p', 'Public gift-selection link'));
     status('');
-  } catch (_) { status('This public link is unavailable'); }
+  } catch (_) { unavailableLink(); }
 }
 async function invitationView(token) {
   root.replaceChildren(node('h1', 'Collaborator invitation'));
@@ -393,7 +424,15 @@ async function start() {
     if (prefix === 'p') return publicView(token);
     return invitationView(token);
   }
-  try { await bootstrap(); await showHome(); }
-  catch (_) { status('Open this app in Telegram to sign in.'); }
+  if (startParam && !['home', 'create', 'collection'].includes(startParam)) {
+    return unavailableLink();
+  }
+  try {
+    await bootstrap();
+    await showHome();
+    if (startParam === 'create') {
+      root.querySelector('button')?.focus();
+    }
+  } catch (_) { status('Open this app in Telegram to sign in.'); }
 }
 start();

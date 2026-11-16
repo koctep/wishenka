@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     telegram_auth_max_age_seconds: int = 86400
     application_origin: str = "http://testserver"
     csrf_secret_key: str = "wishenka_csrf_default_change_in_prod"
+    mini_app_url: str = ""
     telegram_bot_username: str = ""
     telegram_app_short_name: str = ""
     invite_token_ttl_seconds: int = 7 * 86400
