@@ -65,6 +65,8 @@ from wishenka.wishlists.schemas import (
     WishlistDetailViewDTO,
 )
 
+RESERVATION_QUANTITY_MIN_ERROR = "Reservation quantity must be at least 1"
+
 logger = logging.getLogger("wishenka.wishlists")
 
 _ITEM_INVENTORY_METHODS = frozenset(
@@ -1536,7 +1538,7 @@ class WishlistService:
     ) -> Reservation:
         """Reserve quantity units of an item on behalf of a gifter."""
         if quantity < 1:
-            raise ValueError("Reservation quantity must be at least 1")
+            raise ValueError(RESERVATION_QUANTITY_MIN_ERROR)
         if user is None:
             raise PermissionDeniedError("Authentication required")
         gifter_id = user.telegram_id
@@ -1982,7 +1984,7 @@ class WishlistService:
             raise ReservationError(f"Cannot update reservation in status {res.status}")
 
         if new_quantity < 1:
-            raise ValueError("Reservation quantity must be at least 1")
+            raise ValueError(RESERVATION_QUANTITY_MIN_ERROR)
 
         async with self._concurrency_coordinator.acquire(res.wish_item_id):
             self._ensure_reservation_writable(res)

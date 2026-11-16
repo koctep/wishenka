@@ -243,6 +243,19 @@ Create passes `item_id`. Quantity change, cancel, purchase, and undo pass
 `reservation_id`. The store accepts exactly one of those keys. The service
 loaded inside `execute_wish` does not open a second transaction.
 
+For a create request, the authenticated route rejects a quantity below one
+with HTTP 400 and detail `Reservation quantity must be at least 1` before
+loading the wish. This response is the same for existing and missing wishes;
+no reservation is written. A positive quantity for a missing wish still
+returns HTTP 404. Authentication, CSRF and request parsing run before the
+route, and the service retains its quantity guard for direct callers. The
+shared quantity DTO and the quantity-change route keep their existing rules.
+The early rejection logs `reservation_validation_error` with operation and
+item scope, without the giver identifier or request body.
+
+Run `make test PYTEST_ARGS='-n 0 tests/test_reservation_invalid_quantity_repro.py'`
+to check the response precedence, storage bypass, authentication and log privacy.
+
 The routes add no second lock. They do not call `WishlistStore.execute`,
 `SELECT FOR UPDATE`, or Redis, and they do not add an `asyncio.Lock`.
 Cross-process exclusion stays the wish-scoped SQLite transaction
@@ -645,8 +658,9 @@ The router is `wishenka/web/routes/reservations.py`, included from
 A missing session is HTTP 401 `{"detail":"Authentication required"}`.
 The reservation method is not called, and no row is written.
 
-Each handler calls one existing method through `execute` in that module.
-`execute` passes the action to `WishlistStore.execute_wish`. Create passes
+After create's early quantity check, each handler calls one existing method
+through `execute` in that module. `execute` passes the action to
+`WishlistStore.execute_wish`. Create passes
 `item_id`. The other four pass `reservation_id`. There is no second lock.
 Cross-process exclusion remains `BEGIN IMMEDIATE` on the wish.
 
@@ -684,8 +698,9 @@ the caller holds another promise on the same wish. `item` keeps the combined
 status.
 
 Create and quantity change read `ReservationQuantityDTO`: a required integer
-`quantity` and no extra fields. On a wish `execute_wish` can load, a
-quantity below 1 is HTTP 400
+`quantity` and no extra fields. A create quantity below 1 is HTTP 400 even
+if the wish is missing. A quantity change below 1 is also HTTP 400 when its
+wish and reservation can be loaded. The response detail is
 `{"detail":"Reservation quantity must be at least 1"}`. No row is stored or
 resized.
 
@@ -706,7 +721,7 @@ caller who does not hold the promise use that body.
 
 `InsufficientQuantityError`, `ReservationError`, and
 `WishlistArchivedError` are HTTP 409. The `detail` is the exception text.
-A shortage is this 409. A quantity below 1 on a loaded wish is HTTP 400
+A shortage is this 409. An invalid create quantity is HTTP 400
 `{"detail":"Reservation quantity must be at least 1"}`.
 `ReservationNotFoundError` stays the HTTP 404 body above.
 
@@ -1010,7 +1025,7 @@ Key metrics derived from structured log events:
   exception text.
 - **HTTP 403**: `execute` returns 403 `{"detail":"Forbidden"}` for
   `PermissionDeniedError`.
-- **HTTP 400**: A quantity below 1 on a loaded wish is
+- **HTTP 400**: A create quantity below 1, including for a missing wish, is
   `{"detail":"Reservation quantity must be at least 1"}`.
 - **Resolution**: The UI reads `available_quantity` from
   [`WishItemGifterViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L39)
@@ -1050,17 +1065,18 @@ Key metrics derived from structured log events:
 - **Resolution**: Send the existing session cookie or bearer token. These
   routes do not add a second session mechanism.
 
-### 7. Non-positive quantity on a loaded wish (HTTP 400)
+### 7. Non-positive reservation quantity (HTTP 400)
 
-- **Symptom**: Create or quantity change with `quantity` below 1, on a wish
-  `execute_wish` can load, returns `400` and
+- **Symptom**: Create with `quantity` below 1 returns `400` for an existing
+  or missing wish. Quantity change returns the same response when its wish
+  and reservation can be loaded. The detail is
   `{"detail":"Reservation quantity must be at least 1"}`.
-- **Cause**: `create_reservation` and `update_reservation_quantity` raise
-  that `ValueError` before a row is stored or resized. The route logs
-  `reservation_validation_error` and names no gifter.
-- **Resolution**: Send an integer quantity of at least 1. A create whose
-  wish the store cannot load is `404` `Resource not found` instead: the
-  store resolves the wish before the quantity floor.
+- **Cause**: The create route validates before loading the wish. The service
+  retains its own guard for direct create calls and raises `ValueError` for
+  invalid quantity changes before a row is resized. The route logs
+  `reservation_validation_error` without naming the gifter.
+- **Resolution**: Send an integer quantity of at least 1. A create with a
+  valid quantity and an unavailable wish returns `404` `Resource not found`.
 
 ### 8. Recipient create (HTTP 403)
 

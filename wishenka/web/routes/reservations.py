@@ -25,7 +25,11 @@ from wishenka.wishlists.exceptions import (
     WishlistNotFoundError,
 )
 from wishenka.wishlists.schemas import PromiseActionDTO, ReservationQuantityDTO
-from wishenka.wishlists.service import WishlistService, project_reservation_action
+from wishenka.wishlists.service import (
+    RESERVATION_QUANTITY_MIN_ERROR,
+    WishlistService,
+    project_reservation_action,
+)
 
 router = APIRouter(
     prefix="/api/wishlists/{wishlist_id}/items/{item_id}/reservations",
@@ -216,6 +220,19 @@ async def create_reservation(
     request: Request,
 ) -> PromiseActionDTO:
     """Promise a positive number of units of a wish the caller does not receive."""
+    if payload.quantity < 1:
+        logger.warning(
+            "Reservation operation validation error: %s",
+            "create_reservation",
+            extra={
+                "event": "reservation_validation_error",
+                **_request_scope("create_reservation", item_id=item_id, reservation_id=None),
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=RESERVATION_QUANTITY_MIN_ERROR,
+        )
 
     async def action(svc: WishlistService) -> PromiseActionDTO:
         reservation = await svc.create_reservation(
