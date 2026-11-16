@@ -35,10 +35,9 @@ from tests.test_wishlist_touch_reorder import strip_js_comments
 
 pytestmark = pytest.mark.timeout(30)
 
-# SHA-256 of the text of the single inline <script> of ``base.html`` at HEAD 7fb5503 (5575
-# characters, computed in WISHENKA-24 Step 3). Green today; it turns red when the inline script
-# is edited. The script is expected to change only with WISHENKA-140 (no inline code).
-INLINE_SCRIPT_SHA256 = "4484b2c1a3e78c69933061bbf04a0f79a911e4b2f52879eaa70306cbd747113b"
+# WISHENKA-123 updates the inline script to guard CSRF initialization while preserving the
+# receipt separation invariant. Pin the reviewed version until the script is externalized.
+INLINE_SCRIPT_SHA256 = "ffe16da52c7a51a83c2f6eaab170fc74a5ad87cdef8c825d30dc62494cfa3a61"
 GUARD = re.compile(r"typeof\s+[\w.]*getResponseHeader\s*(?:!==?|===?)\s*['\"]function['\"]")
 REASON_LIKE = re.compile(r"['\"]([a-z]+(?:_[a-z]+)+)['\"]")
 

@@ -381,8 +381,9 @@ runs when the control path contains `/reservations`.
   text contains `available`, and `notice=refused` otherwise. The card
   does not echo `detail`. Shortage text is
   `Бронь не изменилась. Свободно: {available_quantity}.`
-- **HTTP 401, 403, or 404.** The same GET adds `notice=refused`. The
-  sentence is `Бронь не изменилась.`
+- **HTTP 401, recipient HTTP 403, or HTTP 404.** The same GET adds
+  `notice=refused`. The sentence is `Бронь не изменилась.` A CSRF 403
+  instead leaves the card in place and asks the user to retry.
 - **HTTP 503.** The current card stays in place. The script does not
   request the partial and does not read `detail`. It shows
   `Желание занято, бронь не изменилась. Повторите попытку.` on
@@ -403,18 +404,33 @@ to records that already exist: `reservation_action_completed` (200 or
 #### Cookie CSRF on the card
 
 Cookie mutations need `Origin` and `X-CSRF-Token`
-([`BrowserSecurityMiddleware`](file:///home/src/wishenka/web/security.py#L21)).
-Bearer calls skip that check. When `body` has `data-viewer-identified`,
-`base.html` calls `GET /api/auth/csrf` after `DOMContentLoaded` and stores
-`csrf_token`. `htmx:configRequest` sets `X-CSRF-Token` on an unsafe
-request only after that value is non-empty. A click before the fetch
-returns, and a fetch that fails, sends no header.
-`BrowserSecurityMiddleware` answers HTTP 403
-`{"detail":"Invalid CSRF token"}`. The refresh script maps every 403 to
-`notice=refused`, so the card currently shows `Бронь не изменилась.`
-The promise handler does not run, and no row is stored. The follow-up is
-[WISHENKA-123](https://pypost.atlassian.net/browse/WISHENKA-123).
-The token stays out of the HTML.
+([`BrowserSecurityMiddleware`](../../wishenka/web/security.py)). When `body` has
+`data-viewer-identified`, `base.html` starts `GET /api/auth/csrf` on `DOMContentLoaded`.
+The token is held in JavaScript memory and is not embedded in HTML. Concurrent preparation
+requests share one pending fetch, with a 10-second timeout. An empty, malformed, failed, or
+expired response leaves the token unavailable; a later click starts another fetch.
+
+For a giver-card reservation action, `htmx:confirm` holds the action while token preparation
+finishes. Repeated clicks on the same pending control are coalesced; a removed card is not
+resubmitted. `htmx:configRequest` then attaches the token to unsafe requests. If preparation
+failed, a giver request without an explicit bearer header is cancelled and the card displays
+`Не удалось подготовить запрос. Повторите попытку.` A subsequent click retries preparation.
+Requests configured with `hx-request` or `data-hx-request` to suppress headers are also
+cancelled for giver controls, because their credentials cannot be safely established.
+
+Bearer API requests do not require the CSRF header. For HTMX, the guard recognizes an explicit
+`Authorization: Bearer ...` header in the actual request configuration; a bearer credential hidden
+from HTMX is not assumed to exist. Even an explicit bearer card action may wait for the pending
+CSRF preparation before dispatch. If a card response is HTTP 403 with
+`detail` equal to `Invalid CSRF token`, the cached token is invalidated and the card asks for a
+retry without refreshing as a refused booking. Other well-formed 403 responses keep the existing
+`notice=refused` refresh. An unparseable or missing 403 detail also shows the retry message.
+
+Run the browser coverage, including local HTMX 1.9.12 and real SQLite persistence, with:
+
+```bash
+make test PYTEST_ARGS='-n 0 tests/test_giver_csrf_repro_browser.py'
+```
 
 ### 7. My reservations cabinet
 
@@ -620,8 +636,7 @@ and a fetch that fails,
 sends no `X-CSRF-Token`. `BrowserSecurityMiddleware` answers HTTP
 403 `{"detail":"Invalid CSRF token"}`. The row branch maps that 403
 to `notice=refused`. The promise handler does not run, and no row
-is stored. The follow-up remains
-[WISHENKA-123](https://pypost.atlassian.net/browse/WISHENKA-123).
+is stored. The card-specific guard does not apply to cabinet rows.
 The home-card fetch in `showHome` is a GET and does not use this
 token.
 
@@ -1126,20 +1141,15 @@ Key metrics derived from structured log events:
 - **Resolution**: Repeat the same control. See
   [Wish-card giver controls](#6-wish-card-giver-controls).
 
-### 12. Cookie click before the CSRF token (HTTP 403 shown as a refused booking)
+### 12. Giver control cannot prepare a CSRF token
 
-- **Symptom**: An identified cookie session clicks a giver control and the
-  card refreshes to `Бронь не изменилась.` The promise row is unchanged.
-- **Cause**: `base.html` stores `csrf_token` only after
-  `GET /api/auth/csrf` resolves. Until then, and when that GET fails,
-  `htmx:configRequest` sends no `X-CSRF-Token`.
-  `BrowserSecurityMiddleware` returns HTTP 403
-  `{"detail":"Invalid CSRF token"}`. The card maps every 403, including
-  this one, to `notice=refused`. The promise handler does not run.
-- **Resolution**: After the token is stored, the next click sends
-  `X-CSRF-Token`. Bearer calls skip the cookie check. The current card
-  still paints this 403 as a refused booking. The follow-up is
-  [WISHENKA-123](https://pypost.atlassian.net/browse/WISHENKA-123).
+- **Symptom**: The card displays `Не удалось подготовить запрос. Повторите попытку.`
+- **Cause**: Token preparation failed, timed out, or returned no usable token; the request was
+  cancelled before dispatch. An invalid-token 403 also invalidates the cached token and shows
+  this message instead of a booking refusal.
+- **Resolution**: Check the session, network, `GET /api/auth/csrf`, and server CSRF settings;
+  then retry the control. Check that the action does not suppress request headers. See
+  [Cookie CSRF on the card](#cookie-csrf-on-the-card).
 
 ### 13. Recipient card refresh shows no booking sentence
 
@@ -1194,9 +1204,8 @@ Key metrics derived from structured log events:
   including this one, to `notice=refused`. The promise handler does
   not run. The empty-token window is unchanged.
 - **Resolution**: After the token is stored, the next click sends
-  `X-CSRF-Token`. Bearer calls skip the cookie check. The follow-up
-  remains
-  [WISHENKA-123](https://pypost.atlassian.net/browse/WISHENKA-123).
+  `X-CSRF-Token`. Bearer calls skip the cookie check. The giver-card guard does not apply
+  to cabinet rows.
 
 ### 17. Personal-list owner sees no promise for those wishes
 

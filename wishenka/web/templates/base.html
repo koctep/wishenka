@@ -11,17 +11,85 @@
     <script src="/static/wishlist.js" defer></script>
     <script src="/static/receipt.js" defer></script>
     <script>
+    var csrfToken = '';
+    var csrfPending = null;
+    var csrfGeneration = 0;
+    var csrfTimeoutMs = 10000;
+    var pendingGiverControls = new WeakSet();
+    function prepareCsrf() {
+        if (csrfToken) { return Promise.resolve(csrfToken); }
+        if (csrfPending) { return csrfPending; }
+        var controller = new AbortController();
+        var generation = csrfGeneration;
+        var timer;
+        var deadline = new Promise(function (resolve) {
+            timer = setTimeout(function () { controller.abort(); resolve(''); }, csrfTimeoutMs);
+        });
+        var request = fetch('/api/auth/csrf', {
+            credentials: 'same-origin', signal: controller.signal
+        }).then(function (response) { return response.ok ? response.json() : {}; })
+            .then(function (body) {
+                return typeof body.csrf_token === 'string' ? body.csrf_token.trim() : '';
+            }).catch(function () { return ''; });
+        csrfPending = Promise.race([request, deadline]).then(function (token) {
+            clearTimeout(timer);
+            if (generation === csrfGeneration) { csrfToken = token; }
+            csrfPending = null;
+            return token;
+        });
+        return csrfPending;
+    }
+    function giverPreparationError(card) {
+        var slot = card && card.querySelector('[data-giver-busy]');
+        if (slot) {
+            slot.hidden = false;
+            slot.textContent = 'Не удалось подготовить запрос. Повторите попытку.';
+        }
+    }
+    function requestSuppressesHeaders(elt) {
+        for (var node = elt; node && node.getAttribute; node = node.parentElement) {
+            var setting = node.getAttribute('hx-request') || node.getAttribute('data-hx-request');
+            if (!setting) { continue; }
+            try { if (JSON.parse(setting).noHeaders) { return true; } }
+            catch (_) { return true; }
+        }
+        return false;
+    }
+    function explicitBearer(headers) {
+        return Object.keys(headers || {}).some(function (name) {
+            return name.toLowerCase() === 'authorization'
+                && /^Bearer \S/.test(String(headers[name] || ''));
+        });
+    }
     document.addEventListener('DOMContentLoaded', function () {
         if (!document.body.hasAttribute('data-viewer-identified')) { return; }
-        var csrfToken = '';
-        fetch('/api/auth/csrf', { credentials: 'same-origin' })
-            .then(function (response) { return response.ok ? response.json() : {}; })
-            .then(function (body) { csrfToken = (body && body.csrf_token) || ''; })
-            .catch(function () { csrfToken = ''; });
+        prepareCsrf();
+        document.addEventListener('htmx:confirm', function (evt) {
+            var detail = evt.detail || {};
+            var elt = detail.elt;
+            var card = elt && elt.closest && elt.closest('.item-card');
+            if (!card || !reservationRequestPath(elt) || !detail.issueRequest) { return; }
+            if (csrfToken) { return; }
+            evt.preventDefault();
+            if (pendingGiverControls.has(elt)) { return; }
+            pendingGiverControls.add(elt);
+            prepareCsrf().then(function () {
+                pendingGiverControls.delete(elt);
+                if (elt.isConnected && card.isConnected) { detail.issueRequest(); }
+            });
+        });
         document.addEventListener('htmx:configRequest', function (evt) {
             var verb = String((evt.detail && evt.detail.verb) || '').toUpperCase();
-            if (verb === 'GET' || verb === 'HEAD' || verb === 'OPTIONS' || !csrfToken) { return; }
-            evt.detail.headers['X-CSRF-Token'] = csrfToken;
+            if (verb === 'GET' || verb === 'HEAD' || verb === 'OPTIONS') { return; }
+            var elt = evt.detail.elt;
+            var card = elt && elt.closest && elt.closest('.item-card');
+            var giver = card && reservationRequestPath(elt);
+            var suppressed = giver && requestSuppressesHeaders(elt);
+            if (csrfToken && !suppressed) { evt.detail.headers['X-CSRF-Token'] = csrfToken; }
+            if (giver && (suppressed || (!csrfToken && !explicitBearer(evt.detail.headers)))) {
+                evt.preventDefault();
+                giverPreparationError(card);
+            }
         });
     });
     function reservationRequestPath(elt) {
@@ -98,6 +166,21 @@
         if (!card) { return; }
         var xhr = evt.detail.xhr;
         var status = xhr ? xhr.status : 0;
+        if (status === 403) {
+            var rejection;
+            try { rejection = JSON.parse(xhr.responseText); }
+            catch (_) { giverPreparationError(card); return; }
+            if (!rejection || typeof rejection.detail !== 'string') {
+                giverPreparationError(card);
+                return;
+            }
+            if (rejection.detail === 'Invalid CSRF token') {
+                csrfToken = '';
+                csrfGeneration += 1;
+                giverPreparationError(card);
+                return;
+            }
+        }
         if (status === 503) {
             var busy = card.querySelector('[data-giver-busy]');
             if (busy) {
