@@ -105,7 +105,11 @@ def create_router(dependencies: EntryDependencies) -> Router:
     @router.errors()
     async def entry_error(_event: ErrorEvent) -> bool:
         # Aiogram otherwise logs the exception and traceback, which can contain capabilities.
-        logger.error("Bot entry failed", extra={"event": "bot_start_failed"})
+        logger.error(
+            "Bot entry failed (%s)",
+            type(_event.exception).__name__,
+            extra={"event": "bot_start_failed"},
+        )
         return True
 
     @router.message(CommandStart(), F.chat.type == "private")
@@ -132,4 +136,8 @@ def create_router(dependencies: EntryDependencies) -> Router:
             )
         await callback.answer()
 
+    if getattr(dependencies, "wishlist_store", None) is not None:
+        from wishenka.bot.capture import create_capture_router
+
+        router.include_router(create_capture_router(dependencies))
     return router

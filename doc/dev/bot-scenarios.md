@@ -4,8 +4,9 @@
 
 The bot handles private `/start` messages, presents a Russian or English menu, and opens the
 Mini App or a public wishlist. [Bot journeys and notifications](../../in-docs/bot-scenarios.md)
-contains the functional specification. Forwarded wish creation and the additional notification
-scenarios remain planned. The existing receipt notice worker is described in
+contains the functional specification. Private text and forwarded messages can create wishes
+through a reviewable draft. Additional notification scenarios remain planned. The existing
+receipt notice worker is described in
 [Gift receipt](gift-receipt.md).
 
 ## Architecture and navigation
@@ -37,6 +38,39 @@ projection can expose availability; [WISHENKA-63](https://pypost.atlassian.net/b
 tracks that pre-existing privacy issue. Do not treat the Mini App projection as a fix for the
 legacy route.
 
+## Capturing a wish in chat
+
+`wishenka.bot.capture.create_capture_router` handles non-command text in private chats, including
+forwarded text. `wishenka.bot.entry.create_router` includes this router when the wishlist store and
+preview service are available. The polling process supplies both dependencies. A new Telegram user
+is registered when capture starts; entry via `/start` alone does not create a user.
+
+The classifier extracts a URL and residual title. Supported links are sent to the existing preview
+service; partial or failed extraction leaves a manual draft and identifies missing fields. Other
+schemes are kept in the draft for correction without a preview request. At save, `link` and
+`image_url` must be absolute HTTP(S) URLs. The user can edit or clear optional fields, inspect full
+values across bounded Telegram messages, choose an eligible wishlist, and explicitly save or cancel.
+With one eligible list it is selected automatically; several lists use paginated inline buttons.
+When no list is available the menu offers Mini App navigation. Access is rechecked on save.
+
+The migrations `add_bot_drafts` and `add_bot_capture_order` create durable SQLite state. An active
+draft and message-order watermark are stored atomically before network preview. The owner and chat
+bind each callback; an expiry and revision reject stale actions. A newer message replaces the active
+draft, and a delayed preview cannot overwrite a newer message or edit. Preview enrichment increments
+the revision so previously displayed save buttons cannot submit unseen values. Redelivery can show
+the persisted manual draft after an interruption. The save transaction combines the domain write and
+receipt, allowing a repeated callback to return the previous result without creating another wish.
+
+Active drafts expire after 24 hours and save receipts after seven days. The bot starts a cleanup
+loop immediately, then hourly; it removes up to 100 expired rows per pass and retries a failure in
+one minute. `bot_capture_order` retains owner, chat and message identifiers without an expiry; it
+is not removed by draft cleanup. [WISHENKA-178](https://pypost.atlassian.net/browse/WISHENKA-178)
+tracks a retention policy that preserves replay ordering, and
+[WISHENKA-35](https://pypost.atlassian.net/browse/WISHENKA-35) covers account deletion. Include
+both bot tables when implementing that deletion. The atomic capture operation currently uses
+private wishlist store methods; [WISHENKA-179](https://pypost.atlassian.net/browse/WISHENKA-179)
+tracks a supported store interface.
+
 ## Running and configuration
 
 Start the web server using the repository workflow, and run one bot receiver alongside it:
@@ -51,7 +85,7 @@ variables or `.env`:
 - `WISHENKA_BOT_TOKEN`: real Telegram bot token; the default is a nonfunctional placeholder.
 - `WISHENKA_MINI_APP_URL`: HTTPS Mini App URL without credentials or a fragment. The router
   replaces any existing `startapp` query parameter. The empty default fails router validation.
-- `WISHENKA_DATABASE_URL`: shared database URL, used to look up the user's language preference.
+- `WISHENKA_DATABASE_URL`: shared database URL for users, wishlists, drafts and receipts.
 - `WISHENKA_LOG_LEVEL` and `WISHENKA_LOG_JSON`: log level and structured JSON output.
 - `WISHENKA_TELEGRAM_BOT_USERNAME` and `WISHENKA_TELEGRAM_APP_SHORT_NAME`: configure Mini App
   share-link generation; see [Authentication](auth.md) for session and origin configuration.
@@ -66,13 +100,18 @@ The entry router emits `bot_start_handled` with a bounded outcome (`menu`, `publ
 `invalid_link`) and `bot_start_failed` for errors. Public view events are
 `public_entry_viewed` and `public_entry_unavailable`. These events exclude payloads, link tokens,
 user identifiers and exception text. The bot error handler consumes exceptions to prevent aiogram
-from logging their contents. Uvicorn's application access filter masks capability paths and
+from logging their contents. Capture emits `bot_capture_preview`, `bot_capture_draft_ready`,
+`bot_capture_save`, `bot_capture_action_error`, and `bot_draft_cleanup_failed`. These events omit
+message contents, URLs, identifiers, and exception text. A context-local filter suppresses
+specified dependency loggers during sensitive work; it does not automatically cover future
+loggers. Cleanup failures retry after one minute. Uvicorn's access filter masks capability paths and
 removes query strings; external proxies and their access logs must be configured separately.
 
 Run the focused tests with:
 
 ```bash
 make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_start_repro.py tests/test_bot_entry_repro.py'
+make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_capture_repro.py'
 ```
 
 They exercise a fake Telegram transport and Mini App browser behavior. Observability tests also
@@ -89,5 +128,9 @@ check dispatcher error handling and actual Uvicorn access output. The full quali
   response intentionally does not distinguish these cases. Do not paste capability links into logs.
 - If sign-in or reservation fails, check Telegram session, origin and CSRF configuration in
   [Authentication](auth.md). Anonymous viewers do not get reservation controls.
+- If capture cannot save, verify that the selected list remains accessible, required fields are
+  valid, and links use HTTP(S). Expired or replaced drafts require a new message.
+- If `bot_draft_cleanup_failed` occurs, check database availability and storage capacity. The loop
+  retries automatically; avoid including draft content or links in diagnostic logs.
 - For receipt notice delivery failures, see
   [Gift receipt troubleshooting](gift-receipt.md#troubleshooting).
