@@ -179,10 +179,10 @@ async def test_exception_message_never_logged_only_error_class(
     assert [(r.levelno, getattr(r, "error_class", None)) for r in failed] == [
         (logging.DEBUG, "RuntimeError")
     ]
-    retried = _events(caplog.records, "receipt_notice_retry_scheduled")
-    assert [r.levelno for r in retried] == [logging.DEBUG]
+    uncertain = _events(caplog.records, "receipt_notice_uncertain")
+    assert [r.levelno for r in uncertain] == [logging.DEBUG]
     loud = [r for r in caplog.records if r.name == _NOTICE_LOGGER and r.levelno >= logging.INFO]
-    assert [(_event(r), getattr(r, "retried", None)) for r in loud] == [
+    assert [(_event(r), getattr(r, "uncertain", None)) for r in loud] == [
         ("receipt_notice_window_summary", 1)
     ]
 

@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import time
 from collections.abc import Callable
 
 from wishenka.config import Settings
+from wishenka.notices.reminders import claim_reminder, refresh_reminder, settle_reminder
+from wishenka.notices.scheduler import ReminderScheduler
 from wishenka.notices.sender import NoticeSender, SendOutcome, SendResult
 from wishenka.notices.store import ClaimedNotice, NoticeStore
 
@@ -41,21 +44,47 @@ class NoticeWorker:
         self._store = store
         self._sender = sender
         self._max_attempts = settings.receipt_notice_max_attempts
+        self._lease = settings.receipt_notice_claim_lease_seconds
+        self._scheduler = (
+            ReminderScheduler(store._store, settings) if isinstance(store, NoticeStore) else None
+        )
+        self._next_schedule = 0.0
         self._send_timeout = settings.receipt_notice_request_timeout_seconds + 5
         self._poll = settings.receipt_notice_poll_interval_seconds
         self._clock = clock
         self._window = settings.receipt_notice_summary_window_seconds
         self._window_start = self._window_floor(clock())
-        self._counts = {"sent": 0, "retried": 0, "failed_terminal": 0}
+        self._counts = {"sent": 0, "retried": 0, "failed_terminal": 0, "uncertain": 0}
+        self._reminder_counts = dict.fromkeys(
+            ("sent", "retried", "failed_terminal", "uncertain", "skipped"), 0
+        )
 
     async def run(self, stop: asyncio.Event) -> None:
         """Poll until ``stop`` is set or the task is cancelled (a cancelled send stays ``sending``).
 
-        An idle tick writes no record. A failing tick logs one ERROR per failure streak and
-        backs off up to ``MAX_ERROR_BACKOFF_SECONDS``.
+        An idle tick writes no record. Queue and scheduler failures back off independently.
         """
         failures = 0
+        scheduler_failures = 0
         while not stop.is_set():
+            if self._scheduler is not None and self._clock() >= self._next_schedule:
+                try:
+                    more_pages = await self._scheduler.run_once(int(self._clock()))
+                except Exception as error:
+                    if scheduler_failures == 0:
+                        logger.error(
+                            "Reminder scheduler failed: error_class=%s",
+                            type(error).__name__,
+                            extra={
+                                "event": "reminder_scheduler_error",
+                                "error_class": type(error).__name__,
+                            },
+                        )
+                    scheduler_failures += 1
+                    self._next_schedule = self._clock() + self._error_delay(scheduler_failures)
+                else:
+                    scheduler_failures = 0
+                    self._next_schedule = self._clock() if more_pages else self._clock() + 3600
             try:
                 await self.run_once()
                 self.flush_if_due(self._clock())
@@ -63,7 +92,8 @@ class NoticeWorker:
             except Exception as error:
                 if failures == 0:
                     logger.error(
-                        "Notice worker tick failed",
+                        "Notice worker tick failed: error_class=%s",
+                        type(error).__name__,
                         extra={
                             "event": "receipt_notice_worker_error",
                             "error_class": type(error).__name__,
@@ -71,6 +101,8 @@ class NoticeWorker:
                     )
                 failures += 1
             delay = self._poll if failures == 0 else self._error_delay(failures)
+            if failures == 0 and self._scheduler is not None:
+                delay = min(delay, max(0.05, self._next_schedule - self._clock()))
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=delay)
 
@@ -87,14 +119,40 @@ class NoticeWorker:
         if start <= self._window_start:
             return
         counts, self._counts = self._counts, dict.fromkeys(self._counts, 0)
+        reminder_counts, self._reminder_counts = (
+            self._reminder_counts,
+            dict.fromkeys(self._reminder_counts, 0),
+        )
         self._window_start = start
         if any(counts.values()):
             logger.info(
-                "Notice window summary",
+                "Notice window summary: window_seconds=%s sent=%s retried=%s "
+                "failed_terminal=%s uncertain=%s",
+                self._window,
+                counts["sent"],
+                counts["retried"],
+                counts["failed_terminal"],
+                counts["uncertain"],
                 extra={
                     "event": "receipt_notice_window_summary",
                     "window_seconds": self._window,
                     **counts,
+                },
+            )
+        if any(reminder_counts.values()):
+            logger.info(
+                "Service delivery window summary: window_seconds=%s sent=%s retried=%s "
+                "failed_terminal=%s uncertain=%s skipped=%s",
+                self._window,
+                reminder_counts["sent"],
+                reminder_counts["retried"],
+                reminder_counts["failed_terminal"],
+                reminder_counts["uncertain"],
+                reminder_counts["skipped"],
+                extra={
+                    "event": "service_delivery_window_summary",
+                    "window_seconds": self._window,
+                    **reminder_counts,
                 },
             )
 
@@ -107,8 +165,60 @@ class NoticeWorker:
         """
         rows = 0
         while (claim := await self._store.claim_next(self._time(now))) is not None:
-            result = await self._send(claim)
-            await self._settle(claim, result, self._time(now))
+            refreshed = await self._store.refresh_claim(claim)
+            if refreshed is None:
+                await self._store.skip_claim(claim, self._time(now))
+                rows += 1
+                continue
+            result = await self._send(refreshed)
+            await self._settle(refreshed, result, self._time(now))
+            rows += 1
+        while (
+            reminder := await claim_reminder(
+                self._store._store,
+                self._time(now),
+                self._lease,
+                self._store.global_limit,
+                self._store.chat_interval,
+            )
+        ) is not None:
+            refreshed_reminder = await refresh_reminder(
+                self._store._store, reminder, self._time(now)
+            )
+            if refreshed_reminder is None:
+                if await settle_reminder(self._store._store, reminder, "skipped", self._time(now)):
+                    self._reminder_counts["skipped"] += 1
+                rows += 1
+                continue
+            reminder = refreshed_reminder
+            try:
+                result = await asyncio.wait_for(
+                    self._sender.send(reminder.chat_id, reminder.body), timeout=self._send_timeout
+                )
+            except Exception:
+                result = SendResult(SendOutcome.AMBIGUOUS)
+            if result.outcome is SendOutcome.DELIVERED:
+                status = "sent"
+            elif result.outcome is SendOutcome.AMBIGUOUS:
+                status = "uncertain"
+            elif result.outcome is SendOutcome.REJECTED or reminder.attempt >= self._max_attempts:
+                status = "failed"
+            else:
+                status = "pending"
+            delay = max(
+                self._store.backoff_seconds(reminder.attempt), math.ceil(result.retry_after or 0)
+            )
+            settled = await settle_reminder(
+                self._store._store,
+                reminder,
+                status,
+                self._time(now) + delay,
+                result.error_class,
+                self._time(now) + math.ceil(result.retry_after) if result.retry_after else None,
+            )
+            if settled:
+                counter = {"pending": "retried", "failed": "failed_terminal"}.get(status, status)
+                self._reminder_counts[counter] += 1
             rows += 1
         if rows:
             logger.debug(
@@ -123,7 +233,13 @@ class NoticeWorker:
 
     async def _send(self, claim: ClaimedNotice) -> SendResult:
         """Send one notice; a timeout or any unexpected error is ``AMBIGUOUS``."""
-        text = notice_text(claim.wish_title, claim.list_title)
+        if claim.language.lower().startswith("en"):
+            text = (
+                f"Wish ‘{claim.wish_title[:TITLE_LIMIT]}’ from ‘{claim.list_title[:TITLE_LIMIT]}’ "
+                "was marked received. Check your reservation and change it if necessary."
+            )
+        else:
+            text = notice_text(claim.wish_title, claim.list_title)
         try:
             return await asyncio.wait_for(
                 self._sender.send(claim.giver_user_id, text), timeout=self._send_timeout
@@ -139,15 +255,17 @@ class NoticeWorker:
                 self._counts["sent"] += 1
             self._debug("receipt_notice_sent", "Notice sent", claim)
             return
+        if outcome is SendOutcome.AMBIGUOUS:
+            self._debug("receipt_notice_send_failed", "Notice send failed", claim, result)
+            if await self._store.uncertain(claim, now, result.error_class):
+                self._counts["uncertain"] += 1
+            self._debug("receipt_notice_uncertain", "Notice delivery uncertain", claim, result)
+            return
         self._debug("receipt_notice_send_failed", "Notice send failed", claim, result)
-        give_up = (
-            outcome is SendOutcome.REJECTED
-            or claim.attempt >= self._max_attempts
-            or (outcome is SendOutcome.AMBIGUOUS and claim.ambiguous)
-        )
+        give_up = outcome is SendOutcome.REJECTED or claim.attempt >= self._max_attempts
         if give_up:
             if await self._store.fail(
-                claim, now, result.error_class, ambiguous=outcome is SendOutcome.AMBIGUOUS
+                claim, now, result.error_class, retry_after=result.retry_after
             ):
                 self._counts["failed_terminal"] += 1
             self._debug("receipt_notice_failed_terminal", "Notice failed for good", claim, result)
@@ -157,7 +275,6 @@ class NoticeWorker:
             now,
             error_class=result.error_class,
             retry_after=result.retry_after,
-            ambiguous=outcome is SendOutcome.AMBIGUOUS,
         ):
             self._counts["retried"] += 1
         self._debug("receipt_notice_retry_scheduled", "Notice retry scheduled", claim, result)

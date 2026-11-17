@@ -303,21 +303,31 @@ def create_capture_router(deps: Any) -> Router:
         actor = _actor(message.from_user.id)
         lang = await _language(message.from_user, deps)
         users = getattr(deps, "user_store", None)
-        if users is not None and await users.get_by_telegram_id(message.from_user.id) is None:
-            private_context = _preview_active.set(True)
-            try:
-                await users.upsert_user(
-                    TelegramUser(
-                        id=message.from_user.id,
-                        first_name=message.from_user.first_name,
-                        last_name=message.from_user.last_name,
-                        username=message.from_user.username,
-                        language_code=message.from_user.language_code,
-                        is_premium=bool(message.from_user.is_premium),
+        if users is not None and message.chat.id == message.from_user.id:
+            record = await users.get_by_telegram_id(message.from_user.id)
+            if record is None:
+                private_context = _preview_active.set(True)
+                try:
+                    record = await users.upsert_user(
+                        TelegramUser(
+                            id=message.from_user.id,
+                            first_name=message.from_user.first_name,
+                            last_name=message.from_user.last_name,
+                            username=message.from_user.username,
+                            language_code=message.from_user.language_code,
+                            is_premium=bool(message.from_user.is_premium),
+                        )
                     )
+                finally:
+                    _preview_active.reset(private_context)
+            async with users.engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "INSERT INTO bot_destinations(user_id,chat_id,active) VALUES (:id,:chat,1) "
+                        "ON CONFLICT(user_id) DO UPDATE SET chat_id=:chat,active=1"
+                    ),
+                    {"id": record.id, "chat": message.chat.id},
                 )
-            finally:
-                _preview_active.reset(private_context)
         now = _now(deps)
         chat = message.chat.id
         raw = message.text.strip()
@@ -767,6 +777,13 @@ async def cleanup_drafts(store: WishlistStore) -> int:
             ),
             {"now": datetime.now(UTC).isoformat()},
         )
-        return int(result.rowcount or 0)
+        birthday = await conn.execute(
+            text(
+                "DELETE FROM birthday_input WHERE rowid IN "
+                "(SELECT rowid FROM birthday_input WHERE expires_at<=:now LIMIT 100)"
+            ),
+            {"now": int(time.time())},
+        )
+        return int(result.rowcount or 0) + int(birthday.rowcount or 0)
 
     return await store.transaction(remove)

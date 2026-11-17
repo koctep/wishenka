@@ -5,20 +5,26 @@
 The bot handles private `/start` messages, presents a Russian or English menu, and opens the
 Mini App or a public wishlist. [Bot journeys and notifications](../../in-docs/bot-scenarios.md)
 contains the functional specification. Private text and forwarded messages can create wishes
-through a reviewable draft. Additional notification scenarios remain planned. The existing
-receipt notice worker is described in
-[Gift receipt](gift-receipt.md).
+through a reviewable draft. Private birthday tracking (`/birthdays`), opt-in reservation
+confirmations (`/reservation_confirmations on|off`), shared wishlist notifications, and occasion
+reminders are described in [Service notifications and reminders](notifications.md). The receipt
+notice worker is also described in [Gift receipt](gift-receipt.md).
 
 ## Architecture and navigation
 
 `wishenka.bot.__main__` starts a separate aiogram polling process and provides the configured
 Mini App URL and `UserStore` to `wishenka.bot.entry.create_router`. The router handles private
 chats only. It uses a stored language when available, otherwise the Telegram language code;
-Russian language codes select Russian and all others select English. A help callback responds in
-the selected language. The router does not create a user or wishlist during entry.
+`en*` language codes select English and all others select Russian. A help callback responds in
+the selected language and explains `/reservation_confirmations on|off`. When `user_store` is
+configured, a verified private `/start` (`chat.id == from_user.id`) upserts the user and activates
+their private destination in `bot_destinations`.
 
 The Create wishlist, My wishlists and Open Mini App buttons use `WebAppInfo` URLs with the
-`startapp` values `create`, `collection` and `home`. Mini App startup authenticates the user and
+`startapp` values `create`, `collection` and `home`. The menu also includes a `Birthdays`
+(`birthday:open`) callback button that opens the private `/birthdays` flow (see
+[Service notifications and reminders](notifications.md#private-birthdays-tracking-flow)). Mini App
+startup authenticates the user and
 opens the home view for these intents; `create` focuses its first button and does not create a
 wishlist. A valid `/start p_<token>` adds an Open wishlist button whose URL carries that payload.
 Malformed bot payloads receive a generic unavailable message and the normal menu.
@@ -41,9 +47,11 @@ legacy route.
 ## Capturing a wish in chat
 
 `wishenka.bot.capture.create_capture_router` handles non-command text in private chats, including
-forwarded text. `wishenka.bot.entry.create_router` includes this router when the wishlist store and
-preview service are available. The polling process supplies both dependencies. A new Telegram user
-is registered when capture starts; entry via `/start` alone does not create a user.
+forwarded text. `wishenka.bot.entry.create_router` includes `create_birthday_router` and
+`create_capture_router` when the wishlist store is available (while a birthday label or date input
+session is active in `birthday_input`, the birthday router consumes the text message first). The
+polling process supplies both dependencies. When capture starts in a verified private chat, the
+user is upserted if needed and their `bot_destinations` entry is marked active.
 
 The classifier extracts a URL and residual title. Supported links are sent to the existing preview
 service; partial or failed extraction leaves a manual draft and identifies missing fields. Other
@@ -61,13 +69,17 @@ the revision so previously displayed save buttons cannot submit unseen values. R
 the persisted manual draft after an interruption. The save transaction combines the domain write and
 receipt, allowing a repeated callback to return the previous result without creating another wish.
 
-Active drafts expire after 24 hours and save receipts after seven days. The bot starts a cleanup
-loop immediately, then hourly; it removes up to 100 expired rows per pass and retries a failure in
+Active drafts expire after 24 hours, pending birthday inputs after one hour, and save receipts
+after seven days. The bot starts a cleanup
+loop immediately, then hourly; it removes up to 100 expired rows per pass (plus up to 100 expired
+`birthday_input` rows) and retries a failure in
 one minute. `bot_capture_order` retains owner, chat and message identifiers without an expiry; it
 is not removed by draft cleanup. [WISHENKA-178](https://pypost.atlassian.net/browse/WISHENKA-178)
 tracks a retention policy that preserves replay ordering, and
 [WISHENKA-35](https://pypost.atlassian.net/browse/WISHENKA-35) covers account deletion. Include
-both bot tables when implementing that deletion. The atomic capture operation currently uses
+both bot tables and the notification/birthday tables (see
+[Service notifications and reminders](notifications.md)) when implementing that deletion. The
+atomic capture operation currently uses
 private wishlist store methods; [WISHENKA-179](https://pypost.atlassian.net/browse/WISHENKA-179)
 tracks a supported store interface.
 

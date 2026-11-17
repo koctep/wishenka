@@ -90,11 +90,26 @@
 доменный сервис напрямую и не меняет домен, хранилище и JSON-интерфейсы. См.
 [`doc/dev/gift-receipt.md`](gift-receipt.md#mini-app-ui-wishenka-24).
 
+Реализовано (WISHENKA-29): сервис уведомлений и напоминаний с защитой тайны сюрприза
+(`wishenka/notices/`, `wishenka/bot/birthdays.py`) — транзакционные интенты изменений списков и
+opt-in подтверждений собственной брони (`reminder_outbox`), приватные дни рождения (`/birthdays`,
+`birthday_entries`, `birthday_input`), подтверждённые чаты (`bot_destinations`), UTC-планировщик
+напоминаний (`ReminderScheduler`), общий межпроцессный rate limiter (`notice_rate_slots`),
+карантин неопределённых отправок (`status = 'uncertain'`) и операторский CLI
+(`python -m wishenka.notices.operator`). См. [`doc/dev/notifications.md`](notifications.md).
+
 ---
 
 ## 4. Документация подсистем и доменов
 
 - [`doc/dev/wishlists.md`](wishlists.md) — Домен вишлистов: ролевая модель (RBAC/ABAC), жизненный цикл, Surprise Invariant, бронирование и токены шеринга.
+- [`doc/dev/notifications.md`](notifications.md) — Сервис уведомлений и напоминаний (WISHENKA-29):
+  защита тайны сюрприза и live-проверки получателей, приватное отслеживание `/birthdays`,
+  UTC-планировщик событий, межпроцессный rate limiter, карантин `uncertain` и CLI оператора.
+- [`doc/dev/gift-receipt.md`](gift-receipt.md) — Получение подарков и раздел «Подаренные»
+  (WISHENKA-23, WISHENKA-24): доменная модель, UI и очередь уведомлений о получении.
+- [`doc/dev/bot-scenarios.md`](bot-scenarios.md) — Точка входа Telegram-бота (`/start`), навигация в
+  Mini App и создание желаний из сообщений чата.
 - [`doc/dev/reservations.md`](reservations.md) — Домен бронирования подарков:
   жизненный цикл броней (`ACTIVE`, `PURCHASED`, `CANCELLED`). Приход
   добавляет полученные штуки и оставляет обещание открытым: статуса

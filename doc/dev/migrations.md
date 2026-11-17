@@ -39,12 +39,22 @@ Revision chain (linear):
    with `received_quantity > 0` and no record; clears `is_archived` on fully received archived
    rows. Idempotent, irreversible. Logs `legacy_receipts_backfilled` and
    `legacy_archived_rows_normalised` (INFO, field `rows`).
-6. `add_notice_outbox` (head) - tables `notification_outbox`, `user_notification_settings`,
+6. `add_notice_outbox` - tables `notification_outbox`, `user_notification_settings`,
    `wl_list_notification_settings` and `idx_notice_outbox_due`.
+7. `add_bot_drafts` - table `bot_drafts` and indexes `ix_bot_drafts_owner`, `ix_bot_drafts_expiry`
+   (see [bot-scenarios.md](bot-scenarios.md)).
+8. `add_bot_capture_order` - table `bot_capture_order` (see [bot-scenarios.md](bot-scenarios.md)).
+9. `add_birthday_reminders` - tables `bot_destinations`, `birthday_entries`, `birthday_input`,
+   `reminder_outbox`, `notice_rate_slots`, `notice_scheduler_cursors` and indexes
+   `idx_notice_rate_second`, `idx_reminders_due` (see [notifications.md](notifications.md)).
+10. `add_notice_uncertain` (head) - adds `requires_membership` to `reminder_outbox`, rebuilds
+    `notification_outbox` with `status = 'uncertain'`, `claim_token`, and `requires_membership`,
+    and creates `notice_receipt_keys` (see [notifications.md](notifications.md)).
 
-Details of revisions 5 and 6 are in [gift-receipt.md](gift-receipt.md). The legacy-adoption map
-(`_REVISIONS`) still stops at `add_item_order_index`; adoption stamps that revision and
-`upgrade head` then applies revisions 5 and 6.
+Details of revisions 5 and 6 are in [gift-receipt.md](gift-receipt.md), revisions 7 and 8 in
+[bot-scenarios.md](bot-scenarios.md), and revisions 9 and 10 in [notifications.md](notifications.md).
+The legacy-adoption map (`_REVISIONS`) still stops at `add_item_order_index`; adoption stamps that
+revision and `upgrade head` then applies revisions 5 through 10.
 
 `head_revision(database_url=...)` in `migrations.py` returns the head id from the script
 directory without opening a database (the URL only builds the config, default in-memory). Tests
@@ -257,6 +267,10 @@ Current state of the `downgrade()` functions:
 
 | Revision | `downgrade()` |
 | --- | --- |
+| `add_notice_uncertain` | Works: drops `requires_membership` from `reminder_outbox`, drops `notice_receipt_keys`, and rebuilds `notification_outbox` (mapping `uncertain` rows to `failed`) |
+| `add_birthday_reminders` | Works: drops `notice_scheduler_cursors`, `notice_rate_slots`, `reminder_outbox`, `birthday_input`, `birthday_entries`, and `bot_destinations` |
+| `add_bot_capture_order` | Works: drops `bot_capture_order` |
+| `add_bot_drafts` | Works: drops `bot_drafts` |
 | `add_notice_outbox` | Works: drops the three notice tables (queued notices are lost) |
 | `add_gift_receipts` | Raises `NotImplementedError` (irreversible: the normalised archived rows cannot be told apart and the receipt history would be lost) |
 | `add_item_order_index` | Works: `DROP INDEX idx_wl_items_order` |

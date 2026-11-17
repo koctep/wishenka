@@ -41,8 +41,9 @@ from tests.receipt_support import (
     seed_wish,
     sql_exec,
 )
-from wishenka.auth.models import AuthenticatedUser
+from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.config import Settings
+from wishenka.users.store import UserStore
 from wishenka.web.app import create_app
 from wishenka.wishlists.service import WishlistService
 from wishenka.wishlists.store import WishlistStore
@@ -60,9 +61,12 @@ _DAN = AuthenticatedUser(telegram_id=606, first_name="Dan", auth_method="session
 class _Env:
     """A migrated store with one list and one wish on a file database."""
 
-    def __init__(self, store: WishlistStore, path: Path) -> None:
+    def __init__(
+        self, store: WishlistStore, path: Path, *, verify_destinations: bool = False
+    ) -> None:
         self.store = store
         self.db = path
+        self.verify_destinations = verify_destinations
         self.settings = Settings(database_url=f"sqlite+aiosqlite:///{path}", secret_key="notice")
         self.wishlist_id = 0
         self.item_id = 0
@@ -74,6 +78,25 @@ class _Env:
         title: str = "Kettle",
         list_title: str = "Alice Birthday",
     ) -> None:
+        if self.verify_destinations:
+            users = UserStore(self.settings.database_url)
+            try:
+                for user, _ in promises:
+                    profile = await users.upsert_user(
+                        TelegramUser(
+                            id=user.telegram_id, first_name=user.first_name, language_code="ru"
+                        )
+                    )
+                    from sqlalchemy import text
+
+                    async with users.engine.begin() as conn:
+                        await conn.execute(
+                            text("INSERT OR REPLACE INTO bot_destinations VALUES (:id,:chat,1)"),
+                            {"id": profile.id, "chat": user.telegram_id},
+                        )
+            finally:
+                await users.engine.dispose()
+
         async def setup(service: WishlistService) -> tuple[int, int]:
             wishlist_id, item_id = await seed_wish(
                 service, quantity=quantity, title=title, list_title=list_title
@@ -144,7 +167,7 @@ def _base() -> int:
 async def _store_env(tmp_path: Path) -> AsyncIterator[_Env]:
     path = tmp_path / "notices.db"
     async with open_store(path) as store:
-        yield _Env(store, path)
+        yield _Env(store, path, verify_destinations=True)
 
 
 async def test_producer_rules(tmp_path: Path) -> None:
@@ -220,6 +243,8 @@ async def test_settings_gate_matrix(tmp_path: Path) -> None:
             10,
             ((GIFTER, 1), (OTHER_GIFTER, 1), (THIRD_GIFTER, 1), (_DAN, 1)),
         )
+        # Isolate receipt delivery from reservation-change events produced during setup.
+        sql_exec(env.db, "DELETE FROM reminder_outbox WHERE kind='reservation_changed'")
         env.settings_list(GIFTER_ID, False)
         env.settings_user(GIFTER_ID, True)
         env.settings_list(OTHER_GIFTER_ID, True)
@@ -248,7 +273,10 @@ async def test_settings_gate_matrix(tmp_path: Path) -> None:
         assert [r["status"] for r in env.rows_for(GIFTER_ID)] == ["skipped", "pending"]
 
         sender = FakeNoticeSender()
-        await env.worker(sender).run_once(_base())
+        now = _base()
+        worker = env.worker(sender)
+        await worker.run_once(now)
+        await worker.run_once(now + 1)
         assert sorted(chat for chat, _text in sender.calls) == sorted(
             [OTHER_GIFTER_ID, OTHER_GIFTER_ID, 606, 606, GIFTER_ID, THIRD_GIFTER_ID]
         )
@@ -334,7 +362,7 @@ async def test_rejected_fails_at_once_and_error_class_is_stored(tmp_path: Path) 
 
 
 async def test_at_most_one_extra_send(tmp_path: Path) -> None:
-    """R-6.6: two ambiguous sends fail the row; a third send is never made."""
+    """An ambiguous send is held for explicit operator resolution."""
     async with _store_env(tmp_path) as env:
         await env.seed(5, ((GIFTER, 1),))
         await env.receive(1)
@@ -346,17 +374,19 @@ async def test_at_most_one_extra_send(tmp_path: Path) -> None:
 
         await worker.run_once(now)
         row = env.outbox_one()
-        assert (row["status"], row["ambiguous"], row["next_attempt_at"]) == ("pending", 1, now + 30)
+        assert (row["status"], row["ambiguous"]) == ("uncertain", 1)
         await worker.run_once(now + 30)
-        assert env.outbox_one()["status"] == "failed"
+        assert env.outbox_one()["status"] == "uncertain"
         await worker.run_once(now + 100_000)
-        assert len(sender.calls) == 2
+        assert len(sender.calls) == 1
 
 
 async def test_stale_sending_row_is_settled_not_sent(tmp_path: Path) -> None:
     """R-6.6: a stale claim gets the ambiguous transition first and is not sent in that claim."""
     async with _store_env(tmp_path) as env:
         await env.seed(10, ((GIFTER, 1), (OTHER_GIFTER, 1), (THIRD_GIFTER, 1)))
+        # Isolate receipt delivery from reservation-change events produced during setup.
+        sql_exec(env.db, "DELETE FROM reminder_outbox WHERE kind='reservation_changed'")
         await env.receive(1)
         lease = int(attr_of(env.settings, "receipt_notice_claim_lease_seconds"))
         now = _base()
@@ -371,7 +401,7 @@ async def test_stale_sending_row_is_settled_not_sent(tmp_path: Path) -> None:
             )
 
         make_stale(GIFTER_ID, ambiguous=0, attempts=1)
-        make_stale(OTHER_GIFTER_ID, ambiguous=1, attempts=2)
+        make_stale(OTHER_GIFTER_ID, ambiguous=0, attempts=2)
         make_stale(THIRD_GIFTER_ID, ambiguous=0, attempts=5)
         sender = FakeNoticeSender([send_result("ambiguous")])
         worker = env.worker(sender)
@@ -380,17 +410,16 @@ async def test_stale_sending_row_is_settled_not_sent(tmp_path: Path) -> None:
 
         assert sender.calls == []
         first = env.rows_for(GIFTER_ID)[0]
-        assert (first["status"], first["ambiguous"], first["claimed_at"]) == ("pending", 1, None)
-        assert first["next_attempt_at"] == now + 30
+        assert (first["status"], first["ambiguous"], first["claimed_at"]) == ("uncertain", 1, None)
         second = env.rows_for(OTHER_GIFTER_ID)[0]
-        assert (second["status"], second["last_error_class"]) == ("failed", "StaleClaim")
-        assert env.rows_for(THIRD_GIFTER_ID)[0]["status"] == "failed"
+        assert (second["status"], second["last_error_class"]) == ("uncertain", "StaleClaim")
+        assert env.rows_for(THIRD_GIFTER_ID)[0]["status"] == "uncertain"
 
         await worker.run_once(now + 30)
-        assert [chat for chat, _text in sender.calls] == [GIFTER_ID]
-        assert env.rows_for(GIFTER_ID)[0]["status"] == "failed"
+        assert sender.calls == []
+        assert env.rows_for(GIFTER_ID)[0]["status"] == "uncertain"
         await worker.run_once(now + 100_000)
-        assert len(sender.calls) == 1
+        assert len(sender.calls) == 0
 
 
 async def test_second_death_after_reclaim_fails_without_third_send(tmp_path: Path) -> None:
@@ -408,7 +437,11 @@ async def test_second_death_after_reclaim_fails_without_third_send(tmp_path: Pat
         sender = FakeNoticeSender()
         worker = env.worker(sender)
         await worker.run_once(now)
-        assert env.outbox_one()["status"] == "pending"
+        assert env.outbox_one()["status"] == "uncertain"
+
+        from wishenka.notices.operator import resolve
+
+        assert await resolve(env.store, "receipt", env.outbox_one()["id"], "retry", now + 30)
 
         sql_exec(
             env.db,
@@ -418,7 +451,7 @@ async def test_second_death_after_reclaim_fails_without_third_send(tmp_path: Pat
         await worker.run_once(now + 30 + lease + 1)
 
         row = env.outbox_one()
-        assert (row["status"], row["last_error_class"]) == ("failed", "StaleClaim")
+        assert (row["status"], row["last_error_class"]) == ("uncertain", "StaleClaim")
         assert sender.calls == []
 
 
@@ -451,14 +484,14 @@ async def test_late_settle_write_is_ignored(
             await worker_b.run_once(later)
             assert sender_b.calls == []
             await worker_b.run_once(later + 30)
-            assert [chat for chat, _text in sender_b.calls] == [GIFTER_ID]
-            assert env.outbox_one()["status"] == "sent"
+            assert sender_b.calls == []
+            assert env.outbox_one()["status"] == "uncertain"
         finally:
             gate.set()
             await asyncio.wait_for(task_a, timeout=20)
 
         row = env.outbox_one()
-        assert (row["status"], row["last_error_class"]) == ("sent", None)
+        assert (row["status"], row["last_error_class"]) == ("uncertain", "StaleClaim")
         events = [getattr(r, "event", "") for r in caplog.records]
         assert "receipt_notice_late_write_ignored" in events
 
@@ -570,7 +603,7 @@ async def test_send_timeout_is_ambiguous(tmp_path: Path) -> None:
 
         row = env.outbox_one()
         assert (row["status"], row["ambiguous"], row["last_error_class"]) == (
-            "pending",
+            "uncertain",
             1,
             "TimeoutError",
         )
@@ -683,7 +716,7 @@ def test_no_token_no_worker_and_lifespan(tmp_path: Path, caplog: pytest.LogCaptu
 
 
 def test_settings_storage_only(tmp_path: Path) -> None:
-    """R-6.7, DoD 8: both settings tables exist, no route and no production writer for them."""
+    """Receipt preferences remain storage-only; bot confirmations have an explicit opt-in."""
     with app_env(tmp_path) as (_client, _sessions, app):
         db = str(app.state.settings.database_url).removeprefix("sqlite+aiosqlite:///")
         require_table(db, "user_notification_settings")
@@ -704,4 +737,4 @@ def test_settings_storage_only(tmp_path: Path) -> None:
         for path in root.rglob("*.py")
         if "alembic" not in path.parts and writer.search(path.read_text(encoding="utf-8"))
     ]
-    assert offenders == []
+    assert offenders == ["bot/entry.py"]

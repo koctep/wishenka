@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from wishenka.currency import DEFAULT_CURRENCY
 from wishenka.items.models import ItemPriority
+from wishenka.notices.events import EventProducer
 from wishenka.notices.models import (
     EVENT_GIFT_RECEIVED,
     SKIP_SETTING_LIST,
@@ -895,15 +896,37 @@ class WishlistStore:
             receipt.id = int(result.lastrowid)
         flushed: list[FlushedNotice] = []
         now = datetime.now(UTC)
+        producer = EventProducer()
+        for shared_event in service._new_shared_item_events:
+            await producer.record(conn, shared_event, int(now.timestamp()))
         for draft in service._new_notices:
             wishlist_id = service._items[draft.receipt.wish_item_id].wishlist_id
+            is_member = await conn.scalar(
+                text("SELECT 1 FROM wl_members WHERE wishlist_id=:list AND user_id=:user"),
+                {"list": wishlist_id, "user": draft.giver_user_id},
+            )
+            key = await conn.execute(
+                text(
+                    "INSERT OR IGNORE INTO notice_receipt_keys"
+                    "(event_type,receipt_id,giver_user_id) "
+                    "VALUES (:event,:receipt,:giver)"
+                ),
+                {
+                    "event": EVENT_GIFT_RECEIVED,
+                    "receipt": draft.receipt.id,
+                    "giver": draft.giver_user_id,
+                },
+            )
+            if not key.rowcount:
+                continue
             result = await conn.execute(
                 text(
                     "INSERT INTO notification_outbox (event_type, receipt_id, wishlist_id, "
                     "wish_item_id, giver_user_id, status, skip_reason, next_attempt_at, "
-                    "created_at, updated_at) VALUES (:event_type, :receipt_id, :wishlist_id, "
+                    "created_at, updated_at, requires_membership) "
+                    "VALUES (:event_type, :receipt_id, :wishlist_id, "
                     ":wish_item_id, :giver_user_id, :status, :skip_reason, :next_attempt_at, "
-                    ":now, :now)"
+                    ":now, :now, :requires_membership)"
                 ),
                 {
                     "event_type": EVENT_GIFT_RECEIVED,
@@ -915,6 +938,7 @@ class WishlistStore:
                     "skip_reason": draft.skip_reason,
                     "next_attempt_at": int(now.timestamp()),
                     "now": _format_dt(now),
+                    "requires_membership": int(bool(is_member)),
                 },
             )
             gate = (

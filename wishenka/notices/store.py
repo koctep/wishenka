@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+import secrets
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from sqlalchemy import text
@@ -20,6 +21,7 @@ from wishenka.notices.models import (
     STATUS_SENT,
     STATUS_SKIPPED,
 )
+from wishenka.notices.rate import block_until, reserve_permit
 from wishenka.wishlists.store import WishlistStore
 
 logger = logging.getLogger("wishenka.wishlists.notices")
@@ -29,6 +31,7 @@ STALE_CLAIM_ERROR = "StaleClaim"
 _EVENT_MESSAGES = {
     "receipt_notice_retry_scheduled": "Notice queue row retry scheduled",
     "receipt_notice_failed_terminal": "Notice queue row failed for good",
+    "receipt_notice_uncertain": "Notice queue row delivery uncertain",
 }
 _Event = tuple[str, int, int]
 
@@ -49,7 +52,7 @@ class ClaimedNotice:
     """A row handed to the worker for sending.
 
     ``attempt`` is the attempt number this claim represents, ``ambiguous`` is the flag before
-    the claim, ``claimed_at`` is the token the guarded settle writes must match.
+    the claim, and ``claim_token`` fences every settlement.
     """
 
     outbox_id: int
@@ -59,6 +62,8 @@ class ClaimedNotice:
     claimed_at: int
     wish_title: str
     list_title: str
+    language: str = "ru"
+    claim_token: str = ""
 
 
 def _iso(epoch: int) -> str:
@@ -75,6 +80,8 @@ class NoticeStore:
         self._max_attempts = settings.receipt_notice_max_attempts
         self._backoff_base = settings.receipt_notice_backoff_base_seconds
         self._backoff_max = settings.receipt_notice_backoff_max_seconds
+        self.global_limit = settings.notice_global_per_second
+        self.chat_interval = settings.notice_chat_interval_seconds
 
     def backoff_seconds(self, attempts: int) -> int:
         """Delay after the ``attempts``-th failed attempt: ``min(base * 2**(n-1), max)``."""
@@ -95,12 +102,27 @@ class NoticeStore:
             params = {"now": now, "stale_before": now - self._lease, "limit": CLAIM_BATCH_LIMIT}
             rows = (await conn.execute(_DUE_SQL, params)).mappings().all()
             for row in rows:
-                if row["list_status"] in (None, "deleted") or row["wish_title"] is None:
-                    await self._skip_gone(conn, row["id"], now)
-                elif row["status"] == STATUS_SENDING:
+                if row["status"] == STATUS_SENDING:
                     events.append(await self._settle_stale(conn, row, now))
+                elif row["list_status"] in (None, "deleted") or row["wish_title"] is None:
+                    await self._skip_gone(conn, row["id"], now)
                 else:
-                    return await self._claim(conn, row, now)
+                    delivery = await self._eligible(conn, int(row["id"]))
+                    if delivery is None:
+                        await self._skip_gone(conn, row["id"], now)
+                        continue
+                    if not await reserve_permit(
+                        conn, delivery[0], now, self.global_limit, self.chat_interval
+                    ):
+                        await conn.execute(
+                            text(
+                                "UPDATE notification_outbox SET next_attempt_at=:next "
+                                "WHERE id=:id AND status='pending'"
+                            ),
+                            {"next": now + 1, "id": row["id"]},
+                        )
+                        continue
+                    return await self._claim(conn, row, now, delivery)
             return None
 
         claimed = await self._store.transaction(work)
@@ -115,6 +137,36 @@ class NoticeStore:
         """Mark the claimed row ``sent``; ``False`` when the claim was lost (late write)."""
         return await self._settle(claim, now, STATUS_SENT, None)
 
+    async def uncertain(self, claim: ClaimedNotice, now: int, error_class: str | None) -> bool:
+        """Record a send whose external outcome cannot be established."""
+        return await self._settle(claim, now, "uncertain", error_class, ambiguous=True)
+
+    async def refresh_claim(self, claim: ClaimedNotice) -> ClaimedNotice | None:
+        """Recheck consent and refresh authorized text immediately before delivery."""
+
+        async def work(conn: AsyncConnection) -> ClaimedNotice | None:
+            owned = await conn.scalar(
+                text(
+                    "SELECT 1 FROM notification_outbox WHERE id=:id AND status='sending' "
+                    "AND claim_token=:token"
+                ),
+                {"id": claim.outbox_id, "token": claim.claim_token},
+            )
+            if not owned:
+                return None
+            delivery = await self._eligible(conn, claim.outbox_id)
+            if not delivery or delivery[0] != claim.giver_user_id:
+                return None
+            return replace(
+                claim, language=delivery[1], wish_title=delivery[2], list_title=delivery[3]
+            )
+
+        return await self._store.transaction(work)
+
+    async def skip_claim(self, claim: ClaimedNotice, now: int) -> bool:
+        """Fence and skip a claim whose consent or access has changed."""
+        return await self._settle(claim, now, STATUS_SKIPPED, None)
+
     async def fail(
         self,
         claim: ClaimedNotice,
@@ -122,12 +174,20 @@ class NoticeStore:
         error_class: str | None,
         *,
         ambiguous: bool = False,
+        retry_after: float | None = None,
     ) -> bool:
         """Mark the claimed row ``failed`` (final); ``False`` when the claim was lost.
 
         ``ambiguous`` stores the flag of an unconfirmed send so the gauge counts the row.
         """
-        return await self._settle(claim, now, STATUS_FAILED, error_class, ambiguous=ambiguous)
+        return await self._settle(
+            claim,
+            now,
+            STATUS_FAILED,
+            error_class,
+            ambiguous=ambiguous,
+            throttle_until=now + math.ceil(retry_after) if retry_after else None,
+        )
 
     async def reschedule(
         self,
@@ -145,7 +205,13 @@ class NoticeStore:
         """
         delay = max(self.backoff_seconds(claim.attempt), math.ceil(retry_after or 0))
         return await self._settle(
-            claim, now, STATUS_PENDING, error_class, next_at=now + delay, ambiguous=ambiguous
+            claim,
+            now,
+            STATUS_PENDING,
+            error_class,
+            next_at=now + delay,
+            ambiguous=ambiguous,
+            throttle_until=now + math.ceil(retry_after) if retry_after else None,
         )
 
     async def _settle(
@@ -157,6 +223,7 @@ class NoticeStore:
         *,
         next_at: int | None = None,
         ambiguous: bool = False,
+        throttle_until: int | None = None,
     ) -> bool:
         """One guarded write: it changes the row only while this claim still owns it."""
 
@@ -164,10 +231,11 @@ class NoticeStore:
             result = await conn.execute(
                 text(
                     "UPDATE notification_outbox SET status = :status, claimed_at = NULL, "
+                    "claim_token = NULL, "
                     "next_attempt_at = COALESCE(:next_at, next_attempt_at), "
                     "ambiguous = CASE WHEN :ambiguous THEN 1 ELSE ambiguous END, "
                     "last_error_class = :error, updated_at = :updated "
-                    "WHERE id = :id AND status = 'sending' AND claimed_at = :claimed_at"
+                    "WHERE id = :id AND status = 'sending' AND claim_token = :token"
                 ),
                 {
                     "status": status,
@@ -176,9 +244,16 @@ class NoticeStore:
                     "error": error_class,
                     "updated": _iso(now),
                     "id": claim.outbox_id,
-                    "claimed_at": claim.claimed_at,
+                    "token": claim.claim_token,
                 },
             )
+            if result.rowcount and error_class in ("TelegramForbiddenError", "TelegramNotFound"):
+                await conn.execute(
+                    text("UPDATE bot_destinations SET active=0 WHERE chat_id=:chat"),
+                    {"chat": claim.giver_user_id},
+                )
+            if result.rowcount and throttle_until is not None:
+                await block_until(conn, throttle_until)
             return bool(result.rowcount)
 
         changed = await self._store.transaction(work)
@@ -207,29 +282,28 @@ class NoticeStore:
     async def _settle_stale(self, conn: AsyncConnection, row: RowMapping, now: int) -> _Event:
         """Apply the ambiguous transition to a dead ``sending`` row; it is never sent now."""
         attempts = int(row["attempts"])
-        terminal = bool(row["ambiguous"]) or attempts >= self._max_attempts
         await conn.execute(
             text(
                 "UPDATE notification_outbox SET status = :status, ambiguous = 1, "
-                "claimed_at = NULL, next_attempt_at = :next_at, last_error_class = :error, "
+                "claimed_at = NULL, claim_token = NULL, next_attempt_at = :next_at, "
+                "last_error_class = :error, "
                 "updated_at = :updated WHERE id = :id"
             ),
             {
-                "status": STATUS_FAILED if terminal else STATUS_PENDING,
+                "status": "uncertain",
                 "next_at": now + self.backoff_seconds(attempts),
                 "error": STALE_CLAIM_ERROR,
                 "updated": _iso(now),
                 "id": row["id"],
             },
         )
-        event = "receipt_notice_failed_terminal" if terminal else "receipt_notice_retry_scheduled"
-        return (event, int(row["id"]), attempts)
+        return ("receipt_notice_uncertain", int(row["id"]), attempts)
 
     async def _skip_gone(self, conn: AsyncConnection, outbox_id: int, now: int) -> None:
         await conn.execute(
             text(
                 "UPDATE notification_outbox SET status = :status, skip_reason = :reason, "
-                "claimed_at = NULL, updated_at = :updated WHERE id = :id"
+                "claimed_at = NULL, claim_token = NULL, updated_at = :updated WHERE id = :id"
             ),
             {
                 "status": STATUS_SKIPPED,
@@ -239,12 +313,66 @@ class NoticeStore:
             },
         )
 
-    async def _claim(self, conn: AsyncConnection, row: RowMapping, now: int) -> ClaimedNotice:
+    async def _eligible(
+        self, conn: AsyncConnection, ident: int
+    ) -> tuple[int, str, str, str] | None:
+        """Fail closed unless current preferences, role and a verified "
+        "destination permit delivery."""
+        if not await conn.scalar(
+            text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'")
+        ):
+            return None
+        row = (
+            (
+                await conn.execute(
+                    text(
+                        "SELECT d.chat_id,u.language_code,i.title AS wish_title,"
+                        "l.title AS list_title FROM notification_outbox o "
+                        "JOIN wl_lists l ON l.id=o.wishlist_id JOIN wl_items i ON "
+                        "i.id=o.wish_item_id "
+                        "JOIN users u ON u.telegram_id=o.giver_user_id "
+                        "JOIN bot_destinations d ON d.user_id=u.id AND d.active=1 "
+                        "WHERE o.id=:id AND l.status != 'deleted' AND i.is_archived=0 "
+                        "AND (i.recipient_user_id IS NULL OR "
+                        "o.giver_user_id != i.recipient_user_id) "
+                        "AND (l.is_collaborative=1 OR o.giver_user_id != l.owner_id) "
+                        "AND COALESCE((SELECT enabled FROM wl_list_notification_settings s "
+                        "WHERE s.user_id=o.giver_user_id AND s.wishlist_id=o.wishlist_id "
+                        "AND s.event_type='gift_received'),(SELECT enabled FROM "
+                        "user_notification_settings s "
+                        "WHERE s.user_id=o.giver_user_id AND s.event_type='gift_received'),1)=1 "
+                        "AND (o.requires_membership=0 OR EXISTS "
+                        "(SELECT 1 FROM wl_members m WHERE m.wishlist_id=o.wishlist_id "
+                        "AND m.user_id=o.giver_user_id)) "
+                        "AND EXISTS (SELECT 1 FROM wl_reservations r WHERE r.wish_item_id=i.id "
+                        "AND r.user_id=o.giver_user_id)"
+                    ),
+                    {"id": ident},
+                )
+            )
+            .mappings()
+            .first()
+        )
+        return (
+            (
+                int(row["chat_id"]),
+                str(row["language_code"] or "ru"),
+                str(row["wish_title"]),
+                str(row["list_title"]),
+            )
+            if row
+            else None
+        )
+
+    async def _claim(
+        self, conn: AsyncConnection, row: RowMapping, now: int, delivery: tuple[int, str, str, str]
+    ) -> ClaimedNotice:
         attempt = int(row["attempts"]) + 1
+        token = secrets.token_urlsafe(18)
         await conn.execute(
             text(
                 "UPDATE notification_outbox SET status = :status, claimed_at = :now, "
-                "attempts = :attempt, updated_at = :updated WHERE id = :id"
+                "claim_token = :token, attempts = :attempt, updated_at = :updated WHERE id = :id"
             ),
             {
                 "status": STATUS_SENDING,
@@ -252,16 +380,19 @@ class NoticeStore:
                 "attempt": attempt,
                 "updated": _iso(now),
                 "id": row["id"],
+                "token": token,
             },
         )
         return ClaimedNotice(
             outbox_id=int(row["id"]),
-            giver_user_id=int(row["giver_user_id"]),
+            giver_user_id=delivery[0],
             attempt=attempt,
             ambiguous=bool(row["ambiguous"]),
             claimed_at=now,
             wish_title=str(row["wish_title"]),
             list_title=str(row["list_title"]),
+            language=delivery[1],
+            claim_token=token,
         )
 
 

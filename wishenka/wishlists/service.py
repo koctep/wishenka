@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.currency import DEFAULT_CURRENCY
 from wishenka.items.models import ItemPriority
+from wishenka.notices.events import SharedEvent
 from wishenka.notices.models import (
     EVENT_GIFT_RECEIVED,
     SKIP_SETTING_LIST,
@@ -271,7 +272,51 @@ class WishlistService:
         # Effects of the current unit of work; the store flushes them with the transaction.
         self._new_receipts: list[ReceiptRecord] = []
         self._new_notices: list[NoticeDraft] = []
+        self._new_shared_item_events: list[SharedEvent] = []
         self._notice_settings: NoticeSettings = NoticeSettings()
+
+    # Reservation mutations affect only the actor's own reservation. Notifying another
+    # giver would disclose that person's activity by timing; receipt notices have a
+    # separate producer for each genuinely affected reservation holder.
+    def _record_reservation_confirmation(self, item: WishItem, actor_id: int) -> None:
+        """Queue only explicitly requested confirmations of the actor's own action."""
+        wl = item.wishlist
+        if wl is None or WishlistAccessPolicy.is_recipient_id(actor_id, item):
+            return
+        self._new_shared_item_events.append(
+            SharedEvent(
+                "reservation_confirmation",
+                wl.id,
+                item.id,
+                secrets.token_hex(16),
+                (actor_id,),
+                frozenset(member.user_id for member in wl.members),
+            )
+        )
+
+    def _record_shared_event(
+        self, kind: str, wishlist: Wishlist, item: WishItem | None, actor_id: int
+    ) -> None:
+        """Snapshot event-time candidates before later changes in the same transaction."""
+        recipients = {wishlist.owner_id, *(member.user_id for member in wishlist.members)}
+        items = wishlist.items if kind == "list_archived" else ([item] if item is not None else [])
+        for wish in items:
+            recipients.update(
+                reservation.user_id
+                for reservation in wish.reservations
+                if reservation.status in (ReservationStatus.ACTIVE, ReservationStatus.PURCHASED)
+            )
+        recipients.discard(actor_id)
+        self._new_shared_item_events.append(
+            SharedEvent(
+                kind,
+                wishlist.id,
+                item.id if item else None,
+                secrets.token_hex(16),
+                tuple(sorted(recipients)),
+                frozenset(member.user_id for member in wishlist.members),
+            )
+        )
 
     def _notice_gate(
         self, user_id: int, wishlist_id: int, event_type: str
@@ -578,6 +623,8 @@ class WishlistService:
 
         existing = next((m for m in wl.members if m.user_id == user_id), None)
         if existing is not None:
+            if existing.role != role:
+                self._record_shared_event("membership_changed", wl, None, actor.telegram_id)
             existing.role = role
             logger.info(
                 "Member %s role updated to %s in wishlist %s by actor %s",
@@ -604,6 +651,7 @@ class WishlistService:
             wishlist=wl,
         )
         wl.members.append(member)
+        self._record_shared_event("membership_changed", wl, None, actor.telegram_id)
         wl.is_collaborative = len(wl.members) > 0
         logger.info(
             "Member %s role assigned as %s in wishlist %s by actor %s",
@@ -647,6 +695,8 @@ class WishlistService:
             )
             raise PermissionDeniedError("Actor cannot remove this member")
 
+        if any(m.user_id == user_id for m in wl.members):
+            self._record_shared_event("membership_changed", wl, None, actor.telegram_id)
         wl.members = [m for m in wl.members if m.user_id != user_id]
         wl.is_collaborative = len(wl.members) > 0
         logger.info(
@@ -711,6 +761,14 @@ class WishlistService:
             )
             raise PermissionDeniedError("Actor cannot edit wishlist settings")
 
+        changed = any(
+            (
+                title is not None and title != wl.title,
+                description is not None and description != wl.description,
+                event_title is not None and event_title != wl.event_title,
+                event_date is not None and event_date != wl.event_date,
+            )
+        )
         if title is not None:
             wl.title = title
         if description is not None:
@@ -719,6 +777,8 @@ class WishlistService:
             wl.event_title = event_title
         if event_date is not None:
             wl.event_date = event_date
+        if changed:
+            self._record_shared_event("list_updated", wl, None, actor.telegram_id)
         wl.updated_at = datetime.now(UTC)
         logger.info(
             "Wishlist %s settings updated by actor %s",
@@ -757,6 +817,7 @@ class WishlistService:
 
         old_status = wl.status.value
         wl.status = WishlistStatus.ARCHIVED
+        self._record_shared_event("list_archived", wl, None, actor.telegram_id)
         wl.updated_at = datetime.now(UTC)
         logger.info(
             "Wishlist %s transitioned from %s to %s by actor %s",
@@ -798,6 +859,8 @@ class WishlistService:
 
         old_status = wl.status.value
         wl.status = WishlistStatus.ACTIVE
+        if old_status != WishlistStatus.ACTIVE.value:
+            self._record_shared_event("list_restored", wl, None, actor.telegram_id)
         wl.updated_at = datetime.now(UTC)
         logger.info(
             "Wishlist %s transitioned from %s to %s by actor %s",
@@ -1006,6 +1069,7 @@ class WishlistService:
         )
         wl.items.append(item)
         self._items[item.id] = item
+        self._record_shared_event("item_created", wl, item, actor.telegram_id)
         has_recip = recipient_user_id is not None or bool(recipient_name and recipient_name.strip())
         logger.info(
             "Item %s added to wishlist %s by actor %s",
@@ -1057,6 +1121,19 @@ class WishlistService:
                 raise ItemNotFoundError(f"Item {item_id} not found")
 
             item = self._items[item_id]
+            before_update = (
+                item.title,
+                item.description,
+                item.link,
+                item.image_url,
+                item.price,
+                item.currency,
+                item.quantity,
+                item.priority,
+                item.category,
+                item.recipient_user_id,
+                item.recipient_name,
+            )
             if wishlist_id is not None and item.wishlist_id != wishlist_id:
                 raise ItemNotFoundError(f"Item {item_id} not found in wishlist {wishlist_id}")
 
@@ -1179,6 +1256,21 @@ class WishlistService:
                 updated_fields.append("recipient_name")
 
             item.updated_at = datetime.now(UTC)
+            after_update = (
+                item.title,
+                item.description,
+                item.link,
+                item.image_url,
+                item.price,
+                item.currency,
+                item.quantity,
+                item.priority,
+                item.category,
+                item.recipient_user_id,
+                item.recipient_name,
+            )
+            if before_update != after_update and wl is not None:
+                self._record_shared_event("item_updated", wl, item, actor.telegram_id)
             logger.info(
                 "Item %s updated by actor %s (delta=%s, new_qty=%s)",
                 item.id,
@@ -1445,7 +1537,10 @@ class WishlistService:
             wl.warn_on_delete_reserved = warn_on_delete_reserved
             wl.updated_at = datetime.now(UTC)
 
+        was_archived = item.is_archived
         item.is_archived = True
+        if not was_archived:
+            self._record_shared_event("item_archived", wl, item, actor.telegram_id)
         item.updated_at = datetime.now(UTC)
         logger.info(
             "Item %s archived in wishlist %s by actor %s",
@@ -1505,7 +1600,10 @@ class WishlistService:
             self._log_archive_refused(wl.id, item.id, actor)
             raise NothingRemainingError()
 
+        was_archived = item.is_archived
         item.is_archived = False
+        if was_archived:
+            self._record_shared_event("item_restored", wl, item, actor.telegram_id)
         active_orders = [it.display_order for it in wl.items if it.is_active and it.id != item.id]
         item.display_order = max(active_orders, default=-1) + 1
         item.updated_at = datetime.now(UTC)
@@ -1653,6 +1751,7 @@ class WishlistService:
             )
             item.reservations.append(res)
             self._register_reservation(res)
+            self._record_reservation_confirmation(item, gifter_id)
             logger.info(
                 "Reservation %s created for item %s (quantity=%s) by gifter %s",
                 res.id,
@@ -1745,6 +1844,8 @@ class WishlistService:
             self._ensure_reservation_writable(res)
             res.status = ReservationStatus.PURCHASED
             res.updated_at = datetime.now(UTC)
+            if res.wish_item is not None:
+                self._record_reservation_confirmation(res.wish_item, user.telegram_id)
 
         logger.info(
             "Reservation %s marked as PURCHASED by actor %s",
@@ -1825,6 +1926,8 @@ class WishlistService:
             self._ensure_reservation_writable(res)
             res.status = ReservationStatus.ACTIVE
             res.updated_at = datetime.now(UTC)
+            if res.wish_item is not None:
+                self._record_reservation_confirmation(res.wish_item, user.telegram_id)
 
         logger.info(
             "Reservation %s reverted to ACTIVE by actor %s",
@@ -1907,6 +2010,8 @@ class WishlistService:
             self._ensure_reservation_writable(res)
             res.status = ReservationStatus.CANCELLED
             res.updated_at = datetime.now(UTC)
+            if res.wish_item is not None:
+                self._record_reservation_confirmation(res.wish_item, user.telegram_id)
 
         logger.info(
             "Reservation %s cancelled by actor %s",
@@ -2015,6 +2120,8 @@ class WishlistService:
             old_quantity = res.quantity
             res.quantity = new_quantity
             res.updated_at = datetime.now(UTC)
+            if old_quantity != new_quantity:
+                self._record_reservation_confirmation(item, user.telegram_id)
 
         logger.info(
             "Reservation %s quantity updated to %s by actor %s",
@@ -2309,6 +2416,7 @@ class WishlistService:
         )
         wl.members.append(member)
         wl.is_collaborative = True
+        self._record_shared_event("membership_changed", wl, None, user.telegram_id)
         logger.info(
             "User %s joined wishlist %s via invite token with role %s",
             user.telegram_id,

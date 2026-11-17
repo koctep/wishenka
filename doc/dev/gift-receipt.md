@@ -112,8 +112,10 @@ came.
 
 ### Legacy data and the migrations
 
-Two Alembic revisions, see [migrations.md](migrations.md). The chain is now
-`add_item_order_index` -> `add_gift_receipts` -> `add_notice_outbox` (head).
+Built by `add_gift_receipts` and `add_notice_outbox` and extended by `add_birthday_reminders` and
+`add_notice_uncertain`, see [migrations.md](migrations.md). The chain is now
+`add_item_order_index` -> `add_gift_receipts` -> `add_notice_outbox` -> `add_bot_drafts` ->
+`add_bot_capture_order` -> `add_birthday_reminders` -> `add_notice_uncertain` (head).
 
 - **`add_gift_receipts`.** Creates `wl_receipts` and its index. Back-fills one record per wish
   that has `received_quantity > 0` and no record yet: quantity = `received_quantity`,
@@ -129,6 +131,9 @@ Two Alembic revisions, see [migrations.md](migrations.md). The chain is now
   rows were normalised, and dropping the table would lose the history. Restore from a backup.
 - **`add_notice_outbox`.** Creates `notification_outbox`, `user_notification_settings` and
   `wl_list_notification_settings` (see below). Its downgrade drops the three tables.
+- **`add_notice_uncertain` (head).** Rebuilds `notification_outbox` with `status = 'uncertain'`,
+  `claim_token`, `requires_membership`, and `CHECK(ambiguous=0 OR status NOT IN ('pending','sending'))`,
+  and creates `notice_receipt_keys` (see [notifications.md](notifications.md)).
 - `head_revision(database_url=<in-memory default>)` in `wishlists/migrations.py` returns the
   single head id of the script directory without opening a database; the concurrency test uses
   it instead of a hard-coded name.
@@ -215,46 +220,53 @@ list is archived. Order: newest receipt first (a wish without records falls back
 
 ## Notice path
 
-Delivery of the giver notice is a transactional outbox plus an in-process async worker.
+Delivery of the giver notice is a transactional outbox plus an in-process async worker. Extended in
+[WISHENKA-29](notifications.md) with live eligibility rechecks, verified bot destinations,
+shared rate limiting, `claim_token` fencing, and `uncertain` quarantine for ambiguous sends.
 
 ### Outbox table `notification_outbox`
 
-Created by `add_notice_outbox`. Columns: `id`, `event_type` (`gift_received`), `receipt_id` (FK
+Created by `add_notice_outbox` and updated by `add_notice_uncertain`. Columns: `id`, `event_type`
+(`gift_received`), `receipt_id` (FK
 to `wl_receipts`, cascade), `wishlist_id` (FK, cascade), `wish_item_id` (FK, cascade),
 `giver_user_id`, `status`, `skip_reason`, `attempts` (default 0), `ambiguous` (0 or 1),
 `next_attempt_at` (integer epoch seconds), `claimed_at` (integer epoch seconds, set only while
-`sending`), `last_error_class`, `created_at`, `updated_at` (ISO text). Unique key
-`(event_type, receipt_id, giver_user_id)`, index `idx_notice_outbox_due (status,
+`sending`), `last_error_class`, `created_at`, `updated_at` (ISO text), `claim_token` (random token
+fencing `sending` rows), and `requires_membership` (0 or 1). Unique key
+`(event_type, receipt_id, giver_user_id)`, also mirrored in `notice_receipt_keys` so purging
+terminal rows does not allow duplicate receipt notices, index `idx_notice_outbox_due (status,
 next_attempt_at)`. There is no payload, text or quantity column: the text is rendered at send
 time from the current titles.
 
 | `status` | Meaning |
 | -------- | ------- |
 | `pending` | waiting for `next_attempt_at` |
-| `sending` | claimed by a worker; `claimed_at` is the claim token |
+| `sending` | claimed by a worker; fenced by `claim_token` |
 | `sent` | delivered (terminal) |
 | `failed` | gave up (terminal), `last_error_class` holds the class name |
 | `skipped` | terminal; `skip_reason` is `setting_list`, `setting_user` or `target_gone` |
+| `uncertain` | quarantined ambiguous send or expired lease; requires operator resolution via `wishenka.notices.operator` |
 
 `ambiguous = 1` marks a send whose outcome is unknown (a timeout, a 5xx, a network or unexpected
-error, or a dead claim). It is never cleared.
+error, or a dead claim) and places the row in `status = 'uncertain'` (`CHECK(ambiguous=0 OR status
+NOT IN ('pending','sending'))`).
 
 ### Producer (inside the receipt transaction)
 
 `WishlistService._draft_receipt_notices`: one notice per distinct giver with an `ACTIVE` or
 `PURCHASED` reservation on the wish, in first-reservation order, excluding anyone who is the
 recipient of that wish (`is_recipient_id`). It is one notice per giver per act, not per promise.
-The giver has no more than one row per receipt (the unique key). Because a receipt id is new in
-its own transaction, a key hit does not happen in practice. The rows are inserted by
-`_flush_receipt_effects` with `next_attempt_at = now`.
+The giver has no more than one row per receipt (`notice_receipt_keys` and the unique key). The rows
+are inserted by `_flush_receipt_effects` with `next_attempt_at = now` and `requires_membership = 1`
+when the giver is currently a wishlist member.
 
-The settings gate is evaluated by the producer, never by the worker
-(`WishlistService._notice_gate`), in this order: the list-level row
+The settings gate is evaluated by the producer (`WishlistService._notice_gate`) and rechecked live
+by the worker (`NoticeStore._eligible`), in this order: the list-level row
 (`wl_list_notification_settings`: `user_id`, `wishlist_id`, `event_type`, `enabled`), else the
 user-level row (`user_notification_settings`: `user_id`, `event_type`, `enabled`), else default
 on. A disabled giver gets a `skipped` row (kept for audit)
-with `skip_reason` `setting_list` or `setting_user`. No production code writes the settings tables
-yet (WISHENKA-34); tests do.
+with `skip_reason` `setting_list` or `setting_user`. No production code writes the `gift_received`
+settings rows yet (WISHENKA-34); tests do.
 
 ### Worker claim protocol
 
@@ -263,42 +275,51 @@ yet (WISHENKA-34); tests do.
 rows whose `next_attempt_at <= now`, and `sending` rows whose `claimed_at <= now - lease`. For each
 row in order:
 
-1. If the list is deleted or missing, or the wish is missing: the row becomes `skipped` with
-   `target_gone` and the loop continues.
-2. If the row is a stale `sending` row (the claim is older than the lease): it is settled first
-   and never sent in the same call. It is marked `ambiguous = 1`, `last_error_class =
-   StaleClaim`, and becomes `failed` when it was already ambiguous or has reached the maximum
-   attempts, otherwise `pending` with the backoff. The loop continues.
-3. Otherwise a `pending` row is claimed: `status = sending`, `claimed_at = now`, `attempts + 1`.
+1. If the row is a stale `sending` row (the claim is older than the lease): it is settled first
+   and never sent in the same call. It is marked `status = 'uncertain'`, `ambiguous = 1`,
+   `last_error_class = StaleClaim`, `claimed_at = NULL`, `claim_token = NULL`, and the loop
+   continues.
+2. If the list is deleted or missing, the wish is missing, or `NoticeStore._eligible` fails (wish
+   archived, giver became recipient, setting disabled, membership required and revoked, reservation
+   removed, or no active `bot_destinations` entry): the row becomes `skipped` with `target_gone`
+   and the loop continues.
+3. If `reserve_permit` (global and per-chat rate limit in `notice_rate_slots`) denies a slot now:
+   `next_attempt_at` is pushed to `now + 1` and the loop continues.
+4. Otherwise a `pending` row is claimed: `status = sending`, `claimed_at = now`,
+   `claim_token = secrets.token_urlsafe(18)`, `attempts + 1`.
 
-The settle writes (`complete`, `fail`, `reschedule`) are one guarded `UPDATE ... WHERE id = ?
-AND status = 'sending' AND claimed_at = <token>`. If the claim was lost the write changes
-nothing and the DEBUG event `receipt_notice_late_write_ignored` is logged.
+Immediately before network send, `NoticeWorker.run_once` calls `NoticeStore.refresh_claim(claim)`
+to re-verify `claim_token`, live eligibility, language, and current titles; if eligibility changed,
+`skip_claim` marks the row `skipped`. The settle writes (`complete`, `uncertain`, `fail`,
+`reschedule`, `skip_claim`) are one guarded `UPDATE ... WHERE id = :id AND status = 'sending' AND
+claim_token = :token`. If the claim was lost the write changes nothing and the DEBUG event
+`receipt_notice_late_write_ignored` is logged.
 
-`NoticeWorker.run_once` drains all due rows, reading the clock afresh for every claim and settle.
-The send is wrapped in `asyncio.wait_for(..., request_timeout + 5)`. The outcome mapping
-(`sender.classify_error`, ordered, subclasses first):
+`NoticeWorker.run_once` drains all due receipt and service/reminder rows, reading the clock afresh
+for every claim and settle. The send is wrapped in `asyncio.wait_for(..., request_timeout + 5)`.
+The outcome mapping (`sender.classify_error`, ordered, subclasses first):
 
 | Outcome | Errors | Effect |
 | ------- | ------ | ------ |
 | `DELIVERED` | no error | `sent` |
-| `REJECTED` | forbidden, bad request, not found, entity too large, migrate to chat | `failed` at once, never retried |
-| `RETRYABLE` | retry after (honoured: delay is the larger of the backoff and `retry_after`), unauthorized | `pending` with backoff |
-| `AMBIGUOUS` | everything else: 5xx, network, timeout, unexpected | first time `pending` with `ambiguous = 1`, second time `failed` |
+| `REJECTED` | forbidden, bad request, not found, entity too large, migrate to chat | `failed` at once (never retried; forbidden/not found also sets `bot_destinations.active = 0`) |
+| `RETRYABLE` | retry after (honoured: delay is the larger of the backoff and `retry_after`, and `block_until` throttles all workers), unauthorized | `pending` with backoff |
+| `AMBIGUOUS` | everything else: 5xx, network, timeout, unexpected | `uncertain` with `ambiguous = 1` (never automatically retried) |
 
 An attempt number at the maximum also ends in `failed`. Backoff after the n-th failed attempt is
-`min(base * 2**(n - 1), max)` seconds (defaults: 30, 60, 120, 240 after attempts 1 to 4; the fifth
-failure is terminal). The text is plain (no parse mode): "Желание «<wish>» из списка «<list>»
-отмечено как полученное." plus a fixed line inviting the giver to review the promise, with each
-title cut at 100 characters. No quantity, no other giver, no hint of excess.
+`min(base * 2**(n - 1), max)` seconds (defaults: 30, 60, 120, 240 after attempts 1 to 4, capped at
+3600 s; the fifth failure is terminal). The text is plain (no parse mode), rendered in English for
+`en*` language codes and Russian otherwise, with each title cut at 100 characters. No quantity, no
+other giver, no hint of excess.
 
 ### Delivery guarantee
 
-Delivery is at-least-once. A duplicate is possible when a process dies or is cancelled after
-Telegram accepted the message and before the row is marked `sent`: the row stays `sending`, is
-reclaimed after the lease as `ambiguous`, and is resent once. The `ambiguous` flag bounds this to
-one possible duplicate notice per giver per act; a second unconfirmed outcome ends in `failed`.
-A failed or lost delivery never fails or rolls back the receipt. Several acts give several notices.
+External delivery cannot be promised as exactly-once because Telegram may accept a request before
+the HTTP response is lost. When a send times out, fails ambiguously, or a worker dies while a row
+is `sending`, the row transitions to `status = 'uncertain'` and is held for explicit operator
+resolution (`python -m wishenka.notices.operator`) rather than being automatically resent or
+reported as delivered. See [Service notifications and reminders](notifications.md) for operator
+commands. A failed or uncertain delivery never fails or rolls back the receipt.
 
 ### Worker and lifespan
 
@@ -625,11 +646,14 @@ case with the prefix `WISHENKA_`. Out-of-range values fail at startup.
 | `receipt_notice_poll_interval_seconds` | `5.0` | `> 0`; must not exceed the window | Worker poll interval |
 | `receipt_notice_max_attempts` | `5` | `1 <= n <= 20` | Maximum attempts per row |
 | `receipt_notice_backoff_base_seconds` | `30` | `>= 1` | First retry delay |
-| `receipt_notice_backoff_max_seconds` | `1800` | `>=` the backoff base | Retry delay cap |
+| `receipt_notice_backoff_max_seconds` | `3600` | `>=` the backoff base | Retry delay cap |
 | `receipt_notice_request_timeout_seconds` | `30.0` | `> 0` | Telegram HTTP timeout; the worker waits this plus 5 s |
 | `receipt_notice_claim_lease_seconds` | `300` | `>=` request timeout + 30 | Age after which a `sending` row counts as dead |
 | `receipt_notice_summary_window_seconds` | `300` | `>= 60` | Fixed wall-clock window of the INFO summary |
 | `receipt_notice_retention_days` | `30` | `>= 1` | Age after which finished rows are purged |
+| `notice_global_per_second` | `20` | `1 <= n <= 30` | Global send limit per second across workers |
+| `notice_chat_interval_seconds` | `1` | `>= 1` | Per-chat minimum send interval in seconds |
+| `notice_reminder_lead_days` | `(7,)` | positive ints | Occasion reminder lead days in UTC |
 
 The cross-field rules live in `Settings._check_receipt_notice_limits` (backoff max, lease,
 poll vs window). Module constants that are not settings: `CLAIM_BATCH_LIMIT = 50`,
@@ -658,13 +682,14 @@ Every record sets `extra={"event": ...}`. The notice path correlates by `outbox_
 | `receipt_notice_worker_started`, `receipt_notice_worker_stopped` | INFO | `wishenka.wishlists.notices` | none |
 | `receipt_notice_worker_disabled` | INFO | `wishenka.wishlists.notices` | `reason` |
 | `receipt_notice_worker_error` | ERROR | `wishenka.wishlists.notices` | `error_class` |
-| `receipt_notice_window_summary` | INFO | `wishenka.wishlists.notices` | `window_seconds`, `sent`, `retried`, `failed_terminal` |
+| `receipt_notice_window_summary` | INFO | `wishenka.wishlists.notices` | `window_seconds`, `sent`, `retried`, `failed_terminal`, `uncertain` |
+| `service_delivery_window_summary` | INFO | `wishenka.wishlists.notices` | `window_seconds`, `sent`, `retried`, `failed_terminal`, `uncertain`, `skipped` |
 | `receipt_notice_rows_purged` | INFO | `wishenka.wishlists.cleanup` | `rows` |
 | `receipt_notice_purge_failed` | WARNING | `wishenka.wishlists.cleanup` | `error_class` |
 | `receipt_notice_created` | DEBUG | `wishenka.wishlists.notices` | `outbox_id` |
 | `receipt_notice_skipped` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `gate` (`list` or `user`) |
 | `receipt_notice_sent` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `attempt` |
-| `receipt_notice_send_failed`, `receipt_notice_retry_scheduled`, `receipt_notice_failed_terminal` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `attempt`, `error_class` |
+| `receipt_notice_send_failed`, `receipt_notice_retry_scheduled`, `receipt_notice_failed_terminal`, `receipt_notice_uncertain` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `attempt`, `error_class` |
 | `receipt_notice_late_write_ignored` | DEBUG | `wishenka.wishlists.notices` | `outbox_id` |
 | `receipt_notice_batch_processed` | DEBUG | `wishenka.wishlists.notices` | `rows` |
 | `ui_receipt_form_opened`, `ui_receipt_form_refused`, `receipt_recorded_http`, `receipt_refused`, `receipt_inventory_busy` | INFO or WARNING | `wishenka.web.receipts_ui` | ids only, see [Log events of the UI](#log-events-of-the-ui) |
@@ -709,10 +734,14 @@ metric uses a DEBUG event, and labels never use a user, wishlist, item or giver.
   `now - min(created_at)` over `pending` rows; terminal failures are the `failed` count.
 - Sent, retried, failed-terminal totals: the `receipt_notice_window_summary` counts, delayed by up
   to one window.
-- `ambiguous` gauge: `SELECT count(*) FROM notification_outbox WHERE ambiguous = 1`. The flag is
-  never cleared, so a row that was ambiguous and later `sent` still counts. Read it as "rows in the
-  retention window with a possible duplicate or loss"; add `AND status IN ('sent', 'failed')` for
-  possible duplicates and `AND status = 'failed'` for unconfirmed deliveries.
+- `ambiguous` / `uncertain` gauge: `SELECT count(*) FROM notification_outbox WHERE ambiguous = 1`.
+  Unconfirmed sends and expired `sending` leases transition to `status = 'uncertain'` with
+  `ambiguous = 1` (`CHECK(ambiguous=0 OR status NOT IN ('pending','sending'))`). Explicit operator
+  resolution via `operator.resolve(..., action="retry")` resets `ambiguous = 0` when re-queuing a
+  row as `pending`, whereas `action="fail"` moves the row to `status = 'failed'` with
+  `ambiguous = 1`. Query `WHERE status = 'uncertain'` for quarantined unconfirmed deliveries
+  awaiting operator action and `WHERE ambiguous = 1 AND status = 'failed'` for unconfirmed
+  deliveries resolved as failed.
 - Delay proxy: `updated_at - created_at` of `sent` rows (no `sent_at` column, second resolution).
 - Not derivable: totals of send failures by class (`last_error_class` describes the current state
   of a row and is cleared by a later success); a duplicates counter (dropped by design).
@@ -730,13 +759,14 @@ metric uses a DEBUG event, and labels never use a user, wishlist, item or giver.
   that switched the event off; `skipped` with `target_gone` means the list was deleted or the wish
   gone at claim time; `failed` with a Telegram error class (for example a forbidden bot) is a
   rejected send that is never retried. A giver who is the recipient of the wish gets no row.
-- **Rows stuck in `sending`.** A worker died or was cancelled mid-send. They are reclaimed after
+- **Rows stuck in `sending`.** A worker died or was cancelled mid-send. They are settled after
   `receipt_notice_claim_lease_seconds` (default 300) by the next `claim_next` of any worker: marked
-  `ambiguous` with `last_error_class = StaleClaim`, then `pending` (resent once) or `failed`.
-  Nothing to do unless no worker runs at all.
+  `status = 'uncertain'` (`ambiguous = 1`, `last_error_class = 'StaleClaim'`) and quarantined
+  without automatic resend until resolved via `python -m wishenka.notices.operator` (see
+  [notifications.md](notifications.md)).
 - **Queue read by status.** `SELECT status, count(*) FROM notification_outbox GROUP BY status;`
   and for details `SELECT id, status, attempts, ambiguous, next_attempt_at, last_error_class
-  FROM notification_outbox WHERE status IN ('pending', 'sending', 'failed') ORDER BY id`.
+  FROM notification_outbox WHERE status IN ('pending', 'sending', 'uncertain', 'failed') ORDER BY id`.
   `next_attempt_at` is epoch seconds.
 - **ERROR `receipt_notice_worker_error`.** The queue could not be read or settled in a tick (the
   field is the exception class). The worker backs off to 60 s and logs again only after a

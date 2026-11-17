@@ -36,11 +36,14 @@ class Settings(BaseSettings):
     receipt_notice_poll_interval_seconds: float = Field(default=5.0, gt=0)
     receipt_notice_max_attempts: int = Field(default=5, ge=1, le=20)
     receipt_notice_backoff_base_seconds: int = Field(default=30, ge=1)
-    receipt_notice_backoff_max_seconds: int = 1800
+    receipt_notice_backoff_max_seconds: int = 3600
     receipt_notice_request_timeout_seconds: float = Field(default=30.0, gt=0)
     receipt_notice_claim_lease_seconds: int = 300
     receipt_notice_summary_window_seconds: int = Field(default=300, ge=60)
     receipt_notice_retention_days: int = Field(default=30, ge=1)
+    notice_global_per_second: int = Field(default=20, ge=1, le=30)
+    notice_chat_interval_seconds: int = Field(default=1, ge=1)
+    notice_reminder_lead_days: tuple[int, ...] = (7,)
 
     model_config = SettingsConfigDict(
         env_prefix="WISHENKA_",
@@ -64,4 +67,8 @@ class Settings(BaseSettings):
             raise ValueError(
                 "receipt_notice_poll_interval_seconds must not exceed the summary window"
             )
+        if not self.notice_reminder_lead_days or any(
+            day <= 0 for day in self.notice_reminder_lead_days
+        ):
+            raise ValueError("notice_reminder_lead_days must contain positive day values")
         return self
