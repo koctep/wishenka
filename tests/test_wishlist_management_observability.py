@@ -100,6 +100,27 @@ def test_miniapp_shell_requested_log(setup_app: Setup, caplog: pytest.LogCapture
     assert records[0].levelname == "INFO"
 
 
+def test_miniapp_catalog_embedded_debug_log(
+    setup_app: Setup, caplog: pytest.LogCaptureFixture
+) -> None:
+    """GET / must emit structured DEBUG log for miniapp_catalog_embedded with scalar fields."""
+    client, _, _, _, _ = setup_app
+    with caplog.at_level(logging.DEBUG, logger="wishenka.web.miniapp"):
+        response = client.get("/")
+    assert response.status_code == 200
+    records = [
+        r
+        for r in caplog.records
+        if r.name == "wishenka.web.miniapp"
+        and getattr(r, "event", None) == "miniapp_catalog_embedded"
+    ]
+    assert len(records) == 1
+    assert records[0].levelname == "DEBUG"
+    assert getattr(records[0], "locale", None) in {"en", "ru"}
+    assert isinstance(getattr(records[0], "key_count", None), int)
+    assert getattr(records[0], "key_count", 0) > 0
+
+
 def test_wishlist_lifecycle_observability_events(
     setup_app: Setup, caplog: pytest.LogCaptureFixture
 ) -> None:

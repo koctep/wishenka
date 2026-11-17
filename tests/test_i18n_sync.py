@@ -513,8 +513,12 @@ def test_miniapp_switch_immediately_updates_ssr_bot_and_pending_notices(
         home_en = client.get("/")
         assert home_en.status_code == 200
         assert _html_lang(home_en.text) == "en"
-        assert "Loading" in home_en.text
-        assert "Загрузка" not in home_en.text
+        home_soup = BeautifulSoup(home_en.text, "html.parser")
+        status_el = home_soup.find(id="status")
+        assert status_el is not None
+        status_text = status_el.get_text(strip=True)
+        assert "Loading" in status_text
+        assert "Загрузка" not in status_text
 
         reservations_page = client.get("/web/reservations")
         assert reservations_page.status_code == 200

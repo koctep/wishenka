@@ -1,6 +1,6 @@
 """Centralized bilingual localization (RU/EN) for Mini App, Bot, and Notices."""
 
-from wishenka.i18n.catalog import CATALOG, t
+from wishenka.i18n.catalog import CATALOG, miniapp_catalog, t
 from wishenka.i18n.locale import (
     DEFAULT_LOCALE,
     LOCALE_LABELS,
@@ -19,6 +19,7 @@ __all__ = [
     "SUPPORTED_LOCALES",
     "LocaleSource",
     "SupportedLocale",
+    "miniapp_catalog",
     "resolve_accept_language",
     "resolve_telegram_locale",
     "t",

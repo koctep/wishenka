@@ -736,26 +736,56 @@ def test_profile_locale_patch_runs_bot_sync_in_background_tasks(tmp_path: Path) 
 
 @pytest.mark.timeout(10)
 def test_miniapp_js_localizes_home_nav_shell_and_settings_label(tmp_path: Path) -> None:
-    """miniapp.js provides RU and EN labels for Settings and Home nav shell controls."""
+    """GET / supplies centralized RU/EN Mini App catalog and miniapp.js uses t()."""
+    from wishenka.i18n import miniapp_catalog
+
     app = create_app(_make_settings(tmp_path / "miniapp_js.db"))
     with TestClient(app) as client:
+        shell_resp = client.get("/")
+        assert shell_resp.status_code == 200
+        assert '<script id="miniapp-i18n" type="application/json">' in shell_resp.text
+
+        catalog = miniapp_catalog()
+        assert set(catalog.keys()) == {"en", "ru"}
+        assert catalog["ru"]["nav.settings"] == "Настройки"
+        assert catalog["en"]["nav.settings"] == "Settings"
+        assert catalog["ru"]["miniapp.home.title"] == "Вишлисты"
+        assert catalog["en"]["miniapp.home.title"] == "Wishlists"
+        assert catalog["ru"]["miniapp.home.create_wishlist"] == "Создать вишлист"
+        assert catalog["en"]["miniapp.home.create_wishlist"] == "Create wishlist"
+        assert catalog["ru"]["miniapp.home.viewing_history"] == "История просмотров"
+        assert catalog["en"]["miniapp.home.viewing_history"] == "Viewing history"
+        assert catalog["ru"]["miniapp.home.my_wishlists"] == "Мои вишлисты"
+        assert catalog["en"]["miniapp.home.my_wishlists"] == "My wishlists"
+
         resp = client.get("/static/miniapp.js")
         assert resp.status_code == 200
         source = resp.text
+        assert "HOME_I18N" not in source
         for token in (
-            "'Настройки'",
-            "'Settings'",
-            "'Вишлисты'",
-            "'Wishlists'",
-            "'Создать вишлист'",
-            "'Create wishlist'",
-            "'История просмотров'",
-            "'Viewing history'",
-            "'Мои вишлисты'",
-            "'My wishlists'",
+            "miniapp-i18n",
+            "t('nav.settings')",
+            "t('miniapp.home.title')",
+            "t('miniapp.home.create_wishlist')",
+            "t('miniapp.home.viewing_history')",
+            "t('miniapp.home.my_wishlists')",
             "activeLocale()",
         ):
-            assert token in source, f"Missing localized home shell token {token} in miniapp.js"
+            assert token in source, f"Missing centralized i18n token {token} in miniapp.js"
+
+
+@pytest.mark.timeout(10)
+def test_miniapp_catalog_projection_and_json_xss_escaping() -> None:
+    """miniapp_catalog() projects only nav.*/miniapp.* keys with RU/EN parity."""
+    from wishenka.i18n import miniapp_catalog
+
+    projected = miniapp_catalog()
+    assert set(projected.keys()) == {"en", "ru"}
+    assert set(projected["en"].keys()) == set(projected["ru"].keys())
+    assert projected["en"]
+    for locale in ("en", "ru"):
+        for key in projected[locale]:
+            assert key.startswith(("nav.", "miniapp.")), f"Unexpected key {key} in miniapp_catalog"
 
 
 @pytest.mark.timeout(15)

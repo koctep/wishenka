@@ -489,7 +489,7 @@ def test_mini_app_home_sections_and_badges_browser(
             # 2. Assert role badges rendering
             has_owner_badge = bool(re_search(r"владелец|owner", data["badges"]))
             has_collab_badge = bool(
-                re_search(r"соавтор|member|admin|администратор", data["badges"])
+                re_search(r"соавтор|collaborator|member|admin|администратор", data["badges"])
             )
             assert has_owner_badge and has_collab_badge, (
                 f"Missing role badges in Mini App home! Badges: {data['badges']}"

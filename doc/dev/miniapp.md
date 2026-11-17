@@ -65,12 +65,15 @@ wishlists domain service and security middleware to satisfy four primary goals:
 
 - **HTML Shell (`GET /`)**: Defined in
   [`wishenka.web.routes.miniapp`](../../wishenka/web/routes/miniapp.py). Renders an accessible
-  skeleton (`#app`, `#status` live region) configured with `data-bot` and `data-miniapp` attributes.
+  skeleton (`#app`, `#status` live region) configured with `data-bot`, `data-miniapp`, and
+  `data-locale` attributes, and embeds the bilingual `nav.*`/`miniapp.*` catalog in
+  `<script id="miniapp-i18n" type="application/json">` (see [i18n.md](i18n.md)).
   Applies strict Content-Security-Policy (CSP) headers restricting frames to Telegram.
 - **Client Script (`static/miniapp.js`)**: Pure JavaScript application. Parses navigation
-  parameters (`startapp`, hash/query), manages views, and performs API calls with session cookies
-  and CSRF headers. Uses safe DOM manipulation (`textContent`) rather than HTML string interpolation
-  to prevent Cross-Site Scripting (XSS).
+  parameters (`startapp`, hash/query), manages views, localizes all UI screens via `t()`,
+  `activeLocale()`, `roleLabel()`, and `formatDateTime()` backed by `#miniapp-i18n`, and performs
+  API calls with session cookies and CSRF headers. Uses safe DOM manipulation (`textContent`)
+  rather than HTML string interpolation to prevent Cross-Site Scripting (XSS).
 - **Wishlist Page Script (`static/wishlist.js`)**: Second static script, loaded by `base.html` on
   server-rendered wishlist pages (not by the Mini App shell, which loads only `miniapp.js`).
   Implements the card toggle and drag-and-drop reorder. See
