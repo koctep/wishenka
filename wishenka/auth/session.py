@@ -154,3 +154,12 @@ def delete_session_cookie(response: Response, settings: Settings) -> None:
         httponly=True,
         samesite=valid_samesite,  # type: ignore[arg-type]
     )
+
+
+def compute_revocation_subject_hash(telegram_id: int, secret_key: str) -> str:
+    """Compute a non-reversible HMAC-SHA256 subject hash for session revocation."""
+    return hmac.new(
+        secret_key.encode("utf-8"),
+        f"deleted:{telegram_id}".encode(),
+        hashlib.sha256,
+    ).hexdigest()

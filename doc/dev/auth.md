@@ -19,7 +19,7 @@ Because the application runs inside Telegram WebView and serves dynamic interfac
    simultaneously accepting `Authorization: Bearer <token>` headers for REST API clients and tests.
 
 > [!NOTE]
-> **Implemented Baseline & `WISHENKA-33` vs. Planned `WISHENKA-32` Extensions (`WISHENKA-34/35`):** The sections below describe the shipped authentication and `users` baseline plus the implemented `locale` / `locale_source` synchronization (`WISHENKA-33`, see [i18n.md](i18n.md)). Agreed target extensions from `WISHENKA-32` — `TelegramUser.photo_url` extraction (`WISHENKA-34`) and `users.id` liveness plus `deleted_session_revocations` session invalidation (`WISHENKA-35`) — are **not shipped in runtime code yet** and are documented as target contracts in [users.md](users.md) and the targeted notes below.
+> **Implemented Baseline (`WISHENKA-33`, `WISHENKA-35`) vs. Planned `WISHENKA-32` Extension (`WISHENKA-34`):** The sections below describe the shipped authentication and `users` baseline, the implemented `locale` / `locale_source` synchronization (`WISHENKA-33`, see [i18n.md](i18n.md)), and the implemented `users.id` liveness plus `deleted_session_revocations` session invalidation (`WISHENKA-35`). The remaining `WISHENKA-32` extension — `TelegramUser.photo_url` extraction (`WISHENKA-34`) — is **not shipped in runtime code yet** and is documented as a target contract in [users.md](users.md) and the targeted notes below.
 
 ```
 +------------------------------------------------------------------------------------+
@@ -108,14 +108,18 @@ Handles stateless session token issuance, signature verification, and HTTP cooki
   (`telegram_id`, `first_name`, `username`, `user_id`, `iat`, `exp`).
 - `set_session_cookie(response, token, settings)`: Sets the `HttpOnly`, `SameSite=None`, `Secure`
   session cookie on outgoing responses.
-- `delete_session_cookie(response, settings)`: Clears the session cookie on logout.
+- `delete_session_cookie(response, settings)`: Clears the session cookie on logout or account deletion.
+- `compute_revocation_subject_hash(telegram_id, secret_key)`: Computes a non-reversible `HMAC-SHA256` hex digest (`"deleted:{telegram_id}"`) used for `deleted_session_revocations` lookup and pseudonymous `subject_hash_prefix` logging.
 
 ### 4. `wishenka.auth.dependencies`
 FastAPI dependency injection utilities for protecting route handlers and resolving storage:
 - `get_current_user`: Enforces valid authentication. Returns `AuthenticatedUser` containing
   `user_id` and Telegram attributes, or raises `HTTPException(401)`.
 - `get_optional_current_user`: Resolves `AuthenticatedUser` if valid credentials exist, or returns
-  `None` for public/guest requests.
+  `None` for public/guest requests. Enforces session liveness and revocation checks via
+  `_is_session_active` (`users` existence for `user_id` claims, `deleted_session_revocations` for
+  stateless tokens without `user_id`), raising `HTTPException(401)` with
+  `"Session revoked or account deleted"` when rejected.
 - `get_user_store`: Resolves `UserStore` instance from `request.app.state.user_store` with fallback
   to configured database URL.
 - `get_settings`: Resolves `Settings` instance from `request.app.state` or instantiates defaults.
@@ -147,16 +151,17 @@ FastAPI APIRouter mounted at `/api/auth`:
   `auth_method`, `user_id`) of the current caller.
 - `GET /api/auth/csrf`: Issues session-bound CSRF token for browser-initiated mutations.
 
-### Planned Target Contracts (`WISHENKA-32` -> `WISHENKA-33/34/35`)
+### `WISHENKA-32` Extension Contracts (`WISHENKA-33/34/35`)
 
 > [!IMPORTANT]
-> The contracts below are agreed in `WISHENKA-32` and **not yet implemented** in runtime code.
+> Of the `WISHENKA-32` extension contracts below, `WISHENKA-33` (`locale` / `locale_source` sync) and `WISHENKA-35` (session revocation on account deletion) are **implemented** in runtime code; `WISHENKA-34` (`TelegramUser.photo_url` and `avatar_url` sync) is **planned / not yet implemented**.
 
-- **`TelegramUser.photo_url` & Avatar Sync (`WISHENKA-34`)**: `wishenka.auth.models.TelegramUser` adds optional `photo_url` extracted from verified `initData`, accepting `https://` URLs only (Bot API proxy URLs `api.telegram.org/file/bot<TOKEN>/...` are rejected to protect `bot_token`). `UserStore.upsert_user(..., sync_avatar=True)` updates or clears `avatar_url` when `photo_url` is omitted in `initData`, while bot updates pass `sync_avatar=False` so missing `photo_url` on `aiogram.types.User` does not erase an existing avatar.
+- **`TelegramUser.photo_url` & Avatar Sync (`WISHENKA-34`, Planned)**: `wishenka.auth.models.TelegramUser` adds optional `photo_url` extracted from verified `initData`, accepting `https://` URLs only (Bot API proxy URLs `api.telegram.org/file/bot<TOKEN>/...` are rejected to protect `bot_token`). `UserStore.upsert_user(..., sync_avatar=True)` updates or clears `avatar_url` when `photo_url` is omitted in `initData`, while bot updates pass `sync_avatar=False` so missing `photo_url` on `aiogram.types.User` does not erase an existing avatar.
 - **`locale` / `locale_source` Sync (`WISHENKA-33`, Implemented)**: `UserStore.upsert_user` uses atomic SQL `CASE WHEN users.locale_source = 'explicit' THEN users.locale ELSE excluded.locale END` with `'ru'`/`'en'` normalization (`'en'` default fallback). Explicit switching via `PATCH /api/profile/locale` (`UserStore.set_locale`) persists `locale_source = 'explicit'` in SQLite WAL; `locale` is **not** cached inside `SessionClaims` so TMA SSR, Bot `LocaleMiddleware`, and notice workers stay immediately consistent (see [i18n.md](i18n.md)).
-- **Session Revocation on Account Deletion (`WISHENKA-35`)**: Currently `get_optional_current_user` verifies tokens purely in memory. In `WISHENKA-35`, `AccountDeletionService` deletes `users` and writes `(subject_hash, revoked_before, expires_at)` into `deleted_session_revocations` (`subject_hash = HMAC-SHA256(secret_key, f"deleted:{telegram_id}")`) inside a single `BEGIN IMMEDIATE` transaction, and `get_optional_current_user` enforces:
-  - For tokens with `claims.user_id is not None`: `SELECT 1 FROM users WHERE id = :user_id AND telegram_id = :tg_id` (returning `401` if absent; skipped only if the `users` table does not exist in isolated route tests). Because `users.id` uses `AUTOINCREMENT`, immediate re-registration gets a new `users.id` while old tokens on all devices remain permanently invalid.
+- **Session Revocation on Account Deletion (`WISHENKA-35`, Implemented)**: `AccountDeletionService` (`wishenka/wishlists/deletion.py`) deletes `users` and upserts `(subject_hash, revoked_before, expires_at)` into `deleted_session_revocations` (`subject_hash = compute_revocation_subject_hash(telegram_id, settings.secret_key)`) inside a single `BEGIN IMMEDIATE` transaction, and `get_optional_current_user` (`_is_session_active`) enforces:
+  - For tokens with `claims.user_id is not None`: `SELECT 1 FROM users WHERE id = :uid AND telegram_id = :tg_id` (returning `401` if absent; skipped only if the `users` table does not exist in isolated route tests). Because `users.id` uses `AUTOINCREMENT`, immediate re-registration gets a new `users.id` while old tokens on all devices remain permanently invalid.
   - For tokens with `claims.user_id is None`: lookup in `deleted_session_revocations` by `subject_hash`, returning `401` when `claims.iat <= revoked_before`.
+  - Expired revocation markers are purged by `WishlistStore.cleanup_expired_session_revocations` during `run_cleanup_cycle`.
 
 ---
 
@@ -404,8 +409,8 @@ async def auth_telegram(
 - **Backward Compatibility**: `user_id` defaults to `None` in `SessionClaims`, `AuthenticatedUser`,
   and `AuthResponse`. Existing active sessions issued before user persistence continue to work
   seamlessly without breaking.
-- **Target Revocation Linkage (`WISHENKA-35`, planned)**: Once account deletion lands,
-  `get_optional_current_user` will verify `users.id` + `telegram_id` existence (and check
+- **Revocation Linkage (`WISHENKA-35`, Implemented)**: `get_optional_current_user` verifies
+  `users.id` + `telegram_id` existence via `_is_session_active` (and checks
   `deleted_session_revocations` when `claims.user_id is None`) so deleted accounts cannot keep
   using stateless tokens on any device, even after immediate re-registration (`AUTOINCREMENT`).
   See [users.md](users.md) for the full contract.
@@ -516,6 +521,9 @@ Structured logging across authentication and user persistence uses dedicated log
 - **`auth_session_resolved`** (`wishenka.auth`, level `DEBUG`):
   - Emitted when session credentials decode into authenticated user claims.
   - Context fields: `event="auth_session_resolved"`, `telegram_id`, `auth_method`.
+- **`session_rejected_revoked_or_deleted`** (`wishenka.auth`, level `WARNING`):
+  - Emitted when `get_optional_current_user` rejects a token because the user was deleted or the token's `iat` precedes `deleted_session_revocations.revoked_before`.
+  - Context fields: `event="session_rejected_revoked_or_deleted"`, `subject_hash_prefix` (first 12 hex chars of `subject_hash`), `auth_method`.
 
 ### Zero Secret Leakage Guarantees
 
@@ -530,10 +538,7 @@ All authentication and persistence components enforce strict security and privac
   timing side-channel attacks during signature verification.
 - **Guest Request Isolation**: Unauthenticated guest requests to public endpoints do not trigger
   database writes to the `users` table or generate user identity logs.
-- **Planned `WISHENKA-33/34/35` Observability Contract**: Target events for avatar validation
-  (`profile_avatar_rejected`), explicit/auto locale sync, and revoked-session rejection
-  (`session_rejected_revoked_or_deleted` using pseudonymous `subject_hash_prefix` without logging
-  `telegram_id`, PII, tokens, or Bot API file URLs) are specified in [users.md](users.md#observability-and-privacy-contract).
+- **`WISHENKA-33/34/35` Observability Contract**: Revoked-session rejection (`session_rejected_revoked_or_deleted`) is implemented using pseudonymous `subject_hash_prefix` without logging `telegram_id`, PII, or tokens. Additional profile/deletion events and planned avatar validation events (`profile_avatar_rejected`) are specified in [users.md](users.md#observability-and-privacy-contract).
 
 ---
 
@@ -693,3 +698,10 @@ All settings can be configured via environment variables with `WISHENKA_` prefix
 - **Root Cause**: Token was signed with a different `secret_key` or tampered with.
 - **Diagnosis**:
   - Ensure `WISHENKA_SECRET_KEY` is persistent across backend restarts and shared across replicas.
+
+### 8. `401 Session revoked or account deleted`
+- **Root Cause**: The user deleted their account via `POST /api/profile/delete` (`AccountDeletionService`), removing their `users` row and recording a `deleted_session_revocations` marker.
+- **Diagnosis**:
+  - Tokens carrying `user_id` fail the `users` liveness check even if the user immediately re-registers (since `users.id` is `AUTOINCREMENT`).
+  - Tokens without `user_id` fail if `claims.iat <= deleted_session_revocations.revoked_before`.
+  - The client must re-authenticate via `POST /api/auth/telegram` with fresh Telegram `initData` to obtain a new session token.

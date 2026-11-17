@@ -13,6 +13,7 @@ from sqlalchemy import text
 
 from wishenka.auth.dependencies import get_current_user, get_settings, get_user_store
 from wishenka.auth.models import AuthenticatedUser, TelegramUser
+from wishenka.auth.session import delete_session_cookie
 from wishenka.bot.i18n import sync_user_bot_commands
 from wishenka.config import Settings
 from wishenka.i18n import DEFAULT_LOCALE, SupportedLocale, t, validate_locale
@@ -25,6 +26,8 @@ from wishenka.notices.sender import PLACEHOLDER_TOKEN
 from wishenka.users.models import UserRecord
 from wishenka.users.store import UserNotFoundError, UserStore
 from wishenka.web.templates import templates
+from wishenka.wishlists.deletion import AccountDeletionService
+from wishenka.wishlists.store import WishlistStore
 
 router = APIRouter(tags=["profile"])
 logger = logging.getLogger("wishenka.web.profile")
@@ -105,6 +108,14 @@ def _get_preferences_store(request: Request, user_store: UserStore) -> Notificat
     wishlist_store = getattr(request.app.state, "wishlist_store", None)
     engine = wishlist_store.engine if wishlist_store is not None else user_store.engine
     return NotificationPreferencesStore(engine)
+
+
+def _get_wishlist_store(request: Request) -> WishlistStore:
+    store = getattr(request.app.state, "wishlist_store", None)
+    if isinstance(store, WishlistStore):
+        return store
+    settings = getattr(request.app.state, "settings", None) or Settings()
+    return WishlistStore(settings.database_url)
 
 
 def _serialize_birthdate(record: UserRecord | None) -> dict[str, object]:
@@ -453,3 +464,63 @@ async def update_wishlist_notifications(
             detail=t("settings.wishlist_not_found", locale),
         )
     return JSONResponse(content=summary.to_dict())
+
+
+@router.get("/api/profile/deletion-preview")
+async def get_deletion_preview(
+    request: Request,
+    current_user: Annotated[AuthenticatedUser, Depends(get_current_user)],
+) -> JSONResponse:
+    """Return personal account deletion impact summary without exposing others' reservations."""
+    service = AccountDeletionService(_get_wishlist_store(request))
+    preview = await service.preview_account_deletion(current_user.telegram_id)
+    return JSONResponse(
+        content={
+            "personal_lists_count": preview.personal_lists_count,
+            "collaborative_transferred_count": preview.collaborative_transferred_count,
+            "collaborative_deleted_count": preview.collaborative_deleted_count,
+            "reservations_count": preview.reservations_count,
+        }
+    )
+
+
+@router.post("/api/profile/delete")
+async def delete_profile_account(
+    request: Request,
+    current_user: Annotated[AuthenticatedUser, Depends(get_current_user)],
+    locale: LocaleDep,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> JSONResponse:
+    """Permanently delete the authenticated user's account and revoke all sessions."""
+    payload = await _read_json_dict(request, locale)
+    if payload.get("confirm") is not True:
+        logger.warning(
+            "Rejected account deletion without explicit confirmation",
+            extra={
+                "event": "account_deletion_rejected",
+                "reason": "missing_confirmation",
+                "status_code": status.HTTP_422_UNPROCESSABLE_CONTENT,
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=t("settings.delete_confirmation_required", locale),
+        )
+
+    service = AccountDeletionService(_get_wishlist_store(request))
+    result = await service.delete_account(
+        current_user.telegram_id,
+        secret_key=settings.secret_key,
+        session_ttl_seconds=settings.session_ttl_seconds,
+    )
+    response = JSONResponse(
+        content={
+            "already_deleted": result.already_deleted,
+            "deleted_lists": result.deleted_lists,
+            "transferred_lists": result.transferred_lists,
+            "cancelled_reservations": result.cancelled_reservations,
+            "anonymized_items": result.anonymized_items,
+        }
+    )
+    delete_session_cookie(response=response, settings=settings)
+    return response

@@ -1688,5 +1688,36 @@ class WishlistStore:
             )
         return removed
 
+    async def cleanup_expired_session_revocations(self, now: datetime | None = None) -> int:
+        """Delete expired account-deletion session revocation markers."""
+        effective_now = (now or datetime.now(UTC)).astimezone(UTC)
+        now_epoch = int(effective_now.timestamp())
+        async with self.engine.begin() as conn:
+            await conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+            await conn.exec_driver_sql("PRAGMA busy_timeout = 5000")
+            table_exists = await conn.scalar(
+                text(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'deleted_session_revocations'"
+                )
+            )
+            if table_exists is None:
+                return 0
+            result = await conn.execute(
+                text("DELETE FROM deleted_session_revocations WHERE expires_at <= :now_epoch"),
+                {"now_epoch": now_epoch},
+            )
+            removed = int(result.rowcount or 0)
+        if removed > 0:
+            logger.info(
+                "Expired session revocation markers purged: %s",
+                removed,
+                extra={
+                    "event": "session_revocations_purged",
+                    "purged_count": removed,
+                },
+            )
+        return removed
+
 
 __all__ = ["TokenCollision", "WishlistRepository", "WishlistStore"]

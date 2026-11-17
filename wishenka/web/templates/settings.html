@@ -124,6 +124,34 @@
         {% endif %}
         <p id="wishlist-notifications-feedback" role="status" aria-live="polite"></p>
     </section>
+
+    <section class="settings-card settings-danger-zone" aria-labelledby="delete-account-heading">
+        <h2 id="delete-account-heading">{{ t('settings.delete_account_heading', locale) }}</h2>
+        <p>{{ t('settings.delete_account_description', locale) }}</p>
+        <div id="delete-account-entry">
+            <button id="delete-account-start-btn" type="button" onclick="openDeletionPreview()">
+                {{ t('settings.delete_account_button', locale) }}
+            </button>
+        </div>
+        <div id="delete-account-confirm-panel" hidden>
+            <p class="delete-warning" role="alert">{{ t('settings.delete_warning', locale) }}</p>
+            <ul id="delete-impact-summary">
+                <li>{{ t('settings.delete_summary_personal', locale) }} <strong id="impact-personal">0</strong></li>
+                <li>{{ t('settings.delete_summary_transferred', locale) }} <strong id="impact-transferred">0</strong></li>
+                <li>{{ t('settings.delete_summary_collab_deleted', locale) }} <strong id="impact-collab-deleted">0</strong></li>
+                <li>{{ t('settings.delete_summary_reservations', locale) }} <strong id="impact-reservations">0</strong></li>
+            </ul>
+            <div class="delete-actions">
+                <button id="delete-account-confirm-btn" type="button" onclick="confirmAccountDeletion()">
+                    {{ t('settings.delete_confirm_button', locale) }}
+                </button>
+                <button id="delete-account-cancel-btn" type="button" onclick="cancelDeletionPreview()">
+                    {{ t('settings.delete_cancel_button', locale) }}
+                </button>
+            </div>
+        </div>
+        <p id="delete-account-feedback" role="status" aria-live="polite"></p>
+    </section>
 </div>
 
 <script>
@@ -202,6 +230,40 @@ async function updateWishlistOverride(wishlistId, category, rawVal) {
     } else {
         var err = await resp.json().catch(function () { return {}; });
         feedback.textContent = err.detail || '{{ t("settings.invalid_notification_setting", locale) }}';
+    }
+}
+
+async function openDeletionPreview() {
+    var feedback = document.getElementById('delete-account-feedback');
+    feedback.textContent = '';
+    var resp = await fetch('/api/profile/deletion-preview', { credentials: 'same-origin' });
+    if (!resp.ok) {
+        feedback.textContent = '{{ t("settings.delete_failed", locale) }}';
+        return;
+    }
+    var data = await resp.json();
+    document.getElementById('impact-personal').textContent = String(data.personal_lists_count || 0);
+    document.getElementById('impact-transferred').textContent = String(data.collaborative_transferred_count || 0);
+    document.getElementById('impact-collab-deleted').textContent = String(data.collaborative_deleted_count || 0);
+    document.getElementById('impact-reservations').textContent = String(data.reservations_count || 0);
+    document.getElementById('delete-account-confirm-panel').hidden = false;
+}
+
+function cancelDeletionPreview() {
+    document.getElementById('delete-account-confirm-panel').hidden = true;
+    document.getElementById('delete-account-feedback').textContent = '';
+}
+
+async function confirmAccountDeletion() {
+    var feedback = document.getElementById('delete-account-feedback');
+    var resp = await settingsFetch('/api/profile/delete', 'POST', { confirm: true });
+    if (resp.ok) {
+        document.getElementById('delete-account-confirm-panel').hidden = true;
+        document.getElementById('delete-account-entry').hidden = true;
+        feedback.textContent = '{{ t("settings.delete_completed", locale) }}';
+    } else {
+        var err = await resp.json().catch(function () { return {}; });
+        feedback.textContent = err.detail || '{{ t("settings.delete_failed", locale) }}';
     }
 }
 </script>

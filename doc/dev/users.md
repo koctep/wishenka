@@ -1,7 +1,7 @@
 # Users Domain, i18n Synchronization, and Account Deletion
 
 > [!NOTE]
-> **Implementation Status (`WISHENKA-32/33/34`):** The `users` baseline, **`WISHENKA-33`** (`RU`/`EN` bilingual i18n — see [i18n.md](i18n.md)), and **`WISHENKA-34`** (profile birthdate fields, `NotificationPreferencesStore`, and Mini App `/settings` & `/api/profile/*` preferences/notification APIs) are **implemented**. Sections marked **Target (`WISHENKA-35`)** (or `avatar_url` / `ChatFullInfo.birthdate` sync) are not shipped in runtime code yet; do not assume those tables, endpoints, or services exist until the corresponding task lands.
+> **Implementation Status (`WISHENKA-32/33/34/35`):** The `users` baseline, **`WISHENKA-33`** (`RU`/`EN` bilingual i18n — see [i18n.md](i18n.md)), **`WISHENKA-34`** (profile birthdate fields, `NotificationPreferencesStore`, and Mini App `/settings` & `/api/profile/*` preferences/notification APIs), and **`WISHENKA-35`** (`AccountDeletionService`, `deleted_session_revocations`, session liveness/revocation checks, `/api/profile/deletion-preview`, and `/api/profile/delete`) are **implemented**. (`avatar_url` and `ChatFullInfo.birthdate` sync remain future enhancements.)
 
 ---
 
@@ -14,7 +14,7 @@ The `wishenka.users` subsystem manages durable Telegram user identity, profile s
 | Baseline (`wishenka/users/`) | Implemented | `users` table (imperatively created by `UserStore.initialize()`), `UserRecord`, `UserStore.upsert_user` / `get_by_telegram_id` / `get_by_id`, unconditional `language_code` sync. |
 | `WISHENKA-33` | Implemented | `RU`/`EN` i18n across TMA, Bot, and Outbox; Alembic revision `add_user_locale` adding `locale` & `locale_source` (synced with `UserStore.initialize()`); `wishenka/i18n/`; `GET /settings` & `PATCH /api/profile/locale`; `wishenka/bot/i18n.py` `LocaleMiddleware`. |
 | `WISHENKA-34` | Implemented (Profile & Preferences) | `birth_day`, `birth_month`, `birth_year`, `birthdate_source` (`'auto'` \| `'explicit'`) in `users`/`UserRecord`, `validate_birthdate`, `set_birthdate`/`clear_birthdate`, `NotificationPreferencesStore` (`wishenka/notices/preferences.py`), `birthday_reminders` priority in `reminders.py`, and Mini App `/settings` UI + `/api/profile/preferences`, `/api/profile/birthdate`, `/api/profile/notifications/*` APIs. (`avatar_url` and `ChatFullInfo.birthdate` sync remain future enhancements.) |
-| `WISHENKA-35` | Target (Planned) | `AccountDeletionService` (`BEGIN IMMEDIATE` cascade), deterministic collaborative ownership transfer (`is_collaborative = 1` preserved), PII purge across `telegram_id` and `users.id` tables, `deleted_session_revocations`, auth liveness/revocation checks, `GET /api/profile/deletion-preview`, `POST /api/profile/delete`. |
+| `WISHENKA-35` | Implemented | `AccountDeletionService` (`BEGIN IMMEDIATE` cascade), deterministic collaborative ownership transfer (`is_collaborative = 1` preserved), item recipient anonymization, PII purge across `telegram_id` and `users.id` tables, `deleted_session_revocations`, auth liveness/revocation checks, `GET /api/profile/deletion-preview`, `POST /api/profile/delete`, and Settings UI confirmation. |
 
 > [!IMPORTANT]
 > **Coordination with sibling tasks (`WISHENKA-73`, `WISHENKA-89`, and `WISHENKA-31`):** Any profile, settings, or role changes in the `WISHENKA-31` epic must build on the single `users` Alembic revision and the `UserRecord`/`locale`/`AccountDeletionService` contracts documented here rather than creating parallel profile tables or competing migrations.
@@ -31,10 +31,10 @@ The `wishenka.users` subsystem manages durable Telegram user identity, profile s
 | Notification preferences | `wishenka/notices/preferences.py` | Implemented (`WISHENKA-34`) | `NotificationPreferencesStore` for global and per-wishlist notification overrides and effective resolution. |
 | Auth models & dependencies | `wishenka/auth/models.py`, `wishenka/auth/dependencies.py` | Implemented (extended in `WISHENKA-35`) | DB liveness and `deleted_session_revocations` checks (`WISHENKA-35`). |
 | i18n catalog & helpers | `wishenka/i18n/`, `wishenka/bot/i18n.py` | Implemented (`WISHENKA-33`) | `resolve_telegram_locale()`, `RU`/`EN` `CATALOG`, Jinja2 global `t()`, FastAPI `LocaleDep`, `aiogram` `LocaleMiddleware`. |
-| Account deletion & cleanup | `wishenka/wishlists/deletion.py`, `wishenka/wishlists/cleanup.py` | Target (`WISHENKA-35`) | `AccountDeletionService` (`BEGIN IMMEDIATE` cascade + transfer) and expired revocation purge. |
+| Account deletion & cleanup | `wishenka/wishlists/deletion.py`, `wishenka/wishlists/cleanup.py` | Implemented (`WISHENKA-35`) | `AccountDeletionService` (`BEGIN IMMEDIATE` cascade + transfer) and expired `deleted_session_revocations` purge. |
 | Notification workers | `wishenka/notices/store.py`, `wishenka/notices/reminders.py` | Implemented (`WISHENKA-33/34`) | Reads `u.locale` with `'en'` fallback; checks `birthday_reminders` before `reminders` for birthday reminders; re-checks `JOIN users` + `JOIN bot_destinations` in `BEGIN IMMEDIATE` right before send. |
 | Bot routers | `wishenka/bot/entry.py`, `capture.py`, `birthdays.py`, `support.py` | Implemented (`WISHENKA-33`) | Outer `LocaleMiddleware` (`WISHENKA-33`). |
-| Web / Mini App routes | `wishenka/web/routes/profile.py` | Implemented (`WISHENKA-33/34`); extended in `WISHENKA-35` | `GET /settings`, `PATCH /api/profile/locale` (`WISHENKA-33`); `GET /api/profile/preferences`, `PATCH /api/profile/birthdate`, `PUT /api/profile/notifications/global`, `GET/PUT /api/profile/notifications/wishlists/{wishlist_id}` (`WISHENKA-34`). |
+| Web / Mini App routes | `wishenka/web/routes/profile.py`, `wishenka/web/templates/settings.html` | Implemented (`WISHENKA-33/34/35`) | `GET /settings`, `PATCH /api/profile/locale` (`WISHENKA-33`); `GET /api/profile/preferences`, `PATCH /api/profile/birthdate`, `PUT /api/profile/notifications/global`, `GET/PUT /api/profile/notifications/wishlists/{wishlist_id}` (`WISHENKA-34`); `GET /api/profile/deletion-preview`, `POST /api/profile/delete` (`WISHENKA-35`). |
 
 ### Target Interaction Flow (`WISHENKA-33/34/35`)
 
@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS users (
 );
 ```
 
-Target DDL for stateless session revocations (`WISHENKA-35`):
+Implemented DDL for stateless session revocations (`WISHENKA-35`, Alembic revision `add_deleted_session_revocations`):
 
 ```sql
 CREATE TABLE IF NOT EXISTS deleted_session_revocations (
@@ -129,23 +129,11 @@ CREATE INDEX IF NOT EXISTS idx_deleted_session_revocations_expires
 
 ### Alembic Migration Strategy (`WISHENKA-33` / `WISHENKA-35`)
 
-Currently, the Alembic head in `wishenka/wishlists/alembic/versions/` is `add_idempotency_records` (see [migrations.md](migrations.md)). The target schema migration builds linearly on `down_revision = "add_idempotency_records"`:
+The Alembic revisions in `wishenka/wishlists/alembic/versions/` include `add_user_locale` (`WISHENKA-33`) and `add_deleted_session_revocations` (`WISHENKA-35`, `down_revision = "add_user_locale"`, see [migrations.md](migrations.md)):
 
-1. Idempotently create `users` (if absent in DBs initialized solely by `WishlistStore`), or inspect `PRAGMA table_info(users)` and add missing columns (`avatar_url`, `birthday`, `birthday_source`, `locale`, `locale_source`).
-2. Backfill existing rows:
-
-   ```sql
-   UPDATE users
-   SET locale = CASE
-           WHEN lower(trim(coalesce(language_code, ''))) LIKE 'ru%' THEN 'ru'
-           ELSE 'en'
-       END,
-       locale_source = 'auto'
-   WHERE locale IS NULL OR locale NOT IN ('ru', 'en');
-   ```
-
-3. Create `deleted_session_revocations` and `idx_deleted_session_revocations_expires`.
-4. Keep `UserStore.initialize()` strictly aligned on the same DDL and `PRAGMA table_info(users)` check so isolated unit tests that initialize `UserStore` without `WishlistStore.initialize()` get the identical schema.
+1. `add_user_locale`: idempotently creates `users` (if absent in DBs initialized solely by `WishlistStore`) or adds missing `locale` / `locale_source` columns and backfills `locale` from `language_code`.
+2. `add_deleted_session_revocations`: creates `deleted_session_revocations` and `idx_deleted_session_revocations_expires` (`CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`).
+3. `UserStore.initialize()` remains aligned on the same `users` DDL and `PRAGMA table_info(users)` check so isolated unit tests that initialize `UserStore` without `WishlistStore.initialize()` get the identical schema.
 
 ---
 
@@ -189,47 +177,47 @@ def resolve_telegram_locale(language_code: str | None) -> SupportedLocale:
 
 ---
 
-## Account Deletion & Session Revocation (`AccountDeletionService` — Target `WISHENKA-35`)
+## Account Deletion & Session Revocation (`AccountDeletionService` — Implemented `WISHENKA-35`)
 
 ### Transaction & Locking Contract
 
 All account deletion steps execute inside a **single `BEGIN IMMEDIATE` transaction** (`WishlistStore.transaction`) with `PRAGMA foreign_keys = ON` and `PRAGMA busy_timeout = 5000`, serializing deletion against concurrent reservations, gift receipts, `ReminderScheduler`, and `NoticeStore` workers. Any mid-transaction error rolls back completely.
 
-At transaction start, the service resolves `tg_id = current_user.telegram_id`, `internal_user_id = users.id`, and any linked `bot_destinations.chat_id`.
+At transaction start, the service computes `subject_hash = compute_revocation_subject_hash(telegram_id, secret_key)` (defined in `wishenka/auth/session.py`), resolves `internal_user_id = users.id` (if `users` table exists), and queries owned lists, memberships, and reservations for `telegram_id`.
 
 ### Six-Step Cascade Specification
 
-1. **Idempotency guard**: Check `users` (and any residual `wl_lists`/`wl_members`/`wl_reservations` rows) for `tg_id`. If none exist, return `DeletionResultDTO(already_deleted=True)`.
-2. **Cancel own reservations across others' wishlists**: `DELETE FROM wl_reservations WHERE user_id = :tg_id` (across all statuses: `active`, `purchased`, `cancelled`, `completed`).
+1. **Idempotency guard**: Check `users` (if table exists), `wl_lists`, `wl_members`, and `wl_reservations` for `telegram_id`. If none exist, return `DeletionResultDTO(already_deleted=True, deleted_lists=0, transferred_lists=0, cancelled_reservations=0, anonymized_items=0)`.
+2. **Handle owned wishlists (`wl_lists WHERE owner_id = :tg_id`, ordered by `id ASC`)**:
+   - **A. Personal (`is_collaborative = 0`) or solo collaborative (no other `wl_members`)**: Hard-delete `DELETE FROM wl_lists WHERE id IN :ids` (FK `ON DELETE CASCADE` removes `wl_items`, other gifters' `wl_reservations`, `wl_receipts`, `wl_members`, `wl_favorites`, `wl_view_history`, `notification_outbox`, and `notice_receipt_keys`), plus explicit cleanup of `wl_list_notification_settings`, `wl_tokens`, and `wl_invite_tokens`.
+   - **B. Collaborative with other members (`active` or `archived`)**:
+     - Query `wl_members WHERE wishlist_id = :wid AND user_id != :tg_id` joined with `LEFT JOIN users u ON u.telegram_id = m.user_id`.
+     - Select a single successor deterministically by ascending `(_role_rank(role), _parse_utc_datetime(joined_at), _parse_utc_datetime(user_created_at), user_id)`:
+       1. `_role_rank`: `admin -> 1`, `coauthor` / `collaborator` `-> 2`, `member` / other `-> 3`.
+       2. `joined_at`: earliest `wl_members.joined_at` normalized to UTC `datetime`.
+       3. `user_created_at`: earliest `users.created_at` (`datetime.max` UTC if no `users` row).
+       4. `user_id` (`telegram_id`): smallest numeric Telegram ID.
+     - Update `wl_lists`: set `owner_id = new_owner_id`, `owner_name = new_owner_name`, `updated_at = now_iso`, and **keep `is_collaborative = 1`** even if no other members remain (otherwise `WishlistAccessPolicy.is_recipient_id` would treat the new owner as recipient of all wishes and violate surprise/visibility rules).
+     - Remove both the outgoing owner and the promoted successor from `wl_members`.
+     - Anonymize items on that list where `recipient_user_id = :tg_id` or legacy `(recipient_user_id IS NULL AND recipient_name IS NOT NULL)` by clearing `recipient_user_id = NULL, recipient_name = NULL`.
+     - Queue a neutral `SharedEvent(kind="membership_changed", ...)` via `EventProducer` **only** to remaining participants (never mentioning the deleted user or reservations).
+3. **Exit others' collaborative wishlists & anonymize wishes**:
+   - Anonymize `wl_items` where `recipient_user_id = :tg_id` (`recipient_user_id = NULL, recipient_name = NULL`), then `DELETE FROM wl_members WHERE wishlist_id = :wl_id AND user_id = :tg_id`.
+   - Queue a neutral `SharedEvent(kind="membership_changed", ...)` to the list owner and remaining members.
+   - Wishes, other gifters' active/purchased reservations, and `wl_receipts` remain intact without revealing surprise data.
+4. **Cancel own reservations across others' wishlists**: `DELETE FROM wl_reservations WHERE user_id = :tg_id` (across all statuses).
    - Immediately reduces `occupied` and frees `available_quantity` for other gifters.
    - `wl_receipts` stores no `user_id` or `reservation_id` and stays intact.
    - Zero notifications are sent to list recipients (Surprise Invariant).
-3. **Handle owned wishlists (`wl_lists WHERE owner_id = :tg_id`, all statuses)**:
-   - **A. Soft-deleted (`status = 'deleted'`)**: Hard-delete `DELETE FROM wl_lists WHERE id = :wid` and explicitly delete non-FK rows in `wl_tokens`, `wl_invite_tokens`, and `reminder_outbox`.
-   - **B. Personal (`is_collaborative = 0`) or solo collaborative (no other `wl_members`)**: Hard-delete `DELETE FROM wl_lists WHERE id = :wid` (FK `ON DELETE CASCADE` removes `wl_items`, other gifters' `wl_reservations`, `wl_receipts`, `wl_members`, `wl_favorites`, `wl_view_history`, `wl_list_notification_settings`, `notification_outbox`, and `notice_receipt_keys`), plus explicit cleanup of `wl_tokens`, `wl_invite_tokens`, and `reminder_outbox`.
-   - **C. Collaborative with other members (`active` or `archived`)**:
-     - Query `wl_members WHERE wishlist_id = :wid AND user_id != :tg_id` joined with `LEFT JOIN users u ON u.telegram_id = m.user_id`.
-     - Select a single successor deterministically by ascending `(role_rank, joined_at_utc, user_created_at_utc, user_id)`:
-       1. `role_rank`: `admin -> 1`, `coauthor` / `collaborator` (if present) `-> 2`, `member` / other `-> 3`.
-       2. `joined_at_utc`: earliest `wl_members.joined_at` normalized to UTC `datetime`.
-       3. `user_created_at_utc`: earliest `users.created_at` (`datetime.max` UTC if no `users` row in test fixtures).
-       4. `user_id` (`telegram_id`): smallest numeric Telegram ID.
-     - Update `wl_lists`: set `owner_id = successor.user_id`, `owner_name = successor_display_name`, `updated_at = :now`, and **keep `is_collaborative = 1`** even if no other members remain (otherwise `WishlistAccessPolicy.is_recipient_id` would treat the new owner as recipient of all wishes and violate surprise/visibility rules).
-     - Remove successor (and outgoing owner if present) from `wl_members`.
-     - Emit a neutral `membership_changed` event via `EventProducer` **only** to remaining participants (never mentioning the deleted user or reservations).
-4. **Exit others' collaborative wishlists & anonymize wishes**:
-   - `DELETE FROM wl_members WHERE user_id = :tg_id`.
-   - `UPDATE wl_items SET recipient_user_id = NULL, recipient_name = NULL, updated_at = :now WHERE recipient_user_id = :tg_id`.
-   - Wishes, other gifters' active/purchased reservations, and `wl_receipts` remain intact without revealing surprise data.
 5. **Purge remaining PII & bot state**:
    - By `tg_id`: delete from `wl_favorites`, `wl_view_history`, `user_notification_settings`, `wl_list_notification_settings`, `notification_outbox` (`giver_user_id`), `notice_receipt_keys` (`giver_user_id`), `reminder_outbox` (`user_id`), and `wl_idempotency_records` (`actor_id`).
    - By `internal_user_id` / `tg_id` / `chat_id`: delete from `birthday_entries`, `birthday_input`, `bot_destinations`, `support_input`, `support_tickets`, `bot_drafts`, and `bot_capture_order`, then `DELETE FROM users WHERE telegram_id = :tg_id`.
 6. **Revoke stateless sessions & allow instant re-registration**:
-   - Insert `(subject_hash, revoked_before = now_epoch, expires_at = now_epoch + session_ttl_seconds)` into `deleted_session_revocations` inside the same transaction.
-   - `get_optional_current_user` (`wishenka/auth/dependencies.py`) checks:
-     - When `claims.user_id is not None`: `SELECT 1 FROM users WHERE id = :user_id AND telegram_id = :tg_id` (skipped only if `users` table does not exist in isolated route tests; otherwise returns `401 Unauthorized`). Because `users.id` uses `AUTOINCREMENT`, immediate re-registration assigns a fresh `users.id` while all pre-deletion tokens on every device remain permanently rejected.
+   - Upsert `(subject_hash, revoked_before = now_epoch, expires_at = now_epoch + max(1, session_ttl_seconds))` into `deleted_session_revocations` (`ON CONFLICT(subject_hash) DO UPDATE SET revoked_before = MAX(...), expires_at = MAX(...)`) inside the same transaction.
+   - `get_optional_current_user` (`wishenka/auth/dependencies.py`, via `_is_session_active`) checks:
+     - When `claims.user_id is not None`: `SELECT 1 FROM users WHERE id = :user_id AND telegram_id = :tg_id` (skipped only if `users` table does not exist in isolated route tests; otherwise returns `401 Unauthorized` with `"Session revoked or account deleted"`). Because `users.id` uses `AUTOINCREMENT`, immediate re-registration assigns a fresh `users.id` while all pre-deletion tokens on every device remain permanently rejected.
      - When `claims.user_id is None` (legacy/direct tokens): checks `deleted_session_revocations` by `subject_hash` and returns `401` if `claims.iat <= revoked_before`.
-   - `POST /api/profile/delete` calls `delete_session_cookie(response, settings)`.
+   - `POST /api/profile/delete` calls `delete_session_cookie(response=response, settings=settings)`.
    - In-flight outbox safety: `NoticeStore.refresh_claim` and `refresh_reminder` already re-check `JOIN users` + `JOIN bot_destinations` inside `BEGIN IMMEDIATE` prior to Telegram delivery and abort if the user was deleted.
 
 ---
@@ -256,9 +244,9 @@ At transaction start, the service resolves `tg_id = current_user.telegram_id`, `
   - `t(key: str, locale: str | None = DEFAULT_LOCALE, **kwargs: Any) -> str`
   - `get_request_locale(...) -> SupportedLocale` / `LocaleDep` (FastAPI dependency)
   - `LocaleMiddleware` (`aiogram` outer middleware setting `data["locale"]`, `data["t"]`, and `data["user_record"]`)
-- **`AccountDeletionService` (`wishenka/wishlists/deletion.py`, Target `WISHENKA-35`)**:
+- **`AccountDeletionService` (`wishenka/wishlists/deletion.py`, Implemented `WISHENKA-35`)**:
   - `preview_account_deletion(telegram_id: int) -> DeletionPreviewDTO` (`personal_lists_count`, `collaborative_transferred_count`, `collaborative_deleted_count`, `reservations_count`; reveals no foreign booking/recipient data)
-  - `delete_account(telegram_id: int, *, secret_key: str, session_ttl_seconds: int, now: datetime | None = None) -> DeletionResultDTO` (`already_deleted`, `deleted_lists`, `transferred_lists`, `cancelled_reservations`)
+  - `delete_account(telegram_id: int, *, secret_key: str, session_ttl_seconds: int, now: datetime | None = None) -> DeletionResultDTO` (`already_deleted`, `deleted_lists`, `transferred_lists`, `cancelled_reservations`, `anonymized_items`)
 
 ### Mini App HTTP Endpoints
 
@@ -271,8 +259,8 @@ At transaction start, the service resolves `tg_id = current_user.telegram_id`, `
 | `PUT /api/profile/notifications/global` | `WISHENKA-34` (Implemented) | Update global `user_notification_settings` (`{settings: {...}}`). Returns `422` if `settings` is not an object, or on unknown category or non-boolean value. |
 | `GET /api/profile/notifications/wishlists/{wishlist_id}` | `WISHENKA-34` (Implemented) | Return per-wishlist `overrides` and `effective` settings, or `404` if inaccessible/deleted. |
 | `PUT /api/profile/notifications/wishlists/{wishlist_id}` | `WISHENKA-34` (Implemented) | Update or reset (`null`) per-wishlist overrides in `wl_list_notification_settings` (`{overrides: {...}}`), or `404`/`422`. |
-| `GET /api/profile/deletion-preview` | `WISHENKA-35` (Target) | Aggregate counts of lists/reservations impacted by deletion. |
-| `POST /api/profile/delete` | `WISHENKA-35` (Target) | Atomic account deletion (`confirm: true` + CSRF) and session cookie removal. |
+| `GET /api/profile/deletion-preview` | `WISHENKA-35` (Implemented) | Aggregate counts of lists/reservations impacted by deletion (`personal_lists_count`, `collaborative_transferred_count`, `collaborative_deleted_count`, `reservations_count`). |
+| `POST /api/profile/delete` | `WISHENKA-35` (Implemented) | Atomic account deletion (`{"confirm": true}` + CSRF; returns `422` if `confirm is not True`), returns `DeletionResultDTO` JSON, and clears session cookie via `delete_session_cookie`. |
 
 ---
 
@@ -323,14 +311,14 @@ Structured logging uses [`wishenka/logging.py`](../../wishenka/logging.py) (`con
 | `WISHENKA-34` | `WARNING` | `wishenka.web.profile` | `notification_global_invalid_request` | `user_id`, `status_code` (`422`) |
 | `WISHENKA-34` | `WARNING` | `wishenka.web.profile` | `notification_wishlist_not_found` | `user_id`, `wishlist_id`, `status_code` (`404`) |
 | `WISHENKA-34` | `WARNING` | `wishenka.web.profile` | `notification_wishlist_invalid_request` | `user_id`, `wishlist_id`, `status_code` (`422`) |
-| `WISHENKA-35` | `DEBUG` | `wishenka.wishlists.deletion` | `account_deletion_previewed` | `user_id`, `personal_lists_count`, `collaborative_transferred_count`, `collaborative_deleted_count`, `reservations_count` |
-| `WISHENKA-35` | `INFO` | `wishenka.wishlists.deletion` | `account_deletion_started` | `subject_hash_prefix`, `confirmed` (`True`) |
-| `WISHENKA-35` | `INFO` | `wishenka.wishlists.deletion` | `collaborative_wishlist_ownership_transferred` | `subject_hash_prefix`, `wishlist_id`, `wishlist_status`, `selected_role_rank`, `tie_breaker_level`, `is_collaborative` (`True`) |
-| `WISHENKA-35` | `INFO` | `wishenka.wishlists.deletion` | `account_deletion_completed` | `subject_hash_prefix`, `already_deleted`, `deleted_lists_count`, `transferred_lists_count`, `cancelled_reservations_count`, `anonymized_items_count`, `revocation_recorded`, `duration_ms` |
-| `WISHENKA-35` | `ERROR` | `wishenka.wishlists.deletion` | `account_deletion_failed` | `subject_hash_prefix`, `stage`, `error_type`, `rolled_back` (`True`), `duration_ms` |
-| `WISHENKA-35` | `WARNING` | `wishenka.auth.dependencies` | `session_rejected_revoked_or_deleted` | `reason` (`user_not_found` \| `session_revoked`), `subject_hash_prefix`, `has_user_id_claim` |
-| `WISHENKA-35` | `DEBUG` | `wishenka.notices.store` / `wishenka.notices.reminders` | `notice_aborted_user_deleted` | `channel` (`notice_outbox` \| `reminder_outbox`), `reason` (`user_or_destination_deleted`) |
-| `WISHENKA-35` | `INFO` / `DEBUG` | `wishenka.wishlists.cleanup` | `session_revocations_purged` | `purged_count`, `duration_ms` |
+| `WISHENKA-35` | `DEBUG` | `wishenka.wishlists.deletion` | `account_deletion_preview_computed` | `personal_lists_count`, `collaborative_transferred_count`, `collaborative_deleted_count`, `reservations_count` |
+| `WISHENKA-35` | `INFO` | `wishenka.wishlists.deletion` | `account_deleted` | `subject_hash_prefix`, `deleted_lists`, `transferred_lists`, `cancelled_reservations`, `anonymized_items`, `duration_ms` |
+| `WISHENKA-35` | `INFO` | `wishenka.wishlists.deletion` | `account_deletion_already_deleted` | `subject_hash_prefix`, `duration_ms` |
+| `WISHENKA-35` | `ERROR` | `wishenka.wishlists.deletion` | `account_deletion_failed` | `subject_hash_prefix`, `error_class`, `duration_ms` |
+| `WISHENKA-35` | `WARNING` | `wishenka.web.profile` | `account_deletion_rejected` | `reason` (`missing_confirmation`), `status_code` (`422`) |
+| `WISHENKA-35` | `WARNING` | `wishenka.auth` | `session_rejected_revoked_or_deleted` | `subject_hash_prefix`, `auth_method` |
+| `WISHENKA-35` | `INFO` | `wishenka.wishlists.store` | `session_revocations_purged` | `purged_count` |
+| `WISHENKA-35` | `INFO` | `wishenka.wishlists.cleanup` | `background_cleanup_completed` | `expired_tokens_cleaned`, `wishlists_purged`, `idempotency_records_cleaned`, `session_revocations_cleaned`, `duration_ms` |
 
 ### Target Metrics Contract (Low-Cardinality Labels)
 
@@ -372,4 +360,5 @@ No Prometheus/OpenTelemetry exporter is currently wired in the codebase; these c
 
 - `tests/test_wishenka_34_repro.py` (`WISHENKA-34`, Implemented) — API availability for `/api/profile/preferences` and `/api/profile/notifications/global`, per-wishlist override priority and `null` reset, `birthday_reminders` suppression without deleting `birthday_entries`, explicit birthdate persistence across `upsert_user`, invalid date (`30 Feb`) rejection, and surprise invariant preservation.
 - `tests/test_wishenka_34_preferences.py` (`WISHENKA-34`, Implemented) — unit and integration coverage for `validate_birthdate`, `UserStore.set_birthdate` / `clear_birthdate`, `NotificationPreferencesStore`, `/settings` SSR rendering (RU/EN), and `/api/profile/*` validation/404/CSRF contracts.
-- `tests/test_account_deletion.py` (`WISHENKA-35`, Target) — personal list cascade & Surprise Invariant, deterministic collaborative transfer tie-breakers & `is_collaborative=1`, member exit anonymization, full PII purge, token revocation across devices & re-registration, `BEGIN IMMEDIATE` rollback atomicity, idempotency, and PII-free log verification.
+- `tests/test_account_deletion_repro.py` (`WISHENKA-35`, Implemented) — end-to-end repro covering `/api/profile/deletion-preview`, `/api/profile/delete`, `AccountDeletionService` cascade, ownership transfer, reservation cleanup, PII removal, and session token revocation.
+- `tests/test_account_deletion.py` (`WISHENKA-35`, Implemented) — personal list cascade & Surprise Invariant, deterministic collaborative transfer tie-breakers & `is_collaborative=1`, member exit anonymization, full PII purge, token revocation across devices & re-registration, `BEGIN IMMEDIATE` rollback atomicity, idempotency, expired revocation cleanup, and PII-free log verification.

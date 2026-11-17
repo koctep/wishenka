@@ -1166,8 +1166,10 @@ regular web request handling.
 |  1. store.cleanup_expired_tokens(now) -> revokes expired collaborator invite tokens     |
 |  2. cutoff = now - timedelta(days=settings.wishlist_retention_days)                     |
 |  3. store.purge_archived_wishlists(cutoff) -> permanently cascades soft-deleted lists   |
-|  3b. NoticeStore.purge_finished(now - receipt_notice_retention_days) (notice rows)      |
-|  4. Captures execution duration and returns CleanupStats(duration_ms, ...)              |
+|  4. store.cleanup_expired_idempotency_records(now) -> purges expired idempotency keys   |
+|  5. store.cleanup_expired_session_revocations(now) -> purges expired revocation markers |
+|  6. NoticeStore.purge_finished(now - receipt_notice_retention_days) (notice rows)       |
+|  7. Captures execution duration and returns CleanupStats(duration_ms, ...)              |
 +-----------------------------------------------------------------------------------------+
 ```
 
@@ -1177,6 +1179,8 @@ regular web request handling.
 Dataclass capturing operational metrics for a single execution cycle:
 - `expired_tokens_cleaned: int`: Count of expired collaborator invite tokens revoked.
 - `wishlists_purged: int`: Count of soft-deleted wishlists permanently removed past retention.
+- `idempotency_records_cleaned: int`: Count of expired `wl_idempotency_records` rows removed.
+- `session_revocations_cleaned: int`: Count of expired `deleted_session_revocations` markers purged (`AccountDeletionService` / `WISHENKA-35` — see [users.md](users.md)).
 - `duration_ms: float`: Execution duration of the cycle in milliseconds.
 - `started_at: datetime`: UTC timestamp when the cycle began.
 - `finished_at: datetime`: UTC timestamp when the cycle completed.
@@ -1306,8 +1310,12 @@ Settings in `wishenka.config.Settings` (prefixed with `WISHENKA_` in environment
 | `wishlist_repo_mutation` | `INFO` | Repo mutation | `entity`, `operation`, `count` |
 | `background_worker_started` | `INFO` | Worker loop started | `interval_seconds` |
 | `background_worker_stopped` | `INFO` | Worker loop stopped | None |
-| `background_cleanup_completed` | `INFO` | Cleanup ok | `expired_tokens_cleaned`, `purged` |
+| `background_cleanup_completed` | `INFO` | Cleanup ok | `expired_tokens_cleaned`, `wishlists_purged`, `idempotency_records_cleaned`, `session_revocations_cleaned`, `duration_ms` |
 | `background_cleanup_failed` | `ERROR` | Cleanup failed | `error`, `duration_ms` |
+| `session_revocations_purged` | `INFO` | Expired revocations purged | `purged_count` |
+| `account_deleted` | `INFO` | Account deleted (`AccountDeletionService`) | `subject_hash_prefix`, `deleted_lists`, `transferred_lists`, `cancelled_reservations`, `anonymized_items`, `duration_ms` |
+| `account_deletion_already_deleted` | `INFO` | Idempotent delete | `subject_hash_prefix`, `duration_ms` |
+| `account_deletion_failed` | `ERROR` | Delete rolled back | `subject_hash_prefix`, `error_class`, `duration_ms` |
 
 ---
 

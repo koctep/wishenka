@@ -4,12 +4,15 @@ import logging
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, status
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from wishenka.auth.models import (
     AuthenticatedUser,
     AuthValidationError,
+    SessionClaims,
 )
-from wishenka.auth.session import SessionTokenService
+from wishenka.auth.session import SessionTokenService, compute_revocation_subject_hash
 from wishenka.config import Settings
 from wishenka.users.store import UserStore
 
@@ -31,6 +34,50 @@ def get_user_store(request: Request) -> UserStore:
         return store
     settings = getattr(request.app.state, "settings", None) or Settings()
     return UserStore(settings.database_url)
+
+
+async def _is_session_active(
+    request: Request,
+    settings: Settings,
+    claims: SessionClaims,
+) -> bool:
+    """Verify that the user still exists and the token has not been revoked."""
+    wishlist_store = getattr(request.app.state, "wishlist_store", None)
+    engine = getattr(wishlist_store, "engine", None)
+    if not isinstance(engine, AsyncEngine):
+        return True
+
+    async with engine.connect() as conn:
+        if claims.user_id is not None:
+            has_users = await conn.scalar(
+                text("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'users'")
+            )
+            if has_users is not None:
+                active = await conn.scalar(
+                    text("SELECT 1 FROM users WHERE id = :uid AND telegram_id = :tg_id LIMIT 1"),
+                    {"uid": claims.user_id, "tg_id": claims.telegram_id},
+                )
+                return active is not None
+            return True
+
+        has_revocations = await conn.scalar(
+            text(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'deleted_session_revocations'"
+            )
+        )
+        if has_revocations is None:
+            return True
+
+        subject_hash = compute_revocation_subject_hash(claims.telegram_id, settings.secret_key)
+        revoked_before = await conn.scalar(
+            text(
+                "SELECT revoked_before FROM deleted_session_revocations "
+                "WHERE subject_hash = :subject_hash"
+            ),
+            {"subject_hash": subject_hash},
+        )
+        return not (revoked_before is not None and claims.iat <= int(revoked_before))
 
 
 async def get_optional_current_user(
@@ -91,6 +138,22 @@ async def get_optional_current_user(
             detail=f"Invalid session token: {err}",
             headers={"WWW-Authenticate": "Bearer"},
         ) from err
+
+    if not await _is_session_active(request, settings, claims):
+        subject_hash = compute_revocation_subject_hash(claims.telegram_id, settings.secret_key)
+        logger.warning(
+            "Session token rejected: account deleted or session revoked",
+            extra={
+                "event": "session_rejected_revoked_or_deleted",
+                "subject_hash_prefix": subject_hash[:12],
+                "auth_method": auth_method,
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session revoked or account deleted",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     logger.debug(
         "Resolved session user %s via %s",

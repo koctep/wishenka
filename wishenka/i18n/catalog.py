@@ -69,6 +69,25 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "settings.invalid_notification_setting": "Invalid notification category or value.",
         "settings.wishlist_not_found": "Wishlist not found or inaccessible.",
         "settings.saved": "Saved.",
+        "settings.delete_account_heading": "Delete account",
+        "settings.delete_account_description": (
+            "Permanently delete your profile, personal wishlists, settings, and active sessions."
+        ),
+        "settings.delete_account_button": "Delete account",
+        "settings.delete_warning": (
+            "This action is permanent and cannot be undone. All your personal data will be erased."
+        ),
+        "settings.delete_summary_personal": "Personal wishlists to be deleted:",
+        "settings.delete_summary_transferred": "Collaborative wishlists to transfer ownership:",
+        "settings.delete_summary_collab_deleted": "Solo collaborative wishlists to be deleted:",
+        "settings.delete_summary_reservations": "Your active/purchased reservations to cancel:",
+        "settings.delete_confirm_button": "Confirm permanent deletion",
+        "settings.delete_cancel_button": "Cancel",
+        "settings.delete_confirmation_required": "Explicit confirmation is required.",
+        "settings.delete_completed": (
+            "Your account has been permanently deleted and all sessions have been signed out."
+        ),
+        "settings.delete_failed": "Could not delete account. Please try again.",
         # Telegram bot commands menu (setMyCommands)
         "bot.commands.start": "Open menu and wishlists",
         "bot.commands.help": "How Wishenka works",
@@ -267,6 +286,25 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "settings.invalid_notification_setting": "Некорректная категория или значение настройки.",
         "settings.wishlist_not_found": "Вишлист не найден или недоступен.",
         "settings.saved": "Сохранено.",
+        "settings.delete_account_heading": "Удаление аккаунта",
+        "settings.delete_account_description": (
+            "Безвозвратно удалить профиль, личные вишлисты, настройки и все активные сессии."
+        ),
+        "settings.delete_account_button": "Удалить аккаунт",
+        "settings.delete_warning": (
+            "Это действие необратимо. Все ваши персональные данные будут удалены навсегда."
+        ),
+        "settings.delete_summary_personal": "Личных вишлистов к удалению:",
+        "settings.delete_summary_transferred": "Совместных списков к передаче владения:",
+        "settings.delete_summary_collab_deleted": "Совместных списков без участников к удалению:",
+        "settings.delete_summary_reservations": "Ваших активных и купленных броней к снятию:",
+        "settings.delete_confirm_button": "Подтвердить удаление навсегда",
+        "settings.delete_cancel_button": "Отмена",
+        "settings.delete_confirmation_required": "Требуется явное подтверждение удаления.",
+        "settings.delete_completed": (
+            "Ваш аккаунт безвозвратно удалён, все активные сессии завершены."
+        ),
+        "settings.delete_failed": "Не удалось удалить аккаунт. Попробуйте ещё раз.",
         # Telegram bot commands menu (setMyCommands)
         "bot.commands.start": "Открыть меню и вишлисты",
         "bot.commands.help": "Как работает Вишенка",
