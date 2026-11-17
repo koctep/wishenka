@@ -205,9 +205,10 @@ async function showHome() {
   root.append(nav);
   status(t('nav.loading'));
   try {
-    const [lists, favs] = await Promise.all([
+    const [lists, favs, deletedLists] = await Promise.all([
       api('/api/wishlists'),
-      api('/api/favorites').catch(() => [])
+      api('/api/favorites').catch(() => []),
+      api('/api/wishlists/deleted').catch(() => [])
     ]);
 
     const myLists = lists.filter(l => l.role === 'owner');
@@ -269,6 +270,46 @@ async function showHome() {
       });
     }
     root.append(favSection);
+
+    // Recently deleted section (owner-only, within retention window)
+    if (Array.isArray(deletedLists) && deletedLists.length > 0) {
+      const deletedTitle = t('miniapp.deleted.heading');
+      const deletedSection = node('section', '', {
+        'aria-label': deletedTitle,
+        role: 'region',
+        class: 'wishlist-section deleted-section'
+      });
+      deletedSection.append(node('h2', deletedTitle));
+      deletedLists.forEach(l => {
+        const card = node('div', '', {class: 'wishlist-card deleted-wishlist-card'});
+        card.append(
+          node('span', l.name || t('miniapp.common.untitled_wishlist')),
+          node('span', t('miniapp.deleted.days_left', {days: l.days_remaining}), {
+            class: 'history-time deleted-meta'
+          })
+        );
+        const restoreBtn = button(t('miniapp.deleted.restore'), async () => {
+          restoreBtn.disabled = true;
+          status(t('miniapp.deleted.restoring'));
+          try {
+            await api(`/api/wishlists/${l.id}/restore-deleted`, {method: 'POST'});
+            await showHome();
+            status(t('miniapp.deleted.restored'));
+          } catch (err) {
+            restoreBtn.disabled = false;
+            if (err && err.status === 410) {
+              await showHome();
+              status(t('miniapp.deleted.expired'));
+            } else {
+              status(t('miniapp.deleted.restore_failed'));
+            }
+          }
+        });
+        card.append(restoreBtn);
+        deletedSection.append(card);
+      });
+      root.append(deletedSection);
+    }
     try {
       const cardResponse = await fetch('/web/reservations/card', {
         credentials: 'same-origin',

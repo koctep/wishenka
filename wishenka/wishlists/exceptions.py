@@ -21,6 +21,10 @@ class WishlistDeletedError(WishlistError):
     """Raised when attempting access or mutation on a deleted wishlist."""
 
 
+class WishlistRetentionExpiredError(WishlistError):
+    """Raised when attempting to restore a deleted wishlist after its retention window expired."""
+
+
 class InvalidInviteTokenError(WishlistError):
     """Raised when invite token is non-existent, revoked, or expired."""
 

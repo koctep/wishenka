@@ -301,6 +301,23 @@ collaborative operational role strictly takes precedence over `favorite` in both
 the home section placement. The wishlist appears in the "Collaborating" section with their
 collaborator badge (`Администратор` or `Соавтор`).
 
+#### Recently Deleted Wishlists (Owner Restore)
+
+When the authenticated caller owns soft-deleted wishlists still inside the retention window
+(`WISHENKA_WISHLIST_RETENTION_DAYS`, default `30` days), `showHome()` fetches
+`GET /api/wishlists/deleted` in parallel with `/api/wishlists` and `/api/favorites`, and renders
+an owner-only `.deleted-section` (`miniapp.deleted.heading`):
+
+- Each `.deleted-wishlist-card` displays the wishlist title (or `miniapp.common.untitled_wishlist`),
+  remaining retention days (`miniapp.deleted.days_left` with `days_remaining`), and a restore
+  button (`miniapp.deleted.restore`).
+- Clicking restore sends `POST /api/wishlists/{id}/restore-deleted` with the session CSRF token,
+  restores the list to `active` with rotated `public_token` and `invite_token`, refreshes the home
+  screen, and announces `miniapp.deleted.restored`.
+- If the retention window expired before submission, the server returns `410 Gone`
+  (`code: "retention_expired"`), and the UI refreshes the home screen and shows
+  `miniapp.deleted.expired`.
+
 ---
 
 ### 7. Favorites Management & Zero-Leak Guarantees
@@ -675,8 +692,10 @@ no globals (`toggleWishCard` is no longer a global function).
 | `/api/auth/csrf` | `GET` | Yes | No | Issues session-bound CSRF token for forms. |
 | `/api/wishlists` | `GET` | Yes | No | Lists user's wishlists (owner and member). |
 | `/api/wishlists` | `POST` | Yes | Yes | Creates an empty personal wishlist. |
+| `/api/wishlists/deleted` | `GET` | Yes | No | Lists owner's soft-deleted wishlists within retention window. |
 | `/api/wishlists/{id}` | `GET` | Yes | No | Returns wishlist details and item view. |
 | `/api/wishlists/{id}` | `PATCH` | Yes | Yes | Updates title, description, or event. |
+| `/api/wishlists/{id}/restore-deleted` | `POST` | Yes | Yes | Restores owner's soft-deleted wishlist with token rotation (`410` if expired). |
 | `/api/wishlists/{id}/members` | `GET` | Yes | No | Returns list of members and roles. |
 | `/api/wishlists/{id}/members/{uid}/role` | `PATCH` | Yes | Yes | Updates role (Owner only). |
 | `/api/wishlists/{id}/members/{uid}` | `DELETE` | Yes | Yes | Removes member from wishlist. |

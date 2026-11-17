@@ -98,6 +98,11 @@ class WishlistAccessPolicy:
         return ctx.is_owner
 
     @staticmethod
+    def can_restore_deleted(ctx: UserWishlistContext, wishlist: Wishlist) -> bool:
+        """Only Owner can view or restore a soft-deleted wishlist."""
+        return ctx.is_owner
+
+    @staticmethod
     def can_transfer_ownership(ctx: UserWishlistContext, wishlist: Wishlist) -> bool:
         """Only current Owner can transfer ownership in active wishlists."""
         if wishlist.status != WishlistStatus.ACTIVE:

@@ -61,6 +61,10 @@ rejected by the optional authentication dependency.
 - `GET /api/wishlists`: Lists the caller's active memberships. Set `include_archived=true` to
   include archived lists.
 
+- `GET /api/wishlists/deleted`: Lists the caller's own soft-deleted wishlists that are still
+  within the retention window (`wishlist_retention_days`, default `30` days), sorted by
+  `updated_at` descending with `deleted_at`, `expires_at`, and `days_remaining`.
+
 - `GET /api/wishlists/{id}`: Reads a list for a member, including archived lists.
 
 - `PATCH /api/wishlists/{id}`: Owner or admin updates an active list.
@@ -68,6 +72,11 @@ rejected by the optional authentication dependency.
 - `POST /api/wishlists/{id}/archive`: Owner or admin archives an active list.
 
 - `POST /api/wishlists/{id}/restore`: Owner or admin restores an archived list.
+
+- `POST /api/wishlists/{id}/restore-deleted`: Owner restores a soft-deleted list within the
+  retention window back to `active`, rotating `public_token` and `invite_token` (with a fresh
+  `invite_token_expires_at`). Returns `410 Gone` (`code: "retention_expired"`) if the retention
+  window has expired.
 
 - `POST /api/wishlists/{id}/share/reset`: Owner or admin rotates the public link on an active list.
 
@@ -108,7 +117,9 @@ Projections for `/api/favorites` and `/api/history` strictly enforce the Surpris
 return sanitized list metadata with roles and omit all reservation records, item availability
 counts, and buyer details.
 Unknown, deleted or inaccessible lists return 404; operations incompatible with the archived
-state return 409. Archive is read-only until restored. State-changing requests from browser
+state return 409; attempting to restore a soft-deleted list past its retention window via
+`POST /api/wishlists/{id}/restore-deleted` returns 410 (`code: "retention_expired"`). Archive is
+read-only until restored. State-changing requests from browser
 sessions are protected by CSRF tokens and origin validation — see [miniapp.md](miniapp.md).
 There is no HTTP delete route in this API; domain soft deletion remains a separate operation.
 
@@ -663,6 +674,43 @@ async def delete_wishlist(
 
 - **Permissions**: Solely the `Owner`.
 - Cancels all active reservations and invalidates tokens.
+
+#### `list_deleted_wishlists` & `restore_deleted_wishlist`
+
+Lists and restores an owner's soft-deleted wishlists while they remain inside the retention
+window (`wishlist_retention_days`, default `30` days).
+
+```python
+async def list_deleted_wishlists(
+    self,
+    actor: AuthenticatedUser,
+    retention_days: int = 30,
+    now: datetime | None = None,
+) -> list[tuple[Wishlist, datetime, int]]
+
+async def restore_deleted_wishlist(
+    self,
+    wishlist_id: int,
+    actor: AuthenticatedUser,
+    retention_days: int = 30,
+    now: datetime | None = None,
+) -> Wishlist
+```
+
+- **Permissions**: Solely the `Owner` via `WishlistAccessPolicy.can_restore_deleted`. Non-owners
+  are excluded from `list_deleted_wishlists` and receive `PermissionDeniedError` (HTTP `404`)
+  from `restore_deleted_wishlist`.
+- **Retention boundary**: A list is restorable only when
+  `deleted_at > effective_now - timedelta(days=retention_days)`. Once `deleted_at <= threshold`,
+  `list_deleted_wishlists` omits it and `restore_deleted_wishlist` raises
+  `WishlistRetentionExpiredError` (HTTP `410 Gone` with `detail.code = "retention_expired"`).
+- **Listing output**: Returns `(wishlist, expires_at, days_remaining)` sorted by `updated_at`
+  descending, with `days_remaining = max(1, math.ceil(remaining_seconds / 86400))`.
+- **Token rotation & state**: Restoring a `DELETED` list transitions it to `WishlistStatus.ACTIVE`,
+  rotates both `public_token` and `invite_token` to fresh values distinct from prior tokens, and
+  resets `invite_token_expires_at = effective_now + self._default_invite_ttl`. Calling
+  `restore_deleted_wishlist` on an `ACTIVE` list is idempotent; calling it on an `ARCHIVED` list
+  raises `WishlistArchivedError` (HTTP `409`).
 
 #### `create_reservation`
 
@@ -1316,6 +1364,10 @@ Settings in `wishenka.config.Settings` (prefixed with `WISHENKA_` in environment
 | `account_deleted` | `INFO` | Account deleted (`AccountDeletionService`) | `subject_hash_prefix`, `deleted_lists`, `transferred_lists`, `cancelled_reservations`, `anonymized_items`, `duration_ms` |
 | `account_deletion_already_deleted` | `INFO` | Idempotent delete | `subject_hash_prefix`, `duration_ms` |
 | `account_deletion_failed` | `ERROR` | Delete rolled back | `subject_hash_prefix`, `error_class`, `duration_ms` |
+| `wishlist_deleted_listed` | `INFO` | Deleted wishlists listed | `actor_id` / `user_id`, `count`, `retention_days` |
+| `wishlist_restored_from_deleted` | `INFO` | Soft-deleted list restored | `wishlist_id`, `actor_id` / `user_id`, `from_status`, `to_status`, `retention_days` |
+| `wishlist_restore_retention_expired` | `WARNING` | Service restore past retention | `wishlist_id`, `actor_id`, `retention_days` |
+| `wishlist_retention_expired` | `WARNING` | HTTP 410 retention expired | `operation` |
 
 ---
 
@@ -1330,6 +1382,7 @@ WishlistError
 ├── WishlistNotFoundError
 ├── WishlistArchivedError
 ├── WishlistDeletedError
+├── WishlistRetentionExpiredError
 ├── InvalidInviteTokenError
 ├── SelfReservationError
 ├── ItemNotFoundError
@@ -1356,7 +1409,16 @@ WishlistError
 
 #### `WishlistDeletedError`
 - **Root Cause**: Requested wishlist has been soft-deleted.
-- **Resolution**: Deleted wishlists cannot be viewed or modified. Create a new wishlist.
+- **Resolution**: Deleted wishlists cannot be viewed or modified. Within
+  `WISHENKA_WISHLIST_RETENTION_DAYS`, the `Owner` can restore it via
+  `WishlistService.restore_deleted_wishlist` (`POST /api/wishlists/{wishlist_id}/restore-deleted`);
+  otherwise create a new wishlist.
+
+#### `WishlistRetentionExpiredError`
+- **Root Cause**: Attempted to restore a soft-deleted wishlist after its retention window
+  (`WISHENKA_WISHLIST_RETENTION_DAYS`, default `30` days) expired.
+- **Resolution**: HTTP routes return `410 Gone` (`code: "retention_expired"`). The list is
+  eligible for permanent purge and can no longer be restored; create a new wishlist instead.
 
 #### `InvalidInviteTokenError`
 - **Root Cause**: Invite link has expired, was rotated via `regenerate_invite_token`, or token is

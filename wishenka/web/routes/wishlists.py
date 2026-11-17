@@ -18,6 +18,7 @@ from wishenka.wishlists.exceptions import (
     WishlistArchivedError,
     WishlistDeletedError,
     WishlistNotFoundError,
+    WishlistRetentionExpiredError,
 )
 from wishenka.wishlists.models import Wishlist, WishlistRole, WishlistStatus
 from wishenka.wishlists.policy import WishlistAccessPolicy
@@ -48,13 +49,32 @@ async def execute[T](request: Request, action: Callable[[WishlistService], Await
             result = await action(injected)
         else:
             result = cast(T, await request.app.state.wishlist_store.execute(action))
-        if operation in {"create_wishlist", "update_wishlist", "change_status", "reset_share"}:
+        if operation in {
+            "create_wishlist",
+            "update_wishlist",
+            "change_status",
+            "reset_share",
+            "restore_deleted_wishlist",
+        }:
             logger.info(
                 "Wishlist mutation committed: %s",
                 operation,
                 extra={"event": "wishlist_mutation_committed", "operation": operation},
             )
         return result
+    except WishlistRetentionExpiredError as exc:
+        logger.warning(
+            "Wishlist restore rejected because retention window expired: %s",
+            operation,
+            extra={"event": "wishlist_retention_expired", "operation": operation},
+        )
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "code": "retention_expired",
+                "message": "Wishlist retention window has expired",
+            },
+        ) from exc
     except (WishlistNotFoundError, WishlistDeletedError, PermissionDeniedError) as exc:
         if isinstance(exc, PermissionDeniedError):
             logger.warning(
@@ -198,6 +218,42 @@ async def list_wishlists(
             if WishlistAccessPolicy.resolve_context(user, wl).is_member
             and wl.status != WishlistStatus.DELETED
             and (include_archived or wl.status == WishlistStatus.ACTIVE)
+        ]
+
+    return await execute(request, action)
+
+
+@router.get("/api/wishlists/deleted")
+async def list_deleted_wishlists(request: Request, user: User) -> list[dict[str, Any]]:
+    """Return owner's soft-deleted wishlists still inside the retention window."""
+    retention_days = getattr(
+        getattr(request.app.state, "settings", None), "wishlist_retention_days", 30
+    )
+
+    async def action(service: WishlistService) -> list[dict[str, Any]]:
+        entries = await service.list_deleted_wishlists(user, retention_days=retention_days)
+        logger.info(
+            "Deleted wishlists listed for user %s",
+            user.telegram_id,
+            extra={
+                "event": "wishlist_deleted_listed",
+                "user_id": user.telegram_id,
+                "count": len(entries),
+                "retention_days": retention_days,
+            },
+        )
+        return [
+            {
+                "id": wl.id,
+                "name": wl.title,
+                "description": wl.description,
+                "event_title": wl.event_title,
+                "event_date": wl.event_date.isoformat() if wl.event_date else None,
+                "deleted_at": wl.updated_at.isoformat(),
+                "expires_at": expires_at.isoformat(),
+                "days_remaining": days_remaining,
+            }
+            for wl, expires_at, days_remaining in entries
         ]
 
     return await execute(request, action)
@@ -439,6 +495,42 @@ async def update_wishlist(
             },
         )
         return projection(wl, user, False)
+
+    return await execute(request, action)
+
+
+@router.post("/api/wishlists/{wishlist_id}/restore-deleted")
+async def restore_deleted_wishlist(
+    request: Request, wishlist_id: int, user: User
+) -> dict[str, Any]:
+    """Restore owner's soft-deleted wishlist within the retention window."""
+    retention_days = getattr(
+        getattr(request.app.state, "settings", None), "wishlist_retention_days", 30
+    )
+
+    async def action(service: WishlistService) -> dict[str, Any]:
+        wl = await service.restore_deleted_wishlist(
+            wishlist_id,
+            user,
+            retention_days=retention_days,
+        )
+        logger.info(
+            "Deleted wishlist %s restored for user %s",
+            wishlist_id,
+            user.telegram_id,
+            extra={
+                "event": "wishlist_restored_from_deleted",
+                "wishlist_id": wishlist_id,
+                "user_id": user.telegram_id,
+                "retention_days": retention_days,
+            },
+        )
+        return projection(
+            wl,
+            user,
+            False,
+            is_favorite=service.has_favorite(user.telegram_id, wl.id),
+        )
 
     return await execute(request, action)
 

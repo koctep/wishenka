@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import secrets
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
@@ -39,6 +40,7 @@ from wishenka.wishlists.exceptions import (
     WishlistArchivedError,
     WishlistDeletedError,
     WishlistNotFoundError,
+    WishlistRetentionExpiredError,
 )
 from wishenka.wishlists.models import (
     ReceiptRecord,
@@ -929,6 +931,135 @@ class WishlistService:
                 "to_status": WishlistStatus.DELETED.value,
             },
         )
+
+    async def list_deleted_wishlists(
+        self,
+        actor: AuthenticatedUser,
+        retention_days: int = 30,
+        now: datetime | None = None,
+    ) -> list[tuple[Wishlist, datetime, int]]:
+        """List owner's soft-deleted wishlists that are still within the retention window."""
+        effective_now = now if now is not None else datetime.now(UTC)
+        threshold = effective_now - timedelta(days=retention_days)
+        results: list[tuple[Wishlist, datetime, int]] = []
+        for wl in self._wishlists.values():
+            if wl.status != WishlistStatus.DELETED:
+                continue
+            ctx = WishlistAccessPolicy.resolve_context(actor, wl)
+            if not WishlistAccessPolicy.can_restore_deleted(ctx, wl):
+                continue
+            deleted_at = (
+                wl.updated_at
+                if wl.updated_at.tzinfo is not None
+                else wl.updated_at.replace(tzinfo=UTC)
+            )
+            if deleted_at <= threshold:
+                continue
+            expires_at = deleted_at + timedelta(days=retention_days)
+            remaining_seconds = (expires_at - effective_now).total_seconds()
+            days_remaining = max(1, math.ceil(remaining_seconds / 86400))
+            results.append((wl, expires_at, days_remaining))
+        results.sort(key=lambda entry: entry[0].updated_at, reverse=True)
+        logger.info(
+            "Listed %s deleted wishlists for actor %s",
+            len(results),
+            actor.telegram_id,
+            extra={
+                "event": "wishlist_deleted_listed",
+                "actor_id": actor.telegram_id,
+                "count": len(results),
+                "retention_days": retention_days,
+            },
+        )
+        return results
+
+    async def restore_deleted_wishlist(
+        self,
+        wishlist_id: int,
+        actor: AuthenticatedUser,
+        retention_days: int = 30,
+        now: datetime | None = None,
+    ) -> Wishlist:
+        """Restore owner's soft-deleted wishlist within the retention window with token rotation."""
+        wl = self._wishlists.get(wishlist_id)
+        if wl is None:
+            raise WishlistNotFoundError(f"Wishlist {wishlist_id} not found")
+
+        ctx = WishlistAccessPolicy.resolve_context(actor, wl)
+        if not WishlistAccessPolicy.can_restore_deleted(ctx, wl):
+            logger.warning(
+                "Actor %s denied permission to restore deleted wishlist %s",
+                actor.telegram_id,
+                wishlist_id,
+                extra={
+                    "event": "access_denied",
+                    "actor_id": actor.telegram_id,
+                    "wishlist_id": wishlist_id,
+                    "action": "restore_deleted_wishlist",
+                },
+            )
+            raise PermissionDeniedError("Actor cannot restore deleted wishlist")
+
+        if wl.status == WishlistStatus.ACTIVE:
+            return wl
+        if wl.status != WishlistStatus.DELETED:
+            raise WishlistArchivedError("Wishlist is archived and cannot be restored as deleted")
+
+        effective_now = now if now is not None else datetime.now(UTC)
+        deleted_at = (
+            wl.updated_at if wl.updated_at.tzinfo is not None else wl.updated_at.replace(tzinfo=UTC)
+        )
+        threshold = effective_now - timedelta(days=retention_days)
+        if deleted_at <= threshold:
+            logger.warning(
+                "Restore rejected for deleted wishlist %s: retention window (%s days) expired",
+                wishlist_id,
+                retention_days,
+                extra={
+                    "event": "wishlist_restore_retention_expired",
+                    "wishlist_id": wishlist_id,
+                    "actor_id": actor.telegram_id,
+                    "retention_days": retention_days,
+                },
+            )
+            raise WishlistRetentionExpiredError("Wishlist retention window has expired")
+
+        new_public_token = secrets.token_urlsafe(16)
+        for _ in range(4):
+            if new_public_token not in {wl.public_token, wl.invite_token}:
+                break
+            new_public_token = secrets.token_urlsafe(16)
+        if new_public_token in {wl.public_token, wl.invite_token}:
+            raise RuntimeError("Unable to generate a new public token")
+
+        new_invite_token = secrets.token_urlsafe(24)
+        for _ in range(4):
+            if new_invite_token not in {wl.invite_token, wl.public_token, new_public_token}:
+                break
+            new_invite_token = secrets.token_urlsafe(24)
+        if new_invite_token in {wl.invite_token, wl.public_token, new_public_token}:
+            raise RuntimeError("Unable to generate a new invitation token")
+
+        wl.public_token = new_public_token
+        wl.invite_token = new_invite_token
+        wl.invite_token_expires_at = effective_now + self._default_invite_ttl
+        wl.status = WishlistStatus.ACTIVE
+        wl.updated_at = effective_now
+        logger.info(
+            "Deleted wishlist %s restored to %s by actor %s",
+            wishlist_id,
+            WishlistStatus.ACTIVE.value,
+            actor.telegram_id,
+            extra={
+                "event": "wishlist_restored_from_deleted",
+                "wishlist_id": wishlist_id,
+                "actor_id": actor.telegram_id,
+                "from_status": WishlistStatus.DELETED.value,
+                "to_status": WishlistStatus.ACTIVE.value,
+                "retention_days": retention_days,
+            },
+        )
+        return wl
 
     async def transfer_ownership(
         self,
