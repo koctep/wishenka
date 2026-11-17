@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import logging
 import secrets
+import sqlite3
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from wishenka.i18n import DEFAULT_LOCALE, SUPPORTED_LOCALES, resolve_telegram_locale, t
 from wishenka.notices.rate import block_until, reserve_permit
 from wishenka.notices.scheduler import utc_event_date
 from wishenka.wishlists.store import WishlistStore
 
 logger = logging.getLogger("wishenka.wishlists.notices")
+locale_logger = logging.getLogger("wishenka.notices.reminders")
 
 
 @dataclass(frozen=True)
@@ -31,29 +35,45 @@ class Reminder:
 
 
 def _render(kind: str, title: str, item: str | None, date: str, language: str | None) -> str:
-    en = (language or "").lower().startswith("en")
+    locale = resolve_telegram_locale(language)
     safe = title[:100]
     if kind not in ("list", "birthday"):
         subject = f"{item[:100]} — {safe}" if item else safe
-        labels = {
-            "item_created": ("Wish added", "Желание добавлено"),
-            "item_updated": ("Wish updated", "Желание изменено"),
-            "item_archived": ("Wish archived", "Желание архивировано"),
-            "item_restored": ("Wish restored", "Желание восстановлено"),
-            "list_updated": ("Wishlist updated", "Список изменён"),
-            "list_archived": ("Wishlist archived", "Список архивирован"),
-            "list_restored": ("Wishlist restored", "Список восстановлен"),
-            "membership_changed": ("Wishlist membership changed", "Изменился состав списка"),
-            "reservation_confirmation": (
-                "Your reservation was updated",
-                "Ваше бронирование изменено",
-            ),
-        }
-        label = labels[kind][0 if en else 1]
-        return f"{label}: {subject}."
-    return (
-        f"Upcoming occasion: {safe} ({date})." if en else f"Приближается событие: {safe} ({date})."
+        return t(f"notices.reminder.{kind}", locale, subject=subject)
+    return t("notices.reminder.occasion", locale, title=safe, date=date)
+
+
+def _normalize_row_locale(raw_locale: object, *, channel: str) -> str:
+    fallback_used = raw_locale not in SUPPORTED_LOCALES
+    locale = str(raw_locale) if not fallback_used else DEFAULT_LOCALE
+    locale_logger.debug(
+        "Reminder recipient locale resolved: locale=%s",
+        locale,
+        extra={
+            "event": "notice_locale_resolved",
+            "channel": channel,
+            "locale": locale,
+            "fallback_used": fallback_used,
+        },
     )
+    return locale
+
+
+async def _fetch_first_with_locale_fallback(
+    conn: AsyncConnection,
+    sql_with_locale: str,
+    sql_without_locale: str,
+    params: dict[str, Any],
+) -> tuple[Any, object]:
+    """Fetch a row with ``u.locale``, defaulting to ``None`` if legacy column is absent."""
+    try:
+        row = (await conn.execute(text(sql_with_locale), params)).mappings().first()
+    except (OperationalError, sqlite3.OperationalError) as exc:
+        if "no such column" not in str(exc).lower():
+            raise
+        row = (await conn.execute(text(sql_without_locale), params)).mappings().first()
+        return row, None
+    return row, (row["locale"] if row is not None else None)
 
 
 async def _event_authorized(conn: AsyncConnection, row: Any) -> bool:
@@ -146,18 +166,13 @@ async def claim_reminder(
                 )
                 skipped.append((int(row["id"]), str(row["kind"]), "unauthorized"))
                 continue
-            dest = (
-                (
-                    await conn.execute(
-                        text(
-                            "SELECT d.chat_id,u.language_code FROM bot_destinations d JOIN users u "
-                            "ON d.user_id=u.id WHERE u.telegram_id=:user AND d.active=1"
-                        ),
-                        {"user": row["user_id"]},
-                    )
-                )
-                .mappings()
-                .first()
+            dest, raw_dest_locale = await _fetch_first_with_locale_fallback(
+                conn,
+                "SELECT d.chat_id,u.locale FROM bot_destinations d JOIN users u "
+                "ON d.user_id=u.id WHERE u.telegram_id=:user AND d.active=1",
+                "SELECT d.chat_id FROM bot_destinations d JOIN users u "
+                "ON d.user_id=u.id WHERE u.telegram_id=:user AND d.active=1",
+                {"user": row["user_id"]},
             )
             setting = await conn.scalar(
                 text(
@@ -299,9 +314,8 @@ async def claim_reminder(
                 ),
                 {"now": now, "id": row["id"], "token": token},
             )
-            body = _render(
-                row["kind"], str(title), item_title, row["event_date"], dest["language_code"]
-            )
+            resolved_locale = _normalize_row_locale(raw_dest_locale, channel="reminder_claim")
+            body = _render(row["kind"], str(title), item_title, row["event_date"], resolved_locale)
             return Reminder(
                 int(row["id"]), now, int(dest["chat_id"]), body, int(row["attempts"]) + 1, token
             )
@@ -327,20 +341,17 @@ async def refresh_reminder(store: WishlistStore, claim: Reminder, now: int) -> R
     """Recheck consent and refresh authorized text immediately before sending."""
 
     async def work(conn: AsyncConnection) -> Reminder | None:
-        row = (
-            (
-                await conn.execute(
-                    text(
-                        "SELECT q.*,d.chat_id,u.language_code FROM reminder_outbox q "
-                        "JOIN users u ON u.telegram_id=q.user_id "
-                        "JOIN bot_destinations d ON d.user_id=u.id AND d.active=1 "
-                        "WHERE q.id=:id AND q.status='sending' AND q.claim_token=:token"
-                    ),
-                    {"id": claim.ident, "token": claim.claim_token},
-                )
-            )
-            .mappings()
-            .first()
+        row, raw_row_locale = await _fetch_first_with_locale_fallback(
+            conn,
+            "SELECT q.*,d.chat_id,u.locale FROM reminder_outbox q "
+            "JOIN users u ON u.telegram_id=q.user_id "
+            "JOIN bot_destinations d ON d.user_id=u.id AND d.active=1 "
+            "WHERE q.id=:id AND q.status='sending' AND q.claim_token=:token",
+            "SELECT q.*,d.chat_id FROM reminder_outbox q "
+            "JOIN users u ON u.telegram_id=q.user_id "
+            "JOIN bot_destinations d ON d.user_id=u.id AND d.active=1 "
+            "WHERE q.id=:id AND q.status='sending' AND q.claim_token=:token",
+            {"id": claim.ident, "token": claim.claim_token},
         )
         if row is None or row["chat_id"] != claim.chat_id:
             return None
@@ -387,11 +398,10 @@ async def refresh_reminder(store: WishlistStore, claim: Reminder, now: int) -> R
             )
             if title is None:
                 return None
+            resolved_locale = _normalize_row_locale(raw_row_locale, channel="reminder_refresh")
             return replace(
                 claim,
-                body=_render(
-                    row["kind"], str(title), None, row["event_date"], row["language_code"]
-                ),
+                body=_render(row["kind"], str(title), None, row["event_date"], resolved_locale),
             )
         result = (
             (
@@ -436,6 +446,7 @@ async def refresh_reminder(store: WishlistStore, claim: Reminder, now: int) -> R
                     return None
             except ValueError:
                 return None
+        resolved_locale = _normalize_row_locale(raw_row_locale, channel="reminder_refresh")
         return replace(
             claim,
             body=_render(
@@ -443,7 +454,7 @@ async def refresh_reminder(store: WishlistStore, claim: Reminder, now: int) -> R
                 str(result["title"]),
                 result["item_title"],
                 row["event_date"],
-                row["language_code"],
+                resolved_locale,
             ),
         )
 

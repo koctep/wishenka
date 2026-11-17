@@ -20,7 +20,14 @@ from aiogram.types import (
 )
 from sqlalchemy import text
 
-from wishenka.auth.models import TelegramUser
+from wishenka.bot.i18n import LocaleMiddleware, _private_bot_user, sync_user_bot_commands
+from wishenka.i18n import (
+    DEFAULT_LOCALE,
+    SupportedLocale,
+    resolve_telegram_locale,
+    t,
+)
+from wishenka.users.models import UserRecord
 from wishenka.users.store import UserStore
 
 logger = logging.getLogger("wishenka.bot.entry")
@@ -30,45 +37,6 @@ class EntryDependencies(Protocol):
     """Configuration needed by the bot entry router."""
 
     mini_app_url: str
-
-
-_COPY = {
-    "en": {
-        "welcome": "Welcome to Wishenka! Create and share wishlists with friends.",
-        "unavailable": "This link is unavailable. Choose an action below.",
-        "help": (
-            "Create and share a wishlist. Givers can reserve wishes while surprises stay secret."
-            " To receive confirmations of your own reservation actions,"
-            " send /reservation_confirmations on; use off to stop them."
-            " Need help or want to send feedback? Select Contact support or send /support."
-        ),
-        "create": "Create wishlist",
-        "collection": "My wishlists",
-        "help_button": "How it works",
-        "support": "Contact support",
-        "home": "Open Mini App",
-        "public": "Open wishlist",
-        "birthdays": "Birthdays",
-    },
-    "ru": {
-        "welcome": "Добро пожаловать в Вишенку! Создавайте и делитесь вишлистами.",
-        "unavailable": "Ссылка недоступна. Выберите действие ниже.",
-        "help": (
-            "Создайте и отправьте вишлист. Дарители бронируют желания, сохраняя сюрприз."
-            " Чтобы получать подтверждения своих действий с бронью, отправьте"
-            " /reservation_confirmations on; для отключения используйте off."
-            " Нужна помощь или хотите отправить отзыв? Нажмите «Написать в поддержку»"
-            " или отправьте /support."
-        ),
-        "create": "Создать вишлист",
-        "collection": "Мои вишлисты",
-        "help_button": "Как это работает",
-        "support": "Написать в поддержку",
-        "home": "Открыть Mini App",
-        "public": "Открыть вишлист",
-        "birthdays": "Дни рождения",
-    },
-}
 
 
 def _url(base: str, intent: str) -> str:
@@ -86,38 +54,106 @@ def _url(base: str, intent: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path or "/", urlencode(query), ""))
 
 
-async def _language(user: User | None, dependencies: EntryDependencies) -> str:
-    code = user.language_code if user else None
+async def _language(
+    user: User | None,
+    dependencies: EntryDependencies,
+    resolved_locale: str | None = None,
+) -> SupportedLocale:
+    """Resolve user locale, preferring pre-resolved middleware locale when supplied."""
+    if resolved_locale == "ru":
+        return "ru"
+    if resolved_locale == "en":
+        return "en"
     store: UserStore | None = getattr(dependencies, "user_store", None)
     if store is not None and user is not None:
         record = await store.get_by_telegram_id(user.id)
-        if record and record.language_code:
-            code = record.language_code
-    return "en" if code and code.lower().startswith("en") else "ru"
+        if record is not None:
+            return record.locale
+    return resolve_telegram_locale(user.language_code if user else None)
 
 
-def _keyboard(base: str, lang: str, target: str | None = None) -> InlineKeyboardMarkup:
-    copy = _COPY[lang]
+def _keyboard(base: str, lang: SupportedLocale, target: str | None = None) -> InlineKeyboardMarkup:
     rows = []
     if target:
         rows.append(
-            [InlineKeyboardButton(text=copy["public"], web_app=WebAppInfo(url=_url(base, target)))]
+            [
+                InlineKeyboardButton(
+                    text=t("bot.entry.btn_public", lang),
+                    web_app=WebAppInfo(url=_url(base, target)),
+                )
+            ]
         )
-    for key in ("create", "collection"):
-        rows.append([InlineKeyboardButton(text=copy[key], web_app=WebAppInfo(url=_url(base, key)))])
-    rows.append([InlineKeyboardButton(text=copy["help_button"], callback_data="entry:help")])
-    rows.append([InlineKeyboardButton(text=copy["support"], callback_data="support:open")])
-    rows.append([InlineKeyboardButton(text=copy["birthdays"], callback_data="birthday:open")])
+    for intent, key in (
+        ("create", "bot.entry.btn_create"),
+        ("collection", "bot.entry.btn_collection"),
+    ):
+        rows.append(
+            [InlineKeyboardButton(text=t(key, lang), web_app=WebAppInfo(url=_url(base, intent)))]
+        )
     rows.append(
-        [InlineKeyboardButton(text=copy["home"], web_app=WebAppInfo(url=_url(base, "home")))]
+        [InlineKeyboardButton(text=t("bot.entry.btn_help", lang), callback_data="entry:help")]
+    )
+    rows.append(
+        [InlineKeyboardButton(text=t("bot.entry.btn_support", lang), callback_data="support:open")]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=t("bot.entry.btn_birthdays", lang), callback_data="birthday:open"
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=t("bot.entry.btn_home", lang),
+                web_app=WebAppInfo(url=_url(base, "home")),
+            )
+        ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _ensure_private_destination(
+    dependencies: EntryDependencies,
+    message: Message,
+    user_record: UserRecord | None,
+) -> UserRecord | None:
+    """Persist verified bot destination and clear superseded support input."""
+    users: UserStore | None = getattr(dependencies, "user_store", None)
+    if users is None or not message.from_user or message.chat.id != message.from_user.id:
+        return None
+    record = user_record
+    if record is None:
+        token = _private_bot_user.set(True)
+        try:
+            record = await users.upsert_from_bot(message.from_user)
+        finally:
+            _private_bot_user.reset(token)
+    async with users.engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO bot_destinations(user_id,chat_id,active) VALUES (:id,:chat,1) "
+                "ON CONFLICT(user_id) DO UPDATE SET chat_id=:chat,active=1"
+            ),
+            {"id": record.id, "chat": message.chat.id},
+        )
+    store = getattr(dependencies, "wishlist_store", None)
+    if store is not None:
+        from wishenka.bot.support import clear_support_session
+
+        await clear_support_session(store, int(record.id), message.chat.id)
+    return record
 
 
 def create_router(dependencies: EntryDependencies) -> Router:
     """Create an isolated receiver, without starting polling or modifying user data."""
     _url(dependencies.mini_app_url, "home")
     router = Router()
+
+    middleware = LocaleMiddleware(dependencies)
+    router.message.outer_middleware(middleware)
+    router.callback_query.outer_middleware(middleware)
 
     @router.errors()
     async def entry_error(_event: ErrorEvent) -> bool:
@@ -130,129 +166,92 @@ def create_router(dependencies: EntryDependencies) -> Router:
         return True
 
     @router.message(CommandStart(), F.chat.type == "private")
-    async def start(message: Message, command: CommandObject) -> None:
-        users = getattr(dependencies, "user_store", None)
-        if users is not None and message.from_user and message.chat.id == message.from_user.id:
-            from wishenka.bot.birthdays import _private_bot_user
-
-            user = message.from_user
-            token = _private_bot_user.set(True)
-            try:
-                record = await users.upsert_user(
-                    TelegramUser(
-                        id=user.id,
-                        first_name=user.first_name,
-                        last_name=user.last_name,
-                        username=user.username,
-                        language_code=user.language_code,
-                        is_premium=bool(user.is_premium),
-                    )
-                )
-            finally:
-                _private_bot_user.reset(token)
-            async with users.engine.begin() as conn:
-                await conn.execute(
-                    text(
-                        "INSERT INTO bot_destinations(user_id,chat_id,active) VALUES (:id,:chat,1) "
-                        "ON CONFLICT(user_id) DO UPDATE SET chat_id=:chat,active=1"
-                    ),
-                    {"id": record.id, "chat": message.chat.id},
-                )
-            store = getattr(dependencies, "wishlist_store", None)
-            if store is not None:
-                from wishenka.bot.support import clear_support_session
-
-                await clear_support_session(store, int(record.id), message.chat.id)
+    async def start(
+        message: Message,
+        command: CommandObject,
+        locale: SupportedLocale = DEFAULT_LOCALE,
+        user_record: UserRecord | None = None,
+    ) -> None:
+        record = await _ensure_private_destination(dependencies, message, user_record)
         payload = command.args
         valid = bool(
             payload and len(payload) <= 64 and re.fullmatch(r"p_[A-Za-z0-9_-]{1,62}", payload)
         )
         outcome = "invalid_link" if payload and not valid else "public_link" if valid else "menu"
-        lang = await _language(message.from_user, dependencies)
-        response = _COPY[lang]["unavailable" if payload and not valid else "welcome"]
+        lang = await _language(message.from_user, dependencies, locale)
+        key = "bot.entry.unavailable" if payload and not valid else "bot.entry.welcome"
         await message.answer(
-            response,
+            t(key, lang),
             reply_markup=_keyboard(dependencies.mini_app_url, lang, payload if valid else None),
         )
+        if (
+            message.bot is not None
+            and message.from_user
+            and message.chat.id == message.from_user.id
+        ):
+            await sync_user_bot_commands(
+                message.bot,
+                message.chat.id,
+                lang,
+                user_id=record.id if record is not None else None,
+            )
         logger.info("Bot entry handled", extra={"event": "bot_start_handled", "outcome": outcome})
 
     @router.message(Command("help"), F.chat.type == "private")
-    async def help_command(message: Message) -> None:
-        users = getattr(dependencies, "user_store", None)
-        if users is not None and message.from_user and message.chat.id == message.from_user.id:
-            from wishenka.bot.birthdays import _private_bot_user
-
-            user = message.from_user
-            token = _private_bot_user.set(True)
-            try:
-                record = await users.upsert_user(
-                    TelegramUser(
-                        id=user.id,
-                        first_name=user.first_name,
-                        last_name=user.last_name,
-                        username=user.username,
-                        language_code=user.language_code,
-                        is_premium=bool(user.is_premium),
-                    )
-                )
-            finally:
-                _private_bot_user.reset(token)
-            async with users.engine.begin() as conn:
-                await conn.execute(
-                    text(
-                        "INSERT INTO bot_destinations(user_id,chat_id,active) VALUES (:id,:chat,1) "
-                        "ON CONFLICT(user_id) DO UPDATE SET chat_id=:chat,active=1"
-                    ),
-                    {"id": record.id, "chat": message.chat.id},
-                )
-            store = getattr(dependencies, "wishlist_store", None)
-            if store is not None:
-                from wishenka.bot.support import clear_support_session
-
-                await clear_support_session(store, int(record.id), message.chat.id)
-        lang = await _language(message.from_user, dependencies)
+    async def help_command(
+        message: Message,
+        locale: SupportedLocale = DEFAULT_LOCALE,
+        user_record: UserRecord | None = None,
+    ) -> None:
+        await _ensure_private_destination(dependencies, message, user_record)
+        lang = await _language(message.from_user, dependencies, locale)
         await message.answer(
-            _COPY[lang]["help"], reply_markup=_keyboard(dependencies.mini_app_url, lang)
+            t("bot.entry.help", lang),
+            reply_markup=_keyboard(dependencies.mini_app_url, lang),
         )
 
     @router.callback_query(F.data == "entry:help", F.message.chat.type == "private")
-    async def help_callback(callback: CallbackQuery) -> None:
+    async def help_callback(
+        callback: CallbackQuery,
+        locale: SupportedLocale = DEFAULT_LOCALE,
+        user_record: UserRecord | None = None,
+    ) -> None:
         if isinstance(callback.message, Message):
             users: UserStore | None = getattr(dependencies, "user_store", None)
             store = getattr(dependencies, "wishlist_store", None)
             if users is not None and store is not None and callback.from_user:
-                record = await users.get_by_telegram_id(callback.from_user.id)
+                record = user_record or await users.get_by_telegram_id(callback.from_user.id)
                 if record is not None:
                     from wishenka.bot.support import clear_support_session
 
                     await clear_support_session(store, int(record.id), callback.message.chat.id)
-            lang = await _language(callback.from_user, dependencies)
+            lang = await _language(callback.from_user, dependencies, locale)
             await callback.message.answer(
-                _COPY[lang]["help"], reply_markup=_keyboard(dependencies.mini_app_url, lang)
+                t("bot.entry.help", lang),
+                reply_markup=_keyboard(dependencies.mini_app_url, lang),
             )
         await callback.answer()
 
     @router.message(Command("reservation_confirmations"), F.chat.type == "private")
-    async def reservation_confirmations(message: Message, command: CommandObject) -> None:
+    async def reservation_confirmations(
+        message: Message,
+        command: CommandObject,
+        locale: SupportedLocale = DEFAULT_LOCALE,
+        user_record: UserRecord | None = None,
+    ) -> None:
         """Let a user explicitly opt in or out of their own action confirmations."""
         user = message.from_user
         users: UserStore | None = getattr(dependencies, "user_store", None)
         if user is None or users is None or message.chat.id != user.id:
             return
-        lang = await _language(user, dependencies)
+        lang = await _language(user, dependencies, locale)
         value = (command.args or "").strip().lower()
         if value not in {"on", "off"}:
-            await message.answer(
-                "Use /reservation_confirmations on or off."
-                if lang == "en"
-                else "Используйте /reservation_confirmations on или off."
-            )
+            await message.answer(t("bot.entry.confirmations_usage", lang))
             return
-        record = await users.get_by_telegram_id(user.id)
+        record = user_record or await users.get_by_telegram_id(user.id)
         if record is None:
-            await message.answer(
-                "Send /start first." if lang == "en" else "Сначала отправьте /start."
-            )
+            await message.answer(t("bot.entry.start_first", lang))
             return
         store = getattr(dependencies, "wishlist_store", None)
         if store is not None:
@@ -269,19 +268,8 @@ def create_router(dependencies: EntryDependencies) -> Router:
                 ),
                 {"user": user.id, "enabled": int(value == "on")},
             )
-        await message.answer(
-            (
-                "Default reservation confirmations enabled; list settings take precedence."
-                if value == "on"
-                else "Default reservation confirmations disabled; list settings take precedence."
-            )
-            if lang == "en"
-            else (
-                "Подтверждения бронирования включены по умолчанию; настройки списка важнее."
-                if value == "on"
-                else "Подтверждения бронирования выключены по умолчанию; настройки списка важнее."
-            )
-        )
+        key = "bot.entry.confirmations_on" if value == "on" else "bot.entry.confirmations_off"
+        await message.answer(t(key, lang))
 
     if getattr(dependencies, "wishlist_store", None) is not None:
         from wishenka.bot.birthdays import create_birthday_router

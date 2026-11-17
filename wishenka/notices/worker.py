@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable
 
 from wishenka.config import Settings
+from wishenka.i18n import DEFAULT_LOCALE, resolve_telegram_locale, t
 from wishenka.notices.reminders import claim_reminder, refresh_reminder, settle_reminder
 from wishenka.notices.scheduler import ReminderScheduler
 from wishenka.notices.sender import NoticeSender, SendOutcome, SendResult
@@ -19,15 +20,17 @@ logger = logging.getLogger("wishenka.wishlists.notices")
 
 TITLE_LIMIT = 100
 MAX_ERROR_BACKOFF_SECONDS = 60.0
-_TEXT = (
-    "Желание «{wish}» из списка «{wishlist}» отмечено как полученное.\n"
-    "Проверьте свою бронь и при необходимости измените или отмените её."
-)
 
 
-def notice_text(wish_title: str, list_title: str) -> str:
-    """Fixed template with the two titles cut to ``TITLE_LIMIT``; no quantity, no other giver."""
-    return _TEXT.format(wish=wish_title[:TITLE_LIMIT], wishlist=list_title[:TITLE_LIMIT])
+def notice_text(wish_title: str, list_title: str, locale: str = DEFAULT_LOCALE) -> str:
+    """Localized notice template with titles cut to ``TITLE_LIMIT``; no quantity or other giver."""
+    resolved = resolve_telegram_locale(locale)
+    return t(
+        "notices.gift_received",
+        resolved,
+        wish=wish_title[:TITLE_LIMIT],
+        wishlist=list_title[:TITLE_LIMIT],
+    )
 
 
 class NoticeWorker:
@@ -251,13 +254,7 @@ class NoticeWorker:
 
     async def _send(self, claim: ClaimedNotice) -> SendResult:
         """Send one notice; a timeout or any unexpected error is ``AMBIGUOUS``."""
-        if claim.language.lower().startswith("en"):
-            text = (
-                f"Wish ‘{claim.wish_title[:TITLE_LIMIT]}’ from ‘{claim.list_title[:TITLE_LIMIT]}’ "
-                "was marked received. Check your reservation and change it if necessary."
-            )
-        else:
-            text = notice_text(claim.wish_title, claim.list_title)
+        text = notice_text(claim.wish_title, claim.list_title, claim.language)
         try:
             return await asyncio.wait_for(
                 self._sender.send(claim.giver_user_id, text), timeout=self._send_timeout

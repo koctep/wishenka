@@ -13,6 +13,7 @@ from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from wishenka.config import Settings
+from wishenka.i18n import DEFAULT_LOCALE, SUPPORTED_LOCALES
 from wishenka.notices.models import (
     SKIP_TARGET_GONE,
     STATUS_FAILED,
@@ -25,6 +26,7 @@ from wishenka.notices.rate import block_until, reserve_permit
 from wishenka.wishlists.store import WishlistStore
 
 logger = logging.getLogger("wishenka.wishlists.notices")
+locale_logger = logging.getLogger("wishenka.notices.store")
 
 CLAIM_BATCH_LIMIT = 50
 STALE_CLAIM_ERROR = "StaleClaim"
@@ -63,7 +65,7 @@ class ClaimedNotice:
     claimed_at: int
     wish_title: str
     list_title: str
-    language: str = "ru"
+    language: str = DEFAULT_LOCALE
     claim_token: str = ""
 
 
@@ -358,7 +360,7 @@ class NoticeStore:
             (
                 await conn.execute(
                     text(
-                        "SELECT d.chat_id,u.language_code,i.title AS wish_title,"
+                        "SELECT d.chat_id,u.locale,i.title AS wish_title,"
                         "l.title AS list_title FROM notification_outbox o "
                         "JOIN wl_lists l ON l.id=o.wishlist_id JOIN wl_items i ON "
                         "i.id=o.wish_item_id "
@@ -385,15 +387,26 @@ class NoticeStore:
             .mappings()
             .first()
         )
+        if not row:
+            return None
+        raw_locale = row["locale"]
+        fallback_used = raw_locale not in SUPPORTED_LOCALES
+        locale = str(raw_locale) if not fallback_used else DEFAULT_LOCALE
+        locale_logger.debug(
+            "Notice recipient locale resolved: locale=%s",
+            locale,
+            extra={
+                "event": "notice_locale_resolved",
+                "channel": "gift_notice",
+                "locale": locale,
+                "fallback_used": fallback_used,
+            },
+        )
         return (
-            (
-                int(row["chat_id"]),
-                str(row["language_code"] or "ru"),
-                str(row["wish_title"]),
-                str(row["list_title"]),
-            )
-            if row
-            else None
+            int(row["chat_id"]),
+            locale,
+            str(row["wish_title"]),
+            str(row["list_title"]),
         )
 
     async def _claim(

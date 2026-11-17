@@ -10,12 +10,65 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from wishenka.i18n.locale import (
+    LocaleSource,
+    SupportedLocale,
+    resolve_telegram_locale,
+    validate_locale,
+)
 from wishenka.users.models import UserRecord
 
 if TYPE_CHECKING:
     from wishenka.auth.models import TelegramUser
 
 logger = logging.getLogger("wishenka.users")
+
+_USERS_TABLE_DDL = """
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id INTEGER NOT NULL UNIQUE,
+    first_name TEXT NOT NULL,
+    last_name TEXT,
+    username TEXT,
+    language_code TEXT,
+    locale TEXT NOT NULL DEFAULT 'en' CHECK (locale IN ('ru', 'en')),
+    locale_source TEXT NOT NULL DEFAULT 'auto' CHECK (locale_source IN ('auto', 'explicit')),
+    is_premium INTEGER NOT NULL DEFAULT 0 CHECK (is_premium IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)
+"""
+
+_BACKFILL_ALL_SQL = """
+UPDATE users
+SET locale = CASE
+        WHEN lower(trim(coalesce(language_code, ''))) LIKE 'ru%' THEN 'ru'
+        ELSE 'en'
+    END,
+    locale_source = 'auto'
+"""
+
+_REPAIR_INVALID_SQL = """
+UPDATE users
+SET locale = CASE
+        WHEN lower(trim(coalesce(language_code, ''))) LIKE 'ru%' THEN 'ru'
+        ELSE 'en'
+    END,
+    locale_source = 'auto'
+WHERE locale IS NULL
+   OR locale NOT IN ('ru', 'en')
+   OR locale_source IS NULL
+   OR locale_source NOT IN ('auto', 'explicit')
+"""
+
+_USER_COLUMNS = (
+    "id, telegram_id, first_name, last_name, username, language_code, "
+    "locale, locale_source, is_premium, created_at, updated_at"
+)
+
+
+class UserNotFoundError(LookupError):
+    """Raised when an operation targets a non-existent user record."""
 
 
 class UserStore:
@@ -36,32 +89,37 @@ class UserStore:
         self._initialized = False
 
     async def initialize(self) -> None:
-        """Initialize table schema and WAL mode idempotently."""
+        """Initialize table schema, locale columns, and WAL mode idempotently."""
         async with self.engine.begin() as conn:
             await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
             await conn.exec_driver_sql("PRAGMA foreign_keys=ON")
             await conn.exec_driver_sql("PRAGMA busy_timeout=5000")
-            await conn.exec_driver_sql(
-                """
-                CREATE TABLE IF NOT EXISTS users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    telegram_id INTEGER NOT NULL UNIQUE,
-                    first_name TEXT NOT NULL,
-                    last_name TEXT,
-                    username TEXT,
-                    language_code TEXT,
-                    is_premium INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
+            await conn.exec_driver_sql(_USERS_TABLE_DDL)
             await conn.exec_driver_sql(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id)"
             )
             await conn.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)"
             )
+            columns_res = await conn.execute(text("PRAGMA table_info(users)"))
+            columns = {str(row["name"]) for row in columns_res.mappings().all()}
+            added_column = False
+            if "locale" not in columns:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE users ADD COLUMN locale TEXT NOT NULL DEFAULT 'en' "
+                    "CHECK (locale IN ('ru', 'en'))"
+                )
+                added_column = True
+            if "locale_source" not in columns:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE users ADD COLUMN locale_source TEXT NOT NULL DEFAULT 'auto' "
+                    "CHECK (locale_source IN ('auto', 'explicit'))"
+                )
+                added_column = True
+            if added_column:
+                await conn.exec_driver_sql(_BACKFILL_ALL_SQL)
+            else:
+                await conn.exec_driver_sql(_REPAIR_INVALID_SQL)
         self._initialized = True
 
     async def _ensure_initialized(self) -> None:
@@ -80,6 +138,10 @@ class UserStore:
         updated_dt = (
             datetime.fromisoformat(updated_val) if isinstance(updated_val, str) else updated_val
         )
+        raw_locale = getattr(row, "locale", "en")
+        locale: SupportedLocale = "ru" if raw_locale == "ru" else "en"
+        raw_source = getattr(row, "locale_source", "auto")
+        locale_source: LocaleSource = "explicit" if raw_source == "explicit" else "auto"
         return UserRecord(
             id=int(row.id),
             telegram_id=int(row.telegram_id),
@@ -90,31 +152,39 @@ class UserStore:
             is_premium=bool(row.is_premium),
             created_at=created_dt,
             updated_at=updated_dt,
+            locale=locale,
+            locale_source=locale_source,
         )
 
-    async def upsert_user(self, user: TelegramUser) -> UserRecord:
-        """Insert new user or update mutable attributes if already exists."""
+    async def upsert_user(self, user: TelegramUser, *, channel: str = "miniapp") -> UserRecord:
+        """Insert new user or update mutable attributes while preserving explicit locale."""
         await self._ensure_initialized()
         now_iso = datetime.now(UTC).isoformat()
+        resolved_locale = resolve_telegram_locale(user.language_code)
+        normalized_raw = (user.language_code or "").strip().lower()
+        fallback_used = not normalized_raw.startswith(("ru", "en"))
         stmt = text(
-            """
+            f"""
             INSERT INTO users (
                 telegram_id, first_name, last_name, username,
-                language_code, is_premium, created_at, updated_at
+                language_code, locale, locale_source, is_premium, created_at, updated_at
             ) VALUES (
                 :telegram_id, :first_name, :last_name, :username,
-                :language_code, :is_premium, :created_at, :updated_at
+                :language_code, :locale, 'auto', :is_premium, :created_at, :updated_at
             )
             ON CONFLICT(telegram_id) DO UPDATE SET
                 first_name = excluded.first_name,
                 last_name = excluded.last_name,
                 username = excluded.username,
                 language_code = excluded.language_code,
+                locale = CASE
+                    WHEN users.locale_source = 'explicit' THEN users.locale
+                    ELSE excluded.locale
+                END,
+                locale_source = users.locale_source,
                 is_premium = excluded.is_premium,
                 updated_at = excluded.updated_at
-            RETURNING id, telegram_id, first_name, last_name,
-                      username, language_code, is_premium,
-                      created_at, updated_at
+            RETURNING {_USER_COLUMNS}
             """
         )
         params = {
@@ -123,16 +193,19 @@ class UserStore:
             "last_name": user.last_name,
             "username": user.username,
             "language_code": user.language_code,
+            "locale": resolved_locale,
             "is_premium": 1 if user.is_premium else 0,
             "created_at": now_iso,
             "updated_at": now_iso,
         }
         async with self.engine.begin() as conn:
-            existing = await conn.execute(
-                text("SELECT id FROM users WHERE telegram_id = :telegram_id"),
-                {"telegram_id": user.id},
-            )
-            is_new = existing.first() is None
+            existing = (
+                await conn.execute(
+                    text("SELECT id, locale FROM users WHERE telegram_id = :telegram_id"),
+                    {"telegram_id": user.id},
+                )
+            ).first()
+            is_new = existing is None
             result = await conn.execute(stmt, params)
             row = result.one()
             record = self._row_to_record(row)
@@ -158,19 +231,92 @@ class UserStore:
                         "telegram_id": record.telegram_id,
                     },
                 )
+            changed = is_new or (existing is not None and existing.locale != record.locale)
+            logger.debug(
+                "User locale resolved on %s: locale=%s source=%s",
+                channel,
+                record.locale,
+                record.locale_source,
+                extra={
+                    "event": "locale_auto_resolved",
+                    "channel": channel,
+                    "resolved_locale": record.locale,
+                    "locale_source": record.locale_source,
+                    "changed": changed,
+                    "fallback_used": fallback_used,
+                },
+            )
             return record
+
+    async def upsert_from_bot(self, tg_user: Any) -> UserRecord:
+        """Upsert a user profile from an aiogram User object."""
+        from wishenka.auth.models import TelegramUser
+
+        telegram_user = TelegramUser(
+            id=int(tg_user.id),
+            first_name=str(tg_user.first_name or "User"),
+            last_name=getattr(tg_user, "last_name", None),
+            username=getattr(tg_user, "username", None),
+            language_code=getattr(tg_user, "language_code", None),
+            is_premium=bool(getattr(tg_user, "is_premium", False)),
+        )
+        return await self.upsert_user(telegram_user, channel="bot")
+
+    async def set_locale(self, telegram_id: int, locale: SupportedLocale) -> UserRecord:
+        """Persist an explicit user locale choice that overrides client language auto-detection."""
+        await self._ensure_initialized()
+        validated = validate_locale(locale)
+        now_iso = datetime.now(UTC).isoformat()
+        async with self.engine.begin() as conn:
+            existing = (
+                await conn.execute(
+                    text(
+                        "SELECT id, locale, locale_source FROM users "
+                        "WHERE telegram_id = :telegram_id"
+                    ),
+                    {"telegram_id": telegram_id},
+                )
+            ).first()
+            if existing is None:
+                raise UserNotFoundError(f"User with telegram_id {telegram_id} not found")
+            result = await conn.execute(
+                text(
+                    f"""
+                    UPDATE users
+                    SET locale = :locale,
+                        locale_source = 'explicit',
+                        updated_at = :updated_at
+                    WHERE telegram_id = :telegram_id
+                    RETURNING {_USER_COLUMNS}
+                    """
+                ),
+                {
+                    "locale": validated,
+                    "updated_at": now_iso,
+                    "telegram_id": telegram_id,
+                },
+            )
+            record = self._row_to_record(result.one())
+            logger.info(
+                "User locale explicitly updated to %s",
+                record.locale,
+                extra={
+                    "event": "locale_explicit_updated",
+                    "user_id": record.id,
+                    "previous_locale": str(existing.locale),
+                    "new_locale": record.locale,
+                    "previous_source": str(existing.locale_source),
+                    "locale_source": record.locale_source,
+                },
+            )
+            return record
+
+    set_explicit_locale = set_locale
 
     async def get_by_telegram_id(self, telegram_id: int) -> UserRecord | None:
         """Find user by numeric Telegram ID."""
         await self._ensure_initialized()
-        stmt = text(
-            """
-            SELECT id, telegram_id, first_name, last_name,
-                   username, language_code, is_premium,
-                   created_at, updated_at
-            FROM users WHERE telegram_id = :telegram_id
-            """
-        )
+        stmt = text(f"SELECT {_USER_COLUMNS} FROM users WHERE telegram_id = :telegram_id")
         async with self.engine.connect() as conn:
             result = await conn.execute(stmt, {"telegram_id": telegram_id})
             row = result.first()
@@ -179,14 +325,7 @@ class UserStore:
     async def get_by_id(self, user_id: int) -> UserRecord | None:
         """Find user by internal database primary key."""
         await self._ensure_initialized()
-        stmt = text(
-            """
-            SELECT id, telegram_id, first_name, last_name,
-                   username, language_code, is_premium,
-                   created_at, updated_at
-            FROM users WHERE id = :id
-            """
-        )
+        stmt = text(f"SELECT {_USER_COLUMNS} FROM users WHERE id = :id")
         async with self.engine.connect() as conn:
             result = await conn.execute(stmt, {"id": user_id})
             row = result.first()

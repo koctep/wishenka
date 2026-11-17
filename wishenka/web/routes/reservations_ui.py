@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse
 
 from wishenka.auth.dependencies import get_current_user
 from wishenka.auth.models import AuthenticatedUser
+from wishenka.i18n.dependencies import LocaleDep
 from wishenka.web.templates import templates
 from wishenka.wishlists.models import ReservationStatus
 from wishenka.wishlists.schemas import MyReservationItemDTO
@@ -174,11 +175,16 @@ async def reservations_list(
 
 
 @router.get("/web/reservations", response_class=HTMLResponse)
-async def reservations_page(request: Request, current_user: User) -> Response:
+async def reservations_page(
+    request: Request,
+    current_user: User,
+    locale: LocaleDep,
+) -> Response:
     """Return the cabinet page for the identified caller."""
     items = await _load_items(request, current_user.telegram_id)
     context = _list_context(items, None, None)
     context["viewer_identified"] = True
+    context["locale"] = locale
     return templates.TemplateResponse(
         request=request,
         name="reservations_cabinet.html",

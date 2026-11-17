@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block title %}{{ t('settings.page_title', locale) }}{% endblock %}
+
+{% block content %}
+<div class="settings-page">
+    <p class="mb-4">
+        <a href="/" class="back-link">{{ t('settings.back_home', locale) }}</a>
+    </p>
+    <h1>{{ t('settings.title', locale) }}</h1>
+    <section aria-labelledby="language-heading">
+        <h2 id="language-heading">{{ t('settings.language_heading', locale) }}</h2>
+        <p>{{ t('settings.language_description', locale) }}</p>
+        <p class="locale-source-status">
+            {{ t('settings.current_source_label', locale) }}
+            <strong>{{ t('settings.source_explicit' if locale_source == 'explicit' else 'settings.source_auto', locale) }}</strong>
+        </p>
+        <div class="locale-options" role="group" aria-label="{{ t('settings.language_heading', locale) }}">
+            {% for code in SUPPORTED_LOCALES %}
+            <button type="button"
+                    class="locale-option{% if code == locale %} is-active{% endif %}"
+                    aria-pressed="{{ 'true' if code == locale else 'false' }}"
+                    hx-patch="/api/profile/locale"
+                    hx-ext="json-enc"
+                    hx-vals='{"locale": "{{ code }}"}'
+                    hx-swap="none"
+                    hx-target="#locale-feedback">
+                {{ t('settings.locale_' ~ code, locale) }}
+            </button>
+            {% endfor %}
+        </div>
+        <p id="locale-feedback" role="status" aria-live="polite"></p>
+    </section>
+</div>
+{% endblock %}

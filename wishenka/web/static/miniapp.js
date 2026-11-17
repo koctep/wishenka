@@ -14,6 +14,52 @@ function button(text, handler) {
   el.addEventListener('click', handler);
   return el;
 }
+function activeLocale() {
+  const raw = (root?.dataset?.locale || document.documentElement.lang || '').trim().toLowerCase();
+  return raw.startsWith('ru') ? 'ru' : 'en';
+}
+const HOME_I18N = {
+  en: {
+    title: 'Wishlists',
+    createWishlist: 'Create wishlist',
+    createFailed: 'Could not create wishlist. Try again.',
+    viewingHistory: 'Viewing history',
+    settings: 'Settings',
+    loading: 'Loading',
+    myWishlists: 'My wishlists',
+    myWishlistsEmpty: 'No personal wishlists yet',
+    collaborating: 'Collaborating',
+    collaboratingEmpty: 'No collaborative wishlists yet',
+    favorites: 'Favorites',
+    favoritesEmpty: 'No favorites yet',
+    remove: 'Remove',
+    removedFromFavorites: 'Removed from favorites',
+    removeFavoriteFailed: 'Could not remove from favorites',
+    loadFailed: 'Could not load wishlists. Check your session and try again.',
+  },
+  ru: {
+    title: 'Вишлисты',
+    createWishlist: 'Создать вишлист',
+    createFailed: 'Не удалось создать вишлист. Попробуйте ещё раз.',
+    viewingHistory: 'История просмотров',
+    settings: 'Настройки',
+    loading: 'Загрузка',
+    myWishlists: 'Мои вишлисты',
+    myWishlistsEmpty: 'Пока нет личных вишлистов',
+    collaborating: 'Совместные',
+    collaboratingEmpty: 'Пока нет совместных вишлистов',
+    favorites: 'Избранные',
+    favoritesEmpty: 'Пока нет избранных вишлистов',
+    remove: 'Удалить',
+    removedFromFavorites: 'Удалено из избранного',
+    removeFavoriteFailed: 'Не удалось удалить из избранного',
+    loadFailed: 'Не удалось загрузить вишлисты. Проверьте сессию и попробуйте снова.',
+  },
+};
+function homeText(key) {
+  const table = HOME_I18N[activeLocale()] || HOME_I18N.en;
+  return table[key] ?? HOME_I18N.en[key] ?? key;
+}
 function status(message) {
   document.getElementById('status').textContent = message;
 }
@@ -129,19 +175,25 @@ async function showHistory() {
   } catch (_) { status('Could not load history'); }
 }
 async function showHome() {
-  root.replaceChildren(node('h1', 'Wishlists'));
+  const msg = homeText;
+  root.replaceChildren(node('h1', msg('title')));
   const nav = node('nav', '', {class: 'top-nav'});
+  const settingsLink = node('a', msg('settings'), {
+    href: '/settings',
+    class: 'settings-link',
+  });
   nav.append(
-    button('Create wishlist', async () => {
+    button(msg('createWishlist'), async () => {
       try {
         const list = await api('/api/wishlists', {method: 'POST', body: '{}'});
         await showList(list.id);
-      } catch (_) { status('Could not create wishlist. Try again.'); }
+      } catch (_) { status(msg('createFailed')); }
     }),
-    button('Viewing history', showHistory)
+    button(msg('viewingHistory'), showHistory),
+    settingsLink
   );
   root.append(nav);
-  status('Loading');
+  status(msg('loading'));
   try {
     const [lists, favs] = await Promise.all([
       api('/api/wishlists'),
@@ -153,13 +205,13 @@ async function showHome() {
 
     // My wishlists section
     const mySection = node('section', '', {
-      'aria-label': 'My wishlists',
+      'aria-label': msg('myWishlists'),
       role: 'region',
       class: 'wishlist-section'
     });
-    mySection.append(node('h2', 'My wishlists'));
+    mySection.append(node('h2', msg('myWishlists')));
     if (myLists.length === 0) {
-      mySection.append(node('p', 'No personal wishlists yet', {class: 'empty-notice'}));
+      mySection.append(node('p', msg('myWishlistsEmpty'), {class: 'empty-notice'}));
     } else {
       myLists.forEach(l => mySection.append(wishlistCard(l, () => showList(l.id))));
     }
@@ -167,13 +219,13 @@ async function showHome() {
 
     // Collaborating section
     const collabSection = node('section', '', {
-      'aria-label': 'Collaborating',
+      'aria-label': msg('collaborating'),
       role: 'region',
       class: 'wishlist-section'
     });
-    collabSection.append(node('h2', 'Collaborating'));
+    collabSection.append(node('h2', msg('collaborating')));
     if (collabLists.length === 0) {
-      collabSection.append(node('p', 'No collaborative wishlists yet', {class: 'empty-notice'}));
+      collabSection.append(node('p', msg('collaboratingEmpty'), {class: 'empty-notice'}));
     } else {
       collabLists.forEach(l => collabSection.append(wishlistCard(l, () => showList(l.id))));
     }
@@ -181,22 +233,22 @@ async function showHome() {
 
     // Favorites section
     const favSection = node('section', '', {
-      'aria-label': 'Favorites',
+      'aria-label': msg('favorites'),
       role: 'region',
       class: 'wishlist-section'
     });
-    favSection.append(node('h2', 'Favorites'));
+    favSection.append(node('h2', msg('favorites')));
     if (favs.length === 0) {
-      favSection.append(node('p', 'No favorites yet', {class: 'empty-notice'}));
+      favSection.append(node('p', msg('favoritesEmpty'), {class: 'empty-notice'}));
     } else {
       favs.forEach(l => {
         const card = wishlistCard(l, () => showList(l.id));
-        card.append(button('Remove', async () => {
+        card.append(button(msg('remove'), async () => {
           try {
             await api(`/api/favorites/${l.id}`, {method: 'DELETE'});
             await showHome();
-            status('Removed from favorites');
-          } catch (_) { status('Could not remove from favorites'); }
+            status(msg('removedFromFavorites'));
+          } catch (_) { status(msg('removeFavoriteFailed')); }
         }));
         favSection.append(card);
       });
@@ -230,7 +282,7 @@ async function showHome() {
       // A failed card leaves the three sections in place.
     }
     status('');
-  } catch (_) { status('Could not load wishlists. Check your session and try again.'); }
+  } catch (_) { status(msg('loadFailed')); }
 }
 function settingsForm(list) {
   const form = node('form');
@@ -411,13 +463,25 @@ async function invitationView(token) {
   } catch (_) { status('This invitation is unavailable'); }
 }
 async function bootstrap() {
-  try { await api('/api/auth/me'); }
-  catch (_) {
+  let me = null;
+  try {
+    me = await api('/api/auth/me');
+  } catch (_) {
     if (!bridge?.initData) throw new Error('Telegram authentication required');
-    await api('/api/auth/telegram', {
+    const auth = await api('/api/auth/telegram', {
       method: 'POST',
       body: JSON.stringify({init_data: bridge.initData}),
     });
+    const authLocale = auth?.locale || auth?.user?.locale;
+    if (authLocale) {
+      document.documentElement.lang = authLocale;
+      if (root) root.dataset.locale = authLocale;
+    }
+  }
+  const meLocale = me?.locale || me?.user?.locale;
+  if (meLocale) {
+    document.documentElement.lang = meLocale;
+    if (root) root.dataset.locale = meLocale;
   }
   csrf = (await api('/api/auth/csrf')).csrf_token;
 }

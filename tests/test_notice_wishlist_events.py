@@ -366,7 +366,7 @@ def test_shared_event_text_is_localized_and_identifies_the_actual_change(
 
     assert _render(kind, "List", "Wish", "", "en").startswith(english + ":")
     assert _render(kind, "List", "Wish", "", "ru").startswith(russian + ":")
-    assert _render(kind, "List", "Wish", "", None).startswith(russian + ":")
+    assert _render(kind, "List", "Wish", "", None).startswith(english + ":")
 
 
 async def test_shared_change_does_not_fall_back_to_reservation_after_member_removed(
@@ -492,7 +492,7 @@ async def test_opted_in_reservation_confirmations_reach_only_actor(
             await worker.run_once(now)
             assert len(sender.calls) == 1
             assert sender.calls[0][0] == GIFTER_ID
-            assert "бронирование" in sender.calls[0][1].lower()
+            assert "reservation" in sender.calls[0][1].lower()
 
             async def reserve_other(service: WishlistService) -> None:
                 await service.create_reservation(item, OTHER_GIFTER)
@@ -585,7 +585,7 @@ async def test_list_owner_confirmation_uses_current_wish_recipient(
         await _Env(store, db).worker(sender).run_once(int(time.time()) + 10)
         if changed_role is None:
             assert len(sender.calls) == 1 and sender.calls[0][0] == OWNER_ID
-            assert "бронирование" in sender.calls[0][1].lower()
+            assert "reservation" in sender.calls[0][1].lower()
         else:
             assert sender.calls == []
             with sqlite3.connect(db) as conn:

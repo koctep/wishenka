@@ -34,7 +34,22 @@ label { display: block; margin: .5rem 0; }
 .badge-admin { background: #fef3c7; color: #b45309; }
 .badge-member { background: #dcfce7; color: #15803d; }
 .badge-favorite { background: #fce7f3; color: #be185d; }
-.top-nav { margin: .5rem 0; display: flex; gap: .5rem; flex-wrap: wrap; }
+.top-nav { margin: .5rem 0; display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+.settings-link, .back-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--touch-target);
+  padding: .25rem .75rem;
+  border: 1px solid #74283f;
+  border-radius: .5rem;
+  color: #74283f;
+  text-decoration: none;
+}
+.locale-options { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .75rem; }
+.locale-option.is-active {
+  background: #74283f;
+  color: #ffffff;
+}
 .wishlist-card { display: flex; align-items: center; margin: .4rem 0; flex-wrap: wrap; }
 .history-item { display: flex; align-items: center; margin: .4rem 0; flex-wrap: wrap; }
 .history-time { font-size: .85rem; color: #666; margin-left: .5rem; }

@@ -39,6 +39,7 @@ from tests.receipt_support import (
 from tests.test_bot_capture_repro import _action, _setup
 from tests.test_receipt_notices import _Env
 from wishenka.bot.entry import create_router
+from wishenka.i18n import resolve_telegram_locale
 from wishenka.users.store import UserStore
 from wishenka.wishlists.service import WishlistService
 from wishenka.wishlists.store import WishlistStore
@@ -763,7 +764,7 @@ async def test_recipient_who_is_also_giver_receives_neutral_event_reminder(
 
 @pytest.mark.parametrize(
     ("language", "expected"),
-    [("en-US", "received"), ("ru-RU", "получ"), ("fr", "получ")],
+    [("en-US", "received"), ("ru-RU", "получ"), ("fr", "received")],
 )
 async def test_receipt_uses_language_and_safe_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, language: str, expected: str
@@ -774,7 +775,9 @@ async def test_receipt_uses_language_and_safe_fallback(
         await env.seed(2, ((GIFTER, 1),), title="Safe item", list_title="Safe list")
         await _verify_start(monkeypatch, db, GIFTER_ID)
         sql_exec(
-            db, "UPDATE users SET language_code = ? WHERE telegram_id = ?", (language, GIFTER_ID)
+            db,
+            "UPDATE users SET language_code = ?, locale = ? WHERE telegram_id = ?",
+            (language, resolve_telegram_locale(language), GIFTER_ID),
         )
         await env.receive(1)
         sender = FakeNoticeSender()

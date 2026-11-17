@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import calendar
-import logging
 import time
-from contextvars import ContextVar
 from typing import Any
 
 from aiogram import F, Router
@@ -14,20 +12,10 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from wishenka.auth.models import TelegramUser
 from wishenka.bot.entry import _language
-
-_private_bot_user: ContextVar[bool] = ContextVar("private_birthday_input", default=False)
-
-
-class _PrivateUserLogFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        return not _private_bot_user.get()
-
-
-_user_logger = logging.getLogger("wishenka.users")
-if not any(isinstance(item, _PrivateUserLogFilter) for item in _user_logger.filters):
-    _user_logger.addFilter(_PrivateUserLogFilter())
+from wishenka.bot.i18n import _private_bot_user
+from wishenka.i18n import DEFAULT_LOCALE, SupportedLocale, t
+from wishenka.users.models import UserRecord
 
 
 def create_birthday_router(dependencies: Any) -> Router:
@@ -36,23 +24,20 @@ def create_birthday_router(dependencies: Any) -> Router:
     store = dependencies.wishlist_store
     users = dependencies.user_store
 
-    async def principal(user: Any, chat: int) -> int | None:
+    async def principal(
+        user: Any,
+        chat: int,
+        user_record: UserRecord | None = None,
+    ) -> int | None:
         if user is None or chat != user.id:
             return None
-        token = _private_bot_user.set(True)
-        try:
-            record = await users.upsert_user(
-                TelegramUser(
-                    id=user.id,
-                    first_name=user.first_name,
-                    last_name=user.last_name,
-                    username=user.username,
-                    language_code=user.language_code,
-                    is_premium=bool(user.is_premium),
-                )
-            )
-        finally:
-            _private_bot_user.reset(token)
+        record = user_record
+        if record is None:
+            token = _private_bot_user.set(True)
+            try:
+                record = await users.upsert_from_bot(user)
+            finally:
+                _private_bot_user.reset(token)
         async with users.engine.begin() as conn:
             await conn.execute(
                 text(
@@ -63,7 +48,7 @@ def create_birthday_router(dependencies: Any) -> Router:
             )
         return int(record.id)
 
-    async def listing(message: Message, owner: int, lang: str) -> None:
+    async def listing(message: Message, owner: int, lang: SupportedLocale) -> None:
         async with store.engine.connect() as conn:
             rows = (
                 (
@@ -78,11 +63,11 @@ def create_birthday_router(dependencies: Any) -> Router:
                 .mappings()
                 .all()
             )
-        add = "Добавить" if lang == "ru" else "Add"
-        edit = "Изменить" if lang == "ru" else "Edit"
-        delete = "Удалить" if lang == "ru" else "Delete"
+        add = t("bot.birthdays.btn_add", lang)
+        edit = t("bot.birthdays.btn_edit", lang)
+        delete = t("bot.birthdays.btn_delete", lang)
         keyboard = [[InlineKeyboardButton(text=add, callback_data="birthday:add")]]
-        lines = ["Дни рождения:" if lang == "ru" else "Birthdays:"]
+        lines = [t("bot.birthdays.heading", lang)]
         for row in rows:
             lines.append(f"{row['label']}: {row['month']:02d}-{row['day']:02d}")
             key = f"{row['id']}:{row['revision']}"
@@ -101,17 +86,26 @@ def create_birthday_router(dependencies: Any) -> Router:
         )
 
     @router.message(Command("birthdays"), F.chat.type == "private")
-    async def birthdays(message: Message) -> None:
-        owner = await principal(message.from_user, message.chat.id)
+    async def birthdays(
+        message: Message,
+        locale: SupportedLocale = DEFAULT_LOCALE,
+        user_record: UserRecord | None = None,
+    ) -> None:
+        owner = await principal(message.from_user, message.chat.id, user_record)
         if owner is not None:
             from wishenka.bot.support import clear_support_session
 
             await clear_support_session(store, owner, message.chat.id)
-            await listing(message, owner, await _language(message.from_user, dependencies))
+            lang = await _language(message.from_user, dependencies, locale)
+            await listing(message, owner, lang)
 
     @router.message(Command("cancel"), F.chat.type == "private")
-    async def cancel(message: Message) -> None:
-        owner = await principal(message.from_user, message.chat.id)
+    async def cancel(
+        message: Message,
+        locale: SupportedLocale = DEFAULT_LOCALE,
+        user_record: UserRecord | None = None,
+    ) -> None:
+        owner = await principal(message.from_user, message.chat.id, user_record)
         if owner is None:
             return
 
@@ -122,25 +116,26 @@ def create_birthday_router(dependencies: Any) -> Router:
             )
 
         await store.transaction(clear)
-        await message.answer(
-            "Отменено."
-            if await _language(message.from_user, dependencies) == "ru"
-            else "Cancelled."
-        )
+        lang = await _language(message.from_user, dependencies, locale)
+        await message.answer(t("bot.birthdays.cancelled", lang))
 
     @router.callback_query(F.data.startswith("birthday:"), F.message.chat.type == "private")
-    async def action(callback: CallbackQuery) -> None:
+    async def action(
+        callback: CallbackQuery,
+        locale: SupportedLocale = DEFAULT_LOCALE,
+        user_record: UserRecord | None = None,
+    ) -> None:
         if not isinstance(callback.message, Message):
             return
         chat_id = callback.message.chat.id
-        owner = await principal(callback.from_user, callback.message.chat.id)
+        owner = await principal(callback.from_user, callback.message.chat.id, user_record)
         if owner is None:
             await callback.answer()
             return
         from wishenka.bot.support import clear_support_session
 
         await clear_support_session(store, owner, chat_id)
-        lang = await _language(callback.from_user, dependencies)
+        lang = await _language(callback.from_user, dependencies, locale)
         parts = (callback.data or "").split(":")
         if parts == ["birthday", "open"]:
             await listing(callback.message, owner, lang)
@@ -205,26 +200,28 @@ def create_birthday_router(dependencies: Any) -> Router:
 
         outcome = await store.transaction(change)
         if outcome == "prompt":
-            await callback.message.answer("Введите имя:" if lang == "ru" else "Enter a name:")
+            await callback.message.answer(t("bot.birthdays.enter_name", lang))
         elif outcome == "deleted":
             await listing(callback.message, owner, lang)
         else:
-            await callback.message.answer(
-                "Действие недоступно." if lang == "ru" else "Action unavailable."
-            )
+            await callback.message.answer(t("bot.birthdays.action_unavailable", lang))
         await callback.answer()
 
     @router.message(F.chat.type == "private", F.text, ~F.text.startswith("/"))
-    async def input_message(message: Message) -> Any:
+    async def input_message(
+        message: Message,
+        locale: SupportedLocale = DEFAULT_LOCALE,
+        user_record: UserRecord | None = None,
+    ) -> Any:
         from aiogram.dispatcher.event.bases import SkipHandler
 
         user = message.from_user
         if user is None or message.chat.id != user.id:
             raise SkipHandler
-        record = await users.get_by_telegram_id(user.id)
+        record = user_record or await users.get_by_telegram_id(user.id)
         if record is None:
             raise SkipHandler
-        lang = await _language(user, dependencies)
+        lang = await _language(user, dependencies, locale)
         value = (message.text or "").strip()
 
         async def apply(conn: AsyncConnection) -> str:
@@ -304,17 +301,14 @@ def create_birthday_router(dependencies: Any) -> Router:
         result = await store.transaction(apply)
         if result == "skip":
             raise SkipHandler
-        prompts = {
-            "date": ("Введите дату MM-DD:", "Enter date MM-DD:"),
-            "invalid_label": (
-                "Введите имя до 80 символов.",
-                "Enter a name of at most 80 characters.",
-            ),
-            "invalid_date": ("Некорректная дата. Введите MM-DD.", "Invalid date. Enter MM-DD."),
-            "stale": ("Запись изменилась.", "Entry has changed."),
-            "limit": ("Не более 20 записей.", "At most 20 entries are allowed."),
-            "saved": ("Сохранено.", "Saved."),
+        prompt_keys = {
+            "date": "bot.birthdays.enter_date",
+            "invalid_label": "bot.birthdays.invalid_label",
+            "invalid_date": "bot.birthdays.invalid_date",
+            "stale": "bot.birthdays.stale",
+            "limit": "bot.birthdays.limit",
+            "saved": "bot.birthdays.saved",
         }
-        await message.answer(prompts[result][0 if lang == "ru" else 1])
+        await message.answer(t(prompt_keys[result], lang))
 
     return router

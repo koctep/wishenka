@@ -87,3 +87,4 @@ class AuthResponse(BaseModel):
     token: str = Field(description="Signed session token")
     user: TelegramUser = Field(description="Verified Telegram user profile")
     user_id: int | None = Field(default=None, description="Internal database user ID")
+    locale: str | None = Field(default=None, description="Active user profile locale")

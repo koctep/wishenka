@@ -180,8 +180,7 @@ async def test_partial_destination_success_stored_language_and_ticket_cleanup(
     try:
         # 1. Stored language preference ('ru') overrides Telegram language_code ('en').
         await harness.text("/start", lang="en")
-        async with users.engine.begin() as conn:
-            await conn.execute(text("UPDATE users SET language_code='ru' WHERE telegram_id=101"))
+        await users.set_locale(101, "ru")
         await harness.text("/support", lang="en")
         assert "Отмена" in str(harness.last_user_message().reply_markup)
 

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="{{ locale|default('en') }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -234,6 +234,11 @@
 </head>
 <body class="bg-gray-50 text-gray-900"
       {% if viewer_identified|default(false) %}data-viewer-identified="true"{% endif %}>
+    {% if viewer_identified|default(false) %}
+    <nav class="top-nav container mx-auto px-4 pt-3 max-w-lg">
+        <a href="/settings" class="settings-link">{{ t('nav.settings', locale|default('en')) }}</a>
+    </nav>
+    {% endif %}
     <main class="container mx-auto px-4 py-6 max-w-lg">
         {% block content %}{% endblock %}
     </main>

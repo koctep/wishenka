@@ -24,7 +24,9 @@ from aiogram.types import (
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from wishenka.auth.models import TelegramUser
+from wishenka.bot.i18n import _private_bot_user
+from wishenka.i18n import DEFAULT_LOCALE, SupportedLocale, t
+from wishenka.users.models import UserRecord
 from wishenka.wishlists.store import WishlistStore
 
 logger = logging.getLogger("wishenka.bot.support")
@@ -69,7 +71,9 @@ def redact_capabilities(text_value: str, known_tokens: Iterable[str] = ()) -> st
     sanitized = _STARTAPP_TOKEN_RE.sub(r"\1[REDACTED]", text_value)
     sanitized = _CAPABILITY_PATH_RE.sub(r"\1[REDACTED]", sanitized)
     sanitized = _CAPABILITY_TOKEN_RE.sub("[REDACTED]", sanitized)
-    for token in sorted({t for t in known_tokens if t and len(t) >= 4}, key=len, reverse=True):
+    for token in sorted(
+        {tok for tok in known_tokens if tok and len(tok) >= 4}, key=len, reverse=True
+    ):
         sanitized = sanitized.replace(token, "[REDACTED]")
     return sanitized
 
@@ -107,69 +111,6 @@ async def clear_support_session(store: WishlistStore, owner_id: int, chat_id: in
         )
 
     await store.transaction(_delete)
-
-
-_SUPPORT_COPY: dict[str, dict[str, str]] = {
-    "en": {
-        "prompt": (
-            "Describe your question, problem, or feedback in one message and send it here.\n"
-            "Send /cancel or press the button below to exit support mode."
-        ),
-        "cancel_button": "Cancel",
-        "support_button": "Contact support",
-        "cancelled": "Support request cancelled. You can continue sending wishes as usual.",
-        "empty": "Please send a text message describing your question or issue, or press Cancel.",
-        "non_text": (
-            "Only text messages are supported in support requests. "
-            "Please describe your issue in text or press Cancel."
-        ),
-        "too_long": (
-            "Your message is too long (maximum {max_len} characters). "
-            "Please shorten it and try again, or press Cancel."
-        ),
-        "rate_limited": (
-            "You have reached the support request limit. "
-            "Please wait about {minutes} min. and try again later."
-        ),
-        "unavailable": (
-            "Support is temporarily unavailable and your message could not be delivered. "
-            "Please try again later."
-        ),
-        "submitted": ("Your message has been sent to support.\nTicket reference: {ticket_ref}"),
-    },
-    "ru": {
-        "prompt": (
-            "Опишите ваш вопрос, проблему или отзыв одним сообщением и отправьте его сюда.\n"
-            "Отправьте /cancel или нажмите кнопку ниже, чтобы выйти из режима "
-            "обращения в поддержку."
-        ),
-        "cancel_button": "Отмена",
-        "support_button": "Написать в поддержку",
-        "cancelled": (
-            "Обращение в поддержку отменено. Вы можете снова отправлять желания как обычно."
-        ),
-        "empty": (
-            "Пожалуйста, отправьте текстовое сообщение с описанием вопроса или нажмите «Отмена»."
-        ),
-        "non_text": (
-            "Поддерживаются только текстовые сообщения. "
-            "Опишите проблему текстом или нажмите «Отмена»."
-        ),
-        "too_long": (
-            "Сообщение слишком длинное (максимум {max_len} символов). "
-            "Сократите его и попробуйте снова или нажмите «Отмена»."
-        ),
-        "rate_limited": (
-            "Вы достигли лимита обращений в поддержку. "
-            "Пожалуйста, подождите около {minutes} мин. и попробуйте позже."
-        ),
-        "unavailable": (
-            "Канал поддержки временно недоступен, сообщение не удалось доставить. "
-            "Пожалуйста, попробуйте позже."
-        ),
-        "submitted": ("Ваше обращение отправлено в поддержку.\nНомер обращения: {ticket_ref}"),
-    },
-}
 
 
 async def collect_diagnostic_context(
@@ -256,12 +197,12 @@ def _destinations(deps: Any) -> list[int]:
     return result
 
 
-def _cancel_keyboard(lang: str) -> InlineKeyboardMarkup:
+def _cancel_keyboard(lang: SupportedLocale) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=_SUPPORT_COPY[lang]["cancel_button"],
+                    text=t("bot.support.cancel_button", lang),
                     callback_data="support:cancel",
                 )
             ]
@@ -300,7 +241,7 @@ async def _submit_support_message(
     deps: Any,
     record: Any,
     raw_text: str,
-    lang: str,
+    lang: SupportedLocale,
 ) -> None:
     store: WishlistStore = deps.wishlist_store
     max_len = int(getattr(deps, "support_max_message_length", 2000))
@@ -308,7 +249,7 @@ async def _submit_support_message(
     max_tickets = int(getattr(deps, "support_rate_limit_max_tickets", 3))
     stripped = raw_text.strip()
     if not stripped:
-        await message.answer(_SUPPORT_COPY[lang]["empty"], reply_markup=_cancel_keyboard(lang))
+        await message.answer(t("bot.support.empty", lang), reply_markup=_cancel_keyboard(lang))
         logger.info(
             "Support message rejected",
             extra={"event": "bot_support_rejected", "reason": "empty"},
@@ -316,7 +257,7 @@ async def _submit_support_message(
         return
     if len(stripped) > max_len:
         await message.answer(
-            _SUPPORT_COPY[lang]["too_long"].format(max_len=max_len),
+            t("bot.support.too_long", lang, max_len=max_len),
             reply_markup=_cancel_keyboard(lang),
         )
         logger.info(
@@ -328,7 +269,9 @@ async def _submit_support_message(
     now_dt = _now(deps)
     now_ts = int(now_dt.timestamp())
     ticket_ref = generate_ticket_ref(now_dt)
-    display_name = " ".join(part for part in (record.first_name, record.last_name) if part)
+    display_name = getattr(record, "display_name", None) or " ".join(
+        part for part in (record.first_name, record.last_name) if part
+    )
     tg_lang = (message.from_user.language_code if message.from_user else None) or (
         record.language_code or ""
     )
@@ -367,7 +310,7 @@ async def _submit_support_message(
 
     status, payload, wait_minutes = await store.transaction(_prepare)
     if status == "rate_limited":
-        await message.answer(_SUPPORT_COPY[lang]["rate_limited"].format(minutes=wait_minutes))
+        await message.answer(t("bot.support.rate_limited", lang, minutes=wait_minutes))
         logger.info(
             "Support message rate limited",
             extra={"event": "bot_support_rejected", "reason": "rate_limited"},
@@ -377,7 +320,7 @@ async def _submit_support_message(
     destinations = _destinations(deps)
     if not destinations or message.bot is None:
         await clear_support_session(store, int(record.id), message.chat.id)
-        await message.answer(_SUPPORT_COPY[lang]["unavailable"])
+        await message.answer(t("bot.support.unavailable", lang))
         logger.warning(
             "Support channel unavailable",
             extra={"event": "bot_support_unavailable", "reason": "unconfigured"},
@@ -400,7 +343,7 @@ async def _submit_support_message(
 
     if delivered == 0:
         await clear_support_session(store, int(record.id), message.chat.id)
-        await message.answer(_SUPPORT_COPY[lang]["unavailable"])
+        await message.answer(t("bot.support.unavailable", lang))
         logger.error(
             "Support ticket delivery failed",
             extra={"event": "bot_support_unavailable", "reason": "send_failed"},
@@ -432,7 +375,7 @@ async def _submit_support_message(
         )
 
     await store.transaction(_record_sent)
-    await message.answer(_SUPPORT_COPY[lang]["submitted"].format(ticket_ref=ticket_ref))
+    await message.answer(t("bot.support.submitted", lang, ticket_ref=ticket_ref))
     logger.info(
         "Support ticket submitted",
         extra={
@@ -444,7 +387,6 @@ async def _submit_support_message(
 
 def create_support_router(dependencies: Any) -> Router:
     """Create the private-chat support and help router."""
-    from wishenka.bot.birthdays import _private_bot_user
     from wishenka.bot.entry import _language
 
     router = Router()
@@ -452,29 +394,20 @@ def create_support_router(dependencies: Any) -> Router:
     users = getattr(dependencies, "user_store", None)
     ttl = int(getattr(dependencies, "support_session_ttl_seconds", 3600))
 
-    async def principal(user: Any, chat: int) -> Any | None:
+    async def principal(
+        user: Any,
+        chat: int,
+        user_record: UserRecord | None = None,
+    ) -> Any | None:
         if user is None or chat != user.id or users is None:
             return None
-        token = _private_bot_user.set(True)
-        try:
-            existing = await users.get_by_telegram_id(user.id)
-            effective_lang = (
-                existing.language_code
-                if existing is not None and existing.language_code
-                else user.language_code
-            )
-            record = await users.upsert_user(
-                TelegramUser(
-                    id=user.id,
-                    first_name=user.first_name,
-                    last_name=user.last_name,
-                    username=user.username,
-                    language_code=effective_lang,
-                    is_premium=bool(user.is_premium),
-                )
-            )
-        finally:
-            _private_bot_user.reset(token)
+        record = user_record
+        if record is None:
+            token = _private_bot_user.set(True)
+            try:
+                record = await users.upsert_from_bot(user)
+            finally:
+                _private_bot_user.reset(token)
         async with users.engine.begin() as conn:
             await conn.execute(
                 text(
@@ -513,11 +446,16 @@ def create_support_router(dependencies: Any) -> Router:
         return await store.transaction(_check)
 
     @router.message(Command("support"), F.chat.type == "private")
-    async def support_command(message: Message, command: CommandObject) -> None:
-        record = await principal(message.from_user, message.chat.id)
-        lang = await _language(message.from_user, dependencies)
+    async def support_command(
+        message: Message,
+        command: CommandObject,
+        locale: SupportedLocale = DEFAULT_LOCALE,
+        user_record: UserRecord | None = None,
+    ) -> None:
+        record = await principal(message.from_user, message.chat.id, user_record)
+        lang = await _language(message.from_user, dependencies, locale)
         if record is None or store is None:
-            await message.answer(_SUPPORT_COPY[lang]["prompt"], reply_markup=_cancel_keyboard(lang))
+            await message.answer(t("bot.support.prompt", lang), reply_markup=_cancel_keyboard(lang))
             return
         expires = int(_now(dependencies).timestamp()) + ttl
         await _open_support_session(
@@ -527,14 +465,18 @@ def create_support_router(dependencies: Any) -> Router:
         if inline:
             await _submit_support_message(message, dependencies, record, inline, lang)
             return
-        await message.answer(_SUPPORT_COPY[lang]["prompt"], reply_markup=_cancel_keyboard(lang))
+        await message.answer(t("bot.support.prompt", lang), reply_markup=_cancel_keyboard(lang))
         logger.info("Support session opened", extra={"event": "bot_support_prompted"})
 
     @router.callback_query(F.data == "support:open", F.message.chat.type == "private")
-    async def support_open_callback(callback: CallbackQuery) -> None:
+    async def support_open_callback(
+        callback: CallbackQuery,
+        locale: SupportedLocale = DEFAULT_LOCALE,
+        user_record: UserRecord | None = None,
+    ) -> None:
         if isinstance(callback.message, Message):
-            record = await principal(callback.from_user, callback.message.chat.id)
-            lang = await _language(callback.from_user, dependencies)
+            record = await principal(callback.from_user, callback.message.chat.id, user_record)
+            lang = await _language(callback.from_user, dependencies, locale)
             if record is not None and store is not None:
                 expires = int(_now(dependencies).timestamp()) + ttl
                 await _open_support_session(
@@ -545,25 +487,33 @@ def create_support_router(dependencies: Any) -> Router:
                     expires,
                 )
             await callback.message.answer(
-                _SUPPORT_COPY[lang]["prompt"], reply_markup=_cancel_keyboard(lang)
+                t("bot.support.prompt", lang), reply_markup=_cancel_keyboard(lang)
             )
             logger.info("Support session opened", extra={"event": "bot_support_prompted"})
         await callback.answer()
 
     @router.callback_query(F.data == "support:cancel", F.message.chat.type == "private")
-    async def support_cancel_callback(callback: CallbackQuery) -> None:
+    async def support_cancel_callback(
+        callback: CallbackQuery,
+        locale: SupportedLocale = DEFAULT_LOCALE,
+        user_record: UserRecord | None = None,
+    ) -> None:
         if isinstance(callback.message, Message):
-            record = await principal(callback.from_user, callback.message.chat.id)
-            lang = await _language(callback.from_user, dependencies)
+            record = await principal(callback.from_user, callback.message.chat.id, user_record)
+            lang = await _language(callback.from_user, dependencies, locale)
             if record is not None and store is not None:
                 await clear_support_session(store, int(record.id), callback.message.chat.id)
-            await callback.message.answer(_SUPPORT_COPY[lang]["cancelled"])
+            await callback.message.answer(t("bot.support.cancelled", lang))
             logger.info("Support session cancelled", extra={"event": "bot_support_cancelled"})
         await callback.answer()
 
     @router.message(Command("cancel"), F.chat.type == "private")
-    async def cancel_command(message: Message) -> None:
-        record = await principal(message.from_user, message.chat.id)
+    async def cancel_command(
+        message: Message,
+        locale: SupportedLocale = DEFAULT_LOCALE,
+        user_record: UserRecord | None = None,
+    ) -> None:
+        record = await principal(message.from_user, message.chat.id, user_record)
         if record is None or store is None:
             raise SkipHandler
 
@@ -576,34 +526,42 @@ def create_support_router(dependencies: Any) -> Router:
 
         if not await store.transaction(_clear_if_active):
             raise SkipHandler
-        lang = await _language(message.from_user, dependencies)
-        await message.answer(_SUPPORT_COPY[lang]["cancelled"])
+        lang = await _language(message.from_user, dependencies, locale)
+        await message.answer(t("bot.support.cancelled", lang))
         logger.info("Support session cancelled", extra={"event": "bot_support_cancelled"})
 
     @router.message(F.chat.type == "private", ~F.text)
-    async def non_text_message(message: Message) -> None:
+    async def non_text_message(
+        message: Message,
+        locale: SupportedLocale = DEFAULT_LOCALE,
+        user_record: UserRecord | None = None,
+    ) -> None:
         user = message.from_user
         if user is None or users is None or message.chat.id != user.id:
             raise SkipHandler
-        record = await users.get_by_telegram_id(user.id)
+        record = user_record or await users.get_by_telegram_id(user.id)
         if record is None or not await has_active_session(int(record.id), message.chat.id):
             raise SkipHandler
-        lang = await _language(user, dependencies)
-        await message.answer(_SUPPORT_COPY[lang]["non_text"], reply_markup=_cancel_keyboard(lang))
+        lang = await _language(user, dependencies, locale)
+        await message.answer(t("bot.support.non_text", lang), reply_markup=_cancel_keyboard(lang))
         logger.info(
             "Support message rejected",
             extra={"event": "bot_support_rejected", "reason": "non_text"},
         )
 
     @router.message(F.chat.type == "private", F.text, ~F.text.startswith("/"))
-    async def text_message(message: Message) -> None:
+    async def text_message(
+        message: Message,
+        locale: SupportedLocale = DEFAULT_LOCALE,
+        user_record: UserRecord | None = None,
+    ) -> None:
         user = message.from_user
         if user is None or users is None or message.chat.id != user.id:
             raise SkipHandler
-        record = await users.get_by_telegram_id(user.id)
+        record = user_record or await users.get_by_telegram_id(user.id)
         if record is None or not await has_active_session(int(record.id), message.chat.id):
             raise SkipHandler
-        lang = await _language(user, dependencies)
+        lang = await _language(user, dependencies, locale)
         await _submit_support_message(message, dependencies, record, message.text or "", lang)
 
     return router

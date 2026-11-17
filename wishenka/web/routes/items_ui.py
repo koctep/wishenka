@@ -14,6 +14,7 @@ from markupsafe import Markup
 from wishenka.auth.dependencies import get_current_user, get_optional_current_user
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.currency import DEFAULT_CURRENCY
+from wishenka.i18n.dependencies import LocaleDep
 from wishenka.items.classifier import UniversalInputClassifier
 from wishenka.items.models import InputType, ItemPriority
 from wishenka.items.parser import extract_domain
@@ -127,6 +128,7 @@ async def view_wishlist_detail(
     wishlist_id: int,
     request: Request,
     current_user: OptionalUser,
+    locale: LocaleDep,
 ) -> Response:
     """Render main TMA wishlist detail page with RBAC-gated Quick Add Bar and edit triggers."""
 
@@ -176,6 +178,7 @@ async def view_wishlist_detail(
             "is_member": is_member,
             "can_view_gifted": can_view_gifted,
             "gifted_rows": gifted_rows,
+            "locale": locale,
         },
     )
 

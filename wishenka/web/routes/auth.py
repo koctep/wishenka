@@ -23,6 +23,7 @@ from wishenka.auth.session import (
     set_session_cookie,
 )
 from wishenka.config import Settings
+from wishenka.i18n.dependencies import LocaleDep
 from wishenka.users.store import UserStore
 from wishenka.web.security import csrf_value
 
@@ -75,7 +76,12 @@ async def auth_telegram(
             "event": "auth_success",
         },
     )
-    return AuthResponse(token=token, user=user, user_id=user_record.id)
+    return AuthResponse(
+        token=token,
+        user=user,
+        user_id=user_record.id,
+        locale=user_record.locale,
+    )
 
 
 @router.post("/logout")
@@ -129,6 +135,7 @@ async def logout(
 @router.get("/me")
 async def get_me(
     current_user: Annotated[AuthenticatedUser, Depends(get_current_user)],
+    locale: LocaleDep,
 ) -> dict[str, Any]:
     """Retrieve current authenticated user context."""
     return {
@@ -137,6 +144,7 @@ async def get_me(
         "username": current_user.username,
         "auth_method": current_user.auth_method,
         "user_id": current_user.user_id,
+        "locale": locale,
     }
 
 

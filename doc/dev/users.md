@@ -1,7 +1,7 @@
 # Users Domain, i18n Synchronization, and Account Deletion
 
 > [!NOTE]
-> **Implementation Status (`WISHENKA-32`):** This document describes both the **implemented baseline** currently in the repository and the **agreed target contracts** decomposed in `WISHENKA-32` for implementation in **`WISHENKA-33`**, **`WISHENKA-34`**, and **`WISHENKA-35`**. Sections marked **Target (`WISHENKA-33/34/35`)** are not shipped in runtime code yet; do not assume their tables, endpoints, or services exist until the corresponding task lands.
+> **Implementation Status (`WISHENKA-32`):** The `users` baseline and **`WISHENKA-33`** (`RU`/`EN` bilingual i18n — see [i18n.md](i18n.md)) are **implemented**. Sections marked **Target (`WISHENKA-34/35`)** are not shipped in runtime code yet; do not assume their tables, endpoints, or services exist until the corresponding task lands.
 
 ---
 
@@ -12,7 +12,7 @@ The `wishenka.users` subsystem manages durable Telegram user identity, profile s
 | Scope | Status | Responsibility |
 | --- | --- | --- |
 | Baseline (`wishenka/users/`) | Implemented | `users` table (imperatively created by `UserStore.initialize()`), `UserRecord`, `UserStore.upsert_user` / `get_by_telegram_id` / `get_by_id`, unconditional `language_code` sync. |
-| `WISHENKA-33` | Target (Planned) | `RU`/`EN` i18n across TMA, Bot, and Outbox; Alembic revision from `add_idempotency_records` adding `locale` & `locale_source` (synced with `UserStore.initialize()`); `wishenka/i18n/`; `PATCH /api/profile/locale`; `LocaleMiddleware`. |
+| `WISHENKA-33` | Implemented | `RU`/`EN` i18n across TMA, Bot, and Outbox; Alembic revision `add_user_locale` adding `locale` & `locale_source` (synced with `UserStore.initialize()`); `wishenka/i18n/`; `GET /settings` & `PATCH /api/profile/locale`; `wishenka/bot/i18n.py` `LocaleMiddleware`. |
 | `WISHENKA-34` | Target (Planned) | Extended profile (`TelegramUser.photo_url`, `avatar_url`, `birthday`, `birthday_source`, computed `display_name`), manual birthday override, best-effort `ChatFullInfo.birthdate` sync, Mini App settings UI (`GET /settings`) & profile/notification CRUD APIs, real member names/avatars in wishlist views. |
 | `WISHENKA-35` | Target (Planned) | `AccountDeletionService` (`BEGIN IMMEDIATE` cascade), deterministic collaborative ownership transfer (`is_collaborative = 1` preserved), PII purge across `telegram_id` and `users.id` tables, `deleted_session_revocations`, auth liveness/revocation checks, `GET /api/profile/deletion-preview`, `POST /api/profile/delete`. |
 
@@ -29,11 +29,11 @@ The `wishenka.users` subsystem manages durable Telegram user identity, profile s
 | --- | --- | --- | --- |
 | User models & store | `wishenka/users/models.py`, `wishenka/users/store.py` | Implemented (extended in `WISHENKA-33/34`) | `UserRecord` and async SQLite repository (`UserStore`). |
 | Auth models & dependencies | `wishenka/auth/models.py`, `wishenka/auth/dependencies.py` | Implemented (extended in `WISHENKA-34/35`) | `TelegramUser.photo_url` extraction (`WISHENKA-34`); DB liveness and `deleted_session_revocations` checks (`WISHENKA-35`). |
-| i18n catalog & helpers | `wishenka/i18n/` | Target (`WISHENKA-33`) | `resolve_telegram_locale()`, `RU`/`EN` dictionary, Jinja2 global `t()`, FastAPI `get_request_locale`, `aiogram` `LocaleMiddleware`. |
+| i18n catalog & helpers | `wishenka/i18n/`, `wishenka/bot/i18n.py` | Implemented (`WISHENKA-33`) | `resolve_telegram_locale()`, `RU`/`EN` `CATALOG`, Jinja2 global `t()`, FastAPI `LocaleDep`, `aiogram` `LocaleMiddleware`. |
 | Account deletion & cleanup | `wishenka/wishlists/deletion.py`, `wishenka/wishlists/cleanup.py` | Target (`WISHENKA-35`) | `AccountDeletionService` (`BEGIN IMMEDIATE` cascade + transfer) and expired revocation purge. |
 | Notification workers | `wishenka/notices/store.py`, `wishenka/notices/reminders.py` | Implemented (updated in `WISHENKA-33`) | Reads `u.locale` with `'en'` fallback; already re-checks `JOIN users` + `JOIN bot_destinations` in `BEGIN IMMEDIATE` right before send. |
 | Bot routers | `wishenka/bot/entry.py`, `capture.py`, `birthdays.py`, `support.py` | Implemented (updated in `WISHENKA-33/34`) | Outer `LocaleMiddleware` (`WISHENKA-33`) and best-effort `ChatFullInfo.birthdate` sync (`WISHENKA-34`). |
-| Web / Mini App routes | `wishenka/web/` | Target (`WISHENKA-33/34/35`) | `GET /settings`, `/api/profile*`, `/api/notifications/settings`, `/api/wishlists/{wishlist_id}/notifications/settings`. |
+| Web / Mini App routes | `wishenka/web/routes/profile.py` | Implemented (`WISHENKA-33`); extended in `WISHENKA-34/35` | `GET /settings`, `PATCH /api/profile/locale` (`WISHENKA-33`); `/api/profile*`, `/api/notifications/settings`, `/api/wishlists/{wishlist_id}/notifications/settings` (`WISHENKA-34/35`). |
 
 ### Target Interaction Flow (`WISHENKA-33/34/35`)
 
@@ -147,10 +147,10 @@ Currently, the Alembic head in `wishenka/wishlists/alembic/versions/` is `add_id
 
 ---
 
-## i18n Protocol (`RU` / `EN` Sync — Target `WISHENKA-33`)
+## i18n Protocol (`RU` / `EN` Sync — Implemented `WISHENKA-33`)
 
 > [!NOTE]
-> **Baseline vs. Target:** Currently, `NoticeStore._eligible` defaults to `"ru"`, `claim_reminder`/`refresh_reminder` check `(language or "").lower().startswith("en")` with an implicit Russian fallback, `UserStore.upsert_user` unconditionally overwrites `language_code`, and `bot/entry.py` reads `language_code`. `WISHENKA-33` unifies all output channels onto `users.locale`.
+> See [i18n.md](i18n.md) for the complete `wishenka.i18n` developer guide, API reference, and troubleshooting.
 
 ### Normalization and Atomic Precedence
 
@@ -168,7 +168,7 @@ def resolve_telegram_locale(language_code: str | None) -> SupportedLocale:
 - **Supported locales**: Only `"ru"` and `"en"`, with `"en"` as default fallback.
 - **Automatic sync (`locale_source = 'auto'`)**: On `UserStore.upsert_user(...)` (Mini App login and Bot updates), raw `language_code` always updates, while `locale` updates atomically in SQL:
   `CASE WHEN users.locale_source = 'explicit' THEN users.locale ELSE excluded.locale END`.
-- **Explicit switch (`locale_source = 'explicit'`)**: `PATCH /api/profile/locale` calls `UserStore.set_explicit_locale(telegram_id, locale)`, locking `locale_source = 'explicit'`. Subsequent Telegram logins/updates with a different client `language_code` do not overwrite `users.locale`.
+- **Explicit switch (`locale_source = 'explicit'`)**: `PATCH /api/profile/locale` calls `UserStore.set_locale(telegram_id, locale)`, locking `locale_source = 'explicit'`. Subsequent Telegram logins/updates with a different client `language_code` do not overwrite `users.locale`.
 
 ### Channel Synchronization
 
@@ -237,15 +237,16 @@ At transaction start, the service resolves `tg_id = current_user.telegram_id`, `
 ### Python Interfaces
 
 - **`UserStore` (`wishenka/users/store.py`)**:
-  - `upsert_user(user: TelegramUser, *, sync_avatar: bool = True) -> UserRecord` (`WISHENKA-33/34`)
-  - `set_explicit_locale(telegram_id: int, locale: SupportedLocale) -> UserRecord` (`WISHENKA-33`)
+  - `upsert_user(user: TelegramUser, *, channel: str = "miniapp") -> UserRecord` (`WISHENKA-33`; `sync_avatar: bool = True` planned in `WISHENKA-34`)
+  - `upsert_from_bot(tg_user: Any) -> UserRecord` (`WISHENKA-33`)
+  - `set_locale(telegram_id: int, locale: SupportedLocale) -> UserRecord` (`WISHENKA-33`)
   - `update_manual_birthday(telegram_id: int, birthday: str | None) -> UserRecord` (`WISHENKA-34`)
   - `sync_telegram_birthday(telegram_id: int, birthday: str | None) -> UserRecord | None` (`WISHENKA-34`)
-- **`wishenka/i18n/` (`WISHENKA-33`)**:
+- **`wishenka/i18n/` & `wishenka/bot/i18n.py` (`WISHENKA-33`, implemented — see [i18n.md](i18n.md))**:
   - `resolve_telegram_locale(language_code: str | None) -> SupportedLocale`
-  - `t(key: str, locale: SupportedLocale, **kwargs: Any) -> str`
-  - `get_request_locale(...) -> SupportedLocale` (FastAPI dependency)
-  - `LocaleMiddleware` (`aiogram` outer middleware setting `data["locale"]`, `data["t"]`)
+  - `t(key: str, locale: str | None = DEFAULT_LOCALE, **kwargs: Any) -> str`
+  - `get_request_locale(...) -> SupportedLocale` / `LocaleDep` (FastAPI dependency)
+  - `LocaleMiddleware` (`aiogram` outer middleware setting `data["locale"]`, `data["t"]`, and `data["user_record"]`)
 - **`AccountDeletionService` (`wishenka/wishlists/deletion.py`, `WISHENKA-35`)**:
   - `preview_account_deletion(telegram_id: int) -> DeletionPreviewDTO` (`personal_lists_count`, `collaborative_transferred_count`, `collaborative_deleted_count`, `reservations_count`; reveals no foreign booking/recipient data)
   - `delete_account(telegram_id: int, *, secret_key: str, session_ttl_seconds: int, now: datetime | None = None) -> DeletionResultDTO` (`already_deleted`, `deleted_lists`, `transferred_lists`, `cancelled_reservations`)
@@ -254,8 +255,8 @@ At transaction start, the service resolves `tg_id = current_user.telegram_id`, `
 
 | Method & Path | Task | Purpose |
 | --- | --- | --- |
-| `PATCH /api/profile/locale` | `WISHENKA-33` | Switch `locale` (`ru` \| `en`) with `locale_source = "explicit"`, optional `HX-Refresh: true` + CSRF. |
-| `GET /settings` | `WISHENKA-34` | HTML settings screen (profile, language, notifications, account deletion). |
+| `PATCH /api/profile/locale` | `WISHENKA-33` (Implemented) | Switch `locale` (`ru` \| `en`) with `locale_source = "explicit"`, `HX-Refresh: true` + CSRF, and background bot command sync. |
+| `GET /settings` | `WISHENKA-33` (Implemented); extended in `WISHENKA-34` | HTML settings screen (language selector shipped in `WISHENKA-33`; profile, notifications, account deletion in `WISHENKA-34/35`). |
 | `GET /api/profile` | `WISHENKA-34` | Return current user profile DTO/HTML fragment. |
 | `PATCH /api/profile` | `WISHENKA-34` | Update or clear manual `birthday` (`YYYY-MM-DD` \| `--MM-DD`, `birthday_source = "manual"`). |
 | `PUT /api/notifications/settings` | `WISHENKA-34` | Update global `user_notification_settings`. |

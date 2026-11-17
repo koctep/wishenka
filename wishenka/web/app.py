@@ -29,6 +29,7 @@ from wishenka.web.routes.auth import router as auth_router
 from wishenka.web.routes.items import router as items_router
 from wishenka.web.routes.items_ui import router as items_ui_router
 from wishenka.web.routes.miniapp import router as miniapp_router
+from wishenka.web.routes.profile import router as profile_router
 from wishenka.web.routes.receipts import router as receipts_router
 from wishenka.web.routes.receipts_ui import router as receipts_ui_router
 from wishenka.web.routes.reservations import router as reservations_router
@@ -260,6 +261,7 @@ def create_app(
     app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
     app.include_router(miniapp_router)
     app.include_router(auth_router)
+    app.include_router(profile_router)
     app.include_router(items_router)
     app.include_router(reservations_router)
     app.include_router(receipts_router)

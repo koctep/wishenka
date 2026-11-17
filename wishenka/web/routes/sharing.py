@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse
 
 from wishenka.auth.dependencies import get_current_user, get_optional_current_user
 from wishenka.auth.models import AuthenticatedUser
+from wishenka.i18n.dependencies import LocaleDep
 from wishenka.web.templates import templates
 from wishenka.wishlists.exceptions import (
     InvalidInviteTokenError,
@@ -45,6 +46,7 @@ async def view_public_share(
     request: Request,
     public_token: str,
     current_user: OptionalUser,
+    locale: LocaleDep,
 ) -> Response:
     """Render public wishlist page with Surprise Invariant enforcement."""
     service = _get_service(request)
@@ -86,6 +88,7 @@ async def view_public_share(
             "items": dto.items,
             "viewer_identified": current_user is not None,
             "wishlist_active": dto.status == WishlistStatus.ACTIVE,
+            "locale": locale,
         },
     )
 
@@ -142,6 +145,7 @@ async def get_item_card_partial(
 async def preview_invite(
     request: Request,
     invite_token: str,
+    locale: LocaleDep,
 ) -> Response:
     """Render collaborator invitation preview or friendly error card."""
     service = _get_service(request)
@@ -165,6 +169,7 @@ async def preview_invite(
                 "error": "Ссылка приглашения недействительна или истек срок действия",
                 "wishlist": None,
                 "token": invite_token,
+                "locale": locale,
             },
             status_code=status.HTTP_200_OK,
         )
@@ -187,6 +192,7 @@ async def preview_invite(
                 "error": "Ссылка приглашения недействительна или истек срок действия",
                 "wishlist": None,
                 "token": invite_token,
+                "locale": locale,
             },
             status_code=status.HTTP_200_OK,
         )
@@ -208,6 +214,7 @@ async def preview_invite(
             "error": None,
             "wishlist": wl,
             "token": invite_token,
+            "locale": locale,
         },
     )
 
@@ -217,6 +224,7 @@ async def join_invite(
     request: Request,
     invite_token: str,
     user: CurrentUser,
+    locale: LocaleDep,
 ) -> Response:
     """Accept invitation to join collaborative wishlist."""
     service = _get_service(request)
@@ -240,6 +248,7 @@ async def join_invite(
                 "error": "Ссылка приглашения недействительна или истек срок действия",
                 "wishlist": None,
                 "token": invite_token,
+                "locale": locale,
             },
             status_code=status.HTTP_200_OK,
         )
