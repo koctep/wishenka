@@ -98,6 +98,13 @@ opt-in подтверждений собственной брони (`reminder_o
 карантин неопределённых отправок (`status = 'uncertain'`) и операторский CLI
 (`python -m wishenka.notices.operator`). См. [`doc/dev/notifications.md`](notifications.md).
 
+Реализовано (WISHENKA-30): канал обратной связи и обращений в поддержку в Telegram-боте
+(`wishenka/bot/support.py`, ревизия `add_support_channel`) — команды `/help` и `/support`,
+изоляция сессии ввода (`support_input`) от захвата желаний и дней рождения, редактирование
+секретных capability-токенов (`redact_capabilities`), безопасный метаданный контекст
+(`DiagnosticContext`), sliding-window rate limit (`support_tickets`) и пересылка в чат поддержки /
+администраторам. См. [`doc/dev/bot-support.md`](bot-support.md).
+
 ---
 
 ## 4. Документация подсистем и доменов
@@ -108,8 +115,12 @@ opt-in подтверждений собственной брони (`reminder_o
   UTC-планировщик событий, межпроцессный rate limiter, карантин `uncertain` и CLI оператора.
 - [`doc/dev/gift-receipt.md`](gift-receipt.md) — Получение подарков и раздел «Подаренные»
   (WISHENKA-23, WISHENKA-24): доменная модель, UI и очередь уведомлений о получении.
-- [`doc/dev/bot-scenarios.md`](bot-scenarios.md) — Точка входа Telegram-бота (`/start`), навигация в
-  Mini App и создание желаний из сообщений чата.
+- [`doc/dev/bot-scenarios.md`](bot-scenarios.md) — Точка входа Telegram-бота (`/start`, `/help`),
+  навигация в Mini App и создание желаний из сообщений чата.
+- [`doc/dev/bot-support.md`](bot-support.md) — Канал обратной связи и обращений в поддержку в
+  Telegram-боте (WISHENKA-30): `/help`, `/support`, приоритет роутеров, изоляция сессий
+  `support_input`, редактирование capability-токенов, rate limiting (`support_tickets`) и
+  диагностика.
 - [`doc/dev/reservations.md`](reservations.md) — Домен бронирования подарков:
   жизненный цикл броней (`ACTIVE`, `PURCHASED`, `CANCELLED`). Приход
   добавляет полученные штуки и оставляет обещание открытым: статуса

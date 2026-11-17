@@ -2,27 +2,34 @@
 
 ## Overview
 
-The bot handles private `/start` messages, presents a Russian or English menu, and opens the
-Mini App or a public wishlist. [Bot journeys and notifications](../../in-docs/bot-scenarios.md)
+The bot handles private `/start` and `/help` messages, presents a Russian or English menu, and opens
+the Mini App or a public wishlist. [Bot journeys and notifications](../../in-docs/bot-scenarios.md)
 contains the functional specification. Private text and forwarded messages can create wishes
-through a reviewable draft. Private birthday tracking (`/birthdays`), opt-in reservation
-confirmations (`/reservation_confirmations on|off`), shared wishlist notifications, and occasion
-reminders are described in [Service notifications and reminders](notifications.md). The receipt
-notice worker is also described in [Gift receipt](gift-receipt.md).
+through a reviewable draft. Support and feedback requests (`/support`, `support:open`) are
+documented in [Telegram bot support and feedback channel](bot-support.md). Private birthday
+tracking (`/birthdays`), opt-in reservation confirmations (`/reservation_confirmations on|off`),
+shared wishlist notifications, and occasion reminders are described in
+[Service notifications and reminders](notifications.md). The receipt notice worker is also
+described in [Gift receipt](gift-receipt.md).
 
 ## Architecture and navigation
 
 `wishenka.bot.__main__` starts a separate aiogram polling process and provides the configured
-Mini App URL and `UserStore` to `wishenka.bot.entry.create_router`. The router handles private
+Mini App URL, `UserStore`, `WishlistStore`, `ItemPreviewService`, and `WISHENKA_SUPPORT_*` settings
+to `wishenka.bot.entry.create_router`. The router handles private
 chats only. It uses a stored language when available, otherwise the Telegram language code;
-`en*` language codes select English and all others select Russian. A help callback responds in
-the selected language and explains `/reservation_confirmations on|off`. When `user_store` is
-configured, a verified private `/start` (`chat.id == from_user.id`) upserts the user and activates
-their private destination in `bot_destinations`.
+`en*` language codes select English and all others select Russian. Both `/help` and the
+`How it works` (`entry:help`) callback respond in the selected language, explain
+`/reservation_confirmations on|off` and `/support`, and present the main navigation keyboard. When
+`user_store` is configured, a verified private `/start` or `/help` (`chat.id == from_user.id`)
+upserts the user, activates their private destination in `bot_destinations`, and clears any active
+support session (`clear_support_session`).
 
 The Create wishlist, My wishlists and Open Mini App buttons use `WebAppInfo` URLs with the
-`startapp` values `create`, `collection` and `home`. The menu also includes a `Birthdays`
-(`birthday:open`) callback button that opens the private `/birthdays` flow (see
+`startapp` values `create`, `collection` and `home`. The menu also includes `How it works`
+(`entry:help`), `Contact support` (`support:open`; see
+[Telegram bot support and feedback channel](bot-support.md)), and `Birthdays` (`birthday:open`)
+callback buttons (see
 [Service notifications and reminders](notifications.md#private-birthdays-tracking-flow)). Mini App
 startup authenticates the user and
 opens the home view for these intents; `create` focuses its first button and does not create a
@@ -47,9 +54,13 @@ legacy route.
 ## Capturing a wish in chat
 
 `wishenka.bot.capture.create_capture_router` handles non-command text in private chats, including
-forwarded text. `wishenka.bot.entry.create_router` includes `create_birthday_router` and
-`create_capture_router` when the wishlist store is available (while a birthday label or date input
-session is active in `birthday_input`, the birthday router consumes the text message first). The
+forwarded text. `wishenka.bot.entry.create_router` mounts `create_support_router`,
+`create_birthday_router`, and `create_capture_router` in that priority order when the wishlist
+store is available: while a support session is active in `support_input`, the support router
+consumes private messages first without creating wish drafts (see
+[Telegram bot support and feedback channel](bot-support.md)); otherwise, while a birthday label or
+date input session is active in `birthday_input`, the birthday router consumes the text message
+before wish capture. The
 polling process supplies both dependencies. When capture starts in a verified private chat, the
 user is upserted if needed and their `bot_destinations` entry is marked active.
 
@@ -69,15 +80,18 @@ the revision so previously displayed save buttons cannot submit unseen values. R
 the persisted manual draft after an interruption. The save transaction combines the domain write and
 receipt, allowing a repeated callback to return the previous result without creating another wish.
 
-Active drafts expire after 24 hours, pending birthday inputs after one hour, and save receipts
+Active drafts expire after 24 hours, pending birthday inputs after one hour, active support
+sessions after `WISHENKA_SUPPORT_SESSION_TTL_SECONDS` (one hour by default), and save receipts
 after seven days. The bot starts a cleanup
-loop immediately, then hourly; it removes up to 100 expired rows per pass (plus up to 100 expired
-`birthday_input` rows) and retries a failure in
+loop immediately, then hourly; it removes up to 100 expired rows per pass across `bot_drafts`,
+`birthday_input`, `support_input`, and `support_tickets` (retaining ticket rate-limit metadata for
+30 days) and retries a failure in
 one minute. `bot_capture_order` retains owner, chat and message identifiers without an expiry; it
 is not removed by draft cleanup. [WISHENKA-178](https://pypost.atlassian.net/browse/WISHENKA-178)
 tracks a retention policy that preserves replay ordering, and
 [WISHENKA-35](https://pypost.atlassian.net/browse/WISHENKA-35) covers account deletion. Include
-both bot tables and the notification/birthday tables (see
+the bot draft tables, support tables (`support_input`, `support_tickets`), and the
+notification/birthday tables (see
 [Service notifications and reminders](notifications.md)) when implementing that deletion. The
 atomic capture operation currently uses
 private wishlist store methods; [WISHENKA-179](https://pypost.atlassian.net/browse/WISHENKA-179)
@@ -101,6 +115,10 @@ variables or `.env`:
 - `WISHENKA_LOG_LEVEL` and `WISHENKA_LOG_JSON`: log level and structured JSON output.
 - `WISHENKA_TELEGRAM_BOT_USERNAME` and `WISHENKA_TELEGRAM_APP_SHORT_NAME`: configure Mini App
   share-link generation; see [Authentication](auth.md) for session and origin configuration.
+- `WISHENKA_SUPPORT_CHAT_ID`, `WISHENKA_SUPPORT_ADMIN_IDS`, `WISHENKA_SUPPORT_SESSION_TTL_SECONDS`,
+  `WISHENKA_SUPPORT_MAX_MESSAGE_LENGTH`, `WISHENKA_SUPPORT_RATE_LIMIT_WINDOW_SECONDS`, and
+  `WISHENKA_SUPPORT_RATE_LIMIT_MAX_TICKETS`: configure the support and feedback channel; see
+  [Telegram bot support and feedback channel](bot-support.md#configuration).
 
 Configure Telegram and the application's public HTTPS endpoint consistently. The bot process
 closes its Telegram session and database engine when polling stops. It is independent of the
@@ -113,7 +131,10 @@ The entry router emits `bot_start_handled` with a bounded outcome (`menu`, `publ
 `public_entry_viewed` and `public_entry_unavailable`. These events exclude payloads, link tokens,
 user identifiers and exception text. The bot error handler consumes exceptions to prevent aiogram
 from logging their contents. Capture emits `bot_capture_preview`, `bot_capture_draft_ready`,
-`bot_capture_save`, `bot_capture_action_error`, and `bot_draft_cleanup_failed`. These events omit
+`bot_capture_save`, `bot_capture_action_error`, and `bot_draft_cleanup_failed`. Support emits
+`bot_support_prompted`, `bot_support_cancelled`, `bot_support_rejected`, `bot_support_submitted`,
+and `bot_support_unavailable` on `wishenka.bot.support` (see
+[Telegram bot support and feedback channel](bot-support.md#observability)). These events omit
 message contents, URLs, identifiers, and exception text. A context-local filter suppresses
 specified dependency loggers during sensitive work; it does not automatically cover future
 loggers. Cleanup failures retry after one minute. Uvicorn's access filter masks capability paths and
@@ -124,6 +145,7 @@ Run the focused tests with:
 ```bash
 make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_start_repro.py tests/test_bot_entry_repro.py'
 make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_capture_repro.py'
+make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_support_repro.py tests/test_bot_support.py'
 ```
 
 They exercise a fake Telegram transport and Mini App browser behavior. Observability tests also
@@ -144,5 +166,7 @@ check dispatcher error handling and actual Uvicorn access output. The full quali
   valid, and links use HTTP(S). Expired or replaced drafts require a new message.
 - If `bot_draft_cleanup_failed` occurs, check database availability and storage capacity. The loop
   retries automatically; avoid including draft content or links in diagnostic logs.
+- For support and feedback channel issues (`bot_support_unavailable` or session expiry), see
+  [Telegram bot support and feedback channel troubleshooting](bot-support.md#troubleshooting).
 - For receipt notice delivery failures, see
   [Gift receipt troubleshooting](gift-receipt.md#troubleshooting).

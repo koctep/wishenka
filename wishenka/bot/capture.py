@@ -770,20 +770,41 @@ async def cleanup_drafts(store: WishlistStore) -> int:
     """Remove a bounded batch of expired drafts and receipts."""
 
     async def remove(conn: AsyncConnection) -> int:
+        now_dt = datetime.now(UTC)
+        now_ts = int(time.time())
         result = await conn.execute(
             text(
                 "DELETE FROM bot_drafts WHERE id IN "
                 "(SELECT id FROM bot_drafts WHERE expires<=:now LIMIT 100)"
             ),
-            {"now": datetime.now(UTC).isoformat()},
+            {"now": now_dt.isoformat()},
         )
         birthday = await conn.execute(
             text(
                 "DELETE FROM birthday_input WHERE rowid IN "
                 "(SELECT rowid FROM birthday_input WHERE expires_at<=:now LIMIT 100)"
             ),
-            {"now": int(time.time())},
+            {"now": now_ts},
         )
-        return int(result.rowcount or 0) + int(birthday.rowcount or 0)
+        support = await conn.execute(
+            text(
+                "DELETE FROM support_input WHERE rowid IN "
+                "(SELECT rowid FROM support_input WHERE expires_at<=:now LIMIT 100)"
+            ),
+            {"now": now_ts},
+        )
+        tickets = await conn.execute(
+            text(
+                "DELETE FROM support_tickets WHERE id IN "
+                "(SELECT id FROM support_tickets WHERE created_at<=:cutoff LIMIT 100)"
+            ),
+            {"cutoff": now_ts - 30 * 86400},
+        )
+        return (
+            int(result.rowcount or 0)
+            + int(birthday.rowcount or 0)
+            + int(support.rowcount or 0)
+            + int(tickets.rowcount or 0)
+        )
 
     return await store.transaction(remove)

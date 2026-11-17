@@ -47,14 +47,17 @@ Revision chain (linear):
 9. `add_birthday_reminders` - tables `bot_destinations`, `birthday_entries`, `birthday_input`,
    `reminder_outbox`, `notice_rate_slots`, `notice_scheduler_cursors` and indexes
    `idx_notice_rate_second`, `idx_reminders_due` (see [notifications.md](notifications.md)).
-10. `add_notice_uncertain` (head) - adds `requires_membership` to `reminder_outbox`, rebuilds
+10. `add_notice_uncertain` - adds `requires_membership` to `reminder_outbox`, rebuilds
     `notification_outbox` with `status = 'uncertain'`, `claim_token`, and `requires_membership`,
     and creates `notice_receipt_keys` (see [notifications.md](notifications.md)).
+11. `add_support_channel` (head) - tables `support_input` and `support_tickets` with index
+    `idx_support_tickets_owner_time` (see [bot-support.md](bot-support.md)).
 
 Details of revisions 5 and 6 are in [gift-receipt.md](gift-receipt.md), revisions 7 and 8 in
-[bot-scenarios.md](bot-scenarios.md), and revisions 9 and 10 in [notifications.md](notifications.md).
+[bot-scenarios.md](bot-scenarios.md), revisions 9 and 10 in [notifications.md](notifications.md),
+and revision 11 in [bot-support.md](bot-support.md).
 The legacy-adoption map (`_REVISIONS`) still stops at `add_item_order_index`; adoption stamps that
-revision and `upgrade head` then applies revisions 5 through 10.
+revision and `upgrade head` then applies revisions 5 through 11.
 
 `head_revision(database_url=...)` in `migrations.py` returns the head id from the script
 directory without opening a database (the URL only builds the config, default in-memory). Tests
@@ -267,6 +270,7 @@ Current state of the `downgrade()` functions:
 
 | Revision | `downgrade()` |
 | --- | --- |
+| `add_support_channel` | Works: drops `idx_support_tickets_owner_time`, `support_tickets`, and `support_input` |
 | `add_notice_uncertain` | Works: drops `requires_membership` from `reminder_outbox`, drops `notice_receipt_keys`, and rebuilds `notification_outbox` (mapping `uncertain` rows to `failed`) |
 | `add_birthday_reminders` | Works: drops `notice_scheduler_cursors`, `notice_rate_slots`, `reminder_outbox`, `birthday_input`, `birthday_entries`, and `bot_destinations` |
 | `add_bot_capture_order` | Works: drops `bot_capture_order` |

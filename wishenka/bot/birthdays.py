@@ -104,6 +104,9 @@ def create_birthday_router(dependencies: Any) -> Router:
     async def birthdays(message: Message) -> None:
         owner = await principal(message.from_user, message.chat.id)
         if owner is not None:
+            from wishenka.bot.support import clear_support_session
+
+            await clear_support_session(store, owner, message.chat.id)
             await listing(message, owner, await _language(message.from_user, dependencies))
 
     @router.message(Command("cancel"), F.chat.type == "private")
@@ -134,6 +137,9 @@ def create_birthday_router(dependencies: Any) -> Router:
         if owner is None:
             await callback.answer()
             return
+        from wishenka.bot.support import clear_support_session
+
+        await clear_support_session(store, owner, chat_id)
         lang = await _language(callback.from_user, dependencies)
         parts = (callback.data or "").split(":")
         if parts == ["birthday", "open"]:

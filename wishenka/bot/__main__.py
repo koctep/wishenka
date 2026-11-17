@@ -25,6 +25,12 @@ class Dependencies:
     user_store: UserStore
     wishlist_store: WishlistStore
     preview_service: ItemPreviewService
+    support_chat_id: int | None = None
+    support_admin_ids: tuple[int, ...] = ()
+    support_session_ttl_seconds: int = 3600
+    support_max_message_length: int = 2000
+    support_rate_limit_window_seconds: int = 3600
+    support_rate_limit_max_tickets: int = 3
 
 
 async def cleanup_loop(
@@ -52,7 +58,18 @@ async def run() -> None:
     dispatcher = Dispatcher()
     dispatcher.include_router(
         create_router(
-            Dependencies(settings.mini_app_url, store, wishlist_store, ItemPreviewService())
+            Dependencies(
+                settings.mini_app_url,
+                store,
+                wishlist_store,
+                ItemPreviewService(),
+                support_chat_id=settings.support_chat_id,
+                support_admin_ids=settings.support_admin_ids,
+                support_session_ttl_seconds=settings.support_session_ttl_seconds,
+                support_max_message_length=settings.support_max_message_length,
+                support_rate_limit_window_seconds=settings.support_rate_limit_window_seconds,
+                support_rate_limit_max_tickets=settings.support_rate_limit_max_tickets,
+            )
         )
     )
     bot = Bot(settings.bot_token)

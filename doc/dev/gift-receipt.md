@@ -115,7 +115,8 @@ came.
 Built by `add_gift_receipts` and `add_notice_outbox` and extended by `add_birthday_reminders` and
 `add_notice_uncertain`, see [migrations.md](migrations.md). The chain is now
 `add_item_order_index` -> `add_gift_receipts` -> `add_notice_outbox` -> `add_bot_drafts` ->
-`add_bot_capture_order` -> `add_birthday_reminders` -> `add_notice_uncertain` (head).
+`add_bot_capture_order` -> `add_birthday_reminders` -> `add_notice_uncertain` ->
+`add_support_channel` (head).
 
 - **`add_gift_receipts`.** Creates `wl_receipts` and its index. Back-fills one record per wish
   that has `received_quantity > 0` and no record yet: quantity = `received_quantity`,
@@ -131,7 +132,7 @@ Built by `add_gift_receipts` and `add_notice_outbox` and extended by `add_birthd
   rows were normalised, and dropping the table would lose the history. Restore from a backup.
 - **`add_notice_outbox`.** Creates `notification_outbox`, `user_notification_settings` and
   `wl_list_notification_settings` (see below). Its downgrade drops the three tables.
-- **`add_notice_uncertain` (head).** Rebuilds `notification_outbox` with `status = 'uncertain'`,
+- **`add_notice_uncertain`.** Rebuilds `notification_outbox` with `status = 'uncertain'`,
   `claim_token`, `requires_membership`, and `CHECK(ambiguous=0 OR status NOT IN ('pending','sending'))`,
   and creates `notice_receipt_keys` (see [notifications.md](notifications.md)).
 - `head_revision(database_url=<in-memory default>)` in `wishlists/migrations.py` returns the

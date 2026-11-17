@@ -40,10 +40,12 @@ _COPY = {
             "Create and share a wishlist. Givers can reserve wishes while surprises stay secret."
             " To receive confirmations of your own reservation actions,"
             " send /reservation_confirmations on; use off to stop them."
+            " Need help or want to send feedback? Select Contact support or send /support."
         ),
         "create": "Create wishlist",
         "collection": "My wishlists",
         "help_button": "How it works",
+        "support": "Contact support",
         "home": "Open Mini App",
         "public": "Open wishlist",
         "birthdays": "Birthdays",
@@ -55,10 +57,13 @@ _COPY = {
             "Создайте и отправьте вишлист. Дарители бронируют желания, сохраняя сюрприз."
             " Чтобы получать подтверждения своих действий с бронью, отправьте"
             " /reservation_confirmations on; для отключения используйте off."
+            " Нужна помощь или хотите отправить отзыв? Нажмите «Написать в поддержку»"
+            " или отправьте /support."
         ),
         "create": "Создать вишлист",
         "collection": "Мои вишлисты",
         "help_button": "Как это работает",
+        "support": "Написать в поддержку",
         "home": "Открыть Mini App",
         "public": "Открыть вишлист",
         "birthdays": "Дни рождения",
@@ -101,6 +106,7 @@ def _keyboard(base: str, lang: str, target: str | None = None) -> InlineKeyboard
     for key in ("create", "collection"):
         rows.append([InlineKeyboardButton(text=copy[key], web_app=WebAppInfo(url=_url(base, key)))])
     rows.append([InlineKeyboardButton(text=copy["help_button"], callback_data="entry:help")])
+    rows.append([InlineKeyboardButton(text=copy["support"], callback_data="support:open")])
     rows.append([InlineKeyboardButton(text=copy["birthdays"], callback_data="birthday:open")])
     rows.append(
         [InlineKeyboardButton(text=copy["home"], web_app=WebAppInfo(url=_url(base, "home")))]
@@ -152,6 +158,11 @@ def create_router(dependencies: EntryDependencies) -> Router:
                     ),
                     {"id": record.id, "chat": message.chat.id},
                 )
+            store = getattr(dependencies, "wishlist_store", None)
+            if store is not None:
+                from wishenka.bot.support import clear_support_session
+
+                await clear_support_session(store, int(record.id), message.chat.id)
         payload = command.args
         valid = bool(
             payload and len(payload) <= 64 and re.fullmatch(r"p_[A-Za-z0-9_-]{1,62}", payload)
@@ -165,9 +176,56 @@ def create_router(dependencies: EntryDependencies) -> Router:
         )
         logger.info("Bot entry handled", extra={"event": "bot_start_handled", "outcome": outcome})
 
+    @router.message(Command("help"), F.chat.type == "private")
+    async def help_command(message: Message) -> None:
+        users = getattr(dependencies, "user_store", None)
+        if users is not None and message.from_user and message.chat.id == message.from_user.id:
+            from wishenka.bot.birthdays import _private_bot_user
+
+            user = message.from_user
+            token = _private_bot_user.set(True)
+            try:
+                record = await users.upsert_user(
+                    TelegramUser(
+                        id=user.id,
+                        first_name=user.first_name,
+                        last_name=user.last_name,
+                        username=user.username,
+                        language_code=user.language_code,
+                        is_premium=bool(user.is_premium),
+                    )
+                )
+            finally:
+                _private_bot_user.reset(token)
+            async with users.engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "INSERT INTO bot_destinations(user_id,chat_id,active) VALUES (:id,:chat,1) "
+                        "ON CONFLICT(user_id) DO UPDATE SET chat_id=:chat,active=1"
+                    ),
+                    {"id": record.id, "chat": message.chat.id},
+                )
+            store = getattr(dependencies, "wishlist_store", None)
+            if store is not None:
+                from wishenka.bot.support import clear_support_session
+
+                await clear_support_session(store, int(record.id), message.chat.id)
+        lang = await _language(message.from_user, dependencies)
+        await message.answer(
+            _COPY[lang]["help"], reply_markup=_keyboard(dependencies.mini_app_url, lang)
+        )
+
     @router.callback_query(F.data == "entry:help", F.message.chat.type == "private")
     async def help_callback(callback: CallbackQuery) -> None:
         if isinstance(callback.message, Message):
+            users: UserStore | None = getattr(dependencies, "user_store", None)
+            store = getattr(dependencies, "wishlist_store", None)
+            if users is not None and store is not None and callback.from_user:
+                record = await users.get_by_telegram_id(callback.from_user.id)
+                if record is not None:
+                    from wishenka.bot.support import clear_support_session
+
+                    await clear_support_session(store, int(record.id), callback.message.chat.id)
             lang = await _language(callback.from_user, dependencies)
             await callback.message.answer(
                 _COPY[lang]["help"], reply_markup=_keyboard(dependencies.mini_app_url, lang)
@@ -196,6 +254,11 @@ def create_router(dependencies: EntryDependencies) -> Router:
                 "Send /start first." if lang == "en" else "Сначала отправьте /start."
             )
             return
+        store = getattr(dependencies, "wishlist_store", None)
+        if store is not None:
+            from wishenka.bot.support import clear_support_session
+
+            await clear_support_session(store, int(record.id), message.chat.id)
         async with users.engine.begin() as conn:
             await conn.execute(
                 text(
@@ -223,7 +286,9 @@ def create_router(dependencies: EntryDependencies) -> Router:
     if getattr(dependencies, "wishlist_store", None) is not None:
         from wishenka.bot.birthdays import create_birthday_router
         from wishenka.bot.capture import create_capture_router
+        from wishenka.bot.support import create_support_router
 
+        router.include_router(create_support_router(dependencies))
         router.include_router(create_birthday_router(dependencies))
         router.include_router(create_capture_router(dependencies))
     return router

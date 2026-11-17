@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     notice_global_per_second: int = Field(default=20, ge=1, le=30)
     notice_chat_interval_seconds: int = Field(default=1, ge=1)
     notice_reminder_lead_days: tuple[int, ...] = (7,)
+    support_chat_id: int | None = None
+    support_admin_ids: tuple[int, ...] = ()
+    support_session_ttl_seconds: int = Field(default=3600, ge=60, le=86400)
+    support_max_message_length: int = Field(default=2000, ge=100, le=3500)
+    support_rate_limit_window_seconds: int = Field(default=3600, ge=60)
+    support_rate_limit_max_tickets: int = Field(default=3, ge=1, le=50)
 
     model_config = SettingsConfigDict(
         env_prefix="WISHENKA_",
