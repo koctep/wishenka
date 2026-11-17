@@ -50,14 +50,16 @@ Revision chain (linear):
 10. `add_notice_uncertain` - adds `requires_membership` to `reminder_outbox`, rebuilds
     `notification_outbox` with `status = 'uncertain'`, `claim_token`, and `requires_membership`,
     and creates `notice_receipt_keys` (see [notifications.md](notifications.md)).
-11. `add_support_channel` (head) - tables `support_input` and `support_tickets` with index
+11. `add_support_channel` - tables `support_input` and `support_tickets` with index
     `idx_support_tickets_owner_time` (see [bot-support.md](bot-support.md)).
+12. `add_idempotency_records` (head) - table `wl_idempotency_records` and index
+    `idx_wl_idempotency_expires_at` (see [idempotency.md](idempotency.md)).
 
 Details of revisions 5 and 6 are in [gift-receipt.md](gift-receipt.md), revisions 7 and 8 in
 [bot-scenarios.md](bot-scenarios.md), revisions 9 and 10 in [notifications.md](notifications.md),
-and revision 11 in [bot-support.md](bot-support.md).
+revision 11 in [bot-support.md](bot-support.md), and revision 12 in [idempotency.md](idempotency.md).
 The legacy-adoption map (`_REVISIONS`) still stops at `add_item_order_index`; adoption stamps that
-revision and `upgrade head` then applies revisions 5 through 11.
+revision and `upgrade head` then applies revisions 5 through 12.
 
 `head_revision(database_url=...)` in `migrations.py` returns the head id from the script
 directory without opening a database (the URL only builds the config, default in-memory). Tests

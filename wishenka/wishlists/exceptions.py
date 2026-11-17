@@ -103,3 +103,23 @@ class WishArchivedError(WishRefusalError):
 
     def __init__(self, message: str = "The wish is archived") -> None:
         super().__init__(message)
+
+
+class InvalidIdempotencyKeyError(WishlistError, ValueError):
+    """Raised when a client-supplied Idempotency-Key header is empty or malformed."""
+
+    def __init__(
+        self,
+        message: str = "Idempotency-Key must be 1..128 characters matching [A-Za-z0-9._:-]",
+    ) -> None:
+        super().__init__(message)
+
+
+class IdempotencyConflictError(WishlistError):
+    """Raised when an Idempotency-Key is reused with different operation or payload."""
+
+    def __init__(
+        self,
+        message: str = "Idempotency-Key was already used with a different request payload",
+    ) -> None:
+        super().__init__(message)

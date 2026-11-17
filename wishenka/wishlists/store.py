@@ -8,7 +8,7 @@ import sqlite3
 import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn, TypeVar
 
@@ -29,9 +29,13 @@ from wishenka.notices.models import (
     NoticeSettings,
 )
 from wishenka.wishlists.exceptions import (
+    IdempotencyConflictError,
     InventoryBusyError,
     ItemNotFoundError,
+    PermissionDeniedError,
     ReservationNotFoundError,
+    SelfReservationError,
+    WishlistDeletedError,
     WishlistError,
     WishlistNotFoundError,
 )
@@ -406,6 +410,16 @@ class _StorageSnapshot:
     reservations: set[int]
     favorites: set[tuple[int, int]]
     history_ids: set[int]
+
+
+@dataclass(frozen=True, slots=True)
+class IdempotentResult:
+    """Serialized HTTP outcome from execute_wish_idempotent."""
+
+    status_code: int
+    content_type: str
+    body: str
+    replayed: bool
 
 
 class WishlistStore:
@@ -1038,6 +1052,181 @@ class WishlistStore:
         _log_flushed_shared_events(flushed_shared)
         return result
 
+    async def _verify_idempotent_replay_access(
+        self,
+        conn: AsyncConnection,
+        *,
+        actor_id: int,
+        resolved_item_id: int,
+        require_member: bool,
+        check_not_recipient: bool,
+    ) -> None:
+        """Enforce wishlist existence, Surprise Invariant, and membership on replay."""
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT i.wishlist_id, i.recipient_user_id, w.owner_id, w.status "
+                    "FROM wl_items i JOIN wl_lists w ON w.id = i.wishlist_id "
+                    "WHERE i.id = :item_id"
+                ),
+                {"item_id": resolved_item_id},
+            )
+        ).one_or_none()
+        if row is None:
+            raise ItemNotFoundError(f"Item {resolved_item_id} not found")
+        if row.status == WishlistStatus.DELETED.value:
+            raise WishlistDeletedError(f"Wishlist {row.wishlist_id} has been deleted")
+        if check_not_recipient and row.recipient_user_id == actor_id:
+            raise SelfReservationError("Recipient cannot access reservation replay")
+        if require_member and row.owner_id != actor_id:
+            is_member = await conn.scalar(
+                text("SELECT 1 FROM wl_members WHERE wishlist_id = :wid AND user_id = :uid"),
+                {"wid": row.wishlist_id, "uid": actor_id},
+            )
+            if not is_member:
+                raise PermissionDeniedError("Actor is no longer a wishlist member")
+
+    async def execute_wish_idempotent(
+        self,
+        operation: Callable[[WishlistService], Awaitable[tuple[int, str, str]]],
+        *,
+        actor_id: int,
+        idempotency_key: str,
+        request_hash: str,
+        retention_hours: int = 24,
+        item_id: int | None = None,
+        reservation_id: int | None = None,
+        operation_name: str = "wish_inventory",
+        require_member: bool = False,
+        check_not_recipient: bool = False,
+        now: datetime | None = None,
+    ) -> IdempotentResult:
+        """Run one wish mutation with atomic idempotency lookup, replay, and persistence."""
+        if (item_id is None) == (reservation_id is None):
+            raise ValueError("Wish inventory change requires item_id or reservation_id")
+
+        effective_now = now or datetime.now(UTC)
+        resolved_item_id = item_id
+        reservations_written = 0
+        flushed: list[FlushedNotice] = []
+        flushed_shared: list[tuple[str, int]] = []
+
+        async def work(conn: AsyncConnection) -> IdempotentResult:
+            nonlocal resolved_item_id, reservations_written, flushed, flushed_shared
+            resolved_item_id = await self._resolve_wish_item_id(
+                conn,
+                item_id=item_id,
+                reservation_id=reservation_id,
+            )
+            existing = (
+                await conn.execute(
+                    text(
+                        "SELECT request_hash, response_status, response_content_type, "
+                        "response_body, expires_at "
+                        "FROM wl_idempotency_records "
+                        "WHERE actor_id = :actor_id AND idempotency_key = :key"
+                    ),
+                    {"actor_id": actor_id, "key": idempotency_key},
+                )
+            ).one_or_none()
+
+            if existing is not None and datetime.fromisoformat(existing.expires_at) > effective_now:
+                if existing.request_hash != request_hash:
+                    raise IdempotencyConflictError()
+                await self._verify_idempotent_replay_access(
+                    conn,
+                    actor_id=actor_id,
+                    resolved_item_id=resolved_item_id,
+                    require_member=require_member,
+                    check_not_recipient=check_not_recipient,
+                )
+                return IdempotentResult(
+                    status_code=int(existing.response_status),
+                    content_type=str(existing.response_content_type),
+                    body=str(existing.response_body),
+                    replayed=True,
+                )
+
+            service, snapshot = await self._load_wish(conn, resolved_item_id)
+            resp_status, resp_content_type, resp_body = await operation(service)
+            reservations_written, flushed = await self._persist_wish(conn, service, snapshot)
+            flushed_shared = list(service._flushed_shared_events)
+
+            expires_at = effective_now + timedelta(hours=retention_hours)
+            await conn.execute(
+                text(
+                    "INSERT OR REPLACE INTO wl_idempotency_records ("
+                    "actor_id, idempotency_key, request_hash, response_status, "
+                    "response_content_type, response_body, created_at, expires_at"
+                    ") VALUES ("
+                    ":actor_id, :key, :request_hash, :status, :content_type, "
+                    ":body, :created_at, :expires_at"
+                    ")"
+                ),
+                {
+                    "actor_id": actor_id,
+                    "key": idempotency_key,
+                    "request_hash": request_hash,
+                    "status": resp_status,
+                    "content_type": resp_content_type,
+                    "body": resp_body,
+                    "created_at": effective_now.isoformat(),
+                    "expires_at": expires_at.isoformat(),
+                },
+            )
+            return IdempotentResult(
+                status_code=resp_status,
+                content_type=resp_content_type,
+                body=resp_body,
+                replayed=False,
+            )
+
+        try:
+            outcome = await self._immediate(work)
+        except SQLAlchemyError as exc:
+            _raise_for_storage_error(
+                exc,
+                item_id=item_id if item_id is not None else resolved_item_id,
+                reservation_id=reservation_id,
+                operation=operation_name,
+            )
+        except Exception as exc:
+            _log_wish_rollback(
+                exc,
+                item_id=resolved_item_id,
+                reservation_id=reservation_id,
+                operation=operation_name,
+            )
+            raise
+
+        if outcome.replayed:
+            logger.info(
+                "Idempotent wish mutation replayed for item %s (%s)",
+                resolved_item_id,
+                operation_name,
+                extra={
+                    "event": "idempotency_replay_hit",
+                    "item_id": resolved_item_id,
+                    "operation": operation_name,
+                    "response_status": outcome.status_code,
+                },
+            )
+        else:
+            logger.info(
+                "Wishlist inventory transaction committed for item %s (%s)",
+                resolved_item_id,
+                operation_name,
+                extra={
+                    "event": "wishlist_inventory_committed",
+                    "item_id": resolved_item_id,
+                    "operation": operation_name,
+                    "reservations_written": reservations_written,
+                },
+            )
+            _log_flushed_notices(flushed)
+            _log_flushed_shared_events(flushed_shared)
+        return outcome
+
     async def _resolve_wish_item_id(
         self,
         conn: AsyncConnection,
@@ -1476,6 +1665,28 @@ class WishlistStore:
     async def purge_deleted_wishlists(self, threshold: datetime) -> int:
         """Alias for purge_archived_wishlists."""
         return await self.purge_archived_wishlists(threshold)
+
+    async def cleanup_expired_idempotency_records(self, now: datetime | None = None) -> int:
+        """Delete expired client idempotency records and return the number of rows removed."""
+        effective_now = now or datetime.now(UTC)
+        async with self.engine.begin() as conn:
+            await conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+            await conn.exec_driver_sql("PRAGMA busy_timeout = 5000")
+            result = await conn.execute(
+                text("DELETE FROM wl_idempotency_records WHERE expires_at <= :now"),
+                {"now": effective_now.isoformat()},
+            )
+            removed = int(result.rowcount or 0)
+        if removed > 0:
+            logger.info(
+                "Expired idempotency records purged: %s",
+                removed,
+                extra={
+                    "event": "idempotency_records_purged",
+                    "purged_count": removed,
+                },
+            )
+        return removed
 
 
 __all__ = ["TokenCollision", "WishlistRepository", "WishlistStore"]

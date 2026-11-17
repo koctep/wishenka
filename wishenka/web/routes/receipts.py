@@ -8,11 +8,19 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from wishenka.auth.dependencies import get_current_user
 from wishenka.auth.models import AuthenticatedUser
+from wishenka.web.idempotency import (
+    build_replay_response,
+    compute_request_hash,
+    parse_idempotency_key,
+    retention_hours_from_request,
+    serialize_dto_response,
+)
 from wishenka.wishlists.exceptions import (
+    IdempotencyConflictError,
     InventoryBusyError,
     ItemNotFoundError,
     NothingRemainingError,
@@ -105,7 +113,10 @@ async def _run[T](
     *,
     wishlist_id: int,
     item_id: int | None = None,
-) -> T:
+    idempotency_key: str | None = None,
+    request_hash: str | None = None,
+    response_status: int = status.HTTP_201_CREATED,
+) -> T | Response:
     """Run one action: a single-wish transaction for a command, a full snapshot for a read."""
     operation = getattr(request.scope.get("endpoint"), "__name__", "")
     context = {"wishlist_id": wishlist_id, "item_id": item_id, "actor_id": user.telegram_id}
@@ -116,6 +127,25 @@ async def _run[T](
         store = request.app.state.wishlist_store
         if item_id is None:
             return cast(T, await store.execute(action))
+        if idempotency_key is not None:
+            if request_hash is None:
+                raise ValueError("Idempotent execution requires request_hash")
+
+            async def serialized_action(svc: WishlistService) -> tuple[int, str, str]:
+                dto = await action(svc)
+                return serialize_dto_response(cast(ReceiptResultDTO, dto), response_status)
+
+            outcome = await store.execute_wish_idempotent(
+                serialized_action,
+                actor_id=user.telegram_id,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                retention_hours=retention_hours_from_request(request),
+                item_id=item_id,
+                operation_name="record_item_fulfillment",
+                require_member=True,
+            )
+            return build_replay_response(outcome.status_code, outcome.content_type, outcome.body)
         return cast(
             T,
             await store.execute_wish(
@@ -124,6 +154,16 @@ async def _run[T](
         )
     except InventoryBusyError as exc:
         raise _busy(exc, operation, context) from exc
+    except IdempotencyConflictError as exc:
+        logger.warning(
+            "Receipt idempotency conflict: %s",
+            operation,
+            extra={"event": "receipt_idempotency_conflict", **context},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"reason": "idempotency_conflict", "message": str(exc)},
+        ) from exc
     except (
         QuantityInvalidError,
         QuantityAboveRemainingError,
@@ -151,8 +191,9 @@ async def record_receipt(
     payload: ReceiptRequestDTO,
     user: User,
     request: Request,
-) -> ReceiptResultDTO:
+) -> ReceiptResultDTO | Response:
     """Record that a list author received some units of a wish."""
+    idempotency_key = parse_idempotency_key(request)
 
     async def action(svc: WishlistService) -> ReceiptResultDTO:
         item = await svc.record_item_fulfillment(
@@ -166,7 +207,25 @@ async def record_receipt(
             is_fully_received=item.is_fully_received,
         )
 
-    result = await _run(request, action, user, wishlist_id=wishlist_id, item_id=item_id)
+    request_hash = (
+        compute_request_hash(
+            "record_receipt",
+            {"wishlist_id": wishlist_id, "item_id": item_id},
+            {"quantity": payload.quantity},
+        )
+        if idempotency_key is not None
+        else None
+    )
+    result = await _run(
+        request,
+        action,
+        user,
+        wishlist_id=wishlist_id,
+        item_id=item_id,
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        response_status=status.HTTP_201_CREATED,
+    )
     logger.info(
         "Receipt recorded for item %s",
         item_id,
@@ -182,4 +241,4 @@ async def list_gifted(wishlist_id: int, user: User, request: Request) -> list[Gi
     async def action(svc: WishlistService) -> list[GiftedItemDTO]:
         return await svc.list_gifted_items(wishlist_id, user)
 
-    return await _run(request, action, user, wishlist_id=wishlist_id)
+    return cast(list[GiftedItemDTO], await _run(request, action, user, wishlist_id=wishlist_id))

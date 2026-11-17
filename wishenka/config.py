@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     telegram_app_short_name: str = ""
     invite_token_ttl_seconds: int = 7 * 86400
     wishlist_retention_days: int = 30
+    idempotency_retention_hours: int = Field(default=24, ge=1)
     background_cleanup_interval_seconds: int = 3600
     background_cleanup_enabled: bool = True
     receipt_notice_worker_enabled: bool = True

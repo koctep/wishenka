@@ -21,6 +21,7 @@ class CleanupStats:
 
     expired_tokens_cleaned: int = 0
     wishlists_purged: int = 0
+    idempotency_records_cleaned: int = 0
     duration_ms: float = 0.0
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     finished_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -63,6 +64,7 @@ async def run_cleanup_cycle(
         expired_count = await store.cleanup_expired_tokens(effective_now)
         retention_threshold = effective_now - timedelta(days=settings.wishlist_retention_days)
         purged_count = await store.purge_archived_wishlists(retention_threshold)
+        idempotency_cleaned = await store.cleanup_expired_idempotency_records(effective_now)
         if notice_store is not None:
             await _purge_notices(notice_store, settings, effective_now)
 
@@ -72,20 +74,23 @@ async def run_cleanup_cycle(
 
         logger.info(
             "Background cleanup cycle completed successfully: "
-            "cleaned %s tokens, purged %s wishlists in %.2fms",
+            "cleaned %s tokens, purged %s wishlists, cleaned %s idempotency records in %.2fms",
             expired_count,
             purged_count,
+            idempotency_cleaned,
             duration_ms,
             extra={
                 "event": "background_cleanup_completed",
                 "expired_tokens_cleaned": expired_count,
                 "wishlists_purged": purged_count,
+                "idempotency_records_cleaned": idempotency_cleaned,
                 "duration_ms": duration_ms,
             },
         )
         return CleanupStats(
             expired_tokens_cleaned=expired_count,
             wishlists_purged=purged_count,
+            idempotency_records_cleaned=idempotency_cleaned,
             duration_ms=duration_ms,
             started_at=started_at,
             finished_at=finished_at,

@@ -5,11 +5,12 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
 
 from wishenka.auth.dependencies import get_current_user, get_optional_current_user
 from wishenka.auth.models import AuthenticatedUser
+from wishenka.web.idempotency import compute_request_hash, parse_idempotency_key
 from wishenka.web.routes.reservations import execute as execute_reservation
 from wishenka.wishlists.exceptions import (
     InvalidInviteTokenError,
@@ -590,11 +591,16 @@ async def public_wishlist_view(request: Request, token: str, user: OptionalUser)
     return await execute(request, action)
 
 
-@router.post("/api/public/wishlists/{token}/items/{item_id}/reservations", status_code=201)
+@router.post(
+    "/api/public/wishlists/{token}/items/{item_id}/reservations",
+    status_code=201,
+    response_model=PromiseActionDTO,
+)
 async def reserve_from_public_link(
     request: Request, token: str, item_id: int, payload: ReservationQuantityDTO, user: User
-) -> PromiseActionDTO:
+) -> PromiseActionDTO | Response:
     """Resolve capability and reserve within the same transactional operation."""
+    idempotency_key = parse_idempotency_key(request)
 
     async def action(service: WishlistService) -> PromiseActionDTO:
         view = await service.get_wishlist_by_public_token(token, user)
@@ -603,7 +609,24 @@ async def reserve_from_public_link(
         )
         return project_reservation_action(reservation, user)
 
-    return await execute_reservation(request, action, item_id=item_id)
+    request_hash = (
+        compute_request_hash(
+            "reserve_from_public_link",
+            {"token": token, "item_id": item_id},
+            {"quantity": payload.quantity},
+        )
+        if idempotency_key is not None
+        else None
+    )
+    return await execute_reservation(
+        request,
+        action,
+        item_id=item_id,
+        idempotency_key=idempotency_key,
+        actor_id=user.telegram_id,
+        request_hash=request_hash,
+        response_status=status.HTTP_201_CREATED,
+    )
 
 
 def member_projection(wishlist: Wishlist) -> list[dict[str, Any]]:

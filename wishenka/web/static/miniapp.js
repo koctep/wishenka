@@ -17,13 +17,23 @@ function button(text, handler) {
 function status(message) {
   document.getElementById('status').textContent = message;
 }
+function nextIdempotencyKey() {
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+    return window.crypto.randomUUID();
+  }
+  return `idem-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 async function api(path, options = {}) {
   const method = options.method || 'GET';
   const headers = {...options.headers};
   if (!['GET', 'HEAD'].includes(method)) headers['X-CSRF-Token'] = csrf;
   if (options.body) headers['Content-Type'] = 'application/json';
   const response = await fetch(path, {...options, headers, credentials: 'same-origin'});
-  if (!response.ok) throw new Error(`Request failed (${response.status})`);
+  if (!response.ok) {
+    const err = new Error(`Request failed (${response.status})`);
+    err.status = response.status;
+    throw err;
+  }
   return response.json();
 }
 function linkFor(prefix, token) {
@@ -357,15 +367,25 @@ async function publicView(token) {
       if (list.identified && list.status === 'active' && !item.is_recipient &&
           !item.is_archived && !item.is_fully_received && !item.is_reserved_by_me &&
           item.available_quantity > 0) {
+        let pendingKey = '';
         section.append(button('Reserve', async () => {
+          if (!pendingKey) pendingKey = nextIdempotencyKey();
           try {
             await api(
               `/api/public/wishlists/${encodeURIComponent(token)}/items/${item.id}/reservations`,
-              {method: 'POST', body: JSON.stringify({quantity: 1})}
+              {
+                method: 'POST',
+                headers: {'Idempotency-Key': pendingKey},
+                body: JSON.stringify({quantity: 1}),
+              }
             );
+            pendingKey = '';
             await publicView(token);
             status('Reserved');
-          } catch (_) { status('Could not reserve this wish. Please try again.'); }
+          } catch (err) {
+            if (err && err.status && err.status !== 503) pendingKey = '';
+            status('Could not reserve this wish. Please try again.');
+          }
         }));
       }
       root.append(section);

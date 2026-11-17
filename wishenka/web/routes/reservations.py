@@ -8,11 +8,19 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Annotated, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from wishenka.auth.dependencies import get_current_user
 from wishenka.auth.models import AuthenticatedUser
+from wishenka.web.idempotency import (
+    build_replay_response,
+    compute_request_hash,
+    parse_idempotency_key,
+    retention_hours_from_request,
+    serialize_dto_response,
+)
 from wishenka.wishlists.exceptions import (
+    IdempotencyConflictError,
     InsufficientQuantityError,
     InventoryBusyError,
     ItemNotFoundError,
@@ -102,13 +110,39 @@ async def execute[T](
     *,
     item_id: int | None = None,
     reservation_id: int | None = None,
-) -> T:
+    idempotency_key: str | None = None,
+    actor_id: int | None = None,
+    request_hash: str | None = None,
+    response_status: int = status.HTTP_200_OK,
+) -> T | Response:
     """Run one promise action through the existing wish transaction."""
     operation = getattr(request.scope.get("endpoint"), "__name__", "")
     try:
         injected = getattr(request.app.state, "wishlist_service", None)
         if injected is not None:
             result = await action(injected)
+        elif idempotency_key is not None:
+            if actor_id is None or request_hash is None:
+                raise ValueError("Idempotent execution requires actor_id and request_hash")
+
+            async def serialized_action(svc: WishlistService) -> tuple[int, str, str]:
+                dto = await action(svc)
+                if isinstance(dto, PromiseActionDTO):
+                    _log_completed(operation, dto)
+                return serialize_dto_response(cast(PromiseActionDTO, dto), response_status)
+
+            outcome = await request.app.state.wishlist_store.execute_wish_idempotent(
+                serialized_action,
+                actor_id=actor_id,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                retention_hours=retention_hours_from_request(request),
+                item_id=None if reservation_id is not None else item_id,
+                reservation_id=reservation_id,
+                operation_name=operation or "wish_inventory",
+                check_not_recipient=True,
+            )
+            return build_replay_response(outcome.status_code, outcome.content_type, outcome.body)
         else:
             # The store accepts one wish key. Both path ids stay on the log.
             result = cast(
@@ -178,7 +212,26 @@ async def execute[T](
             },
         )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden") from exc
-    except (InsufficientQuantityError, ReservationError, WishlistArchivedError) as exc:
+    except IdempotencyConflictError as exc:
+        logger.warning(
+            "Reservation idempotency conflict: %s",
+            operation,
+            extra={
+                "event": "reservation_idempotency_conflict",
+                "reason": "idempotency_conflict",
+                **_request_scope(
+                    operation,
+                    item_id=item_id,
+                    reservation_id=reservation_id,
+                ),
+            },
+        )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except (
+        InsufficientQuantityError,
+        ReservationError,
+        WishlistArchivedError,
+    ) as exc:
         logger.warning(
             "Reservation operation conflict: %s",
             operation,
@@ -218,8 +271,9 @@ async def create_reservation(
     payload: ReservationQuantityDTO,
     user: User,
     request: Request,
-) -> PromiseActionDTO:
+) -> PromiseActionDTO | Response:
     """Promise a positive number of units of a wish the caller does not receive."""
+    idempotency_key = parse_idempotency_key(request)
     if payload.quantity < 1:
         logger.warning(
             "Reservation operation validation error: %s",
@@ -243,7 +297,24 @@ async def create_reservation(
         )
         return project_reservation_action(reservation, user)
 
-    return await execute(request, action, item_id=item_id)
+    request_hash = (
+        compute_request_hash(
+            "create_reservation",
+            {"wishlist_id": wishlist_id, "item_id": item_id},
+            {"quantity": payload.quantity},
+        )
+        if idempotency_key is not None
+        else None
+    )
+    return await execute(
+        request,
+        action,
+        item_id=item_id,
+        idempotency_key=idempotency_key,
+        actor_id=user.telegram_id,
+        request_hash=request_hash,
+        response_status=status.HTTP_201_CREATED,
+    )
 
 
 @router.patch("/{reservation_id}", response_model=PromiseActionDTO)
@@ -254,8 +325,9 @@ async def update_reservation_quantity(
     payload: ReservationQuantityDTO,
     user: User,
     request: Request,
-) -> PromiseActionDTO:
+) -> PromiseActionDTO | Response:
     """Raise or lower one intended or purchased promise owned by the caller."""
+    idempotency_key = parse_idempotency_key(request)
 
     async def action(svc: WishlistService) -> PromiseActionDTO:
         reservation = await svc.update_reservation_quantity(
@@ -267,11 +339,23 @@ async def update_reservation_quantity(
         )
         return project_reservation_action(reservation, user)
 
+    request_hash = (
+        compute_request_hash(
+            "update_reservation_quantity",
+            {"wishlist_id": wishlist_id, "item_id": item_id, "reservation_id": reservation_id},
+            {"quantity": payload.quantity},
+        )
+        if idempotency_key is not None
+        else None
+    )
     return await execute(
         request,
         action,
         item_id=item_id,
         reservation_id=reservation_id,
+        idempotency_key=idempotency_key,
+        actor_id=user.telegram_id,
+        request_hash=request_hash,
     )
 
 
@@ -282,8 +366,9 @@ async def cancel_reservation(
     reservation_id: int,
     user: User,
     request: Request,
-) -> PromiseActionDTO:
+) -> PromiseActionDTO | Response:
     """Cancel one promise owned by the caller and free its units."""
+    idempotency_key = parse_idempotency_key(request)
 
     async def action(svc: WishlistService) -> PromiseActionDTO:
         reservation = await svc.cancel_reservation(
@@ -294,11 +379,22 @@ async def cancel_reservation(
         )
         return project_reservation_action(reservation, user)
 
+    request_hash = (
+        compute_request_hash(
+            "cancel_reservation",
+            {"wishlist_id": wishlist_id, "item_id": item_id, "reservation_id": reservation_id},
+        )
+        if idempotency_key is not None
+        else None
+    )
     return await execute(
         request,
         action,
         item_id=item_id,
         reservation_id=reservation_id,
+        idempotency_key=idempotency_key,
+        actor_id=user.telegram_id,
+        request_hash=request_hash,
     )
 
 
@@ -309,8 +405,9 @@ async def purchase_reservation(
     reservation_id: int,
     user: User,
     request: Request,
-) -> PromiseActionDTO:
+) -> PromiseActionDTO | Response:
     """Mark one intended promise owned by the caller as purchased."""
+    idempotency_key = parse_idempotency_key(request)
 
     async def action(svc: WishlistService) -> PromiseActionDTO:
         reservation = await svc.mark_reservation_purchased(
@@ -321,11 +418,22 @@ async def purchase_reservation(
         )
         return project_reservation_action(reservation, user)
 
+    request_hash = (
+        compute_request_hash(
+            "purchase_reservation",
+            {"wishlist_id": wishlist_id, "item_id": item_id, "reservation_id": reservation_id},
+        )
+        if idempotency_key is not None
+        else None
+    )
     return await execute(
         request,
         action,
         item_id=item_id,
         reservation_id=reservation_id,
+        idempotency_key=idempotency_key,
+        actor_id=user.telegram_id,
+        request_hash=request_hash,
     )
 
 
@@ -336,8 +444,9 @@ async def undo_reservation_purchase(
     reservation_id: int,
     user: User,
     request: Request,
-) -> PromiseActionDTO:
+) -> PromiseActionDTO | Response:
     """Return one purchased promise owned by the caller to intended."""
+    idempotency_key = parse_idempotency_key(request)
 
     async def action(svc: WishlistService) -> PromiseActionDTO:
         reservation = await svc.revert_reservation_to_active(
@@ -348,9 +457,20 @@ async def undo_reservation_purchase(
         )
         return project_reservation_action(reservation, user)
 
+    request_hash = (
+        compute_request_hash(
+            "undo_reservation_purchase",
+            {"wishlist_id": wishlist_id, "item_id": item_id, "reservation_id": reservation_id},
+        )
+        if idempotency_key is not None
+        else None
+    )
     return await execute(
         request,
         action,
         item_id=item_id,
         reservation_id=reservation_id,
+        idempotency_key=idempotency_key,
+        actor_id=user.telegram_id,
+        request_hash=request_hash,
     )

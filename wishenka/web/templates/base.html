@@ -83,15 +83,30 @@
             if (verb === 'GET' || verb === 'HEAD' || verb === 'OPTIONS') { return; }
             var elt = evt.detail.elt;
             var card = elt && elt.closest && elt.closest('.item-card');
-            var giver = card && reservationRequestPath(elt);
+            var resPath = reservationRequestPath(elt);
+            var giver = card && resPath;
             var suppressed = giver && requestSuppressesHeaders(elt);
             if (csrfToken && !suppressed) { evt.detail.headers['X-CSRF-Token'] = csrfToken; }
+            if (resPath && !suppressed && !evt.detail.headers['Idempotency-Key']) {
+                var idemKey = elt.dataset && elt.dataset.idempotencyKey;
+                if (!idemKey) {
+                    idemKey = nextIdempotencyKey();
+                    if (elt.dataset) { elt.dataset.idempotencyKey = idemKey; }
+                }
+                evt.detail.headers['Idempotency-Key'] = idemKey;
+            }
             if (giver && (suppressed || (!csrfToken && !explicitBearer(evt.detail.headers)))) {
                 evt.preventDefault();
                 giverPreparationError(card);
             }
         });
     });
+    function nextIdempotencyKey() {
+        if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+            return window.crypto.randomUUID();
+        }
+        return 'idem-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    }
     function reservationRequestPath(elt) {
         var node = elt;
         while (node && node.getAttribute) {
@@ -118,6 +133,11 @@
     document.addEventListener('htmx:afterRequest', function (evt) {
         var elt = evt.detail.elt;
         if (!reservationRequestPath(elt)) { return; }
+        var reqXhr = evt.detail.xhr;
+        var reqStatus = reqXhr ? reqXhr.status : 0;
+        if (elt.dataset && reqStatus !== 0 && reqStatus !== 503) {
+            delete elt.dataset.idempotencyKey;
+        }
         var row = elt.closest ? elt.closest('.reservation-row') : null;
         if (row) {
             var rowXhr = evt.detail.xhr;

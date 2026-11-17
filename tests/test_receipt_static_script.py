@@ -36,8 +36,10 @@ from tests.test_wishlist_touch_reorder import strip_js_comments
 pytestmark = pytest.mark.timeout(30)
 
 # WISHENKA-123 updates the inline script to guard CSRF initialization while preserving the
-# receipt separation invariant. Pin the reviewed version until the script is externalized.
-INLINE_SCRIPT_SHA256 = "ffe16da52c7a51a83c2f6eaab170fc74a5ad87cdef8c825d30dc62494cfa3a61"
+# receipt separation invariant.
+# WISHENKA-61 updates the inline script to attach and reuse Idempotency-Key on reservations.
+# Pin the reviewed version until the script is externalized.
+INLINE_SCRIPT_SHA256 = "e83466996e59b5b79ab32a736e1ef7abf8cb271230d4c1aaa0a4afe17e5d3d8f"
 GUARD = re.compile(r"typeof\s+[\w.]*getResponseHeader\s*(?:!==?|===?)\s*['\"]function['\"]")
 REASON_LIKE = re.compile(r"['\"]([a-z]+(?:_[a-z]+)+)['\"]")
 

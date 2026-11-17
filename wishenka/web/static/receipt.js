@@ -145,17 +145,41 @@
       feedback.textContent = '';
     }
     const field = form.elements.namedItem('quantity');
+    const qty = field ? field.value : '';
+    let idemKey = form.dataset.idempotencyKey;
+    if (!idemKey || form.dataset.idempotencyQty !== qty) {
+      idemKey =
+        window.crypto && typeof window.crypto.randomUUID === 'function'
+          ? window.crypto.randomUUID()
+          : `idem-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+      form.dataset.idempotencyKey = idemKey;
+      form.dataset.idempotencyQty = qty;
+    }
     const done = () => finishAttempt(form);
     new Promise((resolve) => {
       resolve(
         window.htmx.ajax('POST', form.getAttribute('action'), {
           target: `#${FEEDBACK_ID}`,
           swap: 'none',
-          values: { quantity: field ? field.value : '' },
+          values: { quantity: qty },
+          headers: { 'Idempotency-Key': idemKey },
         }),
       );
     }).then(done, done);
   };
+
+  document.addEventListener('htmx:afterRequest', (event) => {
+    const detail = event.detail;
+    const form = detail && closest(detail.elt, 'form[data-receipt-form]');
+    if (!form) {
+      return;
+    }
+    const status = detail.xhr ? detail.xhr.status : 0;
+    if (status !== 0 && status !== 503) {
+      delete form.dataset.idempotencyKey;
+      delete form.dataset.idempotencyQty;
+    }
+  });
 
   document.addEventListener('submit', (event) => {
     const form = closest(event.target, 'form[data-receipt-form]');

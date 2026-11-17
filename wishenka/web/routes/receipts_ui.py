@@ -25,10 +25,18 @@ from wishenka.web.gifted_view import (
     oob_text,
     read_gifted_rows,
 )
+from wishenka.web.idempotency import (
+    HTML_MEDIA_TYPE,
+    build_replay_response,
+    compute_request_hash,
+    parse_idempotency_key,
+    retention_hours_from_request,
+)
 from wishenka.web.routes.items_ui import _editor_card_flags, _execute, _items_list_html
 from wishenka.web.routes.receipts import _REFUSALS
 from wishenka.web.templates import templates
 from wishenka.wishlists.exceptions import (
+    IdempotencyConflictError,
     InventoryBusyError,
     ItemNotFoundError,
     NothingRemainingError,
@@ -339,6 +347,7 @@ async def record_receipt_ui(
     quantity: Annotated[str, Form()] = "",
 ) -> Response:
     """Record a receipt and answer with out-of-band fragments (dialog, notice, card or list)."""
+    idempotency_key = parse_idempotency_key(request)
     ids = _ids(wishlist_id, item_id, user)
     count = _quantity_of(quantity)
 
@@ -348,11 +357,50 @@ async def record_receipt_ui(
             item.title, item.remaining_quantity, await _read_state(svc, wishlist_id, user)
         )
 
+    def _render_receipt_html(done: _Receipt) -> str:
+        state = done.state
+        shown = state.shown(item_id)
+        main = (
+            _card_oob(request, wishlist_id, shown, state.items)
+            if shown is not None and done.remaining > 0
+            else _list_oob(request, wishlist_id, state.items)
+        )
+        notice = oob_text("list-notice", f"Отмечено получено: {count} шт. («{done.title}»)")
+        parts = [oob_text("item-modal-container"), notice, main, _gifted_oob(request, state.gifted)]
+        return "\n".join(parts)
+
     try:
+        injected = getattr(request.app.state, "wishlist_service", None)
+        if idempotency_key is not None and injected is None:
+            request_hash = compute_request_hash(
+                "record_receipt_ui",
+                {"wishlist_id": wishlist_id, "item_id": item_id},
+                {"quantity": count},
+            )
+
+            async def serialized_action(svc: WishlistService) -> tuple[int, str, str]:
+                done = await action(svc)
+                return status.HTTP_201_CREATED, HTML_MEDIA_TYPE, _render_receipt_html(done)
+
+            outcome = await request.app.state.wishlist_store.execute_wish_idempotent(
+                serialized_action,
+                actor_id=user.telegram_id,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                retention_hours=retention_hours_from_request(request),
+                item_id=item_id,
+                operation_name="record_receipt_ui",
+                require_member=True,
+            )
+            _log(logging.INFO, "receipt_recorded_http", "Receipt recorded", ids)
+            return build_replay_response(outcome.status_code, outcome.content_type, outcome.body)
         done = await _execute(request, action)
     except InventoryBusyError:
         _log(logging.WARNING, "receipt_inventory_busy", "Receipt busy", ids)
         return _refusal_fragment(status.HTTP_503_SERVICE_UNAVAILABLE, BUSY, _sentence(BUSY))
+    except IdempotencyConflictError as exc:
+        _log_refusal("receipt_refused", ids, "idempotency_conflict", status.HTTP_409_CONFLICT, exc)
+        return _refusal_fragment(status.HTTP_409_CONFLICT, "idempotency_conflict", str(exc))
     except WishlistError as exc:
         verdict = _classify(exc)
         if verdict is None:
@@ -364,13 +412,4 @@ async def record_receipt_ui(
             extra = await _effect_fragments(request, user, ids, reason, exc)
         return _refusal_fragment(http_status, reason, _sentence(reason, exc), extra or "")
     _log(logging.INFO, "receipt_recorded_http", "Receipt recorded", ids)
-    state = done.state
-    shown = state.shown(item_id)
-    main = (
-        _card_oob(request, wishlist_id, shown, state.items)
-        if shown is not None and done.remaining > 0
-        else _list_oob(request, wishlist_id, state.items)
-    )
-    notice = oob_text("list-notice", f"Отмечено получено: {count} шт. («{done.title}»)")
-    parts = [oob_text("item-modal-container"), notice, main, _gifted_oob(request, state.gifted)]
-    return HTMLResponse("\n".join(parts), status_code=status.HTTP_201_CREATED)
+    return HTMLResponse(_render_receipt_html(done), status_code=status.HTTP_201_CREATED)

@@ -116,7 +116,7 @@ Built by `add_gift_receipts` and `add_notice_outbox` and extended by `add_birthd
 `add_notice_uncertain`, see [migrations.md](migrations.md). The chain is now
 `add_item_order_index` -> `add_gift_receipts` -> `add_notice_outbox` -> `add_bot_drafts` ->
 `add_bot_capture_order` -> `add_birthday_reminders` -> `add_notice_uncertain` ->
-`add_support_channel` (head).
+`add_support_channel` -> `add_idempotency_records` (head).
 
 - **`add_gift_receipts`.** Creates `wl_receipts` and its index. Back-fills one record per wish
   that has `received_quantity > 0` and no record yet: quantity = `received_quantity`,
@@ -145,6 +145,9 @@ Both routes are in `wishenka/web/routes/receipts.py` (router prefix `/api/wishli
 tag `receipts`, mounted in `create_app`). Authentication is `get_current_user`: session cookie or
 bearer token, 401 without one. A cookie session needs the CSRF token like other mutations
 (`BrowserSecurityMiddleware`, header `X-CSRF-Token` from `GET /api/auth/csrf`).
+Both `POST /api/wishlists/{wishlist_id}/items/{item_id}/receipts` and the HTMX UI route
+`POST /web/wishlists/{wishlist_id}/items/{item_id}/receipt` accept an optional `Idempotency-Key`
+header (see [idempotency.md](idempotency.md)).
 
 ### `POST /api/wishlists/{wishlist_id}/items/{item_id}/receipts`
 

@@ -78,6 +78,8 @@
 - `notification_outbox` — очередь отправки сообщений ботом (та же ревизия).
 - `wl_receipts` — история получений желаний: количество и дата, без дарителя (ревизия
   `add_gift_receipts`).
+- `wl_idempotency_records` — клиентские ключи идемпотентности для мутаций бронирования и получения
+  подарков (ревизия `add_idempotency_records`, см. [`doc/dev/idempotency.md`](idempotency.md)).
 
 Реализовано (WISHENKA-23): уведомление дарителям о получении подарка — производитель в
 `notification_outbox` внутри транзакции прихода, настройки действуют на двух уровнях (вишлист,
@@ -121,6 +123,9 @@ opt-in подтверждений собственной брони (`reminder_o
   UTC-планировщик событий, межпроцессный rate limiter, карантин `uncertain` и CLI оператора.
 - [`doc/dev/gift-receipt.md`](gift-receipt.md) — Получение подарков и раздел «Подаренные»
   (WISHENKA-23, WISHENKA-24): доменная модель, UI и очередь уведомлений о получении.
+- [`doc/dev/idempotency.md`](idempotency.md) — Клиентские ключи идемпотентности для мутаций
+  бронирования и получения подарков (WISHENKA-61): заголовок `Idempotency-Key`, таблица
+  `wl_idempotency_records`, атомарность `BEGIN IMMEDIATE` и TTL-очистка.
 - [`doc/dev/bot-scenarios.md`](bot-scenarios.md) — Точка входа Telegram-бота (`/start`, `/help`),
   навигация в Mini App и создание желаний из сообщений чата.
 - [`doc/dev/bot-support.md`](bot-support.md) — Канал обратной связи и обращений в поддержку в
