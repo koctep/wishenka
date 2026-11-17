@@ -66,6 +66,7 @@ Private /birthdays -------- birthday_entries /
 | Component | Module | Responsibility |
 | --------- | ------ | -------------- |
 | `EventProducer` / `SharedEvent` | `wishenka/notices/events.py` | Enqueues content-free shared wishlist and opt-in reservation confirmation intents inside the domain transaction |
+| `NotificationPreferencesStore` | `wishenka/notices/preferences.py` | Manages global (`user_notification_settings`) and per-wishlist (`wl_list_notification_settings`) notification preferences, access checks, and effective preference resolution |
 | `NoticeStore` / `ClaimedNotice` | `wishenka/notices/store.py` | Fenced claiming, pre-send eligibility refresh, settlement, and unified retention purge for `notification_outbox` and `reminder_outbox` |
 | `claim_reminder` / `refresh_reminder` / `settle_reminder` | `wishenka/notices/reminders.py` | Fenced claiming, live authorization/preference refresh, localized rendering, and settlement for `reminder_outbox` |
 | `ReminderScheduler` / `utc_event_date` | `wishenka/notices/scheduler.py` | Bounded, cursor-driven UTC scanner for dated wishlists and private birthday entries |
@@ -191,6 +192,17 @@ Two Alembic revisions extend the wishlist database schema (see [`doc/dev/migrati
    - Titles and labels are truncated to `100` characters (`TITLE_LIMIT = 100`). Messages are plain
      text and never include capability tokens, URLs, reservation quantities, or other givers'
      identities.
+
+### Notification Preferences & `birthday_reminders` Priority (`WISHENKA-34`)
+
+`NotificationPreferencesStore` (`wishenka/notices/preferences.py`) exposes global and per-wishlist notification controls backed directly by `user_notification_settings` and `wl_list_notification_settings` (keyed by `users.telegram_id`, with no intermediate cache):
+
+- **Global categories** (`GLOBAL_NOTIFICATION_DEFAULTS`): `wishlist_changes` (`True`), `reservation_changes` (`False`, explicit opt-in), `gift_received` (`True`), `reminders` (`True`), `birthday_reminders` (`True`).
+- **Per-wishlist categories** (`WISHLIST_NOTIFICATION_CATEGORIES`): `wishlist_changes`, `reservation_changes`, `gift_received`, `reminders`. A list-level row may be `True`, `False`, or deleted (`None` in the API) to inherit the global setting.
+- **Effective resolution order**: `override` (`wl_list_notification_settings`) -> `global` (`user_notification_settings`) -> `default` (`GLOBAL_NOTIFICATION_DEFAULTS`).
+- **Access check**: Only non-deleted wishlists (`status IN ('active', 'archived')`) where the user is `owner_id`, a member in `wl_members`, or has the list in `wl_favorites` are exposed or configurable.
+- **`birthday_reminders` precedence in `wishenka/notices/reminders.py`**: When `claim_reminder` or `refresh_reminder` evaluates a `kind == "birthday"` row, `_read_user_setting` resolves `COALESCE(birthday_reminders, reminders)` (falling back to `1` if neither row exists). Disabling `birthday_reminders` suppresses already-queued `reminder_outbox` birthday rows (`status = 'skipped'`) without deleting `birthday_entries`.
+- **Mini App endpoints (`wishenka/web/routes/profile.py`)**: `GET /api/profile/preferences`, `PUT /api/profile/notifications/global`, `GET /api/profile/notifications/wishlists/{wishlist_id}`, and `PUT /api/profile/notifications/wishlists/{wishlist_id}` (plus `GET /settings` UI).
 
 ### Private `/birthdays` Tracking Flow
 
@@ -414,6 +426,11 @@ labels or dates, wish/list titles, capability links, bot tokens, or raw exceptio
 | `reminder_scan_completed` | DEBUG | `wishenka.notices.scheduler` | `lists_scanned`, `birthdays_scanned`, `intents_created` (emitted only on non-empty scans) |
 | `shared_notice_events_queued` | DEBUG | `wishenka.wishlists.notices` | `kind`, `queued_count` (emitted after commit when `reminder_outbox` rows are inserted) |
 | `service_notice_skipped` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `reason` (`unauthorized`, `ineligible`, `refresh_ineligible`), `kind` (when claimed) |
+| `notification_global_updated` | INFO | `wishenka.notices.preferences` | `updated_count`, `categories` |
+| `notification_wishlist_updated` | INFO | `wishenka.notices.preferences` | `wishlist_id`, `role`, `updated_count`, `cleared_count` |
+| `notification_global_invalid_request` | WARNING | `wishenka.web.profile` | `user_id`, `status_code` (`422`) |
+| `notification_wishlist_not_found` | WARNING | `wishenka.web.profile` | `user_id`, `wishlist_id`, `status_code` (`404`) |
+| `notification_wishlist_invalid_request` | WARNING | `wishenka.web.profile` | `user_id`, `wishlist_id`, `status_code` (`422`) |
 | `receipt_notice_skipped_ineligible` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `attempt` |
 | `receipt_notice_uncertain` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `attempt`, `error_class` (when a receipt send is ambiguous or lease expires) |
 
@@ -464,7 +481,7 @@ the complete observability specifications.
 Run the focused notification, reminder, upgrade, operator, and observability test suites with:
 
 ```bash
-make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_notice_delivery_repro.py tests/test_notice_wishlist_events.py tests/test_notice_upgrade.py tests/test_notice_operator.py tests/test_reminder_scan_paging.py tests/test_service_notice_observability.py tests/test_receipt_notices.py tests/test_receipt_observability.py tests/test_wishenka_60_repro.py tests/test_wishenka_60_observability.py'
+make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_notice_delivery_repro.py tests/test_notice_wishlist_events.py tests/test_notice_upgrade.py tests/test_notice_operator.py tests/test_reminder_scan_paging.py tests/test_service_notice_observability.py tests/test_receipt_notices.py tests/test_receipt_observability.py tests/test_wishenka_60_repro.py tests/test_wishenka_60_observability.py tests/test_wishenka_34_repro.py tests/test_wishenka_34_preferences.py'
 ```
 
 ## Known Limitations and Follow-up Tasks
@@ -486,5 +503,8 @@ make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_notice_delivery_repro.py tests/t
   to the private `NoticeStore._store` attribute with a public store transaction interface.
 - **[WISHENKA-156](https://pypost.atlassian.net/browse/WISHENKA-156):** Opt-in live Telegram smoke
   test and multiprocess worker race coverage for the expanded service queue and shared rate limits.
-- **[WISHENKA-34](https://pypost.atlassian.net/browse/WISHENKA-34):** Mini App UI screen for
-  managing global and per-list notification settings.
+- **[WISHENKA-194](https://pypost.atlassian.net/browse/WISHENKA-194) / [WISHENKA-195](https://pypost.atlassian.net/browse/WISHENKA-195) / [WISHENKA-196](https://pypost.atlassian.net/browse/WISHENKA-196):**
+  Follow-ups from `WISHENKA-34` (implemented): batch per-wishlist override queries and deduplicate
+  the accessible-wishlist helper in `NotificationPreferencesStore`, wire
+  `NotificationPreferencesStore` via `app.state` / FastAPI dependency in `profile.py`, and
+  refresh inherited effective badges dynamically in `settings.html` with DOM/E2E test coverage.

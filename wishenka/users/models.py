@@ -2,8 +2,11 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 from wishenka.i18n.locale import LocaleSource, SupportedLocale
+
+BirthdateSource = Literal["auto", "explicit"]
 
 
 @dataclass(frozen=True)
@@ -21,6 +24,10 @@ class UserRecord:
     updated_at: datetime
     locale: SupportedLocale = "en"
     locale_source: LocaleSource = "auto"
+    birth_day: int | None = None
+    birth_month: int | None = None
+    birth_year: int | None = None
+    birthdate_source: BirthdateSource = "auto"
 
     @property
     def display_name(self) -> str:

@@ -715,14 +715,31 @@ def test_no_token_no_worker_and_lifespan(tmp_path: Path, caplog: pytest.LogCaptu
     assert fake.closed is True
 
 
+def _collect_route_paths(routes: Any) -> list[str]:
+    paths: list[str] = []
+    for route in routes:
+        path = getattr(route, "path", None)
+        if isinstance(path, str) and path:
+            paths.append(path)
+        nested = getattr(route, "routes", None)
+        if nested is None and (orig := getattr(route, "original_router", None)) is not None:
+            nested = getattr(orig, "routes", None)
+        if nested:
+            paths.extend(_collect_route_paths(nested))
+    return paths
+
+
 def test_settings_storage_only(tmp_path: Path) -> None:
-    """Receipt preferences remain storage-only; bot confirmations have an explicit opt-in."""
+    """Notification settings routes are limited to profile endpoints; writers stay scoped."""
     with app_env(tmp_path) as (_client, _sessions, app):
         db = str(app.state.settings.database_url).removeprefix("sqlite+aiosqlite:///")
         require_table(db, "user_notification_settings")
         require_table(db, "wl_list_notification_settings")
-        paths = [getattr(route, "path", "") for route in app.routes]
-    assert [p for p in paths if "notif" in p.lower()] == []
+        paths = _collect_route_paths(app.routes)
+    assert {p for p in paths if "notif" in p.lower()} == {
+        "/api/profile/notifications/global",
+        "/api/profile/notifications/wishlists/{wishlist_id}",
+    }
 
     import wishenka
 
@@ -737,4 +754,4 @@ def test_settings_storage_only(tmp_path: Path) -> None:
         for path in root.rglob("*.py")
         if "alembic" not in path.parts and writer.search(path.read_text(encoding="utf-8"))
     ]
-    assert offenders == ["bot/entry.py"]
+    assert set(offenders) == {"bot/entry.py", "notices/preferences.py"}

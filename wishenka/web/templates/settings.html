@@ -8,6 +8,7 @@
         <a href="/" class="back-link">{{ t('settings.back_home', locale) }}</a>
     </p>
     <h1>{{ t('settings.title', locale) }}</h1>
+
     <section aria-labelledby="language-heading">
         <h2 id="language-heading">{{ t('settings.language_heading', locale) }}</h2>
         <p>{{ t('settings.language_description', locale) }}</p>
@@ -31,5 +32,177 @@
         </div>
         <p id="locale-feedback" role="status" aria-live="polite"></p>
     </section>
+
+    <section aria-labelledby="birthdate-heading" class="mt-6">
+        <h2 id="birthdate-heading">{{ t('settings.birthdate_heading', locale) }}</h2>
+        <p>{{ t('settings.birthdate_description', locale) }}</p>
+        <p class="birthdate-source-status">
+            {{ t('settings.current_source_label', locale) }}
+            <strong id="birthdate-source-label">
+                {{ t('settings.birthdate_source_explicit' if birthdate.source == 'explicit' else 'settings.birthdate_source_auto', locale) }}
+            </strong>
+        </p>
+        <form id="birthdate-form" class="birthdate-form" onsubmit="return saveBirthdate(event)">
+            <label>
+                {{ t('settings.birthdate_day', locale) }}
+                <input type="number" id="birth-day" name="day" min="1" max="31" value="{{ birthdate.day or '' }}" required>
+            </label>
+            <label>
+                {{ t('settings.birthdate_month', locale) }}
+                <input type="number" id="birth-month" name="month" min="1" max="12" value="{{ birthdate.month or '' }}" required>
+            </label>
+            <label>
+                {{ t('settings.birthdate_year', locale) }}
+                <input type="number" id="birth-year" name="year" min="1900" max="2100" value="{{ birthdate.year or '' }}">
+            </label>
+            <button type="submit">{{ t('settings.birthdate_save', locale) }}</button>
+            <button type="button" onclick="clearBirthdate()">{{ t('settings.birthdate_clear', locale) }}</button>
+        </form>
+        <p id="birthdate-feedback" role="status" aria-live="polite"></p>
+    </section>
+
+    <section aria-labelledby="birthday-reminders-heading" class="mt-6">
+        <h2 id="birthday-reminders-heading">{{ t('settings.birthday_reminders_heading', locale) }}</h2>
+        <p>{{ t('settings.birthday_reminders_description', locale) }}</p>
+        <label class="toggle-row">
+            <input type="checkbox"
+                   id="toggle-birthday-reminders"
+                   {% if birthday_reminders %}checked{% endif %}
+                   onchange="updateGlobalNotification('birthday_reminders', this.checked, 'birthday-reminders-feedback')">
+            <span>{{ t('settings.birthday_reminders_label', locale) }}</span>
+        </label>
+        <p id="birthday-reminders-feedback" role="status" aria-live="polite"></p>
+    </section>
+
+    <section aria-labelledby="notifications-heading" class="mt-6">
+        <h2 id="notifications-heading">{{ t('settings.notifications_heading', locale) }}</h2>
+        <p>{{ t('settings.notifications_description', locale) }}</p>
+        <div class="notification-toggles">
+            {% for cat in wishlist_categories %}
+            <label class="toggle-row">
+                <input type="checkbox"
+                       data-global-category="{{ cat }}"
+                       {% if global_notifications.get(cat) %}checked{% endif %}
+                       onchange="updateGlobalNotification('{{ cat }}', this.checked, 'global-notifications-feedback')">
+                <span>{{ t('settings.category.' ~ cat, locale) }}</span>
+            </label>
+            {% endfor %}
+        </div>
+        <p id="global-notifications-feedback" role="status" aria-live="polite"></p>
+    </section>
+
+    <section aria-labelledby="wishlists-heading" class="mt-6">
+        <h2 id="wishlists-heading">{{ t('settings.wishlists_heading', locale) }}</h2>
+        <p>{{ t('settings.wishlists_description', locale) }}</p>
+        {% if not wishlists %}
+        <p class="empty-state">{{ t('settings.wishlists_empty', locale) }}</p>
+        {% else %}
+        <div class="wishlist-preferences-list">
+            {% for wl in wishlists %}
+            <article class="wishlist-pref-card" data-wishlist-id="{{ wl.id }}">
+                <h3>{{ wl.title }}</h3>
+                {% for cat in wishlist_categories %}
+                {% set ov = wl.overrides.get(cat) %}
+                {% set eff = wl.effective.get(cat) %}
+                <div class="wishlist-pref-row" data-wishlist-id="{{ wl.id }}" data-category="{{ cat }}">
+                    <span class="pref-category">{{ t('settings.category.' ~ cat, locale) }}</span>
+                    <select aria-label="{{ wl.title }} — {{ t('settings.category.' ~ cat, locale) }}"
+                            onchange="updateWishlistOverride({{ wl.id }}, '{{ cat }}', this.value, this)">
+                        <option value="inherit" {% if ov is none %}selected{% endif %}>{{ t('settings.state.inherit', locale) }}</option>
+                        <option value="true" {% if ov is sameas true %}selected{% endif %}>{{ t('settings.state.enabled', locale) }}</option>
+                        <option value="false" {% if ov is sameas false %}selected{% endif %}>{{ t('settings.state.disabled', locale) }}</option>
+                    </select>
+                    <span class="effective-badge" data-effective-for="{{ wl.id }}-{{ cat }}">
+                        {{ t('settings.effective_label', locale) }}
+                        <strong>{{ t('settings.state.enabled' if eff.enabled else 'settings.state.disabled', locale) }}</strong>
+                    </span>
+                </div>
+                {% endfor %}
+            </article>
+            {% endfor %}
+        </div>
+        {% endif %}
+        <p id="wishlist-notifications-feedback" role="status" aria-live="polite"></p>
+    </section>
 </div>
+
+<script>
+async function settingsFetch(url, method, body) {
+    var token = typeof prepareCsrf === 'function' ? await prepareCsrf() : '';
+    var headers = { 'Content-Type': 'application/json' };
+    if (token) { headers['X-CSRF-Token'] = token; }
+    return fetch(url, {
+        method: method,
+        credentials: 'same-origin',
+        headers: headers,
+        body: JSON.stringify(body)
+    });
+}
+
+async function saveBirthdate(evt) {
+    evt.preventDefault();
+    var dayVal = parseInt(document.getElementById('birth-day').value, 10);
+    var monthVal = parseInt(document.getElementById('birth-month').value, 10);
+    var yearRaw = document.getElementById('birth-year').value.trim();
+    var yearVal = yearRaw ? parseInt(yearRaw, 10) : null;
+    var feedback = document.getElementById('birthdate-feedback');
+    var resp = await settingsFetch('/api/profile/birthdate', 'PATCH', {
+        day: dayVal, month: monthVal, year: yearVal
+    });
+    if (resp.ok) {
+        feedback.textContent = '{{ t("settings.saved", locale) }}';
+        document.getElementById('birthdate-source-label').textContent = '{{ t("settings.birthdate_source_explicit", locale) }}';
+    } else {
+        var err = await resp.json().catch(function () { return {}; });
+        feedback.textContent = err.detail || '{{ t("settings.invalid_birthdate", locale) }}';
+    }
+    return false;
+}
+
+async function clearBirthdate() {
+    var feedback = document.getElementById('birthdate-feedback');
+    var resp = await settingsFetch('/api/profile/birthdate', 'PATCH', { clear: true });
+    if (resp.ok) {
+        document.getElementById('birth-day').value = '';
+        document.getElementById('birth-month').value = '';
+        document.getElementById('birth-year').value = '';
+        document.getElementById('birthdate-source-label').textContent = '{{ t("settings.birthdate_source_explicit", locale) }}';
+        feedback.textContent = '{{ t("settings.saved", locale) }}';
+    }
+}
+
+async function updateGlobalNotification(category, enabled, feedbackId) {
+    var feedback = document.getElementById(feedbackId);
+    var payload = { settings: {} };
+    payload.settings[category] = enabled;
+    var resp = await settingsFetch('/api/profile/notifications/global', 'PUT', payload);
+    if (resp.ok) {
+        feedback.textContent = '{{ t("settings.saved", locale) }}';
+    } else {
+        var err = await resp.json().catch(function () { return {}; });
+        feedback.textContent = err.detail || '{{ t("settings.invalid_notification_setting", locale) }}';
+    }
+}
+
+async function updateWishlistOverride(wishlistId, category, rawVal) {
+    var feedback = document.getElementById('wishlist-notifications-feedback');
+    var val = rawVal === 'inherit' ? null : (rawVal === 'true');
+    var payload = { overrides: {} };
+    payload.overrides[category] = val;
+    var resp = await settingsFetch('/api/profile/notifications/wishlists/' + wishlistId, 'PUT', payload);
+    if (resp.ok) {
+        var data = await resp.json();
+        var badge = document.querySelector('[data-effective-for="' + wishlistId + '-' + category + '"] strong');
+        if (badge && data.effective && data.effective[category]) {
+            badge.textContent = data.effective[category].enabled
+                ? '{{ t("settings.state.enabled", locale) }}'
+                : '{{ t("settings.state.disabled", locale) }}';
+        }
+        feedback.textContent = '{{ t("settings.saved", locale) }}';
+    } else {
+        var err = await resp.json().catch(function () { return {}; });
+        feedback.textContent = err.detail || '{{ t("settings.invalid_notification_setting", locale) }}';
+    }
+}
+</script>
 {% endblock %}

@@ -113,6 +113,31 @@ async def _event_authorized(conn: AsyncConnection, row: Any) -> bool:
     return True
 
 
+async def _read_user_setting(
+    conn: AsyncConnection, user_id: object, kind: object, category: str
+) -> object:
+    """Read user notification setting; for birthday reminders prefer birthday_reminders."""
+    if kind == "birthday":
+        return await conn.scalar(
+            text(
+                "SELECT COALESCE("
+                "(SELECT enabled FROM user_notification_settings "
+                "WHERE user_id=:user AND event_type='birthday_reminders'), "
+                "(SELECT enabled FROM user_notification_settings "
+                "WHERE user_id=:user AND event_type='reminders')"
+                ")"
+            ),
+            {"user": user_id},
+        )
+    return await conn.scalar(
+        text(
+            "SELECT enabled FROM user_notification_settings WHERE user_id=:user "
+            "AND event_type=:category"
+        ),
+        {"user": user_id, "category": category},
+    )
+
+
 async def claim_reminder(
     store: WishlistStore, now: int, lease: int, global_limit: int, chat_interval: int
 ) -> Reminder | None:
@@ -174,13 +199,7 @@ async def claim_reminder(
                 "ON d.user_id=u.id WHERE u.telegram_id=:user AND d.active=1",
                 {"user": row["user_id"]},
             )
-            setting = await conn.scalar(
-                text(
-                    "SELECT enabled FROM user_notification_settings WHERE user_id=:user "
-                    "AND event_type=:category"
-                ),
-                {"user": row["user_id"], "category": category},
-            )
+            setting = await _read_user_setting(conn, row["user_id"], row["kind"], category)
             title = None
             item_title = None
             if row["kind"] == "birthday":
@@ -364,13 +383,7 @@ async def refresh_reminder(store: WishlistStore, claim: Reminder, now: int) -> R
             if row["kind"] in ("reservation_changed", "reservation_confirmation")
             else "wishlist_changes"
         )
-        enabled = await conn.scalar(
-            text(
-                "SELECT enabled FROM "
-                "user_notification_settings WHERE user_id=:user AND event_type=:kind"
-            ),
-            {"user": row["user_id"], "kind": category},
-        )
+        enabled = await _read_user_setting(conn, row["user_id"], row["kind"], category)
         if row["list_id"] is not None:
             override = await conn.scalar(
                 text(

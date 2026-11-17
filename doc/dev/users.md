@@ -1,7 +1,7 @@
 # Users Domain, i18n Synchronization, and Account Deletion
 
 > [!NOTE]
-> **Implementation Status (`WISHENKA-32`):** The `users` baseline and **`WISHENKA-33`** (`RU`/`EN` bilingual i18n — see [i18n.md](i18n.md)) are **implemented**. Sections marked **Target (`WISHENKA-34/35`)** are not shipped in runtime code yet; do not assume their tables, endpoints, or services exist until the corresponding task lands.
+> **Implementation Status (`WISHENKA-32/33/34`):** The `users` baseline, **`WISHENKA-33`** (`RU`/`EN` bilingual i18n — see [i18n.md](i18n.md)), and **`WISHENKA-34`** (profile birthdate fields, `NotificationPreferencesStore`, and Mini App `/settings` & `/api/profile/*` preferences/notification APIs) are **implemented**. Sections marked **Target (`WISHENKA-35`)** (or `avatar_url` / `ChatFullInfo.birthdate` sync) are not shipped in runtime code yet; do not assume those tables, endpoints, or services exist until the corresponding task lands.
 
 ---
 
@@ -13,7 +13,7 @@ The `wishenka.users` subsystem manages durable Telegram user identity, profile s
 | --- | --- | --- |
 | Baseline (`wishenka/users/`) | Implemented | `users` table (imperatively created by `UserStore.initialize()`), `UserRecord`, `UserStore.upsert_user` / `get_by_telegram_id` / `get_by_id`, unconditional `language_code` sync. |
 | `WISHENKA-33` | Implemented | `RU`/`EN` i18n across TMA, Bot, and Outbox; Alembic revision `add_user_locale` adding `locale` & `locale_source` (synced with `UserStore.initialize()`); `wishenka/i18n/`; `GET /settings` & `PATCH /api/profile/locale`; `wishenka/bot/i18n.py` `LocaleMiddleware`. |
-| `WISHENKA-34` | Target (Planned) | Extended profile (`TelegramUser.photo_url`, `avatar_url`, `birthday`, `birthday_source`, computed `display_name`), manual birthday override, best-effort `ChatFullInfo.birthdate` sync, Mini App settings UI (`GET /settings`) & profile/notification CRUD APIs, real member names/avatars in wishlist views. |
+| `WISHENKA-34` | Implemented (Profile & Preferences) | `birth_day`, `birth_month`, `birth_year`, `birthdate_source` (`'auto'` \| `'explicit'`) in `users`/`UserRecord`, `validate_birthdate`, `set_birthdate`/`clear_birthdate`, `NotificationPreferencesStore` (`wishenka/notices/preferences.py`), `birthday_reminders` priority in `reminders.py`, and Mini App `/settings` UI + `/api/profile/preferences`, `/api/profile/birthdate`, `/api/profile/notifications/*` APIs. (`avatar_url` and `ChatFullInfo.birthdate` sync remain future enhancements.) |
 | `WISHENKA-35` | Target (Planned) | `AccountDeletionService` (`BEGIN IMMEDIATE` cascade), deterministic collaborative ownership transfer (`is_collaborative = 1` preserved), PII purge across `telegram_id` and `users.id` tables, `deleted_session_revocations`, auth liveness/revocation checks, `GET /api/profile/deletion-preview`, `POST /api/profile/delete`. |
 
 > [!IMPORTANT]
@@ -27,13 +27,14 @@ The `wishenka.users` subsystem manages durable Telegram user identity, profile s
 
 | Component | Location | Status | Role |
 | --- | --- | --- | --- |
-| User models & store | `wishenka/users/models.py`, `wishenka/users/store.py` | Implemented (extended in `WISHENKA-33/34`) | `UserRecord` and async SQLite repository (`UserStore`). |
-| Auth models & dependencies | `wishenka/auth/models.py`, `wishenka/auth/dependencies.py` | Implemented (extended in `WISHENKA-34/35`) | `TelegramUser.photo_url` extraction (`WISHENKA-34`); DB liveness and `deleted_session_revocations` checks (`WISHENKA-35`). |
+| User models & store | `wishenka/users/models.py`, `wishenka/users/store.py` | Implemented (`WISHENKA-33/34`) | `UserRecord` (including `birth_day`, `birth_month`, `birth_year`, `birthdate_source`) and async SQLite repository (`UserStore`). |
+| Notification preferences | `wishenka/notices/preferences.py` | Implemented (`WISHENKA-34`) | `NotificationPreferencesStore` for global and per-wishlist notification overrides and effective resolution. |
+| Auth models & dependencies | `wishenka/auth/models.py`, `wishenka/auth/dependencies.py` | Implemented (extended in `WISHENKA-35`) | DB liveness and `deleted_session_revocations` checks (`WISHENKA-35`). |
 | i18n catalog & helpers | `wishenka/i18n/`, `wishenka/bot/i18n.py` | Implemented (`WISHENKA-33`) | `resolve_telegram_locale()`, `RU`/`EN` `CATALOG`, Jinja2 global `t()`, FastAPI `LocaleDep`, `aiogram` `LocaleMiddleware`. |
 | Account deletion & cleanup | `wishenka/wishlists/deletion.py`, `wishenka/wishlists/cleanup.py` | Target (`WISHENKA-35`) | `AccountDeletionService` (`BEGIN IMMEDIATE` cascade + transfer) and expired revocation purge. |
-| Notification workers | `wishenka/notices/store.py`, `wishenka/notices/reminders.py` | Implemented (updated in `WISHENKA-33`) | Reads `u.locale` with `'en'` fallback; already re-checks `JOIN users` + `JOIN bot_destinations` in `BEGIN IMMEDIATE` right before send. |
-| Bot routers | `wishenka/bot/entry.py`, `capture.py`, `birthdays.py`, `support.py` | Implemented (updated in `WISHENKA-33/34`) | Outer `LocaleMiddleware` (`WISHENKA-33`) and best-effort `ChatFullInfo.birthdate` sync (`WISHENKA-34`). |
-| Web / Mini App routes | `wishenka/web/routes/profile.py` | Implemented (`WISHENKA-33`); extended in `WISHENKA-34/35` | `GET /settings`, `PATCH /api/profile/locale` (`WISHENKA-33`); `/api/profile*`, `/api/notifications/settings`, `/api/wishlists/{wishlist_id}/notifications/settings` (`WISHENKA-34/35`). |
+| Notification workers | `wishenka/notices/store.py`, `wishenka/notices/reminders.py` | Implemented (`WISHENKA-33/34`) | Reads `u.locale` with `'en'` fallback; checks `birthday_reminders` before `reminders` for birthday reminders; re-checks `JOIN users` + `JOIN bot_destinations` in `BEGIN IMMEDIATE` right before send. |
+| Bot routers | `wishenka/bot/entry.py`, `capture.py`, `birthdays.py`, `support.py` | Implemented (`WISHENKA-33`) | Outer `LocaleMiddleware` (`WISHENKA-33`). |
+| Web / Mini App routes | `wishenka/web/routes/profile.py` | Implemented (`WISHENKA-33/34`); extended in `WISHENKA-35` | `GET /settings`, `PATCH /api/profile/locale` (`WISHENKA-33`); `GET /api/profile/preferences`, `PATCH /api/profile/birthdate`, `PUT /api/profile/notifications/global`, `GET/PUT /api/profile/notifications/wishlists/{wishlist_id}` (`WISHENKA-34`). |
 
 ### Target Interaction Flow (`WISHENKA-33/34/35`)
 
@@ -78,7 +79,7 @@ All tables live in a single SQLite WAL database (`settings.database_url`, `PRAGM
 
 Currently (`auth.md`), `users` is created imperatively in `UserStore.initialize()` with `id`, `telegram_id`, `first_name`, `last_name`, `username`, `language_code`, `is_premium`, `created_at`, `updated_at`.
 
-Target DDL for `users` (`WISHENKA-33` + `WISHENKA-34`):
+Implemented DDL for `users` (`WISHENKA-33` + `WISHENKA-34`):
 
 ```sql
 CREATE TABLE IF NOT EXISTS users (
@@ -87,12 +88,13 @@ CREATE TABLE IF NOT EXISTS users (
     first_name TEXT NOT NULL,
     last_name TEXT,
     username TEXT,
-    avatar_url TEXT,
-    birthday TEXT,
-    birthday_source TEXT CHECK (birthday_source IS NULL OR birthday_source IN ('telegram', 'manual')),
     language_code TEXT,
     locale TEXT NOT NULL DEFAULT 'en' CHECK (locale IN ('ru', 'en')),
     locale_source TEXT NOT NULL DEFAULT 'auto' CHECK (locale_source IN ('auto', 'explicit')),
+    birth_day INTEGER,
+    birth_month INTEGER,
+    birth_year INTEGER,
+    birthdate_source TEXT NOT NULL DEFAULT 'auto' CHECK (birthdate_source IN ('auto', 'explicit')),
     is_premium INTEGER NOT NULL DEFAULT 0 CHECK (is_premium IN (0, 1)),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -115,15 +117,15 @@ CREATE INDEX IF NOT EXISTS idx_deleted_session_revocations_expires
 
 ### Profile Field Contracts (`WISHENKA-34`)
 
-- **`display_name`** (computed `@property` on `UserRecord` and `UserProfileDTO`, not a DB column): `f"{first_name} {last_name}".strip()` when `last_name` is non-empty, otherwise `first_name`. Wishlist member views display `UserRecord.display_name` (falling back to `f"User {user_id}"` only if a legacy test fixture omits a `users` row). `wl_lists.owner_name` is kept synchronized on list creation and ownership transfer.
+- **`display_name`** (computed `@property` on `UserRecord`, not a DB column): `f"{first_name} {last_name or ''}".strip()` or `first_name`.
 - **`username`**: Synced on Telegram login and bot updates; cleared to `None` when omitted in subsequent updates.
-- **`avatar_url`**: Populated only from validated `TelegramUser.photo_url` (`https://` scheme and length check). When `initData` omits `photo_url`, `avatar_url` is cleared to `NULL`. Bot updates (`aiogram.types.User`, which lacks `photo_url`) pass `sync_avatar=False` so an existing `avatar_url` is preserved. Bot API proxy URLs (`api.telegram.org/file/bot<TOKEN>/...`) must **never** be persisted to avoid leaking the bot token.
-- **`birthday` & `birthday_source`**:
-  - Accepted formats: `YYYY-MM-DD` (full date) and `--MM-DD` (month/day without year, matching Telegram `ChatFullInfo.birthdate(day, month, year | None)` and allowing `--02-29`).
+- **`birth_day`, `birth_month`, `birth_year` & `birthdate_source`**:
+  - Stored as separate nullable integer columns (`birth_day`, `birth_month`, `birth_year`) plus `birthdate_source TEXT NOT NULL DEFAULT 'auto' CHECK (birthdate_source IN ('auto', 'explicit'))`.
+  - `validate_birthdate(day, month, year=None)` in `wishenka/users/store.py` validates calendar dates using `datetime.date` (with leap year `2000` when `year is None`, so February 29 without a year is valid, while invalid dates like February 30 raise `ValueError`) and restricts `year` to `1900..current_utc_year`.
   - Precedence rules:
-    - When `birthday_source` is `NULL` or `'telegram'`, Telegram sync writes `(birthday, 'telegram')` or clears both to `NULL` if hidden/removed in Telegram.
-    - When `birthday_source = 'manual'`, manual edits (including explicitly clearing the date, which keeps `birthday = NULL, birthday_source = 'manual'`) have absolute priority and are **never** overwritten or cleared by Telegram sync.
-- **Notification settings linkage**: Existing tables `user_notification_settings(user_id, event_type, enabled, updated_at)` and `wl_list_notification_settings(user_id, wishlist_id, event_type, enabled, updated_at)` both key `user_id` on `users.telegram_id`, with list-level overrides taking precedence via `COALESCE`. Supported `event_type` values: `gift_received`, `wishlist_changes`, `reservation_changes` (opt-in, default `0`), `reminders`.
+    - `UserStore.set_birthdate(telegram_id, day=..., month=..., year=...)` and `UserStore.clear_birthdate(telegram_id)` set `birthdate_source = 'explicit'`.
+    - `UserStore.upsert_user(...)` preserves existing `birth_day`, `birth_month`, `birth_year`, and `birthdate_source` when `birthdate_source = 'explicit'` so Telegram re-logins or bot syncs never overwrite or clear manual edits.
+- **Notification settings linkage**: Existing tables `user_notification_settings(user_id, event_type, enabled, updated_at)` and `wl_list_notification_settings(user_id, wishlist_id, event_type, enabled, updated_at)` both key `user_id` on `users.telegram_id`, managed via `NotificationPreferencesStore` (`wishenka/notices/preferences.py`). Supported global `event_type` values: `wishlist_changes` (default `True`), `reservation_changes` (opt-in, default `False`), `gift_received` (default `True`), `reminders` (default `True`), and `birthday_reminders` (default `True`). Per-wishlist overrides support `wishlist_changes`, `reservation_changes`, `gift_received`, and `reminders` (`True`, `False`, or `None` to inherit global). See [notifications.md](notifications.md) for delivery-time resolution.
 
 ### Alembic Migration Strategy (`WISHENKA-33` / `WISHENKA-35`)
 
@@ -232,37 +234,45 @@ At transaction start, the service resolves `tg_id = current_user.telegram_id`, `
 
 ---
 
-## API / Usage (Target Contracts)
+## API / Usage
 
 ### Python Interfaces
 
 - **`UserStore` (`wishenka/users/store.py`)**:
-  - `upsert_user(user: TelegramUser, *, channel: str = "miniapp") -> UserRecord` (`WISHENKA-33`; `sync_avatar: bool = True` planned in `WISHENKA-34`)
+  - `upsert_user(user: TelegramUser, *, channel: str = "miniapp") -> UserRecord` (`WISHENKA-33/34`; preserves `explicit` `locale` and `birthdate`)
   - `upsert_from_bot(tg_user: Any) -> UserRecord` (`WISHENKA-33`)
   - `set_locale(telegram_id: int, locale: SupportedLocale) -> UserRecord` (`WISHENKA-33`)
-  - `update_manual_birthday(telegram_id: int, birthday: str | None) -> UserRecord` (`WISHENKA-34`)
-  - `sync_telegram_birthday(telegram_id: int, birthday: str | None) -> UserRecord | None` (`WISHENKA-34`)
+  - `set_birthdate(telegram_id: int, *, day: int, month: int, year: int | None = None) -> UserRecord` (`WISHENKA-34`, sets `birthdate_source = 'explicit'`)
+  - `clear_birthdate(telegram_id: int) -> UserRecord` (`WISHENKA-34`, clears `birth_day`/`birth_month`/`birth_year` and sets `birthdate_source = 'explicit'`)
+  - `validate_birthdate(day: object, month: object, year: object = None) -> tuple[int, int, int | None]` (`WISHENKA-34`)
+- **`NotificationPreferencesStore` (`wishenka/notices/preferences.py`, `WISHENKA-34`)**:
+  - `get_global_settings(telegram_id: int) -> dict[str, bool]`
+  - `update_global_settings(telegram_id: int, updates: dict[str, bool]) -> dict[str, bool]`
+  - `list_accessible_wishlists_with_preferences(telegram_id: int) -> list[WishlistNotificationSummary]`
+  - `get_wishlist_preferences(telegram_id: int, wishlist_id: int) -> WishlistNotificationSummary | None`
+  - `update_wishlist_overrides(telegram_id: int, wishlist_id: int, overrides: dict[str, bool | None]) -> WishlistNotificationSummary | None`
 - **`wishenka/i18n/` & `wishenka/bot/i18n.py` (`WISHENKA-33`, implemented — see [i18n.md](i18n.md))**:
   - `resolve_telegram_locale(language_code: str | None) -> SupportedLocale`
   - `t(key: str, locale: str | None = DEFAULT_LOCALE, **kwargs: Any) -> str`
   - `get_request_locale(...) -> SupportedLocale` / `LocaleDep` (FastAPI dependency)
   - `LocaleMiddleware` (`aiogram` outer middleware setting `data["locale"]`, `data["t"]`, and `data["user_record"]`)
-- **`AccountDeletionService` (`wishenka/wishlists/deletion.py`, `WISHENKA-35`)**:
+- **`AccountDeletionService` (`wishenka/wishlists/deletion.py`, Target `WISHENKA-35`)**:
   - `preview_account_deletion(telegram_id: int) -> DeletionPreviewDTO` (`personal_lists_count`, `collaborative_transferred_count`, `collaborative_deleted_count`, `reservations_count`; reveals no foreign booking/recipient data)
   - `delete_account(telegram_id: int, *, secret_key: str, session_ttl_seconds: int, now: datetime | None = None) -> DeletionResultDTO` (`already_deleted`, `deleted_lists`, `transferred_lists`, `cancelled_reservations`)
 
-### Planned Mini App HTTP Endpoints
+### Mini App HTTP Endpoints
 
 | Method & Path | Task | Purpose |
 | --- | --- | --- |
 | `PATCH /api/profile/locale` | `WISHENKA-33` (Implemented) | Switch `locale` (`ru` \| `en`) with `locale_source = "explicit"`, `HX-Refresh: true` + CSRF, and background bot command sync. |
-| `GET /settings` | `WISHENKA-33` (Implemented); extended in `WISHENKA-34` | HTML settings screen (language selector shipped in `WISHENKA-33`; profile, notifications, account deletion in `WISHENKA-34/35`). |
-| `GET /api/profile` | `WISHENKA-34` | Return current user profile DTO/HTML fragment. |
-| `PATCH /api/profile` | `WISHENKA-34` | Update or clear manual `birthday` (`YYYY-MM-DD` \| `--MM-DD`, `birthday_source = "manual"`). |
-| `PUT /api/notifications/settings` | `WISHENKA-34` | Update global `user_notification_settings`. |
-| `PUT /api/wishlists/{wishlist_id}/notifications/settings` | `WISHENKA-34` | Update per-wishlist overrides in `wl_list_notification_settings`. |
-| `GET /api/profile/deletion-preview` | `WISHENKA-35` | Aggregate counts of lists/reservations impacted by deletion. |
-| `POST /api/profile/delete` | `WISHENKA-35` | Atomic account deletion (`confirm: true` + CSRF) and session cookie removal. |
+| `GET /settings` | `WISHENKA-33/34` (Implemented) | HTML settings screen (language selector, birthdate preferences, `birthday_reminders` toggle, global notification switches, and per-wishlist notification overrides). |
+| `GET /api/profile/preferences` | `WISHENKA-34` (Implemented) | Return `{locale, locale_source, birthdate, birthday_reminders, global_notifications, wishlists}` for the authenticated user. |
+| `PATCH /api/profile/birthdate` | `WISHENKA-34` (Implemented) | Update (`{day, month, year?}`) or clear (`{clear: true}`) user birthdate with `birthdate_source = "explicit"`. Returns `422` when `day`/`month` are missing (unless `clear: true`) or on invalid calendar dates. |
+| `PUT /api/profile/notifications/global` | `WISHENKA-34` (Implemented) | Update global `user_notification_settings` (`{settings: {...}}`). Returns `422` if `settings` is not an object, or on unknown category or non-boolean value. |
+| `GET /api/profile/notifications/wishlists/{wishlist_id}` | `WISHENKA-34` (Implemented) | Return per-wishlist `overrides` and `effective` settings, or `404` if inaccessible/deleted. |
+| `PUT /api/profile/notifications/wishlists/{wishlist_id}` | `WISHENKA-34` (Implemented) | Update or reset (`null`) per-wishlist overrides in `wl_list_notification_settings` (`{overrides: {...}}`), or `404`/`422`. |
+| `GET /api/profile/deletion-preview` | `WISHENKA-35` (Target) | Aggregate counts of lists/reservations impacted by deletion. |
+| `POST /api/profile/delete` | `WISHENKA-35` (Target) | Atomic account deletion (`confirm: true` + CSRF) and session cookie removal. |
 
 ---
 
@@ -303,13 +313,16 @@ Structured logging uses [`wishenka/logging.py`](../../wishenka/logging.py) (`con
 | `WISHENKA-33` | `WARNING` | `wishenka.i18n` | `i18n_missing_translation_key` | `i18n_key`, `locale`, `fallback_locale` (`en` \| `key`) |
 | `WISHENKA-33` | `WARNING` | `wishenka.bot.i18n` | `bot_commands_locale_sync_failed` | `user_id`, `target_locale`, `error_type` |
 | `WISHENKA-33` | `DEBUG` | `wishenka.notices.store` / `wishenka.notices.reminders` | `notice_locale_resolved` | `channel`, `locale`, `fallback_used` |
-| `WISHENKA-34` | `WARNING` | `wishenka.auth.models` / `wishenka.users.store` | `profile_avatar_rejected` | `reason` (`invalid_scheme` \| `bot_token_url_blocked` \| `exceeds_max_length`) |
-| `WISHENKA-34` | `DEBUG` | `wishenka.users.store` | `profile_telegram_synced` | `user_id`, `sync_avatar`, `has_username`, `has_avatar`, `username_cleared`, `avatar_cleared` |
-| `WISHENKA-34` | `DEBUG` | `wishenka.users.store` | `profile_birthday_synced` | `user_id`, `outcome` (`updated` \| `cleared` \| `skipped_manual_override`), `birthday_source`, `has_year` |
-| `WISHENKA-34` | `WARNING` | `wishenka.bot` | `profile_birthday_telegram_fetch_failed` | `user_id`, `error_type` |
-| `WISHENKA-34` | `INFO` | `wishenka.web.profile` / `wishenka.users.store` | `profile_birthday_manual_updated` | `user_id`, `action` (`set` \| `cleared`), `birthday_source` (`manual`), `has_year` |
-| `WISHENKA-34` | `WARNING` | `wishenka.web.profile` | `profile_birthday_invalid` | `user_id`, `error_code` (`invalid_birthday_format` \| `invalid_calendar_date`) |
-| `WISHENKA-34` | `INFO` | `wishenka.web.profile` | `notification_settings_updated` | `scope` (`global` \| `wishlist`), `user_id`, `wishlist_id`, `event_type`, `enabled` |
+| `WISHENKA-34` | `INFO` | `wishenka.users.store` | `birthdate_explicit_updated` | `user_id`, `has_year`, `birthdate_source` |
+| `WISHENKA-34` | `INFO` | `wishenka.users.store` | `birthdate_explicit_cleared` | `user_id`, `birthdate_source` |
+| `WISHENKA-34` | `WARNING` | `wishenka.web.profile` | `profile_malformed_json` | `status_code` (`422`) |
+| `WISHENKA-34` | `WARNING` | `wishenka.web.profile` | `birthdate_invalid_request` | `user_id`, `status_code` (`422`) |
+| `WISHENKA-34` | `WARNING` | `wishenka.web.profile` | `birthdate_user_not_found` | `user_id`, `status_code` (`404`) |
+| `WISHENKA-34` | `INFO` | `wishenka.notices.preferences` | `notification_global_updated` | `updated_count`, `categories` |
+| `WISHENKA-34` | `INFO` | `wishenka.notices.preferences` | `notification_wishlist_updated` | `wishlist_id`, `role`, `updated_count`, `cleared_count` |
+| `WISHENKA-34` | `WARNING` | `wishenka.web.profile` | `notification_global_invalid_request` | `user_id`, `status_code` (`422`) |
+| `WISHENKA-34` | `WARNING` | `wishenka.web.profile` | `notification_wishlist_not_found` | `user_id`, `wishlist_id`, `status_code` (`404`) |
+| `WISHENKA-34` | `WARNING` | `wishenka.web.profile` | `notification_wishlist_invalid_request` | `user_id`, `wishlist_id`, `status_code` (`422`) |
 | `WISHENKA-35` | `DEBUG` | `wishenka.wishlists.deletion` | `account_deletion_previewed` | `user_id`, `personal_lists_count`, `collaborative_transferred_count`, `collaborative_deleted_count`, `reservations_count` |
 | `WISHENKA-35` | `INFO` | `wishenka.wishlists.deletion` | `account_deletion_started` | `subject_hash_prefix`, `confirmed` (`True`) |
 | `WISHENKA-35` | `INFO` | `wishenka.wishlists.deletion` | `collaborative_wishlist_ownership_transferred` | `subject_hash_prefix`, `wishlist_id`, `wishlist_status`, `selected_role_rank`, `tie_breaker_level`, `is_collaborative` (`True`) |
@@ -355,10 +368,8 @@ No Prometheus/OpenTelemetry exporter is currently wired in the codebase; these c
 - **Old tokens surviving instant re-registration**: Verify `get_optional_current_user` checks `users.id` (`AUTOINCREMENT`) alongside `telegram_id` and falls back to `deleted_session_revocations` when `claims.user_id is None`.
 - **Schema drift in standalone unit tests**: Keep `UserStore.initialize()` DDL and `PRAGMA table_info(users)` column checks aligned with the Alembic revision in `wishenka/wishlists/alembic/versions/`.
 
-### Planned Verification Suites (`WISHENKA-33/34/35`)
+### Verification Suites (`WISHENKA-33/34/35`)
 
-These test modules are specified in `ai-tasks/WISHENKA-32/20-architecture.md` and `50-observability.md` and are **not yet created** in `WISHENKA-32`:
-
-- `tests/test_i18n_sync.py` (`WISHENKA-33`) — initial locale mapping, `explicit` vs `auto` precedence, immediate SSR/Bot/pending-outbox sync, and log assertions.
-- `tests/test_profile_settings.py` (`WISHENKA-34`) — `username`/`avatar_url` clearing, `birthday_source="manual"` priority & `--MM-DD`, Bot API URL rejection, and global vs. list notification override priority.
-- `tests/test_account_deletion.py` (`WISHENKA-35`) — personal list cascade & Surprise Invariant, deterministic collaborative transfer tie-breakers & `is_collaborative=1`, member exit anonymization, full PII purge, token revocation across devices & re-registration, `BEGIN IMMEDIATE` rollback atomicity, idempotency, and PII-free log verification.
+- `tests/test_wishenka_34_repro.py` (`WISHENKA-34`, Implemented) — API availability for `/api/profile/preferences` and `/api/profile/notifications/global`, per-wishlist override priority and `null` reset, `birthday_reminders` suppression without deleting `birthday_entries`, explicit birthdate persistence across `upsert_user`, invalid date (`30 Feb`) rejection, and surprise invariant preservation.
+- `tests/test_wishenka_34_preferences.py` (`WISHENKA-34`, Implemented) — unit and integration coverage for `validate_birthdate`, `UserStore.set_birthdate` / `clear_birthdate`, `NotificationPreferencesStore`, `/settings` SSR rendering (RU/EN), and `/api/profile/*` validation/404/CSRF contracts.
+- `tests/test_account_deletion.py` (`WISHENKA-35`, Target) — personal list cascade & Surprise Invariant, deterministic collaborative transfer tie-breakers & `is_collaborative=1`, member exit anonymization, full PII purge, token revocation across devices & re-registration, `BEGIN IMMEDIATE` rollback atomicity, idempotency, and PII-free log verification.

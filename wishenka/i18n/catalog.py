@@ -30,6 +30,45 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "settings.save_error": "Could not update language. Please try again.",
         "settings.invalid_locale": "Unsupported language selected.",
         "settings.back_home": "Back to Mini App",
+        "settings.birthdate_heading": "Personal preferences & birthdate",
+        "settings.birthdate_description": (
+            "Your manual birthdate choice takes priority over Telegram sync. Year is optional."
+        ),
+        "settings.birthdate_day": "Day",
+        "settings.birthdate_month": "Month",
+        "settings.birthdate_year": "Year (optional)",
+        "settings.birthdate_save": "Save birthdate",
+        "settings.birthdate_clear": "Clear",
+        "settings.birthdate_empty": "Not set",
+        "settings.birthdate_source_explicit": "Set manually",
+        "settings.birthdate_source_auto": "From Telegram",
+        "settings.invalid_birthdate": "Please enter a valid calendar birthdate.",
+        "settings.birthday_reminders_heading": "Birthday reminders",
+        "settings.birthday_reminders_description": (
+            "Disable to pause birthday reminders without deleting saved dates."
+        ),
+        "settings.birthday_reminders_label": "Send birthday reminders",
+        "settings.notifications_heading": "Global notification preferences",
+        "settings.notifications_description": (
+            "Default rules for all wishlists unless overridden per wishlist."
+        ),
+        "settings.category.wishlist_changes": "Wish & wishlist changes",
+        "settings.category.reservation_changes": "Reservation confirmations & updates",
+        "settings.category.gift_received": "Gift received notifications",
+        "settings.category.reminders": "Wishlist occasion reminders",
+        "settings.category.birthday_reminders": "Birthday reminders",
+        "settings.wishlists_heading": "Per-wishlist notification overrides",
+        "settings.wishlists_description": (
+            "List overrides take precedence over global profile settings."
+        ),
+        "settings.wishlists_empty": "No accessible wishlists yet.",
+        "settings.state.enabled": "Enabled",
+        "settings.state.disabled": "Disabled",
+        "settings.state.inherit": "Inherit global",
+        "settings.effective_label": "Effective:",
+        "settings.invalid_notification_setting": "Invalid notification category or value.",
+        "settings.wishlist_not_found": "Wishlist not found or inaccessible.",
+        "settings.saved": "Saved.",
         # Telegram bot commands menu (setMyCommands)
         "bot.commands.start": "Open menu and wishlists",
         "bot.commands.help": "How Wishenka works",
@@ -188,6 +227,46 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "settings.save_error": "Не удалось обновить язык. Повторите попытку.",
         "settings.invalid_locale": "Выбран неподдерживаемый язык.",
         "settings.back_home": "Вернуться в Mini App",
+        "settings.birthdate_heading": "Персональные предпочтения и дата рождения",
+        "settings.birthdate_description": (
+            "Ручное указание или очистка даты рождения имеют приоритет над синхронизацией с "
+            "Telegram. Год указывать необязательно."
+        ),
+        "settings.birthdate_day": "День",
+        "settings.birthdate_month": "Месяц",
+        "settings.birthdate_year": "Год (необязательно)",
+        "settings.birthdate_save": "Сохранить дату",
+        "settings.birthdate_clear": "Очистить",
+        "settings.birthdate_empty": "Не указана",
+        "settings.birthdate_source_explicit": "Указано вручную",
+        "settings.birthdate_source_auto": "Из Telegram",
+        "settings.invalid_birthdate": "Укажите корректную календарную дату рождения.",
+        "settings.birthday_reminders_heading": "Напоминания о днях рождения",
+        "settings.birthday_reminders_description": (
+            "При отключении напоминания не отправляются, но сохранённые даты сохраняются."
+        ),
+        "settings.birthday_reminders_label": "Отправлять напоминания о днях рождения",
+        "settings.notifications_heading": "Глобальные настройки уведомлений",
+        "settings.notifications_description": (
+            "Общие правила для всех вишлистов, если для списка не задано своё переопределение."
+        ),
+        "settings.category.wishlist_changes": "Изменения желаний и списков",
+        "settings.category.reservation_changes": "Подтверждения и изменения броней",
+        "settings.category.gift_received": "Уведомления о получении подарка",
+        "settings.category.reminders": "Напоминания о событиях вишлиста",
+        "settings.category.birthday_reminders": "Напоминания о днях рождения",
+        "settings.wishlists_heading": "Настройки по отдельным вишлистам",
+        "settings.wishlists_description": (
+            "Персональные настройки списка имеют приоритет над глобальными настройками профиля."
+        ),
+        "settings.wishlists_empty": "Пока нет доступных вишлистов.",
+        "settings.state.enabled": "Включено",
+        "settings.state.disabled": "Отключено",
+        "settings.state.inherit": "Как в общих",
+        "settings.effective_label": "Итог:",
+        "settings.invalid_notification_setting": "Некорректная категория или значение настройки.",
+        "settings.wishlist_not_found": "Вишлист не найден или недоступен.",
+        "settings.saved": "Сохранено.",
         # Telegram bot commands menu (setMyCommands)
         "bot.commands.start": "Открыть меню и вишлисты",
         "bot.commands.help": "Как работает Вишенка",
