@@ -19,6 +19,7 @@
   - запись инвентаря одного желания стартует с `Connection.begin()`; слушатель `begin` выполняет `BEGIN IMMEDIATE` при `isolation_level = None`
 - **ORM и миграции:** SQLAlchemy 2.0 (Async) + Alembic
   - Схема таблиц `wl_*` хранилища вишлистов создаётся и меняется только версионными ревизиями Alembic (`wishenka/wishlists/alembic/versions/`); ad-hoc `ALTER TABLE` в коде хранилища нет.
+  - Таблица `users` в текущем baseline создаётся императивно в `UserStore.initialize()` вне цепочки Alembic; в согласованной целевой архитектуре `WISHENKA-32` (к реализации в `WISHENKA-33`/`WISHENKA-35`) эволюция `users` и таблица `deleted_session_revocations` переводятся на линейную ревизию Alembic (от `add_idempotency_records`) при сохранении строго согласованного DDL в `UserStore.initialize()`.
   - `WishlistStore.initialize()` при старте приводит БД к head: распознаёт и штампует legacy-схему без изменения данных, применяет `upgrade head`, выбирает WAL. Параллельный старт нескольких процессов сериализуется файлом `<db>.migrate.lock` (`fcntl`, только POSIX, ожидание до 60 с).
   - Для `:memory:` хранилище использует изолированный временный файл, который удаляется в `WishlistStore.dispose()`.
   - Подробности, добавление ревизии и диагностика: [`doc/dev/migrations.md`](migrations.md).
@@ -60,12 +61,22 @@
 3. Выставляется защищенная `HttpOnly` `SameSite=None` Secure session cookie.
 4. Все последующие HTMX-запросы автоматически аутентифицируются по cookie без оверхеда на повторную проверку подписи.
 
+### 2.4. Профиль пользователя, i18n (`RU`/`EN`) и удаление аккаунта (целевой контракт `WISHENKA-32`)
+
+> [!NOTE]
+> В текущем baseline реализована базовая запись `users` (`id`, `telegram_id`, `first_name`, `last_name`, `username`, `language_code`, `is_premium`). Описанные ниже контракты декомпозированы в `WISHENKA-32` для реализации в `WISHENKA-33`, `WISHENKA-34` и `WISHENKA-35`.
+
+- **Профиль (`WISHENKA-34`):** `avatar_url` принимается только из проверенного `https://` `WebAppUser.photo_url` (без Bot API proxy-URL с токеном бота) и очищается при `photo_url=None` в `initData`; `birthday` поддерживает форматы `YYYY-MM-DD` и `--MM-DD` с безусловным приоритетом ручного ввода (`birthday_source = 'manual'`) над синхронизацией `ChatFullInfo.birthdate`; `display_name` вычисляется из `first_name`/`last_name`.
+- **Локализация `RU`/`EN` (`WISHENKA-33`):** `users.locale` (`'ru'` | `'en'`, fallback `'en'`) и `locale_source` (`'auto'` | `'explicit'`) в SQLite WAL служат единым источником истины для Mini App (SSR/HTMX без кеширования локали в `SessionClaims`), Telegram-бота (`aiogram` `LocaleMiddleware`) и воркеров `NoticeStore`/`ReminderScheduler` (замена чтения `u.language_code` на `u.locale`).
+- **Удаление аккаунта и отзыв сессий (`WISHENKA-35`):** выполняется `AccountDeletionService` в единой транзакции `BEGIN IMMEDIATE` с `PRAGMA foreign_keys = ON`, учитывает историческое разделение таблиц по `users.telegram_id` (`wl_*`, `notification_outbox`, `reminder_outbox`, `user_notification_settings`) и `users.id` (`bot_destinations`, `birthday_entries`, `support_tickets`), детерминированно передаёт владение совместными вишлистами с сохранением `is_collaborative = 1` (для сохранения Surprise Invariant в `WishlistAccessPolicy.is_recipient_id`), обезличивает `wl_items.recipient_user_id` и отзывает все stateless-сессии через проверку живости `users.id` (`AUTOINCREMENT`) и таблицу `deleted_session_revocations` без хранения ПДн. Подробнее см. [`doc/dev/users.md`](users.md).
+
 ---
 
 ## 3. Схема данных (SQLite)
 
 Основные таблицы:
-- `users` — пользователи Telegram (id, telegram_id, username, first_name, language_code, birthday).
+- `users` — пользователи Telegram (реализованный baseline: `id`, `telegram_id`, `first_name`, `last_name`, `username`, `language_code`, `is_premium`, `created_at`, `updated_at`; целевой контракт `WISHENKA-33/34` добавляет `avatar_url`, `birthday`, `birthday_source`, `locale`, `locale_source`).
+- `deleted_session_revocations` *(целевая таблица `WISHENKA-35`)* — хэшированные (`HMAC-SHA256`) маркеры отзыва stateless-сессий без `user_id` и без хранения ПДн (`subject_hash`, `revoked_before`, `expires_at`).
 - `wishlists` — списки желаний (id, owner_id, title, event_title, event_date, is_collaborative, is_archived, public_slug).
 - `wishlist_members` — соавторы совместных вишлистов (wishlist_id, user_id, role).
 - `wish_items` — элементы вишлиста (id, wishlist_id, recipient_user_id, title, link, price, currency, quantity, received_quantity, is_archived).
@@ -113,10 +124,23 @@ opt-in подтверждений собственной брони (`reminder_o
 (`DiagnosticContext`), sliding-window rate limit (`support_tickets`) и пересылка в чат поддержки /
 администраторам. См. [`doc/dev/bot-support.md`](bot-support.md).
 
+Согласованный целевой контракт (`WISHENKA-32`, к реализации в `WISHENKA-33/34/35`, в коде пока не реализовано):
+единая ревизия Alembic от `add_idempotency_records` (эволюция `users`: `avatar_url`, `birthday`,
+`birthday_source`, `locale`, `locale_source`; таблица отзыва сессий `deleted_session_revocations`
+без ПДн), синхронизация локали `RU`/`EN` между Mini App, ботом (`LocaleMiddleware`) и
+воркерами уведомлений, экран настроек профиля и уведомлений (`GET /settings`, `/api/profile*`,
+CRUD настроек `user_notification_settings` / `wl_list_notification_settings`) и транзакционное
+удаление аккаунта (`AccountDeletionService` в `BEGIN IMMEDIATE` с передачей владения совместными
+вишлистами и отзывом сессий). См. [`doc/dev/users.md`](users.md).
+
 ---
 
 ## 4. Документация подсистем и доменов
 
+- [`doc/dev/users.md`](users.md) — Домен пользователей и целевые контракты `WISHENKA-32`
+  (к реализации в `WISHENKA-33`, `WISHENKA-34`, `WISHENKA-35`): модель профиля и дельта Alembic,
+  протокол синхронизации локали `RU`/`EN` (TMA ↔ бот ↔ outbox), транзакционное удаление аккаунта
+  в `BEGIN IMMEDIATE`, `deleted_session_revocations` и контракты наблюдаемости.
 - [`doc/dev/wishlists.md`](wishlists.md) — Домен вишлистов: ролевая модель (RBAC/ABAC), жизненный цикл, Surprise Invariant, бронирование и токены шеринга.
 - [`doc/dev/notifications.md`](notifications.md) — Сервис уведомлений и напоминаний (WISHENKA-29):
   защита тайны сюрприза и live-проверки получателей, приватное отслеживание `/birthdays`,
