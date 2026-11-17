@@ -352,6 +352,22 @@ def _log_flushed_notices(flushed: list[FlushedNotice]) -> None:
             )
 
 
+def _log_flushed_shared_events(flushed_shared: list[tuple[str, int]]) -> None:
+    """Write the after-commit DEBUG record of shared notice rows queued per event kind."""
+    for kind, queued_count in flushed_shared:
+        if queued_count > 0:
+            notice_logger.debug(
+                "Shared notice events queued: kind=%s count=%d",
+                kind,
+                queued_count,
+                extra={
+                    "event": "shared_notice_events_queued",
+                    "kind": kind,
+                    "queued_count": queued_count,
+                },
+            )
+
+
 def _receipt_from_row(row: Any) -> ReceiptRecord:
     """Build a receipt record from a ``wl_receipts`` row."""
     return ReceiptRecord(
@@ -897,8 +913,11 @@ class WishlistStore:
         flushed: list[FlushedNotice] = []
         now = datetime.now(UTC)
         producer = EventProducer()
+        service._flushed_shared_events.clear()
         for shared_event in service._new_shared_item_events:
-            await producer.record(conn, shared_event, int(now.timestamp()))
+            queued = await producer.record(conn, shared_event, int(now.timestamp()))
+            if queued > 0:
+                service._flushed_shared_events.append((shared_event.kind, queued))
         for draft in service._new_notices:
             wishlist_id = service._items[draft.receipt.wish_item_id].wishlist_id
             is_member = await conn.scalar(
@@ -972,9 +991,10 @@ class WishlistStore:
         resolved_item_id = item_id
         reservations_written = 0
         flushed: list[FlushedNotice] = []
+        flushed_shared: list[tuple[str, int]] = []
 
         async def work(conn: AsyncConnection) -> T:
-            nonlocal resolved_item_id, reservations_written, flushed
+            nonlocal resolved_item_id, reservations_written, flushed, flushed_shared
             resolved_item_id = await self._resolve_wish_item_id(
                 conn,
                 item_id=item_id,
@@ -983,6 +1003,7 @@ class WishlistStore:
             service, snapshot = await self._load_wish(conn, resolved_item_id)
             result = await operation(service)
             reservations_written, flushed = await self._persist_wish(conn, service, snapshot)
+            flushed_shared = list(service._flushed_shared_events)
             return result
 
         try:
@@ -1014,6 +1035,7 @@ class WishlistStore:
             },
         )
         _log_flushed_notices(flushed)
+        _log_flushed_shared_events(flushed_shared)
         return result
 
     async def _resolve_wish_item_id(
@@ -1385,9 +1407,10 @@ class WishlistStore:
 
     async def _execute_once(self, operation: Callable[[WishlistService], Awaitable[T]]) -> T:
         flushed: list[FlushedNotice] = []
+        flushed_shared: list[tuple[str, int]] = []
 
         async def work(conn: AsyncConnection) -> T:
-            nonlocal flushed
+            nonlocal flushed, flushed_shared
             service, snapshot = await self._read(conn)
             previous = {wl.id: wl.public_token for wl in service._wishlists.values()}
             prior_invites = {wl.id: wl.invite_token for wl in service._wishlists.values()}
@@ -1426,10 +1449,12 @@ class WishlistStore:
                         {"token": wl.public_token, "id": wl.id},
                     )
             flushed = await self._write(conn, service, snapshot)
+            flushed_shared = list(service._flushed_shared_events)
             return result
 
         result = await self._immediate(work)
         _log_flushed_notices(flushed)
+        _log_flushed_shared_events(flushed_shared)
         return result
 
     async def cleanup_expired_tokens(self, now: datetime | None = None) -> int:

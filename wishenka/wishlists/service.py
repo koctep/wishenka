@@ -273,6 +273,7 @@ class WishlistService:
         self._new_receipts: list[ReceiptRecord] = []
         self._new_notices: list[NoticeDraft] = []
         self._new_shared_item_events: list[SharedEvent] = []
+        self._flushed_shared_events: list[tuple[str, int]] = []
         self._notice_settings: NoticeSettings = NoticeSettings()
 
     # Reservation mutations affect only the actor's own reservation. Notifying another
@@ -299,12 +300,17 @@ class WishlistService:
     ) -> None:
         """Snapshot event-time candidates before later changes in the same transaction."""
         recipients = {wishlist.owner_id, *(member.user_id for member in wishlist.members)}
-        items = wishlist.items if kind == "list_archived" else ([item] if item is not None else [])
+        items = (
+            wishlist.items
+            if kind in ("list_archived", "list_restored", "list_updated")
+            else ([item] if item is not None else [])
+        )
         for wish in items:
             recipients.update(
                 reservation.user_id
                 for reservation in wish.reservations
                 if reservation.status in (ReservationStatus.ACTIVE, ReservationStatus.PURCHASED)
+                and not WishlistAccessPolicy.is_recipient_id(reservation.user_id, wish)
             )
         recipients.discard(actor_id)
         self._new_shared_item_events.append(
@@ -961,6 +967,7 @@ class WishlistService:
             )
         )
         wl.updated_at = datetime.now(UTC)
+        self._record_shared_event("membership_changed", wl, None, actor.telegram_id)
         logger.info(
             "Wishlist %s ownership transferred from %s to %s",
             wishlist_id,

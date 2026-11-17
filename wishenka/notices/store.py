@@ -32,6 +32,7 @@ _EVENT_MESSAGES = {
     "receipt_notice_retry_scheduled": "Notice queue row retry scheduled",
     "receipt_notice_failed_terminal": "Notice queue row failed for good",
     "receipt_notice_uncertain": "Notice queue row delivery uncertain",
+    "receipt_notice_skipped_ineligible": "Notice queue row skipped as ineligible",
 }
 _Event = tuple[str, int, int]
 
@@ -106,10 +107,20 @@ class NoticeStore:
                     events.append(await self._settle_stale(conn, row, now))
                 elif row["list_status"] in (None, "deleted") or row["wish_title"] is None:
                     await self._skip_gone(conn, row["id"], now)
+                    events.append(
+                        ("receipt_notice_skipped_ineligible", int(row["id"]), int(row["attempts"]))
+                    )
                 else:
                     delivery = await self._eligible(conn, int(row["id"]))
                     if delivery is None:
                         await self._skip_gone(conn, row["id"], now)
+                        events.append(
+                            (
+                                "receipt_notice_skipped_ineligible",
+                                int(row["id"]),
+                                int(row["attempts"]),
+                            )
+                        )
                         continue
                     if not await reserve_permit(
                         conn, delivery[0], now, self.global_limit, self.chat_interval
@@ -267,17 +278,38 @@ class NoticeStore:
     async def purge_finished(self, threshold: datetime) -> int:
         """Delete ``sent``, ``skipped`` and ``failed`` rows last updated at or before threshold."""
 
-        async def work(conn: AsyncConnection) -> int:
-            result = await conn.execute(
+        async def work(conn: AsyncConnection) -> tuple[int, int]:
+            receipt_result = await conn.execute(
                 text(
                     "DELETE FROM notification_outbox WHERE updated_at <= :threshold "
                     "AND status IN ('sent', 'skipped', 'failed')"
                 ),
                 {"threshold": threshold.isoformat()},
             )
-            return int(result.rowcount)
+            reminder_result = await conn.execute(
+                text(
+                    "DELETE FROM reminder_outbox WHERE next_attempt_at <= :threshold_epoch "
+                    "AND status IN ('sent', 'skipped', 'failed')"
+                ),
+                {"threshold_epoch": int(threshold.timestamp())},
+            )
+            return int(receipt_result.rowcount), int(reminder_result.rowcount)
 
-        return await self._store.transaction(work)
+        receipt_purged, reminder_purged = await self._store.transaction(work)
+        total = receipt_purged + reminder_purged
+        if total:
+            logger.info(
+                "Purged finished outbox rows: receipt_purged=%d reminder_purged=%d",
+                receipt_purged,
+                reminder_purged,
+                extra={
+                    "event": "notice_outbox_purged",
+                    "receipt_purged": receipt_purged,
+                    "reminder_purged": reminder_purged,
+                    "total_purged": total,
+                },
+            )
+        return total
 
     async def _settle_stale(self, conn: AsyncConnection, row: RowMapping, now: int) -> _Event:
         """Apply the ambiguous transition to a dead ``sending`` row; it is never sent now."""
@@ -332,7 +364,7 @@ class NoticeStore:
                         "i.id=o.wish_item_id "
                         "JOIN users u ON u.telegram_id=o.giver_user_id "
                         "JOIN bot_destinations d ON d.user_id=u.id AND d.active=1 "
-                        "WHERE o.id=:id AND l.status != 'deleted' AND i.is_archived=0 "
+                        "WHERE o.id=:id AND l.status != 'deleted' AND i.received_quantity > 0 "
                         "AND (i.recipient_user_id IS NULL OR "
                         "o.giver_user_id != i.recipient_user_id) "
                         "AND (l.is_collaborative=1 OR o.giver_user_id != l.owner_id) "

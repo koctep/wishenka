@@ -167,7 +167,12 @@ class NoticeWorker:
         while (claim := await self._store.claim_next(self._time(now))) is not None:
             refreshed = await self._store.refresh_claim(claim)
             if refreshed is None:
-                await self._store.skip_claim(claim, self._time(now))
+                if await self._store.skip_claim(claim, self._time(now)):
+                    self._debug(
+                        "receipt_notice_skipped_ineligible",
+                        "Notice queue row skipped as ineligible",
+                        claim,
+                    )
                 rows += 1
                 continue
             result = await self._send(refreshed)
@@ -188,6 +193,14 @@ class NoticeWorker:
             if refreshed_reminder is None:
                 if await settle_reminder(self._store._store, reminder, "skipped", self._time(now)):
                     self._reminder_counts["skipped"] += 1
+                    logger.debug(
+                        "Service notice skipped: reason=refresh_ineligible",
+                        extra={
+                            "event": "service_notice_skipped",
+                            "outbox_id": reminder.ident,
+                            "reason": "refresh_ineligible",
+                        },
+                    )
                 rows += 1
                 continue
             reminder = refreshed_reminder
@@ -205,8 +218,13 @@ class NoticeWorker:
                 status = "failed"
             else:
                 status = "pending"
-            delay = max(
-                self._store.backoff_seconds(reminder.attempt), math.ceil(result.retry_after or 0)
+            delay = (
+                max(
+                    self._store.backoff_seconds(reminder.attempt),
+                    math.ceil(result.retry_after or 0),
+                )
+                if status == "pending"
+                else 0
             )
             settled = await settle_reminder(
                 self._store._store,

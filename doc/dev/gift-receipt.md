@@ -222,8 +222,9 @@ list is archived. Order: newest receipt first (a wish without records falls back
 ## Notice path
 
 Delivery of the giver notice is a transactional outbox plus an in-process async worker. Extended in
-[WISHENKA-29](notifications.md) with live eligibility rechecks, verified bot destinations,
-shared rate limiting, `claim_token` fencing, and `uncertain` quarantine for ambiguous sends.
+[WISHENKA-29](notifications.md) and [WISHENKA-60](notifications.md) with live eligibility
+rechecks, verified bot destinations, shared rate limiting, `claim_token` fencing, `uncertain`
+quarantine for ambiguous sends, and partial-receipt durability across wish archival.
 
 ### Outbox table `notification_outbox`
 
@@ -280,10 +281,13 @@ row in order:
    and never sent in the same call. It is marked `status = 'uncertain'`, `ambiguous = 1`,
    `last_error_class = StaleClaim`, `claimed_at = NULL`, `claim_token = NULL`, and the loop
    continues.
-2. If the list is deleted or missing, the wish is missing, or `NoticeStore._eligible` fails (wish
-   archived, giver became recipient, setting disabled, membership required and revoked, reservation
-   removed, or no active `bot_destinations` entry): the row becomes `skipped` with `target_gone`
-   and the loop continues.
+2. If the list is deleted or missing, the wish is missing, or `NoticeStore._eligible` fails
+   (`received_quantity <= 0`, giver became recipient, setting disabled, membership required and
+   revoked, reservation removed, or no active `bot_destinations` entry): the row becomes `skipped`
+   with `target_gone` (logging DEBUG `receipt_notice_skipped_ineligible`) and the loop continues.
+   Because `_eligible` checks `i.received_quantity > 0` rather than `i.is_archived = 0`, pending
+   `gift_received` notices for a partial receipt remain eligible and are still delivered if the
+   author archives the remaining unreceived units of the wish before the worker runs.
 3. If `reserve_permit` (global and per-chat rate limit in `notice_rate_slots`) denies a slot now:
    `next_attempt_at` is pushed to `now + 1` and the loop continues.
 4. Otherwise a `pending` row is claimed: `status = sending`, `claimed_at = now`,
@@ -347,11 +351,16 @@ tests.
 
 ### Retention
 
-`NoticeStore.purge_finished(threshold)` deletes `sent`, `skipped` and `failed` rows with
-`updated_at <= threshold`. It runs at the end of each cleanup cycle (`run_cleanup_cycle`,
-`_purge_notices`) with `threshold = now - receipt_notice_retention_days`. A failure is a WARNING
-`receipt_notice_purge_failed` and never fails the cycle; INFO `receipt_notice_rows_purged` (`rows`)
-is logged only when rows were deleted. It runs only while `background_cleanup_enabled` is true.
+`NoticeStore.purge_finished(threshold)` deletes terminal (`sent`, `skipped`, and `failed`) rows in
+a single transaction from both `notification_outbox` (`updated_at <= threshold`) and
+`reminder_outbox` (`next_attempt_at <= threshold_epoch`), while preserving `notice_receipt_keys`
+and all `pending`, `sending`, and `uncertain` rows. It runs at the end of each cleanup cycle
+(`run_cleanup_cycle`, `_purge_notices`) with `threshold = now - receipt_notice_retention_days`.
+When rows are deleted, `NoticeStore.purge_finished` logs INFO `notice_outbox_purged`
+(`receipt_purged`, `reminder_purged`, `total_purged`) on `wishenka.wishlists.notices` and cleanup
+logs INFO `receipt_notice_rows_purged` (`rows`). A failure is a WARNING `receipt_notice_purge_failed`
+and never fails the cycle. It runs only while `background_cleanup_enabled` is true. See
+[WISHENKA-183](https://pypost.atlassian.net/browse/WISHENKA-183) for planned batched deletion.
 
 ## Mini App UI (WISHENKA-24)
 

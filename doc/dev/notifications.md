@@ -1,7 +1,8 @@
 # Service Notifications, Occasion Reminders, and Private Birthday Tracking
 
-> **Status: IMPLEMENTED by [WISHENKA-29](https://pypost.atlassian.net/browse/WISHENKA-29), building
-> on the gift receipt notice foundation from [WISHENKA-23](gift-receipt.md#notice-path).**
+> **Status: IMPLEMENTED by [WISHENKA-29](https://pypost.atlassian.net/browse/WISHENKA-29) and
+> extended by [WISHENKA-60](https://pypost.atlassian.net/browse/WISHENKA-60), building on the gift
+> receipt notice foundation from [WISHENKA-23](gift-receipt.md#notice-path).**
 
 ## Overview
 
@@ -65,7 +66,7 @@ Private /birthdays -------- birthday_entries /
 | Component | Module | Responsibility |
 | --------- | ------ | -------------- |
 | `EventProducer` / `SharedEvent` | `wishenka/notices/events.py` | Enqueues content-free shared wishlist and opt-in reservation confirmation intents inside the domain transaction |
-| `NoticeStore` / `ClaimedNotice` | `wishenka/notices/store.py` | Fenced claiming, pre-send eligibility refresh, settlement, and retention purge for `notification_outbox` |
+| `NoticeStore` / `ClaimedNotice` | `wishenka/notices/store.py` | Fenced claiming, pre-send eligibility refresh, settlement, and unified retention purge for `notification_outbox` and `reminder_outbox` |
 | `claim_reminder` / `refresh_reminder` / `settle_reminder` | `wishenka/notices/reminders.py` | Fenced claiming, live authorization/preference refresh, localized rendering, and settlement for `reminder_outbox` |
 | `ReminderScheduler` / `utc_event_date` | `wishenka/notices/scheduler.py` | Bounded, cursor-driven UTC scanner for dated wishlists and private birthday entries |
 | `reserve_permit` / `block_until` | `wishenka/notices/rate.py` | Cross-process SQLite rate limiter and `RetryAfter` throttle state in `notice_rate_slots` |
@@ -107,8 +108,13 @@ Two Alembic revisions extend the wishlist database schema (see [`doc/dev/migrati
 1. **Candidate selection at mutation time (`WishlistService` and `EventProducer`):**
    - Shared wishlist events (`_record_shared_event`) snapshot candidate recipients in the domain
      transaction: the wishlist owner, current members (`wl_members`), and holders of `ACTIVE` or
-     `PURCHASED` reservations on the affected wish (or on any wish in the list for
-     `list_archived`). The acting user (`actor_id`) is always excluded.
+     `PURCHASED` reservations on the affected wish (or on any wish in the list for `list_archived`,
+     `list_restored`, and `list_updated`), excluding any user who is the recipient of that wish
+     (`WishlistAccessPolicy.is_recipient_id`). The acting user (`actor_id`) is always excluded.
+   - `PATCH /api/wishlists/{wishlist_id}` (`update_wishlist`),
+     `PATCH /api/wishlists/{wishlist_id}/members/{user_id}/role` (`set_role`), and
+     `WishlistService.transfer_ownership` emit `list_updated` and `membership_changed` events when
+     their respective state changes.
    - `member_recipients` records which candidates were members at event time; `EventProducer.record`
      stores `requires_membership = 1` for those rows so a member who is removed before delivery
      does not receive details of a private list change.
@@ -124,14 +130,19 @@ Two Alembic revisions extend the wishlist database schema (see [`doc/dev/migrati
 2. **Recipient exclusion under overlapping roles:**
    - A user who is the recipient of a wish (`item.recipient_user_id == user_id`, or
      `wishlist.owner_id == user_id` on a non-collaborative list) is **never** sent a
-     `gift_received` notice or a `reservation_confirmation` for that wish, even if they also hold a
-     collaborator or giver role.
+     `gift_received` notice, a `reservation_confirmation`, or any shared event whose eligibility
+     derives solely from holding a reservation on that wish, even if they also hold a collaborator
+     or giver role.
+   - Reservation-derived eligibility enforces strict recipient exclusion (`recipient_user_id <> user`
+     and non-collaborative `owner_id <> user`) both when enqueueing in
+     `WishlistService._record_shared_event` and during live pre-send verification in
+     `claim_reminder` and `refresh_reminder`.
    - On a collaborative wishlist (`is_collaborative = 1`), the list owner can act as a giver for a
      wish assigned to another recipient (`recipient_user_id != owner_id`).
    - Independently safe wishlist changes (`item_created`, `item_updated`, `item_archived`,
      `item_restored`, `list_updated`, `list_archived`, `list_restored`, `membership_changed`) and
-     neutral occasion reminders remain eligible for the recipient when they have access, because
-     neither their trigger nor their text depends on reservation or receipt state.
+     neutral occasion reminders remain eligible for the recipient when they have access as owner or
+     member, because neither their trigger nor their text depends on reservation or receipt state.
 3. **Notification categories and preference precedence:**
    - Every notice checks `wl_list_notification_settings(user_id, wishlist_id, event_type)` first
      (when `list_id` is present), falling back to `user_notification_settings(user_id, event_type)`,
@@ -152,15 +163,18 @@ Two Alembic revisions extend the wishlist database schema (see [`doc/dev/migrati
      transactions before claiming and again immediately before calling `NoticeSender.send`:
      - The user must have an active `bot_destinations` row (`active = 1`).
      - If `requires_membership = 1`, the user must still be in `wl_members` for `list_id`.
-     - For `gift_received`, the list must not be `deleted`, the wish must not be archived
-       (`is_archived = 0`), the user must not be the wish recipient, the `gift_received` setting
-       must be enabled, and the user must still hold a reservation on the wish.
+     - For `gift_received`, the list must not be `deleted`, the wish must have `received_quantity > 0`
+       (so pending notices for a partial receipt survive subsequent archival of the remaining
+       unreceived units), the user must not be the wish recipient, the `gift_received` setting must
+       be enabled, and the user must still hold a reservation on the wish.
      - For `reservation_confirmation`, the list must be `active`, the user must still hold a
        reservation on the item, must not be the recipient, and `reservation_changes` must be
        explicitly `1`.
      - For shared wishlist changes, the list must be `active` or `archived`, the item (if set) must
        exist, and the user must currently be the owner, a member, or hold an active/purchased
-       reservation on the item (or on any item in the list for `list_archived`).
+       reservation on the item (or on any item in the list for `list_archived`, `list_restored`, and
+       `list_updated`) where the user is not the wish recipient (`recipient_user_id <> user` and
+       non-collaborative `owner_id <> user`).
      - For `list` occasion reminders, the list must be `active`, the user must be the owner, a
        member, or have favorited the list (`wl_favorites`), `utc_event_date(wl.event_date)` must
        still match the queued `event_date`, and `event_date` must not be in the past (`event_date >=
@@ -278,6 +292,20 @@ Implemented in `wishenka/bot/birthdays.py` (`create_birthday_router`), mounted b
     receipt claims). **Uncertain rows are quarantined and never automatically retried**, preventing
     blind duplicate sends when Telegram may have accepted the message before the connection failed.
 
+### Retention Cleanup
+
+`NoticeStore.purge_finished(threshold)` (called during `run_cleanup_cycle` with
+`threshold = now - receipt_notice_retention_days * 86400`) purges terminal (`sent`, `skipped`,
+`failed`) rows from both outbox queues inside a single `BEGIN IMMEDIATE` transaction:
+
+- **`notification_outbox`:** deletes terminal rows with `updated_at <= :threshold_iso`, while
+  preserving `notice_receipt_keys` so purged receipts can never be re-enqueued as duplicates.
+- **`reminder_outbox`:** deletes terminal rows with `next_attempt_at <= :threshold_epoch`. Both
+  `claim_reminder` (when skipping) and `NoticeWorker.run_once` (on terminal settlements `sent`,
+  `skipped`, and `failed`) stamp `next_attempt_at = now` (`delay = 0`) so retention age is
+  measured from the settlement timestamp.
+- **Preserved rows:** `pending`, `sending`, and `uncertain` rows in both tables are never purged.
+
 ## API / Usage
 
 ### Recording Shared Domain Events (`wishenka.notices.events`)
@@ -366,7 +394,7 @@ All settings are defined on `wishenka.config.Settings` (`WISHENKA_` environment 
 | `receipt_notice_request_timeout_seconds` | `WISHENKA_RECEIPT_NOTICE_REQUEST_TIMEOUT_SECONDS` | `30.0` | `> 0`; HTTP request timeout (worker awaits `timeout + 5` seconds) |
 | `receipt_notice_claim_lease_seconds` | `WISHENKA_RECEIPT_NOTICE_CLAIM_LEASE_SECONDS` | `300` | `>= request_timeout_seconds + 30`; age after which a `sending` row becomes `uncertain` |
 | `receipt_notice_summary_window_seconds` | `WISHENKA_RECEIPT_NOTICE_SUMMARY_WINDOW_SECONDS` | `300` | `>= 60`; fixed wall-clock aggregation window for INFO summary logs |
-| `receipt_notice_retention_days` | `WISHENKA_RECEIPT_NOTICE_RETENTION_DAYS` | `30` | `>= 1`; retention period before `purge_finished` deletes terminal receipt rows |
+| `receipt_notice_retention_days` | `WISHENKA_RECEIPT_NOTICE_RETENTION_DAYS` | `30` | `>= 1`; retention period before `purge_finished` deletes terminal rows in `notification_outbox` and `reminder_outbox` |
 | `notice_global_per_second` | `WISHENKA_NOTICE_GLOBAL_PER_SECOND` | `20` | `1..30`; global send limit per second across all worker processes |
 | `notice_chat_interval_seconds` | `WISHENKA_NOTICE_CHAT_INTERVAL_SECONDS` | `1` | `>= 1`; minimum interval in seconds between sends to the same `chat_id` |
 | `notice_reminder_lead_days` | `WISHENKA_NOTICE_REMINDER_LEAD_DAYS` | `(7,)` | Non-empty tuple of positive integers (`> 0`); lead days in UTC before an occasion |
@@ -380,13 +408,18 @@ labels or dates, wish/list titles, capability links, bot tokens, or raw exceptio
 | ----- | ----- | ------ | ------ |
 | `receipt_notice_window_summary` | INFO | `wishenka.wishlists.notices` | `window_seconds`, `sent`, `retried`, `failed_terminal`, `uncertain` |
 | `service_delivery_window_summary` | INFO | `wishenka.wishlists.notices` | `window_seconds`, `sent`, `retried`, `failed_terminal`, `uncertain`, `skipped` |
+| `notice_outbox_purged` | INFO | `wishenka.wishlists.notices` | `receipt_purged`, `reminder_purged`, `total_purged` (emitted only when rows are deleted) |
 | `receipt_notice_worker_error` | ERROR | `wishenka.wishlists.notices` | `error_class` (logged once per consecutive worker failure streak) |
 | `reminder_scheduler_error` | ERROR | `wishenka.wishlists.notices` | `error_class` (logged once per consecutive scheduler failure streak; does not block queue delivery) |
 | `reminder_scan_completed` | DEBUG | `wishenka.notices.scheduler` | `lists_scanned`, `birthdays_scanned`, `intents_created` (emitted only on non-empty scans) |
+| `shared_notice_events_queued` | DEBUG | `wishenka.wishlists.notices` | `kind`, `queued_count` (emitted after commit when `reminder_outbox` rows are inserted) |
+| `service_notice_skipped` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `reason` (`unauthorized`, `ineligible`, `refresh_ineligible`), `kind` (when claimed) |
+| `receipt_notice_skipped_ineligible` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `attempt` |
 | `receipt_notice_uncertain` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `attempt`, `error_class` (when a receipt send is ambiguous or lease expires) |
 
 See [`ai-tasks/WISHENKA-29/50-observability.md`](../../ai-tasks/WISHENKA-29/50-observability.md)
-for the complete observability specification.
+and [`ai-tasks/WISHENKA-60/50-observability.md`](../../ai-tasks/WISHENKA-60/50-observability.md) for
+the complete observability specifications.
 
 ## Troubleshooting
 
@@ -431,14 +464,21 @@ for the complete observability specification.
 Run the focused notification, reminder, upgrade, operator, and observability test suites with:
 
 ```bash
-make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_notice_delivery_repro.py tests/test_notice_wishlist_events.py tests/test_notice_upgrade.py tests/test_notice_operator.py tests/test_reminder_scan_paging.py tests/test_service_notice_observability.py tests/test_receipt_notices.py tests/test_receipt_observability.py'
+make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_notice_delivery_repro.py tests/test_notice_wishlist_events.py tests/test_notice_upgrade.py tests/test_notice_operator.py tests/test_reminder_scan_paging.py tests/test_service_notice_observability.py tests/test_receipt_notices.py tests/test_receipt_observability.py tests/test_wishenka_60_repro.py tests/test_wishenka_60_observability.py'
 ```
 
 ## Known Limitations and Follow-up Tasks
 
+- **[WISHENKA-183](https://pypost.atlassian.net/browse/WISHENKA-183):** Batch `NoticeStore.purge_finished`
+  deletions with a bounded `LIMIT` per pass and evaluate adding a dedicated `updated_at` column on
+  `reminder_outbox` if retention semantics diverge from `next_attempt_at`.
+- **[WISHENKA-184](https://pypost.atlassian.net/browse/WISHENKA-184):** Extract the duplicated
+  live-eligibility SQL in `claim_reminder` and `refresh_reminder` into a shared helper, and move
+  `update_wishlist` / `set_role` domain mutations from `wishenka/web/routes/wishlists.py` into
+  public `WishlistService` methods.
 - **[WISHENKA-181](https://pypost.atlassian.net/browse/WISHENKA-181):** Physical retention and
-  purge policy for soft-deleted `birthday_entries`, terminal `reminder_outbox` rows, inactive
-  `bot_destinations`, and `notice_receipt_keys`.
+  purge policy for soft-deleted `birthday_entries`, inactive `bot_destinations`, and
+  `notice_receipt_keys`.
 - **[WISHENKA-35](https://pypost.atlassian.net/browse/WISHENKA-35):** Account deletion and
   personal-data erasure must include `bot_destinations`, `birthday_entries`, `birthday_input`,
   `reminder_outbox`, `notice_receipt_keys`, and chat-scoped `notice_rate_slots`.

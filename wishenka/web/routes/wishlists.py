@@ -419,10 +419,14 @@ async def update_wishlist(
                 },
             )
             raise HTTPException(status_code=409, detail="Wishlist is archived")
+        before = (wl.title, wl.description, wl.event_title, wl.event_date)
         for key, value in body.model_dump(exclude_unset=True).items():
             setattr(
                 wl, "title" if key == "name" else key, value if key != "name" else (value or "")
             )
+        if (wl.title, wl.description, wl.event_title, wl.event_date) != before:
+            wl.updated_at = datetime.now(UTC)
+            service._record_shared_event("list_updated", wl, None, user.telegram_id)
         logger.info(
             "Wishlist updated: id=%s by user=%s",
             wishlist_id,
@@ -680,7 +684,10 @@ async def set_role(
                 },
             )
             raise HTTPException(status_code=404, detail="Member not found")
-        target.role = WishlistRole(body.role)
+        new_role = WishlistRole(body.role)
+        if target.role != new_role:
+            target.role = new_role
+            service._record_shared_event("membership_changed", wl, None, user.telegram_id)
         logger.info(
             "Member role updated: member %s role changed to %s on wishlist %s by user %s",
             user_id,

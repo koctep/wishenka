@@ -37,7 +37,7 @@ class SharedEvent:
 class EventProducer:
     """Persist candidate intents in the caller's existing domain transaction."""
 
-    async def record(self, conn: AsyncConnection, event: SharedEvent, now: int) -> None:
+    async def record(self, conn: AsyncConnection, event: SharedEvent, now: int) -> int:
         """Create one stable, content-free intent per eligible verified destination."""
         if event.kind not in SAFE_SHARED_EVENTS:
             raise ValueError("Unsupported shared notification event")
@@ -45,7 +45,8 @@ class EventProducer:
             text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'")
         )
         if not users_exist:
-            return
+            return 0
+        queued = 0
         for user in event.recipients:
             if event.kind == "reservation_confirmation":
                 # Confirmations of the actor's action require explicit opt-in.
@@ -70,7 +71,7 @@ class EventProducer:
             )
             if not deliverable:
                 continue
-            await conn.execute(
+            result = await conn.execute(
                 text(
                     "INSERT OR IGNORE INTO reminder_outbox "
                     "(occurrence_key,kind,user_id,list_id,item_id,event_date,next_attempt_at,"
@@ -87,3 +88,5 @@ class EventProducer:
                     "member": int(user in event.member_recipients),
                 },
             )
+            queued += int(result.rowcount or 0)
+        return queued

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -13,6 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from wishenka.notices.rate import block_until, reserve_permit
 from wishenka.notices.scheduler import utc_event_date
 from wishenka.wishlists.store import WishlistStore
+
+logger = logging.getLogger("wishenka.wishlists.notices")
 
 
 @dataclass(frozen=True)
@@ -78,7 +81,12 @@ async def _event_authorized(conn: AsyncConnection, row: Any) -> bool:
     params = {"list": data["list_id"], "user": data["user_id"], "item": data["item_id"]}
     if data["requires_membership"]:
         member = await conn.scalar(
-            text("SELECT 1 FROM wl_members WHERE wishlist_id=:list AND user_id=:user"), params
+            text(
+                "SELECT 1 FROM wl_lists l WHERE l.id=:list AND (l.owner_id=:user "
+                "OR EXISTS (SELECT 1 FROM wl_members m "
+                "WHERE m.wishlist_id=l.id AND m.user_id=:user))"
+            ),
+            params,
         )
         if not member:
             return False
@@ -89,8 +97,10 @@ async def claim_reminder(
     store: WishlistStore, now: int, lease: int, global_limit: int, chat_interval: int
 ) -> Reminder | None:
     """Claim a due row after checking its current access, settings and date."""
+    skipped: list[tuple[int, str, str]] = []
 
     async def work(conn: AsyncConnection) -> Reminder | None:
+        skipped.clear()
         await conn.execute(
             text(
                 "UPDATE reminder_outbox SET status='uncertain',claimed_at=NULL,claim_token=NULL "
@@ -128,9 +138,13 @@ async def claim_reminder(
             )
             if not await _event_authorized(conn, row):
                 await conn.execute(
-                    text("UPDATE reminder_outbox SET status='skipped' WHERE id=:id"),
-                    {"id": row["id"]},
+                    text(
+                        "UPDATE reminder_outbox SET status='skipped',next_attempt_at=:now "
+                        "WHERE id=:id"
+                    ),
+                    {"id": row["id"], "now": now},
                 )
+                skipped.append((int(row["id"]), str(row["kind"]), "unauthorized"))
                 continue
             dest = (
                 (
@@ -189,9 +203,12 @@ async def claim_reminder(
                                 "WHERE m.wishlist_id=l.id AND m.user_id=:user) OR "
                                 "EXISTS (SELECT 1 FROM wl_reservations r JOIN wl_items ri "
                                 "ON ri.id=r.wish_item_id WHERE ri.wishlist_id=l.id "
-                                "AND (:item=ri.id OR (:item IS NULL AND :kind='list_archived')) "
+                                "AND (:item=ri.id OR (:item IS NULL AND "
+                                ":kind IN ('list_archived','list_restored','list_updated'))) "
                                 "AND r.user_id=:user AND (r.status IN ('active','purchased') "
-                                "OR :kind='reservation_confirmation')))"
+                                "OR :kind='reservation_confirmation') "
+                                "AND (ri.recipient_user_id IS NULL OR ri.recipient_user_id<>:user) "
+                                "AND (l.is_collaborative=1 OR l.owner_id<>:user)))"
                             ),
                             {
                                 "list": row["list_id"],
@@ -254,9 +271,13 @@ async def claim_reminder(
                 or (row["kind"] == "reservation_confirmation" and setting != 1)
             ):
                 await conn.execute(
-                    text("UPDATE reminder_outbox SET status='skipped' WHERE id=:id"),
-                    {"id": row["id"]},
+                    text(
+                        "UPDATE reminder_outbox SET status='skipped',next_attempt_at=:now "
+                        "WHERE id=:id"
+                    ),
+                    {"id": row["id"], "now": now},
                 )
+                skipped.append((int(row["id"]), str(row["kind"]), "ineligible"))
                 continue
             if not await reserve_permit(
                 conn, int(dest["chat_id"]), now, global_limit, chat_interval
@@ -286,7 +307,20 @@ async def claim_reminder(
             )
         return None
 
-    return await store.transaction(work)
+    claimed = await store.transaction(work)
+    for reminder_id, kind, reason in skipped:
+        logger.debug(
+            "Service notice skipped: kind=%s reason=%s",
+            kind,
+            reason,
+            extra={
+                "event": "service_notice_skipped",
+                "outbox_id": reminder_id,
+                "kind": kind,
+                "reason": reason,
+            },
+        )
+    return claimed
 
 
 async def refresh_reminder(store: WishlistStore, claim: Reminder, now: int) -> Reminder | None:
@@ -374,9 +408,12 @@ async def refresh_reminder(store: WishlistStore, claim: Reminder, now: int) -> R
                         "WHERE f.wishlist_id=l.id AND f.user_id=:user)) OR "
                         "EXISTS (SELECT 1 FROM wl_reservations r JOIN wl_items ri "
                         "ON ri.id=r.wish_item_id WHERE ri.wishlist_id=l.id "
-                        "AND (:item=ri.id OR (:item IS NULL AND :kind='list_archived')) "
+                        "AND (:item=ri.id OR (:item IS NULL AND "
+                        ":kind IN ('list_archived','list_restored','list_updated'))) "
                         "AND r.user_id=:user AND (r.status IN ('active','purchased') "
-                        "OR :kind='reservation_confirmation')))"
+                        "OR :kind='reservation_confirmation') "
+                        "AND (ri.recipient_user_id IS NULL OR ri.recipient_user_id<>:user) "
+                        "AND (l.is_collaborative=1 OR l.owner_id<>:user)))"
                     ),
                     {
                         "item": row["item_id"],

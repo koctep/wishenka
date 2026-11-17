@@ -98,6 +98,12 @@ opt-in подтверждений собственной брони (`reminder_o
 карантин неопределённых отправок (`status = 'uncertain'`) и операторский CLI
 (`python -m wishenka.notices.operator`). См. [`doc/dev/notifications.md`](notifications.md).
 
+Дополнено (WISHENKA-60): сохранение отложенного уведомления `gift_received` при архивировании
+остатка частично полученного желания (`received_quantity > 0`), уведомление дарителей с открытыми
+бронями при `list_archived`, `list_restored` и `list_updated` (включая `PATCH`-маршруты и передачу
+владения), строгое исключение получателя при проверках по брони и единая очистка терминальных
+строк `notification_outbox` и `reminder_outbox` в `NoticeStore.purge_finished`.
+
 Реализовано (WISHENKA-30): канал обратной связи и обращений в поддержку в Telegram-боте
 (`wishenka/bot/support.py`, ревизия `add_support_channel`) — команды `/help` и `/support`,
 изоляция сессии ввода (`support_input`) от захвата желаний и дней рождения, редактирование
