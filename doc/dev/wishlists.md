@@ -463,7 +463,7 @@ class UserWishlistContext:
 | Reserve item (non-recipient) | Yes | Yes | Yes | Yes |
 | Reserve item (as recipient) | **No** | **No** | **No** | **No** |
 
-*Note: Item recipients are strictly prohibited from reserving items designated for themselves.*
+*Note: Item recipients are strictly prohibited from reserving items designated for themselves. Per `WISHENKA-154` (`FR-1.2`, `FR-4` / Q11), a co-author (`Admin` or `Member`) who is also the recipient of a wish retains full author rights on that wish (edit, archive/restore, record/undo/correct receipt) with strict surprise protection, while acting as a normal gifter on other wishes in the same list.*
 
 #### Role Precedence & Favorite Evaluation
 
@@ -674,6 +674,7 @@ async def delete_wishlist(
 
 - **Permissions**: Solely the `Owner`.
 - Cancels all active reservations and invalidates tokens.
+- Per `WISHENKA-154` (`FR-3` / Q8), deleting a wishlist permanently removes its «Подаренные» gifted history together with the wishlist and its wishes (no standalone long-term history is retained); archiving a wishlist preserves «Подаренные» in read-only mode.
 
 #### `list_deleted_wishlists` & `restore_deleted_wishlist`
 

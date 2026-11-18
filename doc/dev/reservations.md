@@ -43,14 +43,18 @@ card summary, compact and expanded. See
 3. **Discrete Lifecycle State Machine**:
    Explicit states (`ACTIVE`, `PURCHASED`, `CANCELLED`) track a gifter's
    promise. Receipt is not a status change.
+   - **Planned / target spec rule (`WISHENKA-154` `FR-6` / Shortcut E, tracked in `WISHENKA-219`)**:
+     Add an explicit «Завершено» (`completed`) state for a `PURCHASED` promise on a fully
+     received wish (freeing occupied units, excluding it from active «Мои бронирования» counters,
+     and stopping further receipt/undo notices; `ACTIVE` promises cannot be completed directly).
 4. **Wish-scoped write exclusion**:
    Concurrent booking is excluded by the wish-scoped SQLite transaction
    (`BEGIN IMMEDIATE`). `execute_wish` builds a new `WishlistService` per
    call, so `ItemConcurrencyCoordinator` (`asyncio.Lock`) is not shared
    across requests or processes. That lock is not the cross-process
    mechanism.
-5. **Reduction Lock Invariant**:
-   Prevents wishlist authors from reducing an item's desired quantity below the sum of active, purchased, and fulfilled units ($\text{desired} \ge \text{active} + \text{purchased} + \text{fulfilled}$).
+5. **Reduction Lock Invariant (current code; target rule planned in `WISHENKA-218`)**:
+   Prevents wishlist authors from reducing an item's desired quantity below the sum of active, purchased, and fulfilled units ($\text{desired} \ge \text{active} + \text{purchased} + \text{fulfilled}$). Per `WISHENKA-154` (`FR-5` / Q12), the target spec rule tightens this lock to $\max(1, \text{fulfilled})$ without exposing occupied units, entering the over-booked state when $\text{fulfilled} + \text{occupied} > \text{new\_desired}$.
 6. **My reservations cabinet**:
    An identified caller sees the home card «Мои бронирования». The badge
    is `total_distinct_items`: distinct wishes with an occupying promise.

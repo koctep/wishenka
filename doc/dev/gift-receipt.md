@@ -46,15 +46,57 @@ came.
 - **Gifted read is not the archive.** It lists wishes with `received_quantity > 0`, for members
   only, with receipt entries and no promise or giver field.
 - **Surprise.** Receipt results, refusals, the gifted read and the notice carry no promise,
-  giver, booked quantity or purchase fact. The one known exception is the existing
-  quantity-reduction lock in the edit form (WISHENKA-154), unchanged.
+  giver, booked quantity or purchase fact. The one known exception in current code is the legacy
+  quantity-reduction lock in the edit form; `WISHENKA-154` settled the target rule (`FR-5` / Q12)
+  to remove it, and implementation is planned in `WISHENKA-218`.
+
+### Settled product decisions (WISHENKA-154)
+
+All six open product questions from `WISHENKA-22` (assumptions A–D, Q6, Q8, Q11, Q12, and
+shortcut E) are settled in `in-docs/spec.md` (`WISHENKA-154`):
+
+- **Assumptions A–D (`FR-1`):**
+  - **A (confirmed):** Receipt and promise remain independent facts; recording receipt never
+    closes, cancels, or modifies any promise, and `received + occupied > requested` (over-booked)
+    is valid.
+  - **B (confirmed):** Any list author (owner, admin, or member/co-author) may record receipt
+    (and undo/correct per `WISHENKA-153`), including when the author is also the wish's recipient.
+  - **C (superseded):** Receipt is no longer final; `WISHENKA-153` introduced cancellation and
+    quantity correction of receipt records on active lists.
+  - **D (confirmed):** «Подаренные» is strictly author-only and never visible to gifters or
+    anonymous viewers.
+- **No public «уже подарено» label (`FR-2` / Q6):** Gifters and anonymous viewers never see
+  «Подаренные», receipt dates, received quantities, or a public «уже подарено» badge. Partially
+  received active wishes show only the available remainder (or «Забронировано» when zero). Fully
+  received wishes leave the active list; gifters with open promises see the received marker
+  exclusively in «Мои бронирования» and personal receipt notices.
+- **Gifted history on list deletion vs archive (`FR-3` / Q8):** Deleting a wishlist permanently
+  removes its «Подаренные» history together with the wishlist and its wishes (no standalone
+  long-term gifted history is retained). Archiving a wishlist preserves «Подаренные» in read-only
+  mode.
+- **Co-author who is also the recipient (`FR-4` / Q11):** On a collaborative wishlist, an admin or
+  member who is the recipient of a wish retains full author rights on that wish (edit,
+  archive/restore, record/undo/correct receipt) under strict surprise protection (no booking,
+  giver, or purchase data shown) and cannot act as a gifter on that wish (no self-booking). On
+  other wishes in the same list where someone else is the recipient, they act as a normal gifter.
+- **Planned / target spec rules (not yet implemented in code):**
+  - **`FR-5` (Q12, planned in `WISHENKA-218`):** Tighten the edit-form quantity-reduction lock so
+    authors can reduce requested quantity down to `max(1, received_quantity)` without seeing or
+    being blocked by occupied promise units; if `received + occupied > new_requested`, the wish
+    enters the standard over-booked state and open-promise givers are notified.
+  - **`FR-6` (Shortcut E, planned in `WISHENKA-219`):** Add an explicit «Завершено»
+    («Завершить» / «Подарок вручён») completion action for **purchased** promises on fully
+    received wishes, moving the promise to a closed state (freeing occupied units, excluding it
+    from active «Мои бронирования» counters, and stopping further receipt/undo notices). Intended
+    (unpurchased) promises cannot be completed directly.
 
 ### Not implemented
 
 - Notification settings screen (only tables and lookup exist): WISHENKA-34.
 - Metrics exporter: WISHENKA-84 (the metrics are derived from logs and SQL, see Logging).
-- Product decisions (assumptions A to D, public «already gifted» label, history after list
-  deletion, co-author who is the recipient, edit-form quantity lock): WISHENKA-154.
+- Planned target rules from `WISHENKA-154`: edit-form quantity-reduction lock tightening (`FR-5` /
+  Q12) in `WISHENKA-218`, and «Завершено» state for purchased promises (`FR-6` / Shortcut E) in
+  `WISHENKA-219`.
 - Follow-up debt of the UI story: see [Follow-up tickets](#follow-up-tickets-of-the-ui).
 - Follow-up debt of the backend (all Low): WISHENKA-155 (one digit-free `quantity_invalid`
   message), 156 (opt-in real-Telegram smoke test, two-process worker race test), 157 (log-contract
@@ -877,8 +919,8 @@ metric uses a DEBUG event, and labels never use a user, wishlist, item or giver.
   element is empty when nothing was received. «Не удалось загрузить «Подаренные»» means
   `read_gifted_rows` got a domain error; reload the page.
 - **Not built yet** (see Overview): settings screen (WISHENKA-34), metrics
-  exporter (WISHENKA-84), product decisions (WISHENKA-154), the UI follow-ups WISHENKA-160 to
-  164.
+  exporter (WISHENKA-84), target rules `FR-5` (`WISHENKA-218`) and `FR-6` (`WISHENKA-219`) from
+  `WISHENKA-154`, and the UI follow-ups WISHENKA-160 to 164.
 
 ## Tests
 

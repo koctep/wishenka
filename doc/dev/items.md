@@ -108,7 +108,7 @@ The `wishenka.items` package and its integration with `wishenka.wishlists` imple
    - Desired quantity boundary: $1 \le \text{desired} \le 1000$.
    - Occupied units are the sum of reservation `quantity` in `ACTIVE` or `PURCHASED`. The free remainder a promise may take is $\max(0, \text{requested} - \text{received} - \text{occupied})$.
    - A receipt adds received units and is capped by requested minus units already received. It leaves the promise open. After a successful receipt, occupied plus received may exceed the requested quantity.
-   - **Reduction Lock Invariant**: A user cannot reduce requested quantity below occupied plus received. Attempting to do so raises [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L44-L45).
+   - **Reduction Lock Invariant (current code; target rule planned in `WISHENKA-218`)**: A user cannot reduce requested quantity below occupied plus received. Attempting to do so raises [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L44-L45). Per `WISHENKA-154` (`FR-5` / Q12), the target spec rule removes this booking-based floor so authors can reduce requested quantity down to $\max(1, \text{received})$ without exposing occupied units, transitioning into the over-booked state when $\text{received} + \text{occupied} > \text{new\_requested}$.
    - Inventory writes for one wish run in a wish-scoped SQLite WAL transaction ([`WishlistStore.execute_wish`](file:///home/src/wishenka/wishlists/store.py#L942-L997)). `SQLITE_BUSY` after `busy_timeout` becomes [`InventoryBusyError`](file:///home/src/wishenka/wishlists/exceptions.py#L52-L59) and changes nothing.
    - **Surprise Invariant**: Gift recipients receive [`WishItemRecipientViewDTO`](file:///home/src/wishenka/wishlists/schemas.py#L14-L35) strictly devoid of reservation statuses, gifter identities, or booked quantities.
 8. **RESTful Wish Items CRUD API & Atomic Reordering**:
@@ -117,7 +117,7 @@ The `wishenka.items` package and its integration with `wishenka.wishlists` imple
 9. **Collaborative Wishlist Targeting & Dual-Role Projections**:
    - Items can be designated for specific members via `recipient_user_id` or descriptive `recipient_name`.
    - Access control verifies `recipient_user_id` belongs to the wishlist's active members.
-   - Dual-role projection: recipients see clean recipient views (`WishItemRecipientViewDTO`), while collaborators and gifters see full booking and availability states (`WishItemGifterViewDTO`).
+   - Dual-role projection: recipients see clean recipient views (`WishItemRecipientViewDTO`), while collaborators and gifters see full booking and availability states (`WishItemGifterViewDTO`). Per `WISHENKA-154` (`FR-4` / Q11), a co-author who is also the recipient retains full author rights (edit, archive/restore, record/undo/correct receipt) under strict surprise protection and cannot self-book, while acting as a normal gifter on other wishes in the list.
 10. **Safe Archiving & End-of-List Restoration**:
     - Archiving acts as a non-destructive soft-delete (`is_archived = True`), preserving all active reservations in the database while immediately hiding the item from default listings and blocking new bookings.
     - Restoring reactivates the item (`is_archived = False`) and safely appends it to the tail of the active display order (`display_order = max(active_orders) + 1`).
