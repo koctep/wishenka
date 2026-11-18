@@ -178,6 +178,8 @@
                     <button type="button"
                             class="btn-archive-item text-red-600 text-sm"
                             hx-post="/web/wishlists/{{ wishlist_id }}/items/{{ form.id }}/archive"
+                            hx-target="#item-modal-container"
+                            hx-swap="none"
                             hx-confirm="{{ t('web.item.archive_inline_confirm', locale|default('en')) }}">
                         {{ t('web.item.archive_inline_btn', locale|default('en')) }}
                     </button>

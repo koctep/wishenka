@@ -680,7 +680,47 @@ no globals (`toggleWishCard` is no longer a global function).
   WISHENKA-143 (real-device checklist), WISHENKA-144 (tidying), WISHENKA-145 (real htmx smoke test
   instead of the stub), WISHENKA-146 (shared CDP driver for the older browser modules, `websockets`
   range), WISHENKA-147 (CI upload of failure diagnostics). UI debts of the receipt story:
-  WISHENKA-160 to 165 (list in [gift-receipt.md](gift-receipt.md#follow-up-tickets-of-the-ui)).
+  WISHENKA-160 (completed: modal CSS layering, `htmx:beforeSwap`, OOB/retarget error contracts)
+  and WISHENKA-161 to 165 (list in [gift-receipt.md](gift-receipt.md#follow-up-tickets-of-the-ui)).
+
+#### 9.9. Modal CSS Layering, `htmx:beforeSwap` & OOB Error Contracts (WISHENKA-160)
+
+- **Modal CSS & Layering (`static/miniapp.css`)**:
+  - `:root` defines `--layer-modal: 100` (equal to `--layer-receipt: 100` and above
+    `--layer-quick-add: 40`), so `.modal-backdrop` (`position: fixed; inset: 0;
+    z-index: var(--layer-modal)`) renders above `#quick-add-bar` and page content.
+  - `.modal-sheet` renders as a scrollable bottom sheet (`max-width: var(--content-width)`,
+    `max-height: 90vh`, `overflow-y: auto`, `padding-bottom: max(1rem, env(safe-area-inset-bottom))`)
+    on mobile and centers as a rounded dialog at `@media (min-width: 640px)`.
+  - Modal forms, alerts (`.alert-error`, `.alert-warning`), and action buttons (`.btn-save`,
+    `.btn-archive-item`, `.btn-confirm-archive`, `.btn-cancel`, `.btn-modal-close`) enforce
+    `min-height: var(--touch-target)` (`44px`).
+- **Inline Archive Target (`partials/item_edit_modal.html`)**:
+  - `.btn-archive-item` carries `hx-target="#item-modal-container"` and `hx-swap="none"` so
+    archive OOB responses never overwrite the button element itself.
+- **Scoped `htmx:beforeSwap` 4xx/5xx Opt-In (`base.html`)**:
+  - `htmx.org@1.9.12` sets `detail.shouldSwap = false` and `detail.isError = true` for any
+    response with `status >= 400`. `base.html` registers a scoped `htmx:beforeSwap` listener that
+    sets `detail.shouldSwap = true` and `detail.isError = false` only when `xhr.status >= 400`,
+    `Content-Type` includes `text/html`, and one of the following holds:
+    1. `detail.target.id` is `item-modal-container`, `item-edit-sheet`, or `item-archive-modal`;
+    2. `detail.elt.closest('#item-modal-container')` is truthy; or
+    3. `detail.target.id === 'items-list'` and `xhr.responseText` contains an `hx-swap-oob`
+       fragment for `id="item-modal-container"`.
+  - **Explicit Exclusions**: Responses carrying `X-Reorder-Refusal` (handled by `wishlist.js`
+    `htmx:responseError`), `X-Receipt-Refusal` (handled by `receipt.js` `htmx:beforeSwap`),
+    requests matching `reservationRequestPath(detail.elt)` (handled by `base.html`
+    `htmx:afterRequest`), and non-HTML (e.g., JSON) responses are left untouched.
+- **Server Error Response Contracts (`wishenka/web/routes/items_ui.py`)**:
+  - **Recoverable edit-modal errors (`400` validation, `409` Reduction Lock, `503` Busy)**:
+    `_render_edit_modal_error` returns `partials/item_edit_modal.html` with
+    `HX-Retarget: #item-modal-container` and `HX-Reswap: innerHTML` headers, preserving
+    `submitted_form` values and displaying `[role="alert"]` inside the modal without touching
+    `#item-card-{item_id}`.
+  - **Unrecoverable modal/quick-add errors (`409` `WishlistArchivedError`, `404` missing/deleted/
+    forbidden resource, quick-add `400` validation)**: `_modal_domain_error_response` /
+    `_oob_modal_notice` return `text/html` `hx-swap-oob` fragments that clear
+    `#item-modal-container` and write a localized notice into `#list-notice` via `oob_text`.
 
 ---
 
@@ -739,6 +779,10 @@ The HTMX wish item UI router (`wishenka.web.items_ui`) emits structured telemetr
 | `ui_item_edit_opened` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `mode`, `locked_quantity`, `is_collaborative` | Item modal opened (`mode="create"` or `mode="edit"`). |
 | `ui_reduction_lock_rendered` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `locked_quantity` | Edit modal rendered with active Reduction Lock (`locked_quantity > 0`). |
 | `ui_reduction_lock_rejected` | `WARNING` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `requested_quantity`, `locked_quantity` | Edit rejected (HTTP 409) due to quantity below locked reservations. |
+| `ui_item_edit_busy` | `WARNING` | `wishlist_id`, `item_id` | Edit modal returned HTTP 503 (`InventoryBusyError`); names no gifter. |
+| `ui_item_edit_validation_error` | `WARNING` | `stage`, `status_code`, `wishlist_id`, `item_id`, `actor_id`, `user_id` | Edit form rejected with HTTP 400 (`stage="form"` or `"domain"`); user input omitted. |
+| `ui_item_quick_add_validation_error` | `WARNING` | `reason`, `status_code`, `wishlist_id`, `actor_id`, `user_id` | Quick-add rejected with HTTP 400 (`empty_title`, `parse_error`, or `domain_validation`). |
+| `ui_modal_domain_error` | `WARNING` | `operation`, `error_type`, `status_code`, `wishlist_id`, `item_id`, `actor_id`, `user_id` | Modal/UI endpoint hit `WishlistArchivedError` (409) or missing/forbidden resource (404). |
 | `ui_item_edit_saved` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `quantity`, `has_recipient` | Wish item edits persisted via detailed edit modal. |
 | `ui_item_archived` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id` | Wish item archived via HTMX UI. |
 | `ui_item_restored` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id` | Archived wish item restored via HTMX UI. |

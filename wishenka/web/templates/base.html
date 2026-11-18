@@ -232,6 +232,31 @@
             .then(function (response) { return response.text(); })
             .then(function (markup) { swapWishCard(card, markup); });
     });
+    document.addEventListener('htmx:beforeSwap', function (evt) {
+        var detail = evt.detail || {};
+        var xhr = detail.xhr;
+        if (!xhr || xhr.status < 400 || typeof xhr.getResponseHeader !== 'function') { return; }
+        if (xhr.getResponseHeader('X-Reorder-Refusal') || xhr.getResponseHeader('X-Receipt-Refusal')) {
+            return;
+        }
+        if (detail.elt && reservationRequestPath(detail.elt)) { return; }
+        var contentType = (xhr.getResponseHeader('Content-Type') || '').toLowerCase();
+        if (contentType.indexOf('text/html') === -1) { return; }
+        var target = detail.target;
+        var targetId = target && target.id ? target.id : '';
+        var isModalTarget = targetId === 'item-modal-container'
+            || targetId === 'item-edit-sheet'
+            || targetId === 'item-archive-modal';
+        var fromModal = !!(detail.elt && detail.elt.closest && detail.elt.closest('#item-modal-container'));
+        var responseText = xhr.responseText || '';
+        var isModalOobToList = targetId === 'items-list'
+            && responseText.indexOf('id="item-modal-container"') !== -1
+            && responseText.indexOf('hx-swap-oob') !== -1;
+        if (isModalTarget || fromModal || isModalOobToList) {
+            detail.shouldSwap = true;
+            detail.isError = false;
+        }
+    });
     </script>
 </head>
 <body class="bg-gray-50 text-gray-900"

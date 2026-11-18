@@ -432,6 +432,10 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
             "giver's reservations list, but new reservations will not be available."
         ),
         "web.item.archive_warn_checkbox": "Warn when archiving reserved wishes",
+        "web.item.archived_wishlist_error": "This wishlist is archived and cannot be edited.",
+        "web.item.resource_not_found": "Wish or wishlist is no longer available.",
+        "web.item.invalid_numeric": "Invalid numeric value.",
+        "web.item.invalid_priority": "Invalid priority value.",
         "web.receipt.modal_title": "Mark as received",
         "web.receipt.remaining_label": "Remaining: {count}",
         "web.receipt.quantity_label": "How many pieces received",
@@ -917,6 +921,10 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
             "брони дарителя, но новые брони будут недоступны."
         ),
         "web.item.archive_warn_checkbox": "Предупреждать при архивации зарезервированных желаний",
+        "web.item.archived_wishlist_error": "Вишлист в архиве — изменения недоступны.",
+        "web.item.resource_not_found": "Желание или вишлист больше недоступны.",
+        "web.item.invalid_numeric": "Некорректное числовое значение.",
+        "web.item.invalid_priority": "Некорректный приоритет.",
         "web.receipt.modal_title": "Отметить получение",
         "web.receipt.remaining_label": "Осталось: {count}",
         "web.receipt.quantity_label": "Сколько штук получено",

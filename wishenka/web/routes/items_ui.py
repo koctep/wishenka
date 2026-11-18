@@ -106,30 +106,117 @@ def _collaborative_members(
     return members
 
 
-def _parse_optional_int(raw: str | None) -> int | None:
+_RETARGET_MODAL_HEADERS = {
+    "HX-Retarget": "#item-modal-container",
+    "HX-Reswap": "innerHTML",
+}
+
+# Domain errors that modal/UI handlers translate: archived -> 409, all others -> 404.
+_DOMAIN_ERRORS = (
+    WishlistNotFoundError,
+    WishlistDeletedError,
+    ItemNotFoundError,
+    PermissionDeniedError,
+    WishlistArchivedError,
+)
+
+
+def _oob_modal_notice(message: str, status_code: int) -> HTMLResponse:
+    """Close any open item modal and display an escaped notice in ``#list-notice``."""
+    content = f"{oob_text('item-modal-container')}\n{oob_text('list-notice', message)}"
+    return HTMLResponse(content=content, status_code=status_code)
+
+
+def _modal_domain_error_response(
+    exc: Exception,
+    locale: SupportedLocale,
+    *,
+    wishlist_id: int | None = None,
+    item_id: int | None = None,
+    actor_id: int | None = None,
+    operation: str = "modal",
+) -> HTMLResponse:
+    """Return an OOB HTML error notice for archived or missing modal resources."""
+    is_archived = isinstance(exc, WishlistArchivedError)
+    status_code = status.HTTP_409_CONFLICT if is_archived else status.HTTP_404_NOT_FOUND
+    logger.warning(
+        "Modal %s failed with %s (wishlist=%s, item=%s, status=%s)",
+        operation,
+        type(exc).__name__,
+        wishlist_id,
+        item_id,
+        status_code,
+        extra={
+            "event": "ui_modal_domain_error",
+            "operation": operation,
+            "error_type": type(exc).__name__,
+            "status_code": status_code,
+            "wishlist_id": wishlist_id,
+            "item_id": item_id,
+            "actor_id": actor_id,
+            "user_id": actor_id,
+        },
+    )
+    if is_archived:
+        return _oob_modal_notice(
+            t("web.item.archived_wishlist_error", locale),
+            status.HTTP_409_CONFLICT,
+        )
+    return _oob_modal_notice(
+        t("web.item.resource_not_found", locale),
+        status.HTTP_404_NOT_FOUND,
+    )
+
+
+def _render_edit_modal_error(
+    request: Request,
+    *,
+    wishlist_id: int,
+    form_data: dict[str, Any],
+    locked_quantity: int,
+    is_collaborative: bool,
+    collaborative_members: list[dict[str, Any]],
+    error_message: str,
+    status_code: int,
+    is_edit: bool = True,
+) -> Response:
+    """Render the edit modal with an error banner and retarget to ``#item-modal-container``."""
+    return templates.TemplateResponse(
+        request=request,
+        name="partials/item_edit_modal.html",
+        context={
+            "is_edit": is_edit,
+            "wishlist_id": wishlist_id,
+            "form": form_data,
+            "locked_quantity": locked_quantity,
+            "min_quantity": max(1, locked_quantity),
+            "is_collaborative": is_collaborative,
+            "collaborative_members": collaborative_members,
+            "error_message": error_message,
+        },
+        status_code=status_code,
+        headers=_RETARGET_MODAL_HEADERS,
+    )
+
+
+def _parse_optional_int(raw: str | None, locale: SupportedLocale = DEFAULT_LOCALE) -> int | None:
     """Parse an optional form string into an integer or None."""
     if raw is None or not raw.strip():
         return None
     try:
         return int(raw.strip())
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid numeric value",
-        ) from exc
+        raise ValueError(t("web.item.invalid_numeric", locale)) from exc
 
 
-def _parse_priority(raw: str | None) -> ItemPriority:
+def _parse_priority(raw: str | None, locale: SupportedLocale = DEFAULT_LOCALE) -> ItemPriority:
     """Parse item priority string into ItemPriority enum."""
     if not raw or not raw.strip():
         return ItemPriority.MEDIUM
     try:
         return ItemPriority(raw.strip().lower())
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid priority value",
-        ) from exc
+        raise ValueError(t("web.item.invalid_priority", locale)) from exc
 
 
 @router.get("", response_class=HTMLResponse)
@@ -302,14 +389,38 @@ async def quick_add_item(
     """Create a wish item from Quick Add Bar or modal and return card with OOB resets."""
     effective_title = title.strip() if title and title.strip() else raw_input.strip()
     if not effective_title:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=t("web.item.empty_title", locale),
+        logger.warning(
+            "Quick add validation failed (empty_title) in wishlist %s",
+            wishlist_id,
+            extra={
+                "event": "ui_item_quick_add_validation_error",
+                "reason": "empty_title",
+                "status_code": status.HTTP_400_BAD_REQUEST,
+                "wishlist_id": wishlist_id,
+                "actor_id": user.telegram_id,
+                "user_id": user.telegram_id,
+            },
         )
+        return _oob_modal_notice(t("web.item.empty_title", locale), status.HTTP_400_BAD_REQUEST)
 
-    parsed_price = _parse_optional_int(price)
-    parsed_recipient_uid = _parse_optional_int(recipient_user_id)
-    parsed_priority = _parse_priority(priority)
+    try:
+        parsed_price = _parse_optional_int(price, locale)
+        parsed_recipient_uid = _parse_optional_int(recipient_user_id, locale)
+        parsed_priority = _parse_priority(priority, locale)
+    except ValueError as exc:
+        logger.warning(
+            "Quick add validation failed (parse_error) in wishlist %s",
+            wishlist_id,
+            extra={
+                "event": "ui_item_quick_add_validation_error",
+                "reason": "parse_error",
+                "status_code": status.HTTP_400_BAD_REQUEST,
+                "wishlist_id": wishlist_id,
+                "actor_id": user.telegram_id,
+                "user_id": user.telegram_id,
+            },
+        )
+        return _oob_modal_notice(str(exc), status.HTTP_400_BAD_REQUEST)
     clean_link = link.strip() if link and link.strip() else None
     clean_image = image_url.strip() if image_url and image_url.strip() else None
     clean_desc = description.strip() if description and description.strip() else None
@@ -341,21 +452,33 @@ async def quick_add_item(
 
     try:
         projected_item = await _execute(request, action)
-    except (WishlistNotFoundError, WishlistDeletedError, PermissionDeniedError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Wishlist not found",
-        ) from exc
-    except WishlistArchivedError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Wishlist is archived",
-        ) from exc
+    except (
+        WishlistNotFoundError,
+        WishlistDeletedError,
+        PermissionDeniedError,
+        WishlistArchivedError,
+    ) as exc:
+        return _modal_domain_error_response(
+            exc,
+            locale,
+            wishlist_id=wishlist_id,
+            actor_id=user.telegram_id,
+            operation="quick_add",
+        )
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
+        logger.warning(
+            "Quick add validation failed (domain_validation) in wishlist %s",
+            wishlist_id,
+            extra={
+                "event": "ui_item_quick_add_validation_error",
+                "reason": "domain_validation",
+                "status_code": status.HTTP_400_BAD_REQUEST,
+                "wishlist_id": wishlist_id,
+                "actor_id": user.telegram_id,
+                "user_id": user.telegram_id,
+            },
+        )
+        return _oob_modal_notice(str(exc), status.HTTP_400_BAD_REQUEST)
 
     logger.info(
         "Wish item %s quick-added to wishlist %s by actor %s",
@@ -428,16 +551,19 @@ async def get_new_item_modal(
 
     try:
         is_collaborative, collaborative_members = await _execute(request, action)
-    except (WishlistNotFoundError, WishlistDeletedError, PermissionDeniedError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Wishlist not found",
-        ) from exc
-    except WishlistArchivedError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Wishlist is archived",
-        ) from exc
+    except (
+        WishlistNotFoundError,
+        WishlistDeletedError,
+        PermissionDeniedError,
+        WishlistArchivedError,
+    ) as exc:
+        return _modal_domain_error_response(
+            exc,
+            locale,
+            wishlist_id=wishlist_id,
+            actor_id=user.telegram_id,
+            operation="new_item_modal",
+        )
 
     resolved_title = title.strip() if title and title.strip() else ""
     resolved_link = link.strip() if link and link.strip() else ""
@@ -537,21 +663,15 @@ async def get_edit_item_modal(
         form_data, locked_quantity, is_collaborative, collaborative_members = await _execute(
             request, action
         )
-    except (
-        WishlistNotFoundError,
-        WishlistDeletedError,
-        ItemNotFoundError,
-        PermissionDeniedError,
-    ) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Resource not found",
-        ) from exc
-    except WishlistArchivedError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Wishlist is archived",
-        ) from exc
+    except _DOMAIN_ERRORS as exc:
+        return _modal_domain_error_response(
+            exc,
+            locale,
+            wishlist_id=wishlist_id,
+            item_id=item_id,
+            actor_id=user.telegram_id,
+            operation="edit_item_modal",
+        )
 
     logger.info(
         "Item edit modal opened for item %s in wishlist %s (locked_quantity=%s)",
@@ -622,35 +742,71 @@ async def submit_edit_item(
 ) -> Response:
     """Save item edits or re-render modal with 409 Conflict if Reduction Lock is violated."""
     clean_title = title.strip()
-    if not clean_title:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=t("web.item.empty_title", locale),
-        )
-
-    parsed_price = _parse_optional_int(price)
-    parsed_recipient_uid = _parse_optional_int(recipient_user_id)
-    parsed_priority = _parse_priority(priority)
     clean_link = link.strip() if link is not None else None
     clean_desc = description.strip() if description is not None else None
     clean_image = image_url.strip() if image_url is not None else None
     clean_cat = category.strip() if category is not None else None
     clean_recip_name = recipient_name.strip() if recipient_name is not None else None
+    clean_currency = (currency or DEFAULT_CURRENCY).strip() or DEFAULT_CURRENCY
 
     submitted_form: dict[str, Any] = {
         "id": item_id,
         "title": clean_title,
         "description": clean_desc or "",
         "link": clean_link or "",
-        "price": parsed_price,
-        "currency": (currency or DEFAULT_CURRENCY).strip() or DEFAULT_CURRENCY,
+        "price": price.strip() if price and price.strip() else None,
+        "currency": clean_currency,
         "quantity": quantity,
-        "priority": parsed_priority.value,
+        "priority": (priority or "medium").strip().lower() or "medium",
         "category": clean_cat or "",
         "image_url": clean_image or "",
-        "recipient_user_id": parsed_recipient_uid,
+        "recipient_user_id": recipient_user_id.strip() if recipient_user_id else None,
         "recipient_name": clean_recip_name or "",
     }
+
+    validation_error: str | None = None
+    parsed_price: int | None = None
+    parsed_recipient_uid: int | None = None
+    parsed_priority = ItemPriority.MEDIUM
+    if not clean_title:
+        validation_error = t("web.item.empty_title", locale)
+    else:
+        try:
+            parsed_price = _parse_optional_int(price, locale)
+            parsed_recipient_uid = _parse_optional_int(recipient_user_id, locale)
+            parsed_priority = _parse_priority(priority, locale)
+        except ValueError as exc:
+            validation_error = str(exc)
+
+    if validation_error is not None:
+        logger.warning(
+            "Item edit validation failed (form) for item %s in wishlist %s",
+            item_id,
+            wishlist_id,
+            extra={
+                "event": "ui_item_edit_validation_error",
+                "stage": "form",
+                "status_code": status.HTTP_400_BAD_REQUEST,
+                "wishlist_id": wishlist_id,
+                "item_id": item_id,
+                "actor_id": user.telegram_id,
+                "user_id": user.telegram_id,
+            },
+        )
+        return _render_edit_modal_error(
+            request,
+            wishlist_id=wishlist_id,
+            form_data=submitted_form,
+            locked_quantity=0,
+            is_collaborative=False,
+            collaborative_members=[],
+            error_message=validation_error,
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    submitted_form["price"] = parsed_price
+    submitted_form["recipient_user_id"] = parsed_recipient_uid
+    submitted_form["priority"] = parsed_priority.value
 
     locked_quantity_snapshot = 0
     is_collaborative_snapshot = False
@@ -707,19 +863,14 @@ async def submit_edit_item(
                 "item_id": item_id,
             },
         )
-        return templates.TemplateResponse(
-            request=request,
-            name="partials/item_edit_modal.html",
-            context={
-                "is_edit": True,
-                "wishlist_id": wishlist_id,
-                "form": submitted_form,
-                "locked_quantity": locked_quantity_snapshot,
-                "min_quantity": max(1, locked_quantity_snapshot),
-                "is_collaborative": is_collaborative_snapshot,
-                "collaborative_members": collaborative_members_snapshot,
-                "error_message": t("web.item.edit_busy_error", locale),
-            },
+        return _render_edit_modal_error(
+            request,
+            wishlist_id=wishlist_id,
+            form_data=submitted_form,
+            locked_quantity=locked_quantity_snapshot,
+            is_collaborative=is_collaborative_snapshot,
+            collaborative_members=collaborative_members_snapshot,
+            error_message=t("web.item.edit_busy_error", locale),
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
     except CannotReduceQuantityBelowReservedError:
@@ -744,41 +895,50 @@ async def submit_edit_item(
             locale,
             count=locked_quantity_snapshot,
         )
-        return templates.TemplateResponse(
-            request=request,
-            name="partials/item_edit_modal.html",
-            context={
-                "is_edit": True,
-                "wishlist_id": wishlist_id,
-                "form": submitted_form,
-                "locked_quantity": locked_quantity_snapshot,
-                "min_quantity": max(1, locked_quantity_snapshot),
-                "is_collaborative": is_collaborative_snapshot,
-                "collaborative_members": collaborative_members_snapshot,
-                "error_message": error_msg,
-            },
+        return _render_edit_modal_error(
+            request,
+            wishlist_id=wishlist_id,
+            form_data=submitted_form,
+            locked_quantity=locked_quantity_snapshot,
+            is_collaborative=is_collaborative_snapshot,
+            collaborative_members=collaborative_members_snapshot,
+            error_message=error_msg,
             status_code=status.HTTP_409_CONFLICT,
         )
-    except (
-        WishlistNotFoundError,
-        WishlistDeletedError,
-        ItemNotFoundError,
-        PermissionDeniedError,
-    ) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Resource not found",
-        ) from exc
-    except WishlistArchivedError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Wishlist is archived",
-        ) from exc
+    except _DOMAIN_ERRORS as exc:
+        return _modal_domain_error_response(
+            exc,
+            locale,
+            wishlist_id=wishlist_id,
+            item_id=item_id,
+            actor_id=user.telegram_id,
+            operation="submit_edit_item",
+        )
     except ValueError as exc:
-        raise HTTPException(
+        logger.warning(
+            "Item edit validation failed (domain) for item %s in wishlist %s",
+            item_id,
+            wishlist_id,
+            extra={
+                "event": "ui_item_edit_validation_error",
+                "stage": "domain",
+                "status_code": status.HTTP_400_BAD_REQUEST,
+                "wishlist_id": wishlist_id,
+                "item_id": item_id,
+                "actor_id": user.telegram_id,
+                "user_id": user.telegram_id,
+            },
+        )
+        return _render_edit_modal_error(
+            request,
+            wishlist_id=wishlist_id,
+            form_data=submitted_form,
+            locked_quantity=locked_quantity_snapshot,
+            is_collaborative=is_collaborative_snapshot,
+            collaborative_members=collaborative_members_snapshot,
+            error_message=str(exc),
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
+        )
 
     has_recipient = bool(parsed_recipient_uid is not None or clean_recip_name)
     logger.info(
@@ -914,15 +1074,6 @@ async def _nothing_remaining_response(
         headers={RECEIPT_REFUSAL_HEADER: "nothing_remaining"},
     )
 
-
-# Domain errors that `_raise_http` translates: archived -> 409, all others -> 404.
-_DOMAIN_ERRORS = (
-    WishlistNotFoundError,
-    WishlistDeletedError,
-    ItemNotFoundError,
-    PermissionDeniedError,
-    WishlistArchivedError,
-)
 
 # Marker of the stale reorder 400 (read by wishlist.js); a closed value, not a receipt reason.
 REORDER_REFUSAL_HEADER = "X-Reorder-Refusal"
@@ -1066,7 +1217,14 @@ async def archive_confirm_ui(
     try:
         item, has_locked, warn_pref = await _execute(request, action)
     except _DOMAIN_ERRORS as exc:
-        _raise_http(exc)
+        return _modal_domain_error_response(
+            exc,
+            locale,
+            wishlist_id=wishlist_id,
+            item_id=item_id,
+            actor_id=user.telegram_id,
+            operation="archive_confirm",
+        )
 
     show_warning = has_locked and warn_pref
     logger.info(
@@ -1128,7 +1286,14 @@ async def archive_item_ui(
     except NothingRemainingError:
         return await _nothing_remaining_response(request, wishlist_id, user, locale)
     except _DOMAIN_ERRORS as exc:
-        _raise_http(exc)
+        return _modal_domain_error_response(
+            exc,
+            locale,
+            wishlist_id=wishlist_id,
+            item_id=item_id,
+            actor_id=user.telegram_id,
+            operation="archive_item",
+        )
 
     logger.info(
         "Item %s in wishlist %s archived via UI by actor %s",
