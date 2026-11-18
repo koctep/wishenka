@@ -17,6 +17,8 @@ from tests.receipt_support import (
     bearer,
     seed_wish,
 )
+from wishenka.auth.models import TelegramUser
+from wishenka.i18n.locale import SupportedLocale
 from wishenka.wishlists.exceptions import InventoryBusyError
 from wishenka.wishlists.service import WishlistService
 
@@ -65,11 +67,41 @@ def test_item_api_busy_response_hides_gifter(
     assert "gifter" not in response.text.lower()
 
 
+def _set_owner_locale(app: FastAPI, locale: SupportedLocale) -> None:
+    async def apply() -> None:
+        await app.state.user_store.upsert_user(
+            TelegramUser(id=OWNER_ID, first_name="Owner", language_code=locale)
+        )
+        await app.state.user_store.set_locale(OWNER_ID, locale)
+
+    asyncio.run(apply())
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected_alert"),
+    [
+        pytest.param(
+            None,
+            "The wish was busy, the edit was not saved, and it can be submitted again.",
+            id="en-default",
+        ),
+        pytest.param(
+            "ru",
+            "Желание было занято, изменения не сохранены — попробуйте отправить снова.",
+            id="ru",
+        ),
+    ],
+)
 def test_item_edit_busy_renders_submitted_fields(
-    test_app: AppEnv, monkeypatch: pytest.MonkeyPatch
+    test_app: AppEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    locale: SupportedLocale | None,
+    expected_alert: str,
 ) -> None:
     client, sessions, app = test_app
     wishlist_id, item_id = _seed(app.state.domain_service)
+    if locale is not None:
+        _set_owner_locale(app, locale)
     _make_busy(monkeypatch, app)
     path = f"/web/wishlists/{wishlist_id}/items/{item_id}/edit"
     values = {
@@ -94,9 +126,10 @@ def test_item_edit_busy_renders_submitted_fields(
     assert form is not None and form.get("hx-post") == path
     alert = soup.select_one('[role="alert"]')
     assert alert is not None
-    assert alert.get_text(strip=True) == (
-        "The wish was busy, the edit was not saved, and it can be submitted again."
-    )
+    assert alert.get_text(strip=True) == expected_alert
+    assert str(GIFTER_ID) not in response.text
+    assert "gifter" not in response.text.lower()
+    assert "дарител" not in alert.get_text(strip=True).lower()
     for name in ("title", "link", "price", "quantity", "image_url", "category"):
         field = form.select_one(f'[name="{name}"]')
         assert field is not None and field.get("value") == values[name]
