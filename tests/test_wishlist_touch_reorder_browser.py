@@ -32,7 +32,6 @@ from tests.browser_helpers import (
     reorder_ajax_calls,
     reorder_requests,
     request_item_ids,
-    retarget_touch_drag,
     settle,
     title,
     wait_gesture_active,
@@ -49,9 +48,14 @@ SeedFactory = Callable[..., Seeded]
 PageFactory = Callable[..., CdpPage]
 
 
-def _touch_page(seed_wishlist: SeedFactory, wishlist_page: PageFactory) -> tuple[Seeded, CdpPage]:
+def _touch_page(
+    seed_wishlist: SeedFactory,
+    wishlist_page: PageFactory,
+    *,
+    viewport: tuple[int, int] = (412, 800),
+) -> tuple[Seeded, CdpPage]:
     seeded = seed_wishlist(TITLES)
-    page = wishlist_page(seeded)
+    page = wishlist_page(seeded, viewport=viewport)
     page.enable_touch()
     return seeded, page
 
@@ -72,17 +76,16 @@ def test_touch_drag_handle_reorders(
     wishlist_page: PageFactory,
 ) -> None:
     """Dragging the handle onto a card shows feedback, then reorders with one correct request."""
-    seeded, page = _touch_page(seed_wishlist, wishlist_page)
+    viewport = (412, 1000) if expanded else (412, 800)
+    seeded, page = _touch_page(seed_wishlist, wishlist_page, viewport=viewport)
     ids = seeded.item_ids
     if expanded:
         page.click(title(ids[0]))
         assert_cards(page, ids, expanded={ids[0]})
     expected = [ids[index] for index in permutation]
 
-    finger = begin_touch_drag(page, ids[0], ids[2], fraction)
+    begin_touch_drag(page, ids[0], ids[2], fraction)
     wait_gesture_active(page, ids[0])
-    # The dragged expanded card collapses on activation and the cards below shift up.
-    retarget_touch_drag(page, finger, ids[2], fraction)
     indicator = "drop-after" if fraction > 0.5 else "drop-before"
     page.wait_for(
         f"target card has {indicator}",
@@ -108,18 +111,91 @@ def test_expanded_card_stays_expanded_after_cancelled_touch_drag(
     seed_wishlist: SeedFactory, wishlist_page: PageFactory
 ) -> None:
     """An expanded card dragged and cancelled stays expanded; nothing is sent."""
-    seeded, page = _touch_page(seed_wishlist, wishlist_page)
+    seeded, page = _touch_page(seed_wishlist, wishlist_page, viewport=(412, 1000))
     ids = seeded.item_ids
     page.click(title(ids[0]))
     assert_cards(page, ids, expanded={ids[0]})
 
-    finger = begin_touch_drag(page, ids[0], ids[2], LOWER_HALF)
+    begin_touch_drag(page, ids[0], ids[2], LOWER_HALF)
     wait_gesture_active(page, ids[0])
-    # Collapse of the dragged card shifts the layout; cancel over a real target.
-    retarget_touch_drag(page, finger, ids[2], LOWER_HALF)
     page.touch_cancel()
     page.touch_end()
 
+    assert_cards(page, ids, expanded={ids[0]})
+    assert_no_reorder_sent(page)
+    assert_order(page, ids, "DOM order after cancel")
+    assert_gesture_clean(page)
+    assert_clean_console(page)
+
+
+def test_expanded_card_drag_preserves_details_and_list_positions(
+    seed_wishlist: SeedFactory, wishlist_page: PageFactory
+) -> None:
+    """Dragging an expanded card keeps details visible in dimmed state without shifting siblings."""
+    seeded, page = _touch_page(seed_wishlist, wishlist_page, viewport=(412, 1000))
+    ids = seeded.item_ids
+    page.click(title(ids[0]))
+    assert_cards(page, ids, expanded={ids[0]})
+
+    def _measure_layout() -> tuple[str, dict[str, float]]:
+        raw = page.evaluate(
+            f"(() => {{"
+            f" const c0 = document.querySelector({js_str(card(ids[0]))});"
+            f" const d0 = c0.querySelector('.item-card-details');"
+            f" const c1 = document.querySelector({js_str(card(ids[1]))});"
+            f" const c2 = document.querySelector({js_str(card(ids[2]))});"
+            f" return {{"
+            f"  card0Height: c0.getBoundingClientRect().height,"
+            f"  detailsDisplay: getComputedStyle(d0).display,"
+            f"  detailsHeight: d0.getBoundingClientRect().height,"
+            f"  card0Opacity: parseFloat(getComputedStyle(c0).opacity),"
+            f"  card1Top: c1.getBoundingClientRect().top,"
+            f"  card2Top: c2.getBoundingClientRect().top"
+            f" }};"
+            f"}})()"
+        )
+        assert isinstance(raw, dict)
+        display = raw["detailsDisplay"]
+        assert isinstance(display, str)
+        nums: dict[str, float] = {}
+        for key in ("card0Height", "detailsHeight", "card0Opacity", "card1Top", "card2Top"):
+            val = raw[key]
+            assert isinstance(val, (int, float)), f"{key}={val!r}"
+            nums[key] = float(val)
+        return display, nums
+
+    before_display, before = _measure_layout()
+    assert before_display != "none", before
+    assert before["detailsHeight"] > 0, before
+
+    begin_touch_drag(page, ids[0], ids[2], LOWER_HALF)
+    wait_gesture_active(page, ids[0])
+
+    during_display, during = _measure_layout()
+    assert during_display != "none", f"details hidden during drag: {during_display}, {during}"
+    assert during["detailsHeight"] > 0, f"details collapsed during drag: {during}"
+    assert abs(during["card0Height"] - before["card0Height"]) <= 1.0, (
+        "dragged card height changed: "
+        f"before={before['card0Height']}, during={during['card0Height']}"
+    )
+    assert abs(during["card1Top"] - before["card1Top"]) <= 1.0, (
+        f"card[1] shifted vertically: before={before['card1Top']}, during={during['card1Top']}"
+    )
+    assert abs(during["card2Top"] - before["card2Top"]) <= 1.0, (
+        f"card[2] shifted vertically: before={before['card2Top']}, during={during['card2Top']}"
+    )
+    assert during["card0Opacity"] < 1.0, f"dragged card not dimmed: {during}"
+
+    page.touch_cancel()
+    page.touch_end()
+
+    _, after = _measure_layout()
+    assert abs(after["card1Top"] - before["card1Top"]) <= 1.0, (
+        f"card[1] shifted after cancel: before={before['card1Top']}, after={after['card1Top']}"
+    )
+    assert abs(after["card2Top"] - before["card2Top"]) <= 1.0, (
+        f"card[2] shifted after cancel: before={before['card2Top']}, after={after['card2Top']}"
+    )
     assert_cards(page, ids, expanded={ids[0]})
     assert_no_reorder_sent(page)
     assert_order(page, ids, "DOM order after cancel")

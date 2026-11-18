@@ -219,24 +219,6 @@ def wait_gesture_active(page: CdpPage, source_id: str) -> None:
     )
 
 
-def retarget_touch_drag(
-    page: CdpPage, finger: TouchPoint, target_id: str, y_fraction: float
-) -> TouchPoint:
-    """Re-aim the finger at the target using the layout as it is now.
-
-    Activating a drag collapses an expanded dragged card (``.is-touch-dragging`` hides its
-    details), which shifts the cards below it up; coordinates computed before the gesture may then
-    miss every card. Call this after ``wait_gesture_active`` and before ``touch_end``.
-
-    Returns:
-        The new finger position.
-    """
-    end_x, end_y = point_in(page, card(target_id), y_fraction)
-    moved: TouchPoint = (finger[0], end_x, end_y)
-    page.touch_move([moved])
-    return moved
-
-
 def wait_suppression_window_over(page: CdpPage) -> None:
     """Wait (bounded, by the page clock) until the post-gesture click suppression has expired."""
     now = float(page.evaluate("performance.now()"))

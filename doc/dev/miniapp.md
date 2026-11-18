@@ -616,11 +616,11 @@ no globals (`toggleWishCard` is no longer a global function).
     capture, animation frame). While a gesture is in progress, `dragstart` and `contextmenu` are
     cancelled with `preventDefault`.
   - **Feedback classes**: `is-touch-dragging` on the moved card (raised, translucent, shadow,
-    `pointer-events: none`, `.item-card-details` hidden with `display: none`), `drop-before` and
-    `drop-after` on the target (3 px accent line above or below), and `is-touch-reordering` on
-    both `html` and `body` (`user-select: none`, `overscroll-behavior-y: contain` on `html`). The
-    details of an expanded card are hidden by CSS only: `hidden` and `aria-expanded` do not
-    change, but the list shifts up under the finger at drag start (WISHENKA-142).
+    `pointer-events: none`), `drop-before` and `drop-after` on the target (3 px accent line above
+    or below), and `is-touch-reordering` on both `html` and `body` (`user-select: none`,
+    `overscroll-behavior-y: contain` on `html`). Expanded card details (`.item-card-details`)
+    remain visible during touch drag (`hidden` and `aria-expanded` do not change), so the card
+    keeps its height and the list does not jump at drag start (WISHENKA-142).
   - **Autoscroll**: a `requestAnimationFrame` loop scrolls the page by up to 14 px per frame when
     the pointer is within 64 px of the top or bottom window edge (`AUTOSCROLL_EDGE_PX`,
     `AUTOSCROLL_MAX_PX`), then updates the card position and the target. Speed is per frame, not

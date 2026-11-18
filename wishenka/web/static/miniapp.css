@@ -114,7 +114,6 @@ label { display: block; margin: .5rem 0; }
   pointer-events: none;
   will-change: transform;
 }
-.item-card.is-touch-dragging .item-card-details { display: none; }
 .item-card.drop-before { box-shadow: 0 -3px 0 0 #6d28d9; }
 .item-card.drop-after { box-shadow: 0 3px 0 0 #6d28d9; }
 body.is-touch-reordering { user-select: none; -webkit-user-select: none; }
