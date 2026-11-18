@@ -23,27 +23,43 @@ class CleanupStats:
     wishlists_purged: int = 0
     idempotency_records_cleaned: int = 0
     session_revocations_cleaned: int = 0
+    birthdays_purged: int = 0
+    bot_destinations_purged: int = 0
+    receipt_keys_purged: int = 0
     duration_ms: float = 0.0
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     finished_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
-async def _purge_notices(notice_store: NoticeStore, settings: Settings, now: datetime) -> None:
-    """Delete finished notice rows past retention; a failure is a WARNING, never a cycle error."""
+async def _purge_notices(
+    notice_store: NoticeStore, settings: Settings, now: datetime
+) -> tuple[int, int, int]:
+    """Delete finished notice and retention rows; a failure is a WARNING, never a cycle error."""
     threshold = now - timedelta(days=settings.receipt_notice_retention_days)
+    reminder_threshold = now - timedelta(days=settings.reminder_retention_days)
     try:
-        rows = await notice_store.purge_finished(threshold)
+        rows = await notice_store.purge_finished(
+            threshold,
+            now=now,
+            reminder_threshold=reminder_threshold,
+        )
+        retention_counts = await notice_store.purge_retention_records(
+            birthday_threshold=now - timedelta(days=settings.birthday_retention_days),
+            destination_threshold=now - timedelta(days=settings.bot_destination_retention_days),
+            receipt_key_threshold=now - timedelta(days=settings.receipt_dedup_retention_days),
+        )
     except Exception as err:
         logger.warning(
             "Purge of finished notice rows failed",
             extra={"event": "receipt_notice_purge_failed", "error_class": type(err).__name__},
         )
-        return
+        return 0, 0, 0
     if rows > 0:
         logger.info(
             "Finished notice rows purged",
             extra={"event": "receipt_notice_rows_purged", "rows": rows},
         )
+    return retention_counts
 
 
 async def run_cleanup_cycle(
@@ -67,8 +83,13 @@ async def run_cleanup_cycle(
         purged_count = await store.purge_archived_wishlists(retention_threshold)
         idempotency_cleaned = await store.cleanup_expired_idempotency_records(effective_now)
         revocations_cleaned = await store.cleanup_expired_session_revocations(effective_now)
+        birthdays_purged = 0
+        bot_destinations_purged = 0
+        receipt_keys_purged = 0
         if notice_store is not None:
-            await _purge_notices(notice_store, settings, effective_now)
+            birthdays_purged, bot_destinations_purged, receipt_keys_purged = await _purge_notices(
+                notice_store, settings, effective_now
+            )
 
         duration_sec = time.perf_counter() - start_perf
         duration_ms = duration_sec * 1000.0
@@ -89,6 +110,9 @@ async def run_cleanup_cycle(
                 "wishlists_purged": purged_count,
                 "idempotency_records_cleaned": idempotency_cleaned,
                 "session_revocations_cleaned": revocations_cleaned,
+                "birthdays_purged": birthdays_purged,
+                "bot_destinations_purged": bot_destinations_purged,
+                "receipt_keys_purged": receipt_keys_purged,
                 "duration_ms": duration_ms,
             },
         )
@@ -97,6 +121,9 @@ async def run_cleanup_cycle(
             wishlists_purged=purged_count,
             idempotency_records_cleaned=idempotency_cleaned,
             session_revocations_cleaned=revocations_cleaned,
+            birthdays_purged=birthdays_purged,
+            bot_destinations_purged=bot_destinations_purged,
+            receipt_keys_purged=receipt_keys_purged,
             duration_ms=duration_ms,
             started_at=started_at,
             finished_at=finished_at,

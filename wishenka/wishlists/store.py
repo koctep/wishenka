@@ -958,13 +958,14 @@ class WishlistStore:
             key = await conn.execute(
                 text(
                     "INSERT OR IGNORE INTO notice_receipt_keys"
-                    "(event_type,receipt_id,giver_user_id) "
-                    "VALUES (:event,:receipt,:giver)"
+                    "(event_type,receipt_id,giver_user_id,created_at) "
+                    "VALUES (:event,:receipt,:giver,:created_at)"
                 ),
                 {
                     "event": EVENT_GIFT_RECEIVED,
                     "receipt": draft.receipt.id,
                     "giver": draft.giver_user_id,
+                    "created_at": int(now.timestamp()),
                 },
             )
             if not key.rowcount:

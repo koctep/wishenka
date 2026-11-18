@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import calendar
+import logging
 import time
+from datetime import datetime
 from typing import Any
 
 from aiogram import F, Router
@@ -15,7 +17,19 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from wishenka.bot.entry import _language
 from wishenka.bot.i18n import _private_bot_user
 from wishenka.i18n import DEFAULT_LOCALE, SupportedLocale, t
+from wishenka.notices.destinations import upsert_bot_destination
 from wishenka.users.models import UserRecord
+
+logger = logging.getLogger("wishenka.bot.birthdays")
+
+
+def _now_epoch(deps: Any) -> int:
+    """Return the current Unix epoch seconds from ``deps.clock`` or wall time."""
+    clock = getattr(deps, "clock", None)
+    if callable(clock):
+        value = clock()
+        return int(value.timestamp()) if isinstance(value, datetime) else int(value)
+    return int(time.time())
 
 
 def create_birthday_router(dependencies: Any) -> Router:
@@ -39,13 +53,7 @@ def create_birthday_router(dependencies: Any) -> Router:
             finally:
                 _private_bot_user.reset(token)
         async with users.engine.begin() as conn:
-            await conn.execute(
-                text(
-                    "INSERT INTO bot_destinations(user_id,chat_id,active) VALUES (:id,:chat,1) "
-                    "ON CONFLICT(user_id) DO UPDATE SET chat_id=:chat,active=1"
-                ),
-                {"id": record.id, "chat": chat},
-            )
+            await upsert_bot_destination(conn, int(record.id), chat, _now_epoch(dependencies))
         return int(record.id)
 
     async def listing(message: Message, owner: int, lang: SupportedLocale) -> None:
@@ -142,7 +150,10 @@ def create_birthday_router(dependencies: Any) -> Router:
             await callback.answer()
             return
 
+        deleted_id: int | None = None
+
         async def change(conn: AsyncConnection) -> str:
+            nonlocal deleted_id
             if parts == ["birthday", "add"]:
                 await conn.execute(
                     text(
@@ -175,13 +186,18 @@ def create_birthday_router(dependencies: Any) -> Router:
                 return "invalid"
             if parts[1] == "d":
                 await conn.execute(
-                    text("UPDATE birthday_entries SET deleted=1, revision=revision+1 WHERE id=:id"),
-                    {"id": ident},
+                    text(
+                        "UPDATE birthday_entries "
+                        "SET deleted=1, revision=revision+1, label='', month=0, day=0, "
+                        "deleted_at=:now WHERE id=:id"
+                    ),
+                    {"id": ident, "now": _now_epoch(dependencies)},
                 )
                 await conn.execute(
                     text("DELETE FROM birthday_input WHERE owner_id=:owner AND entry_id=:id"),
                     {"owner": owner, "id": ident},
                 )
+                deleted_id = ident
                 return "deleted"
             await conn.execute(
                 text(
@@ -202,6 +218,14 @@ def create_birthday_router(dependencies: Any) -> Router:
         if outcome == "prompt":
             await callback.message.answer(t("bot.birthdays.enter_name", lang))
         elif outcome == "deleted":
+            logger.info(
+                "Birthday entry anonymized and soft-deleted",
+                extra={
+                    "event": "birthday_deleted_anonymized",
+                    "owner_id": owner,
+                    "birthday_id": deleted_id,
+                },
+            )
             await listing(callback.message, owner, lang)
         else:
             await callback.message.answer(t("bot.birthdays.action_unavailable", lang))

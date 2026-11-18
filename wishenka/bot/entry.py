@@ -27,6 +27,7 @@ from wishenka.i18n import (
     resolve_telegram_locale,
     t,
 )
+from wishenka.notices.destinations import upsert_bot_destination
 from wishenka.users.models import UserRecord
 from wishenka.users.store import UserStore
 
@@ -131,13 +132,7 @@ async def _ensure_private_destination(
         finally:
             _private_bot_user.reset(token)
     async with users.engine.begin() as conn:
-        await conn.execute(
-            text(
-                "INSERT INTO bot_destinations(user_id,chat_id,active) VALUES (:id,:chat,1) "
-                "ON CONFLICT(user_id) DO UPDATE SET chat_id=:chat,active=1"
-            ),
-            {"id": record.id, "chat": message.chat.id},
-        )
+        await upsert_bot_destination(conn, int(record.id), message.chat.id)
     store = getattr(dependencies, "wishlist_store", None)
     if store is not None:
         from wishenka.bot.support import clear_support_session

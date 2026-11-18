@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from wishenka.bot.i18n import _private_bot_user
 from wishenka.i18n import DEFAULT_LOCALE, SupportedLocale, t
+from wishenka.notices.destinations import upsert_bot_destination
 from wishenka.users.models import UserRecord
 from wishenka.wishlists.store import WishlistStore
 
@@ -409,12 +410,8 @@ def create_support_router(dependencies: Any) -> Router:
             finally:
                 _private_bot_user.reset(token)
         async with users.engine.begin() as conn:
-            await conn.execute(
-                text(
-                    "INSERT INTO bot_destinations(user_id,chat_id,active) VALUES (:id,:chat,1) "
-                    "ON CONFLICT(user_id) DO UPDATE SET chat_id=:chat,active=1"
-                ),
-                {"id": record.id, "chat": chat},
+            await upsert_bot_destination(
+                conn, int(record.id), chat, int(_now(dependencies).timestamp())
             )
         return record
 

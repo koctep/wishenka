@@ -29,6 +29,7 @@ from wishenka.bot.entry import _language, _url
 from wishenka.i18n import DEFAULT_LOCALE, SupportedLocale, t
 from wishenka.items.classifier import UniversalInputClassifier
 from wishenka.items.schemas import CreateItemDTO
+from wishenka.notices.destinations import upsert_bot_destination
 from wishenka.users.models import UserRecord
 from wishenka.wishlists.policy import WishlistAccessPolicy
 from wishenka.wishlists.store import WishlistStore
@@ -282,12 +283,8 @@ def create_capture_router(deps: Any) -> Router:
                 finally:
                     _preview_active.reset(private_context)
             async with users.engine.begin() as conn:
-                await conn.execute(
-                    text(
-                        "INSERT INTO bot_destinations(user_id,chat_id,active) VALUES (:id,:chat,1) "
-                        "ON CONFLICT(user_id) DO UPDATE SET chat_id=:chat,active=1"
-                    ),
-                    {"id": record.id, "chat": message.chat.id},
+                await upsert_bot_destination(
+                    conn, int(record.id), message.chat.id, int(_now(deps).timestamp())
                 )
         now = _now(deps)
         chat = message.chat.id

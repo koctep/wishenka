@@ -68,6 +68,7 @@ Private /birthdays -------- birthday_entries /
 | `EventProducer` / `SharedEvent` | `wishenka/notices/events.py` | Enqueues content-free shared wishlist and opt-in reservation confirmation intents inside the domain transaction |
 | `NotificationPreferencesStore` | `wishenka/notices/preferences.py` | Manages global (`user_notification_settings`) and per-wishlist (`wl_list_notification_settings`) notification preferences, access checks, and effective preference resolution |
 | `NoticeStore` / `ClaimedNotice` | `wishenka/notices/store.py` | Fenced claiming, pre-send eligibility refresh, settlement, and unified retention purge for `notification_outbox` and `reminder_outbox` |
+| `upsert_bot_destination` / `deactivate_bot_destination` | `wishenka/notices/destinations.py` | Shared `bot_destinations` lifecycle helpers that maintain `active` and `updated_at` across bot and notice call sites |
 | `claim_reminder` / `refresh_reminder` / `settle_reminder` | `wishenka/notices/reminders.py` | Fenced claiming, live authorization/preference refresh, localized rendering, and settlement for `reminder_outbox` |
 | `ReminderScheduler` / `utc_event_date` | `wishenka/notices/scheduler.py` | Bounded, cursor-driven UTC scanner for dated wishlists and private birthday entries |
 | `reserve_permit` / `block_until` | `wishenka/notices/rate.py` | Cross-process SQLite rate limiter and `RetryAfter` throttle state in `notice_rate_slots` |
@@ -79,7 +80,7 @@ Private /birthdays -------- birthday_entries /
 
 ### Database Schema and Migrations
 
-Two Alembic revisions extend the wishlist database schema (see [`doc/dev/migrations.md`](migrations.md)):
+Three Alembic revisions extend the wishlist database schema for notifications, reminders, and retention (see [`doc/dev/migrations.md`](migrations.md)):
 
 1. **`add_birthday_reminders`** (down revision `add_bot_capture_order`):
    - `bot_destinations(user_id PRIMARY KEY, chat_id, active DEFAULT 1)`: records verified private
@@ -103,6 +104,16 @@ Two Alembic revisions extend the wishlist database schema (see [`doc/dev/migrati
      and populates it from existing `notification_outbox` rows so terminal-row purging in
      `notification_outbox` never allows a duplicate receipt notice for the same `(event_type,
      receipt_id, giver_user_id)`.
+3. **`add_notice_retention_columns`** (down revision `add_deleted_session_revocations`):
+   - Adds `deleted_at INTEGER` and index `idx_birthday_entries_deleted_at(deleted, deleted_at)` to
+     `birthday_entries`; anonymizes legacy `deleted = 1` rows (`label = ''`, `month = 0`,
+     `day = 0`, `deleted_at = COALESCE(deleted_at, now)`).
+   - Adds `updated_at INTEGER` and index `idx_bot_destinations_active_updated(active, updated_at)` to
+     `bot_destinations`; backfills `updated_at = now` where `NULL`.
+   - Adds `created_at INTEGER NOT NULL DEFAULT 0` and index
+     `idx_notice_receipt_keys_created(created_at)` to `notice_receipt_keys`; backfills `created_at`
+     from matching `notification_outbox.created_at` rows (or `now` if the outbox row was already
+     purged).
 
 ### Surprise Protection and Live Eligibility Rules
 
@@ -232,8 +243,9 @@ Implemented in `wishenka/bot/birthdays.py` (`create_birthday_router`), mounted b
   - Creating a new entry enforces a cap of 20 active entries per owner. Editing checks `(id,
     owner_id, revision, deleted = 0)` and increments `revision` when `label`, `month`, or `day`
     changed, then deletes the `birthday_input` row.
-  - Deleting an entry sets `deleted = 1, revision = revision + 1` and removes any pending
-    `birthday_input` for that entry.
+  - Deleting an entry immediately anonymizes PII in `birthday_entries` by setting
+    `deleted = 1, revision = revision + 1, label = '', month = 0, day = 0, deleted_at = :now`,
+    and removes any pending `birthday_input` for that entry.
   - `/cancel` deletes the caller's `birthday_input` row without modifying committed
     `birthday_entries`. Expired `birthday_input` rows (up to 100 per pass) are also purged by
     `cleanup_drafts` in `wishenka/bot/capture.py`.
@@ -309,17 +321,38 @@ Implemented in `wishenka/bot/birthdays.py` (`create_birthday_router`), mounted b
 
 ### Retention Cleanup
 
-`NoticeStore.purge_finished(threshold)` (called during `run_cleanup_cycle` with
-`threshold = now - receipt_notice_retention_days * 86400`) purges terminal (`sent`, `skipped`,
-`failed`) rows from both outbox queues inside a single `BEGIN IMMEDIATE` transaction:
+`run_cleanup_cycle` (`wishenka/wishlists/cleanup.py`) invokes two `NoticeStore` cleanup methods:
 
-- **`notification_outbox`:** deletes terminal rows with `updated_at <= :threshold_iso`, while
-  preserving `notice_receipt_keys` so purged receipts can never be re-enqueued as duplicates.
-- **`reminder_outbox`:** deletes terminal rows with `next_attempt_at <= :threshold_epoch`. Both
-  `claim_reminder` (when skipping) and `NoticeWorker.run_once` (on terminal settlements `sent`,
-  `skipped`, and `failed`) stamp `next_attempt_at = now` (`delay = 0`) so retention age is
-  measured from the settlement timestamp.
-- **Preserved rows:** `pending`, `sending`, and `uncertain` rows in both tables are never purged.
+1. **`NoticeStore.purge_finished(threshold, *, now=None, reminder_threshold=None)`** purges terminal
+   (`sent`, `skipped`, `failed`) rows from both outbox queues inside a single `BEGIN IMMEDIATE`
+   transaction:
+   - **`notification_outbox`:** deletes terminal rows with `updated_at <= threshold`
+     (`now - receipt_notice_retention_days * 86400`), while preserving `notice_receipt_keys` so
+     purged receipts cannot be re-enqueued as duplicates.
+   - **`reminder_outbox`:** deletes terminal rows with `next_attempt_at <= reminder_cutoff`
+     (`now - reminder_retention_days * 86400`) that satisfy the **active-cycle guard**:
+     `kind NOT IN ('list', 'birthday') OR event_date < today_utc`. Keeping terminal `list` and
+     `birthday` reminders until `event_date < today_utc` preserves `occurrence_key` deduplication
+     (`INSERT OR IGNORE`) for the current/upcoming occasion cycle. Both `claim_reminder` (when
+     skipping) and `NoticeWorker.run_once` (on terminal settlements `sent`, `skipped`, and `failed`)
+     stamp `next_attempt_at = now` (`delay = 0`) so retention age is measured from the settlement
+     timestamp.
+   - **Preserved rows:** `pending`, `sending`, and `uncertain` rows in both tables are never purged.
+
+2. **`NoticeStore.purge_retention_records(*, birthday_threshold, destination_threshold, receipt_key_threshold)`**
+   physically deletes expired retention records inside a single `BEGIN IMMEDIATE` transaction:
+   - **`birthday_entries`:** deletes `deleted = 1` rows with
+     `deleted_at IS NULL OR deleted_at <= birthday_cutoff` (`now - birthday_retention_days * 86400`)
+     subject to the **`uncertain` / active reminder guard**: rows referenced by a `reminder_outbox`
+     row in `status IN ('pending', 'sending', 'uncertain')` are preserved until those reminders
+     settle or are resolved by an operator.
+   - **`bot_destinations`:** deletes `active = 0` rows with
+     `updated_at IS NULL OR updated_at <= destination_cutoff`
+     (`now - bot_destination_retention_days * 86400`). Call sites maintain `updated_at` via
+     `upsert_bot_destination` and `deactivate_bot_destination` (`wishenka/notices/destinations.py`).
+   - **`notice_receipt_keys`:** deletes rows with `created_at <= receipt_key_cutoff`
+     (`now - receipt_dedup_retention_days * 86400`) that have no matching row in
+     `notification_outbox` (preserving dedup protection while any outbox row still exists).
 
 ## API / Usage
 
@@ -410,7 +443,11 @@ All settings are defined on `wishenka.config.Settings` (`WISHENKA_` environment 
 | `receipt_notice_request_timeout_seconds` | `WISHENKA_RECEIPT_NOTICE_REQUEST_TIMEOUT_SECONDS` | `30.0` | `> 0`; HTTP request timeout (worker awaits `timeout + 5` seconds) |
 | `receipt_notice_claim_lease_seconds` | `WISHENKA_RECEIPT_NOTICE_CLAIM_LEASE_SECONDS` | `300` | `>= request_timeout_seconds + 30`; age after which a `sending` row becomes `uncertain` |
 | `receipt_notice_summary_window_seconds` | `WISHENKA_RECEIPT_NOTICE_SUMMARY_WINDOW_SECONDS` | `300` | `>= 60`; fixed wall-clock aggregation window for INFO summary logs |
-| `receipt_notice_retention_days` | `WISHENKA_RECEIPT_NOTICE_RETENTION_DAYS` | `30` | `>= 1`; retention period before `purge_finished` deletes terminal rows in `notification_outbox` and `reminder_outbox` |
+| `receipt_notice_retention_days` | `WISHENKA_RECEIPT_NOTICE_RETENTION_DAYS` | `30` | `>= 1`; retention period before `purge_finished` deletes terminal rows in `notification_outbox` |
+| `birthday_retention_days` | `WISHENKA_BIRTHDAY_RETENTION_DAYS` | `30` | `>= 1`; retention period before `purge_retention_records` deletes anonymized `deleted = 1` rows in `birthday_entries` |
+| `bot_destination_retention_days` | `WISHENKA_BOT_DESTINATION_RETENTION_DAYS` | `30` | `>= 1`; retention period before `purge_retention_records` deletes inactive (`active = 0`) rows in `bot_destinations` |
+| `reminder_retention_days` | `WISHENKA_REMINDER_RETENTION_DAYS` | `30` | `>= 1`; retention period before `purge_finished` deletes terminal rows in `reminder_outbox` (subject to active-cycle guard) |
+| `receipt_dedup_retention_days` | `WISHENKA_RECEIPT_DEDUP_RETENTION_DAYS` | `30` | `>= 1`; retention period before `purge_retention_records` deletes `notice_receipt_keys` rows without an active outbox row |
 | `notice_global_per_second` | `WISHENKA_NOTICE_GLOBAL_PER_SECOND` | `20` | `1..30`; global send limit per second across all worker processes |
 | `notice_chat_interval_seconds` | `WISHENKA_NOTICE_CHAT_INTERVAL_SECONDS` | `1` | `>= 1`; minimum interval in seconds between sends to the same `chat_id` |
 | `notice_reminder_lead_days` | `WISHENKA_NOTICE_REMINDER_LEAD_DAYS` | `(7,)` | Non-empty tuple of positive integers (`> 0`); lead days in UTC before an occasion |
@@ -425,6 +462,7 @@ labels or dates, wish/list titles, capability links, bot tokens, or raw exceptio
 | `receipt_notice_window_summary` | INFO | `wishenka.wishlists.notices` | `window_seconds`, `sent`, `retried`, `failed_terminal`, `uncertain` |
 | `service_delivery_window_summary` | INFO | `wishenka.wishlists.notices` | `window_seconds`, `sent`, `retried`, `failed_terminal`, `uncertain`, `skipped` |
 | `notice_outbox_purged` | INFO | `wishenka.wishlists.notices` | `receipt_purged`, `reminder_purged`, `total_purged` (emitted only when rows are deleted) |
+| `notice_retention_records_purged` | INFO | `wishenka.wishlists.notices` | `birthdays_purged`, `destinations_purged`, `receipt_keys_purged` (emitted only when rows are deleted) |
 | `receipt_notice_worker_error` | ERROR | `wishenka.wishlists.notices` | `error_class` (logged once per consecutive worker failure streak) |
 | `reminder_scheduler_error` | ERROR | `wishenka.wishlists.notices` | `error_class` (logged once per consecutive scheduler failure streak; does not block queue delivery) |
 | `reminder_scan_completed` | DEBUG | `wishenka.notices.scheduler` | `lists_scanned`, `birthdays_scanned`, `intents_created` (emitted only on non-empty scans) |
@@ -438,8 +476,9 @@ labels or dates, wish/list titles, capability links, bot tokens, or raw exceptio
 | `receipt_notice_skipped_ineligible` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `attempt` |
 | `receipt_notice_uncertain` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `attempt`, `error_class` (when a receipt send is ambiguous or lease expires) |
 
-See [`ai-tasks/WISHENKA-29/50-observability.md`](../../ai-tasks/WISHENKA-29/50-observability.md)
-and [`ai-tasks/WISHENKA-60/50-observability.md`](../../ai-tasks/WISHENKA-60/50-observability.md) for
+See [`ai-tasks/WISHENKA-29/50-observability.md`](../../ai-tasks/WISHENKA-29/50-observability.md),
+[`ai-tasks/WISHENKA-60/50-observability.md`](../../ai-tasks/WISHENKA-60/50-observability.md), and
+[`ai-tasks/WISHENKA-181/50-observability.md`](../../ai-tasks/WISHENKA-181/50-observability.md) for
 the complete observability specifications.
 
 ## Troubleshooting
@@ -485,7 +524,7 @@ the complete observability specifications.
 Run the focused notification, reminder, upgrade, operator, and observability test suites with:
 
 ```bash
-make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_notice_delivery_repro.py tests/test_notice_wishlist_events.py tests/test_notice_upgrade.py tests/test_notice_operator.py tests/test_reminder_scan_paging.py tests/test_service_notice_observability.py tests/test_receipt_notices.py tests/test_receipt_observability.py tests/test_wishenka_60_repro.py tests/test_wishenka_60_observability.py tests/test_wishenka_34_repro.py tests/test_wishenka_34_preferences.py'
+make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_notice_delivery_repro.py tests/test_notice_wishlist_events.py tests/test_notice_upgrade.py tests/test_notice_operator.py tests/test_reminder_scan_paging.py tests/test_service_notice_observability.py tests/test_receipt_notices.py tests/test_receipt_observability.py tests/test_wishenka_60_repro.py tests/test_wishenka_60_observability.py tests/test_wishenka_34_repro.py tests/test_wishenka_34_preferences.py tests/test_wishenka_181_repro.py tests/test_notice_retention.py'
 ```
 
 ## Known Limitations and Follow-up Tasks
@@ -497,9 +536,6 @@ make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_notice_delivery_repro.py tests/t
   live-eligibility SQL in `claim_reminder` and `refresh_reminder` into a shared helper, and move
   `update_wishlist` / `set_role` domain mutations from `wishenka/web/routes/wishlists.py` into
   public `WishlistService` methods.
-- **[WISHENKA-181](https://pypost.atlassian.net/browse/WISHENKA-181):** Physical retention and
-  purge policy for soft-deleted `birthday_entries`, inactive `bot_destinations`, and
-  `notice_receipt_keys`.
 - **[WISHENKA-35](https://pypost.atlassian.net/browse/WISHENKA-35):** Account deletion and
   personal-data erasure must include `bot_destinations`, `birthday_entries`, `birthday_input`,
   `reminder_outbox`, `notice_receipt_keys`, and chat-scoped `notice_rate_slots`.

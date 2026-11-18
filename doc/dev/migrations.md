@@ -52,8 +52,14 @@ Revision chain (linear):
     and creates `notice_receipt_keys` (see [notifications.md](notifications.md)).
 11. `add_support_channel` - tables `support_input` and `support_tickets` with index
     `idx_support_tickets_owner_time` (see [bot-support.md](bot-support.md)).
-12. `add_idempotency_records` (head) - table `wl_idempotency_records` and index
+12. `add_idempotency_records` - table `wl_idempotency_records` and index
     `idx_wl_idempotency_expires_at` (see [idempotency.md](idempotency.md)).
+13. `add_user_locale` - adds `locale` and `locale_source` to `users` (see [i18n.md](i18n.md)).
+14. `add_deleted_session_revocations` - table `deleted_session_revocations` (see [users.md](users.md)).
+15. `add_notice_retention_columns` (head) - adds `birthday_entries.deleted_at`,
+    `bot_destinations.updated_at`, and `notice_receipt_keys.created_at` with their retention
+    indexes, anonymizes legacy `deleted = 1` birthday rows, and backfills timestamps (see
+    [notifications.md](notifications.md)).
 
 Details of revisions 5 and 6 are in [gift-receipt.md](gift-receipt.md), revisions 7 and 8 in
 [bot-scenarios.md](bot-scenarios.md), revisions 9 and 10 in [notifications.md](notifications.md),
@@ -272,6 +278,7 @@ Current state of the `downgrade()` functions:
 
 | Revision | `downgrade()` |
 | --- | --- |
+| `add_notice_retention_columns` | Works: drops `idx_notice_receipt_keys_created`, `notice_receipt_keys.created_at`, `idx_bot_destinations_active_updated`, `bot_destinations.updated_at`, `idx_birthday_entries_deleted_at`, and `birthday_entries.deleted_at` |
 | `add_support_channel` | Works: drops `idx_support_tickets_owner_time`, `support_tickets`, and `support_input` |
 | `add_notice_uncertain` | Works: drops `requires_membership` from `reminder_outbox`, drops `notice_receipt_keys`, and rebuilds `notification_outbox` (mapping `uncertain` rows to `failed`) |
 | `add_birthday_reminders` | Works: drops `notice_scheduler_cursors`, `notice_rate_slots`, `reminder_outbox`, `birthday_input`, `birthday_entries`, and `bot_destinations` |

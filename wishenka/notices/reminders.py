@@ -14,6 +14,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from wishenka.i18n import DEFAULT_LOCALE, SUPPORTED_LOCALES, resolve_telegram_locale, t
+from wishenka.notices.destinations import deactivate_bot_destination
 from wishenka.notices.rate import block_until, reserve_permit
 from wishenka.notices.scheduler import utc_event_date
 from wishenka.wishlists.store import WishlistStore
@@ -512,10 +513,7 @@ async def settle_reminder(
             {"status": status, "next": next_attempt, "id": claim.ident, "token": claim.claim_token},
         )
         if result.rowcount and error_class in ("TelegramForbiddenError", "TelegramNotFound"):
-            await conn.execute(
-                text("UPDATE bot_destinations SET active=0 WHERE chat_id=:chat"),
-                {"chat": claim.chat_id},
-            )
+            await deactivate_bot_destination(conn, claim.chat_id)
         if result.rowcount and throttle_until is not None:
             await block_until(conn, throttle_until)
         return bool(result.rowcount)

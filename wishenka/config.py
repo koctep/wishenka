@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     receipt_notice_claim_lease_seconds: int = 300
     receipt_notice_summary_window_seconds: int = Field(default=300, ge=60)
     receipt_notice_retention_days: int = Field(default=30, ge=1)
+    birthday_retention_days: int = Field(default=30, ge=1)
+    bot_destination_retention_days: int = Field(default=30, ge=1)
+    reminder_retention_days: int = Field(default=30, ge=1)
+    receipt_dedup_retention_days: int = Field(default=30, ge=1)
     notice_global_per_second: int = Field(default=20, ge=1, le=30)
     notice_chat_interval_seconds: int = Field(default=1, ge=1)
     notice_reminder_lead_days: tuple[int, ...] = (7,)

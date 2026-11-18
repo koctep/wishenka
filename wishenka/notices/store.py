@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from wishenka.config import Settings
 from wishenka.i18n import DEFAULT_LOCALE, SUPPORTED_LOCALES
+from wishenka.notices.destinations import deactivate_bot_destination
 from wishenka.notices.models import (
     SKIP_TARGET_GONE,
     STATUS_FAILED,
@@ -261,10 +262,7 @@ class NoticeStore:
                 },
             )
             if result.rowcount and error_class in ("TelegramForbiddenError", "TelegramNotFound"):
-                await conn.execute(
-                    text("UPDATE bot_destinations SET active=0 WHERE chat_id=:chat"),
-                    {"chat": claim.giver_user_id},
-                )
+                await deactivate_bot_destination(conn, claim.giver_user_id, now)
             if result.rowcount and throttle_until is not None:
                 await block_until(conn, throttle_until)
             return bool(result.rowcount)
@@ -277,8 +275,17 @@ class NoticeStore:
             )
         return changed
 
-    async def purge_finished(self, threshold: datetime) -> int:
-        """Delete ``sent``, ``skipped`` and ``failed`` rows last updated at or before threshold."""
+    async def purge_finished(
+        self,
+        threshold: datetime,
+        *,
+        now: datetime | None = None,
+        reminder_threshold: datetime | None = None,
+    ) -> int:
+        """Delete terminal outbox rows past retention while preserving active-cycle reminders."""
+        effective_now = now or datetime.now(UTC)
+        today_utc = effective_now.astimezone(UTC).date().isoformat()
+        reminder_cutoff = int((reminder_threshold or threshold).timestamp())
 
         async def work(conn: AsyncConnection) -> tuple[int, int]:
             receipt_result = await conn.execute(
@@ -291,9 +298,10 @@ class NoticeStore:
             reminder_result = await conn.execute(
                 text(
                     "DELETE FROM reminder_outbox WHERE next_attempt_at <= :threshold_epoch "
-                    "AND status IN ('sent', 'skipped', 'failed')"
+                    "AND status IN ('sent', 'skipped', 'failed') "
+                    "AND (kind NOT IN ('list', 'birthday') OR event_date < :today_utc)"
                 ),
-                {"threshold_epoch": int(threshold.timestamp())},
+                {"threshold_epoch": reminder_cutoff, "today_utc": today_utc},
             )
             return int(receipt_result.rowcount), int(reminder_result.rowcount)
 
@@ -312,6 +320,77 @@ class NoticeStore:
                 },
             )
         return total
+
+    async def purge_retention_records(
+        self,
+        *,
+        birthday_threshold: datetime,
+        destination_threshold: datetime,
+        receipt_key_threshold: datetime,
+    ) -> tuple[int, int, int]:
+        """Physically delete expired deleted birthdays, inactive destinations, and dedup keys."""
+        birthday_cutoff = int(birthday_threshold.timestamp())
+        destination_cutoff = int(destination_threshold.timestamp())
+        receipt_key_cutoff = int(receipt_key_threshold.timestamp())
+
+        async def work(conn: AsyncConnection) -> tuple[int, int, int]:
+            birthday_result = await conn.execute(
+                text(
+                    "DELETE FROM birthday_entries "
+                    "WHERE deleted = 1 "
+                    "AND (deleted_at IS NULL OR deleted_at <= :birthday_cutoff) "
+                    "AND NOT EXISTS ("
+                    "    SELECT 1 FROM reminder_outbox r "
+                    "    WHERE r.birthday_id = birthday_entries.id "
+                    "      AND r.status IN ('pending', 'sending', 'uncertain')"
+                    ")"
+                ),
+                {"birthday_cutoff": birthday_cutoff},
+            )
+            destination_result = await conn.execute(
+                text(
+                    "DELETE FROM bot_destinations "
+                    "WHERE active = 0 "
+                    "AND (updated_at IS NULL OR updated_at <= :destination_cutoff)"
+                ),
+                {"destination_cutoff": destination_cutoff},
+            )
+            receipt_key_result = await conn.execute(
+                text(
+                    "DELETE FROM notice_receipt_keys "
+                    "WHERE created_at <= :receipt_key_cutoff "
+                    "AND NOT EXISTS ("
+                    "    SELECT 1 FROM notification_outbox o "
+                    "    WHERE o.event_type = notice_receipt_keys.event_type "
+                    "      AND o.receipt_id = notice_receipt_keys.receipt_id "
+                    "      AND o.giver_user_id = notice_receipt_keys.giver_user_id"
+                    ")"
+                ),
+                {"receipt_key_cutoff": receipt_key_cutoff},
+            )
+            return (
+                int(birthday_result.rowcount),
+                int(destination_result.rowcount),
+                int(receipt_key_result.rowcount),
+            )
+
+        birthdays_purged, destinations_purged, receipt_keys_purged = await self._store.transaction(
+            work
+        )
+        if birthdays_purged or destinations_purged or receipt_keys_purged:
+            logger.info(
+                "Purged retention records: birthdays=%d destinations=%d receipt_keys=%d",
+                birthdays_purged,
+                destinations_purged,
+                receipt_keys_purged,
+                extra={
+                    "event": "notice_retention_records_purged",
+                    "birthdays_purged": birthdays_purged,
+                    "destinations_purged": destinations_purged,
+                    "receipt_keys_purged": receipt_keys_purged,
+                },
+            )
+        return birthdays_purged, destinations_purged, receipt_keys_purged
 
     async def _settle_stale(self, conn: AsyncConnection, row: RowMapping, now: int) -> _Event:
         """Apply the ambiguous transition to a dead ``sending`` row; it is never sent now."""

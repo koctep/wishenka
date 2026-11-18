@@ -1217,8 +1217,9 @@ regular web request handling.
 |  3. store.purge_archived_wishlists(cutoff) -> permanently cascades soft-deleted lists   |
 |  4. store.cleanup_expired_idempotency_records(now) -> purges expired idempotency keys   |
 |  5. store.cleanup_expired_session_revocations(now) -> purges expired revocation markers |
-|  6. NoticeStore.purge_finished(now - receipt_notice_retention_days) (notice rows)       |
-|  7. Captures execution duration and returns CleanupStats(duration_ms, ...)              |
+|  6. NoticeStore.purge_finished(now - receipt_notice_retention_days, reminder_threshold=...)  |
+|  7. NoticeStore.purge_retention_records(...) -> deleted birthdays, destinations, dedup keys|
+|  8. Captures execution duration and returns CleanupStats(duration_ms, ...)              |
 +-----------------------------------------------------------------------------------------+
 ```
 
@@ -1230,6 +1231,9 @@ Dataclass capturing operational metrics for a single execution cycle:
 - `wishlists_purged: int`: Count of soft-deleted wishlists permanently removed past retention.
 - `idempotency_records_cleaned: int`: Count of expired `wl_idempotency_records` rows removed.
 - `session_revocations_cleaned: int`: Count of expired `deleted_session_revocations` markers purged (`AccountDeletionService` / `WISHENKA-35` — see [users.md](users.md)).
+- `birthdays_purged: int`: Count of anonymized `deleted = 1` `birthday_entries` rows physically deleted past `birthday_retention_days` (with no pending/sending/uncertain reminders).
+- `bot_destinations_purged: int`: Count of inactive (`active = 0`) `bot_destinations` rows physically deleted past `bot_destination_retention_days`.
+- `receipt_keys_purged: int`: Count of `notice_receipt_keys` rows physically deleted past `receipt_dedup_retention_days` (with no remaining `notification_outbox` row).
 - `duration_ms: float`: Execution duration of the cycle in milliseconds.
 - `started_at: datetime`: UTC timestamp when the cycle began.
 - `finished_at: datetime`: UTC timestamp when the cycle completed.
@@ -1246,8 +1250,11 @@ async def run_cleanup_cycle(
 - Performs a complete cleanup cycle: revokes expired tokens and purges deleted wishlists older
   than `settings.wishlist_retention_days`. When `notice_store` is given (the application always
   passes it) it also deletes finished `notification_outbox` rows older than
-  `settings.receipt_notice_retention_days`; a failure there is a WARNING
-  `receipt_notice_purge_failed` and does not fail the cycle.
+  `settings.receipt_notice_retention_days`, finished `reminder_outbox` rows older than
+  `settings.reminder_retention_days` (preserving active-cycle `list`/`birthday` reminders), and
+  expired retention records (`birthday_entries`, `bot_destinations`, `notice_receipt_keys`) via
+  `NoticeStore.purge_retention_records`; a failure there is a WARNING `receipt_notice_purge_failed`
+  and does not fail the cycle.
 - Traps operational exceptions gracefully to prevent background loop termination, logging
   `background_cleanup_failed` with `exc_info=True`.
 - Emits structured audit log `background_cleanup_completed` on success.
@@ -1359,7 +1366,7 @@ Settings in `wishenka.config.Settings` (prefixed with `WISHENKA_` in environment
 | `wishlist_repo_mutation` | `INFO` | Repo mutation | `entity`, `operation`, `count` |
 | `background_worker_started` | `INFO` | Worker loop started | `interval_seconds` |
 | `background_worker_stopped` | `INFO` | Worker loop stopped | None |
-| `background_cleanup_completed` | `INFO` | Cleanup ok | `expired_tokens_cleaned`, `wishlists_purged`, `idempotency_records_cleaned`, `session_revocations_cleaned`, `duration_ms` |
+| `background_cleanup_completed` | `INFO` | Cleanup ok | `expired_tokens_cleaned`, `wishlists_purged`, `idempotency_records_cleaned`, `session_revocations_cleaned`, `birthdays_purged`, `bot_destinations_purged`, `receipt_keys_purged`, `duration_ms` |
 | `background_cleanup_failed` | `ERROR` | Cleanup failed | `error`, `duration_ms` |
 | `session_revocations_purged` | `INFO` | Expired revocations purged | `purged_count` |
 | `account_deleted` | `INFO` | Account deleted (`AccountDeletionService`) | `subject_hash_prefix`, `deleted_lists`, `transferred_lists`, `cancelled_reservations`, `anonymized_items`, `duration_ms` |
