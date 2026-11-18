@@ -69,7 +69,8 @@ def _act(env: AppEnv, wishlist_id: int, item_id: int, reservation_id: int, actio
 def _rows(env: AppEnv, url: str = _CABINET) -> dict[str, Tag]:
     """Cabinet rows of the giver keyed by wish title."""
     client, sessions, _app = env
-    response = client.get(url, headers=bearer(sessions, GIFTER_ID, "Greta"))
+    headers = bearer(sessions, GIFTER_ID, "Greta") | {"Accept-Language": "ru"}
+    response = client.get(url, headers=headers)
     assert response.status_code == 200, response.text
     soup = parse(response.text)
     return {

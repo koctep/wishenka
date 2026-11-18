@@ -86,7 +86,7 @@ def make_user(telegram_id: int, first_name: str) -> AuthenticatedUser:
 def auth_header(sessions: SessionTokenService, user_id: int, name: str) -> dict[str, str]:
     """Build an Authorization header for a session token."""
     token = sessions.create_token(user_id, name)
-    return {"Authorization": f"Bearer {token}"}
+    return {"Authorization": f"Bearer {token}", "Accept-Language": "ru"}
 
 
 def reservations_url(wishlist_id: int, item_id: int) -> str:
@@ -217,7 +217,8 @@ def share_html(
     headers: dict[str, str] | None = None,
 ) -> str:
     """Return the public share page."""
-    response = client.get(f"/share/{public_token}", headers=headers)
+    effective_headers = {"Accept-Language": "ru"} if headers is None else headers
+    response = client.get(f"/share/{public_token}", headers=effective_headers)
     assert response.status_code == 200, response.text
     return str(response.text)
 

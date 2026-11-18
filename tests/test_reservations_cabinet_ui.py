@@ -45,7 +45,7 @@ _BOOKED = "Забронировано"
 _BOUGHT = "Куплено"
 _BUSY_SENTENCE = "Желание занято, бронь не изменилась. Повторите попытку."
 _ACTION_LABELS = ("Изменить", "Отменить бронь", _BOUGHT, "Вернуть в бронь")
-_EVENT_DAY = "2026-03-15"
+_EVENT_DAY = "15.03.2026"
 _EVENT_TITLE = "Пикник"
 
 
@@ -78,7 +78,7 @@ def make_user(telegram_id: int, first_name: str) -> AuthenticatedUser:
 def auth_header(sessions: SessionTokenService, user_id: int, name: str) -> dict[str, str]:
     """Build an Authorization header for a session token."""
     token = sessions.create_token(user_id, name)
-    return {"Authorization": f"Bearer {token}"}
+    return {"Authorization": f"Bearer {token}", "Accept-Language": "ru"}
 
 
 def reservations_url(wishlist_id: int, item_id: int) -> str:
@@ -499,7 +499,9 @@ def refresh_script_problems(script: str) -> list[str]:
         brace = block.find("{", marker)
         if brace >= 0:
             busy = brace_body(block, brace)
-    if _BUSY_SENTENCE not in block or "data-reservation-busy" not in block:
+    if ("data-i18n-busy-error" not in block and _BUSY_SENTENCE not in block) or (
+        "data-reservation-busy" not in block
+    ):
         problems.append("503 branch does not show the fixed busy sentence")
     if not busy or _LIST_URL in busy or "reservations-cabinet" in busy:
         problems.append("503 replaces #reservations-cabinet")

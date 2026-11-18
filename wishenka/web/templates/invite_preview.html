@@ -2,9 +2,9 @@
 
 {% block title %}
 {% if is_valid %}
-Приглашение в {{ wishlist.title }} — Wishenka
+{{ t('web.invite.page_title_valid', locale|default('en'), title=wishlist.title) }}
 {% else %}
-Ошибка приглашения — Wishenka
+{{ t('web.invite.page_title_error', locale|default('en')) }}
 {% endif %}
 {% endblock %}
 
@@ -14,13 +14,13 @@
     <div class="card error-card p-6 border rounded-lg shadow-sm bg-white text-center max-w-md"
          style="width: 100%;">
         <div class="text-red-500 mb-3 text-4xl">⚠️</div>
-        <h2 class="text-xl font-bold mb-2">Приглашение недоступно</h2>
+        <h2 class="text-xl font-bold mb-2">{{ t('web.invite.unavailable_heading', locale|default('en')) }}</h2>
         <p class="text-gray-600 mb-6">
-            {{ error or "Ссылка приглашения недействительна или истек срок действия." }}
+            {{ error or t('web.invite.invalid_or_expired', locale|default('en')) }}
         </p>
         <a href="/"
            class="btn btn-primary px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">
-            На главную
+            {{ t('web.invite.go_home', locale|default('en')) }}
         </a>
     </div>
     {% else %}
@@ -28,18 +28,17 @@
          id="invite-card"
          style="width: 100%;">
         <div class="mb-4 text-4xl">🎁</div>
-        <h1 class="text-2xl font-bold mb-2">{{ wishlist.title|safe }}</h1>
+        <h1 class="text-2xl font-bold mb-2">{{ wishlist.title }}</h1>
+        {% set owner_span %}<span class="font-semibold text-gray-800">{{ wishlist.owner_name }}</span>{% endset %}
         <p class="text-gray-600 mb-6">
-            Пользователь <span class="font-semibold text-gray-800">
-                {{ wishlist.owner_name|safe }}
-            </span> приглашает вас стать соавтором этого списка желаний.
+            {{ t('web.invite.invited_by', locale|default('en'), owner=owner_span)|safe }}
         </p>
         <form hx-post="/invite/{{ token }}/join"
               hx-target="#invite-card"
               hx-swap="outerHTML">
             <button type="submit"
                     class="btn btn-primary w-full py-3 bg-blue-600 text-white font-medium rounded">
-                Присоединиться к списку
+                {{ t('web.invite.join_btn', locale|default('en')) }}
             </button>
         </form>
     </div>

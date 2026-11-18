@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse
 
 from wishenka.auth.dependencies import get_current_user
 from wishenka.auth.models import AuthenticatedUser
+from wishenka.i18n import DEFAULT_LOCALE, SupportedLocale, format_date, t
 from wishenka.i18n.dependencies import LocaleDep
 from wishenka.web.templates import templates
 from wishenka.wishlists.models import ReservationStatus
@@ -23,8 +24,6 @@ router = APIRouter(tags=["reservations-ui"])
 
 User = Annotated[AuthenticatedUser, Depends(get_current_user)]
 
-_BOOKED = "Забронировано"
-_BOUGHT = "Куплено"
 _NOTICES = frozenset({"shortage", "refused"})
 
 
@@ -38,6 +37,7 @@ class CabinetRow:
     item_title: str
     quantity: int
     status_label: str
+    is_purchased: bool
     for_name: str
     wish_archived: bool
     list_archived: bool
@@ -59,24 +59,26 @@ class CabinetGroup:
     rows: tuple[CabinetRow, ...]
 
 
-def _event_day(value: datetime | None) -> str | None:
-    """Return the UTC calendar day, or none when the list has no event date."""
+def _event_day(value: datetime | None, locale: SupportedLocale = DEFAULT_LOCALE) -> str | None:
+    """Return the localized UTC calendar day, or none when the list has no event date."""
     if value is None:
         return None
     aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-    return aware.astimezone(UTC).date().isoformat()
+    return format_date(aware.astimezone(UTC).date(), locale)
 
 
-def _row(item: MyReservationItemDTO) -> CabinetRow:
+def _row(item: MyReservationItemDTO, locale: SupportedLocale = DEFAULT_LOCALE) -> CabinetRow:
     """Project one promise. Actions exist for an archived or received wish on an active list."""
     purchased = item.status == ReservationStatus.PURCHASED
+    status_key = "web.reservations.status_bought" if purchased else "web.reservations.status_booked"
     return CabinetRow(
         reservation_id=item.reservation_id,
         wish_item_id=item.wish_item_id,
         wishlist_id=item.wishlist_id,
         item_title=item.item_title,
         quantity=item.reserved_quantity,
-        status_label=_BOUGHT if purchased else _BOOKED,
+        status_label=t(status_key, locale),
+        is_purchased=purchased,
         for_name=item.recipient_name,
         wish_archived=item.is_item_archived,
         list_archived=item.is_wishlist_archived,
@@ -88,7 +90,9 @@ def _row(item: MyReservationItemDTO) -> CabinetRow:
     )
 
 
-def _groups(items: list[MyReservationItemDTO]) -> tuple[CabinetGroup, ...]:
+def _groups(
+    items: list[MyReservationItemDTO], locale: SupportedLocale = DEFAULT_LOCALE
+) -> tuple[CabinetGroup, ...]:
     """Group by wishlist, casefold then id, and order rows by time then id."""
     by_list: dict[int, list[MyReservationItemDTO]] = {}
     for item in items:
@@ -103,9 +107,9 @@ def _groups(items: list[MyReservationItemDTO]) -> tuple[CabinetGroup, ...]:
                 wishlist_id=wishlist_id,
                 title=first.wishlist_title,
                 event_title=event_title or None,
-                event_date=_event_day(first.event_date),
+                event_date=_event_day(first.event_date, locale),
                 list_archived=first.is_wishlist_archived,
-                rows=tuple(_row(item) for item in ordered),
+                rows=tuple(_row(item, locale) for item in ordered),
             )
         )
     groups.sort(key=lambda group: (group.title.casefold(), group.wishlist_id))
@@ -126,13 +130,15 @@ def _list_context(
     items: list[MyReservationItemDTO],
     notice: str | None,
     reservation_id: int | None,
+    locale: SupportedLocale = DEFAULT_LOCALE,
 ) -> dict[str, Any]:
     """Build the list partial. An unknown notice is omitted."""
     kind = notice if notice in _NOTICES else None
     return {
-        "groups": _groups(items),
+        "groups": _groups(items, locale),
         "notice_kind": kind,
         "free_remainder": _remainder(items, reservation_id) if kind == "shortage" else 0,
+        "locale": locale,
     }
 
 
@@ -145,7 +151,11 @@ async def _load_items(request: Request, user_id: int) -> list[MyReservationItemD
 
 
 @router.get("/web/reservations/card", response_class=HTMLResponse)
-async def reservations_card(request: Request, current_user: User) -> Response:
+async def reservations_card(
+    request: Request,
+    current_user: User,
+    locale: LocaleDep,
+) -> Response:
     """Return the home card fragment. The badge is the distinct-wish count."""
 
     injected = getattr(request.app.state, "wishlist_service", None)
@@ -154,7 +164,7 @@ async def reservations_card(request: Request, current_user: User) -> Response:
     return templates.TemplateResponse(
         request=request,
         name="partials/reservations_card.html",
-        context={"distinct_count": summary.total_distinct_items},
+        context={"distinct_count": summary.total_distinct_items, "locale": locale},
     )
 
 
@@ -162,6 +172,7 @@ async def reservations_card(request: Request, current_user: User) -> Response:
 async def reservations_list(
     request: Request,
     current_user: User,
+    locale: LocaleDep,
     notice: Annotated[str | None, Query()] = None,
     reservation_id: Annotated[int | None, Query()] = None,
 ) -> Response:
@@ -170,7 +181,7 @@ async def reservations_list(
     return templates.TemplateResponse(
         request=request,
         name="partials/reservations_list.html",
-        context=_list_context(items, notice, reservation_id),
+        context=_list_context(items, notice, reservation_id, locale),
     )
 
 
@@ -182,9 +193,8 @@ async def reservations_page(
 ) -> Response:
     """Return the cabinet page for the identified caller."""
     items = await _load_items(request, current_user.telegram_id)
-    context = _list_context(items, None, None)
+    context = _list_context(items, None, None, locale)
     context["viewer_identified"] = True
-    context["locale"] = locale
     return templates.TemplateResponse(
         request=request,
         name="reservations_cabinet.html",

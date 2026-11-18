@@ -152,10 +152,13 @@ class CdpPage:
             {"width": viewport[0], "height": viewport[1], "deviceScaleFactor": 1, "mobile": False},
         )
 
-    def set_bearer(self, token: str) -> None:
-        """Send ``Authorization: Bearer <token>`` with every request of the tab."""
+    def set_bearer(self, token: str, *, accept_language: str | None = None) -> None:
+        """Send ``Authorization: Bearer <token>`` (and optional Accept-Language) on the tab."""
         self._send("Network.enable")
-        self._send("Network.setExtraHTTPHeaders", {"headers": {"Authorization": f"Bearer {token}"}})
+        headers = {"Authorization": f"Bearer {token}"}
+        if accept_language:
+            headers["Accept-Language"] = accept_language
+        self._send("Network.setExtraHTTPHeaders", {"headers": headers})
 
     def _send(
         self, method: str, params: dict[str, Any] | None = None, timeout: float = COMMAND_TIMEOUT

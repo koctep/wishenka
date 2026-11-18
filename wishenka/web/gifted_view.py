@@ -9,12 +9,17 @@ from markupsafe import Markup
 
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.currency import DEFAULT_CURRENCY
+from wishenka.i18n import DEFAULT_LOCALE, SupportedLocale, format_date, t
 from wishenka.wishlists.exceptions import WishlistError
 from wishenka.wishlists.schemas import GiftedItemDTO
 from wishenka.wishlists.service import WishlistService
 
 RECEIPT_REFUSAL_HEADER = "X-Receipt-Refusal"
-NOTHING_REMAINING_TEXT = "Это желание уже полностью получено."
+
+
+def nothing_remaining_text(locale: SupportedLocale = DEFAULT_LOCALE) -> str:
+    """Return the localized 'nothing remaining' refusal message."""
+    return t("web.receipt.error.nothing_remaining", locale)
 
 
 def oob_text(element_id: str, text: str = "") -> Markup:
@@ -44,13 +49,16 @@ class GiftedRow:
     acts: tuple[GiftedAct, ...]
 
 
-def utc_day(value: datetime) -> str:
-    """Return the UTC calendar day as ``dd.mm.yyyy``; a naive value means UTC."""
+def utc_day(value: datetime, locale: SupportedLocale = DEFAULT_LOCALE) -> str:
+    """Return the UTC calendar day formatted for ``locale``; a naive value means UTC."""
     aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-    return aware.astimezone(UTC).strftime("%d.%m.%Y")
+    return format_date(aware.astimezone(UTC).date(), locale)
 
 
-def build_gifted_rows(items: list[GiftedItemDTO]) -> list[GiftedRow]:
+def build_gifted_rows(
+    items: list[GiftedItemDTO],
+    locale: SupportedLocale = DEFAULT_LOCALE,
+) -> list[GiftedRow]:
     """Project gifted DTOs to rows, keeping the service order (it is the display order)."""
     return [
         GiftedRow(
@@ -63,7 +71,7 @@ def build_gifted_rows(items: list[GiftedItemDTO]) -> list[GiftedRow]:
             received=item.received_quantity,
             requested=item.quantity,
             acts=tuple(
-                GiftedAct(utc_day(act.received_at), act.quantity, act.is_approximate)
+                GiftedAct(utc_day(act.received_at, locale), act.quantity, act.is_approximate)
                 for act in item.receipts
             ),
         )
@@ -72,10 +80,13 @@ def build_gifted_rows(items: list[GiftedItemDTO]) -> list[GiftedRow]:
 
 
 async def read_gifted_rows(
-    svc: WishlistService, wishlist_id: int, user: AuthenticatedUser | None
+    svc: WishlistService,
+    wishlist_id: int,
+    user: AuthenticatedUser | None,
+    locale: SupportedLocale = DEFAULT_LOCALE,
 ) -> list[GiftedRow] | None:
     """Read the gifted rows of a list; a domain error gives ``None`` (fail-soft, U-15)."""
     try:
-        return build_gifted_rows(await svc.list_gifted_items(wishlist_id, user))
+        return build_gifted_rows(await svc.list_gifted_items(wishlist_id, user), locale)
     except WishlistError:
         return None

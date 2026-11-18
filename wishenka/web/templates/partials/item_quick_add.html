@@ -9,7 +9,7 @@
             <input type="text"
                    id="quick-add-input"
                    name="raw_input"
-                   placeholder="Вставьте ссылку или название желания..."
+                   placeholder="{{ t('web.item.quick_add_placeholder', locale|default('en')) }}"
                    autocomplete="off"
                    hx-post="/web/wishlists/{{ wishlist.id }}/items/preview"
                    hx-trigger="input changed delay:500ms, paste"
@@ -22,12 +22,12 @@
                     hx-include="#quick-add-form"
                     hx-target="#item-modal-container"
                     hx-swap="innerHTML">
-                Подробнее
+                {{ t('web.common.details', locale|default('en')) }}
             </button>
             <button type="submit"
                     id="btn-quick-add"
                     class="btn-primary text-sm font-semibold">
-                Добавить
+                {{ t('web.common.add', locale|default('en')) }}
             </button>
         </div>
     </form>

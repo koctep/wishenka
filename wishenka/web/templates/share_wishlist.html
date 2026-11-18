@@ -8,7 +8,7 @@
         <h1 class="text-2xl font-bold">{{ wishlist.title|text_escape }}</h1>
         {% if wishlist.owner_name %}
         <p class="text-sm text-gray-500 mt-1">
-            Автор: <span class="font-medium text-gray-700">{{ wishlist.owner_name|text_escape }}</span>
+            {{ t('web.wishlist.author', locale|default('en')) }} <span class="font-medium text-gray-700">{{ wishlist.owner_name|text_escape }}</span>
         </p>
         {% endif %}
         {% if wishlist.description %}
@@ -18,7 +18,7 @@
         <div class="event-info mt-2 text-xs text-gray-400">
             {% if wishlist.event_title %}<span>{{ wishlist.event_title }}</span>{% endif %}
             {% if wishlist.event_date %}
-            <span> — {{ wishlist.event_date.strftime('%d.%m.%Y') }}</span>
+            <span> — {{ wishlist.event_date | format_date(locale|default('en')) }}</span>
             {% endif %}
         </div>
         {% endif %}

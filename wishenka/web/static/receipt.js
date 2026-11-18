@@ -15,7 +15,8 @@
   const CARD_SUMMARY_SELECTOR = '.item-card-summary';
   const FEEDBACK_ID = 'receipt-feedback';
   const REFUSAL_HEADER = 'X-Receipt-Refusal';
-  const GENERIC_FAILURE = 'Не удалось сохранить отметку. Повторите попытку.';
+  const DEFAULT_GENERIC_FAILURE = 'Could not save the receipt. Please try again.';
+  const DEFAULT_SUMMARY_TEMPLATE = 'Will mark as received: {chosen} pcs. of {remaining} remaining';
   /** Closed set of refusal reasons the server marks (mirrors the JSON route table plus busy). */
   const REFUSAL_REASONS = new Set([
     'quantity_invalid',
@@ -71,7 +72,11 @@
     }
     const quantity = Math.min(Math.max(chosen, 1), remaining);
     select.value = String(quantity);
-    line.textContent = `Будет отмечено получено: ${quantity} шт. из ${remaining} оставшихся`;
+    const tpl = (document.body && document.body.getAttribute('data-i18n-receipt-summary'))
+      || DEFAULT_SUMMARY_TEMPLATE;
+    line.textContent = tpl
+      .replace('{chosen}', String(quantity))
+      .replace('{remaining}', String(remaining));
   };
 
   document.addEventListener('change', (event) => {
@@ -120,7 +125,8 @@
     }
     const feedback = document.getElementById(FEEDBACK_ID);
     if (feedback && feedback.textContent.trim() === '') {
-      feedback.textContent = GENERIC_FAILURE;
+      feedback.textContent = (document.body && document.body.getAttribute('data-i18n-receipt-failure'))
+        || DEFAULT_GENERIC_FAILURE;
     }
   };
 

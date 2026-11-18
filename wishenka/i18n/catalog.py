@@ -319,6 +319,175 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "miniapp.unavailable.description": "Return to the menu and choose another action.",
         "miniapp.unavailable.home_menu": "Home menu",
         "miniapp.auth.open_in_telegram": "Open this app in Telegram to sign in.",
+        # SSR web pages, partials, and UI routes
+        "web.common.request_prepare_error": "Could not prepare the request. Please try again.",
+        "web.common.wish_busy_error": (
+            "The wish is busy; the reservation was not changed. Please try again."
+        ),
+        "web.common.member_fallback": "Member #{id}",
+        "web.common.owner_suffix": "{name} (Owner)",
+        "web.common.cancel": "Cancel",
+        "web.common.close": "Close",
+        "web.common.save": "Save",
+        "web.common.delete": "Remove",
+        "web.common.edit": "Edit",
+        "web.common.add": "Add",
+        "web.common.details": "More details",
+        "web.wishlist.author": "Author:",
+        "web.wishlist.empty": "There are no wishes in this wishlist yet.",
+        "web.wishlist.list_changed": "The list has changed. Refreshing.",
+        "web.wishlist.archived_heading": "Archived wishes ({count})",
+        "web.wishlist.archived_remaining": "Remaining {count}",
+        "web.wishlist.restore": "Restore",
+        "web.wishlist.gifted_heading": "Gifted ({count})",
+        "web.wishlist.gifted_load_error": "Could not load Gifted items. Please refresh the page.",
+        "web.wishlist.gifted_for": "For: {name}",
+        "web.wishlist.gifted_received_of": "Received: {received} of {requested}",
+        "web.wishlist.gifted_approx_date": "≈ {day} (approx. date)",
+        "web.wishlist.gifted_act_qty": "{quantity} pcs.",
+        "web.item.drag_title": "Drag to reorder",
+        "web.item.priority_high": "High priority",
+        "web.item.priority_low": "Low priority",
+        "web.item.remaining_of": "Remaining {remaining} of {quantity}",
+        "web.item.for_recipient": "For: {name}",
+        "web.item.store_fallback": "Store",
+        "web.item.notice_shortage": "Reservation unchanged. Available: {available}.",
+        "web.item.notice_refused": "Reservation unchanged.",
+        "web.item.available_of": "Available: {available} of {quantity}",
+        "web.item.reserved_status": "Reserved",
+        "web.item.reserved_by_you": "Reserved by you ({count})",
+        "web.item.bought_suffix": " · Purchased",
+        "web.item.reserve_btn": "Reserve",
+        "web.item.change_btn": "Update",
+        "web.item.cancel_reservation_btn": "Cancel reservation",
+        "web.item.mark_purchased_btn": "Purchased",
+        "web.item.undo_purchase_btn": "Return to reserved",
+        "web.item.requested_label": "Requested: {count}",
+        "web.item.received_label": "Received: {count}",
+        "web.item.remaining_label": "Remaining: {count}",
+        "web.item.quantity_label": "Quantity: {count}",
+        "web.item.open_in_store": "Open in store",
+        "web.item.receipt_btn": "Received",
+        "web.item.move_up": "Move up",
+        "web.item.move_down": "Move down",
+        "web.item.archive_btn": "Archive",
+        "web.item.unavailable": "This wish is no longer available. Please refresh the page.",
+        "web.item.quick_add_placeholder": "Paste a link or wish title...",
+        "web.item.empty_title": "Wish title cannot be empty",
+        "web.item.quantity_below_reserved": (
+            "Cannot set quantity below the amount reserved by givers ({count} pcs.)."
+        ),
+        "web.item.edit_busy_error": (
+            "The wish was busy, the edit was not saved, and it can be submitted again."
+        ),
+        "web.item.preview_fallback_hint": (
+            'Enter the wish title manually or click "More details".'
+        ),
+        "web.item.preview_title_placeholder": "Enter gift title...",
+        "web.item.preview_dismiss": "Close preview",
+        "web.item.modal_edit_title": "Edit wish",
+        "web.item.modal_new_title": "New wish",
+        "web.item.field_title": "Gift title *",
+        "web.item.field_title_placeholder": "e.g. Set of wine glasses",
+        "web.item.field_link": "Store link",
+        "web.item.field_price": "Estimated price",
+        "web.item.field_currency": "Currency",
+        "web.item.field_quantity": "Requested quantity (pcs.)",
+        "web.item.decrease_qty": "Decrease quantity",
+        "web.item.increase_qty": "Increase quantity",
+        "web.item.locked_quantity_hint": (
+            "ℹ️ Reserved by givers: {count} pcs. You cannot set a quantity lower than the "
+            "reserved amount."
+        ),
+        "web.item.field_recipient": "Who is this gift for",
+        "web.item.recipient_shared": "Shared gift (for everyone)",
+        "web.item.field_recipient_manual": "Or enter recipient name manually",
+        "web.item.field_recipient_placeholder": "e.g. Baby, Grandma",
+        "web.item.field_description": "Description and notes",
+        "web.item.field_description_placeholder": "Size, color, preferences...",
+        "web.item.field_image_url": "Image URL",
+        "web.item.image_preview_alt": "Preview",
+        "web.item.field_priority": "Priority",
+        "web.item.priority_opt_low": "Nice to have",
+        "web.item.priority_opt_medium": "Normal",
+        "web.item.priority_opt_high": "Really want",
+        "web.item.field_category": "Category",
+        "web.item.field_category_placeholder": "Gadgets, books, home...",
+        "web.item.archive_inline_btn": "Archive",
+        "web.item.archive_inline_confirm": (
+            "Move this wish to the archive? If it is already reserved, existing reservations "
+            "will be kept."
+        ),
+        "web.item.archive_modal_title": "Archive wish?",
+        "web.item.archive_modal_body": (
+            '"{title}" will be moved to the archive. You can restore it at any time, and '
+            "existing reservations will be preserved."
+        ),
+        "web.item.archive_received_note": (
+            "Only the unreceived portion will be archived: already received items will remain in "
+            'the "Gifted" section.'
+        ),
+        "web.item.archive_gifter_warning": (
+            "This wish is already reserved by a giver. After archiving, it will stay in the "
+            "giver's reservations list, but new reservations will not be available."
+        ),
+        "web.item.archive_warn_checkbox": "Warn when archiving reserved wishes",
+        "web.receipt.modal_title": "Mark as received",
+        "web.receipt.remaining_label": "Remaining: {count}",
+        "web.receipt.quantity_label": "How many pieces received",
+        "web.receipt.summary_many": "Will mark as received: {chosen} pcs. of {remaining} remaining",
+        "web.receipt.summary_one": "Will mark as received: 1 pc.",
+        "web.receipt.summary_template": (
+            "Will mark as received: {chosen} pcs. of {remaining} remaining"
+        ),
+        "web.receipt.irreversible": "This action cannot be undone.",
+        "web.receipt.confirm_btn": "Mark received",
+        "web.receipt.recorded_notice": 'Marked as received: {count} pcs. ("{title}")',
+        "web.receipt.generic_failure": "Could not save the receipt. Please try again.",
+        "web.receipt.error.quantity_invalid": "Enter a whole number of at least 1.",
+        "web.receipt.error.quantity_above_remaining": (
+            "Cannot mark more than remaining. Remaining: {n}."
+        ),
+        "web.receipt.error.nothing_remaining": "This wish has already been fully received.",
+        "web.receipt.error.wish_archived": "This wish is archived. Restore it to mark as received.",
+        "web.receipt.error.wishlist_not_active": (
+            "This wishlist is not active; receipts cannot be recorded."
+        ),
+        "web.receipt.error.forbidden": (
+            "You do not have permission to mark items received in this wishlist."
+        ),
+        "web.receipt.error.not_found": "Wish not found. Please refresh the page.",
+        "web.receipt.error.busy": "Could not save the receipt right now. Please try again.",
+        "web.share.modal_title": "Share wishlist",
+        "web.share.public_link_label": "Public link for givers",
+        "web.share.public_link_hint": (
+            "Givers can view the wishlist and reserve gifts secretly from you."
+        ),
+        "web.share.invite_link_label": "Invite link for co-authors",
+        "web.share.invite_link_hint": "Co-authors can add and edit wishes in this list.",
+        "web.share.regenerate_invite": "Revoke and create new link",
+        "web.share.owner_fallback": "List owner",
+        "web.share.role_owner": "Owner",
+        "web.share.role_admin": "Admin",
+        "web.share.role_member": "Member",
+        "web.share.member_id": "Member ID: {user_id}",
+        "web.invite.page_title_valid": "Invitation to {title} — Wishenka",
+        "web.invite.page_title_error": "Invitation error — Wishenka",
+        "web.invite.unavailable_heading": "Invitation unavailable",
+        "web.invite.invalid_or_expired": "The invitation link is invalid or has expired.",
+        "web.invite.go_home": "Back to home",
+        "web.invite.invited_by": "{owner} invites you to become a co-author of this wishlist.",
+        "web.invite.join_btn": "Join wishlist",
+        "web.invite.join_success": "You have successfully joined the wishlist!",
+        "web.reservations.title": "My reservations",
+        "web.reservations.status_booked": "Reserved",
+        "web.reservations.status_bought": "Purchased",
+        "web.reservations.empty": "No reservations",
+        "web.reservations.wish_received": "Wish received by owner",
+        "web.reservations.for_recipient": "For: {name}",
+        "web.reservations.wish_archived": "Wish is archived",
+        "web.reservations.list_archived": "Wishlist is archived",
+        "web.reservations.go_to_wish": "Go to wish",
     },
     "ru": {
         # Mini App navigation and shell
@@ -638,6 +807,178 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "miniapp.unavailable.description": "Вернитесь в меню и выберите другое действие.",
         "miniapp.unavailable.home_menu": "Главное меню",
         "miniapp.auth.open_in_telegram": "Откройте приложение в Telegram, чтобы войти.",
+        # SSR web pages, partials, and UI routes
+        "web.common.request_prepare_error": "Не удалось подготовить запрос. Повторите попытку.",
+        "web.common.wish_busy_error": ("Желание занято, бронь не изменилась. Повторите попытку."),
+        "web.common.member_fallback": "Участник #{id}",
+        "web.common.owner_suffix": "{name} (Владелец)",
+        "web.common.cancel": "Отмена",
+        "web.common.close": "Закрыть",
+        "web.common.save": "Сохранить",
+        "web.common.delete": "Удалить",
+        "web.common.edit": "Редактировать",
+        "web.common.add": "Добавить",
+        "web.common.details": "Подробнее",
+        "web.wishlist.author": "Автор:",
+        "web.wishlist.empty": "В этом списке желаний пока нет подарков.",
+        "web.wishlist.list_changed": "Список изменился. Обновляем.",
+        "web.wishlist.archived_heading": "Архив желаний ({count})",
+        "web.wishlist.archived_remaining": "Осталось {count}",
+        "web.wishlist.restore": "Восстановить",
+        "web.wishlist.gifted_heading": "Подаренные ({count})",
+        "web.wishlist.gifted_load_error": "Не удалось загрузить «Подаренные». Обновите страницу.",
+        "web.wishlist.gifted_for": "Для: {name}",
+        "web.wishlist.gifted_received_of": "Получено: {received} из {requested}",
+        "web.wishlist.gifted_approx_date": "≈ {day} (дата примерная)",
+        "web.wishlist.gifted_act_qty": "{quantity} шт.",
+        "web.item.drag_title": "Перетащить",
+        "web.item.priority_high": "Высокий приоритет",
+        "web.item.priority_low": "Низкий приоритет",
+        "web.item.remaining_of": "Осталось {remaining} из {quantity}",
+        "web.item.for_recipient": "Для: {name}",
+        "web.item.store_fallback": "Магазин",
+        "web.item.notice_shortage": "Бронь не изменилась. Свободно: {available}.",
+        "web.item.notice_refused": "Бронь не изменилась.",
+        "web.item.available_of": "Доступно: {available} из {quantity}",
+        "web.item.reserved_status": "Забронировано",
+        "web.item.reserved_by_you": "Забронировано вами ({count})",
+        "web.item.bought_suffix": " · Куплено",
+        "web.item.reserve_btn": "Забронировать",
+        "web.item.change_btn": "Изменить",
+        "web.item.cancel_reservation_btn": "Отменить бронь",
+        "web.item.mark_purchased_btn": "Куплено",
+        "web.item.undo_purchase_btn": "Вернуть в бронь",
+        "web.item.requested_label": "Запрошено: {count}",
+        "web.item.received_label": "Получено: {count}",
+        "web.item.remaining_label": "Осталось: {count}",
+        "web.item.quantity_label": "Количество: {count}",
+        "web.item.open_in_store": "Открыть в магазине",
+        "web.item.receipt_btn": "Получено",
+        "web.item.move_up": "Переместить выше",
+        "web.item.move_down": "Переместить ниже",
+        "web.item.archive_btn": "Архивировать",
+        "web.item.unavailable": "Желание больше недоступно. Обновите страницу.",
+        "web.item.quick_add_placeholder": "Вставьте ссылку или название желания...",
+        "web.item.empty_title": "Название желания не может быть пустым",
+        "web.item.quantity_below_reserved": (
+            "Нельзя указать количество меньше забронированного дарителями объема ({count} шт.)."
+        ),
+        "web.item.edit_busy_error": (
+            "Желание было занято, изменения не сохранены — попробуйте отправить снова."
+        ),
+        "web.item.preview_fallback_hint": (
+            "Заполните название желания вручную или нажмите «Подробнее»."
+        ),
+        "web.item.preview_title_placeholder": "Введите название подарка...",
+        "web.item.preview_dismiss": "Закрыть предпросмотр",
+        "web.item.modal_edit_title": "Редактировать желание",
+        "web.item.modal_new_title": "Новое желание",
+        "web.item.field_title": "Название подарка *",
+        "web.item.field_title_placeholder": "Например: Набор винных бокалов",
+        "web.item.field_link": "Ссылка на магазин",
+        "web.item.field_price": "Ориентировочная цена",
+        "web.item.field_currency": "Валюта",
+        "web.item.field_quantity": "Требуемое количество (шт.)",
+        "web.item.decrease_qty": "Уменьшить количество",
+        "web.item.increase_qty": "Увеличить количество",
+        "web.item.locked_quantity_hint": (
+            "ℹ️ Забронировано дарителями: {count} шт. Нельзя указать меньше забронированного объема."
+        ),
+        "web.item.field_recipient": "Кому предназначен подарок",
+        "web.item.recipient_shared": "Общий подарок (для всех)",
+        "web.item.field_recipient_manual": "Или укажите имя получателя вручную",
+        "web.item.field_recipient_placeholder": "Например: Малыш, Бабушка",
+        "web.item.field_description": "Описание и комментарий",
+        "web.item.field_description_placeholder": "Размер, цвет, пожелания...",
+        "web.item.field_image_url": "Ссылка на изображение",
+        "web.item.image_preview_alt": "Предпросмотр",
+        "web.item.field_priority": "Приоритет",
+        "web.item.priority_opt_low": "Если останется",
+        "web.item.priority_opt_medium": "Обычный",
+        "web.item.priority_opt_high": "Очень хочется",
+        "web.item.field_category": "Категория",
+        "web.item.field_category_placeholder": "Гаджеты, книги, дом...",
+        "web.item.archive_inline_btn": "В архив",
+        "web.item.archive_inline_confirm": (
+            "Перенести желание в архив? Если подарок уже забронирован, бронирования дарителей "
+            "сохранятся."
+        ),
+        "web.item.archive_modal_title": "Архивировать желание?",
+        "web.item.archive_modal_body": (
+            "«{title}» будет перемещено в архив. Его можно восстановить в любой момент, а "
+            "существующие брони сохранятся."
+        ),
+        "web.item.archive_received_note": (
+            "Архивируется только неполученная часть: полученные штуки останутся в разделе "
+            "«Подаренные»."
+        ),
+        "web.item.archive_gifter_warning": (
+            "Это желание уже зарезервировано дарителем. После архивации оно останется в списке "
+            "брони дарителя, но новые брони будут недоступны."
+        ),
+        "web.item.archive_warn_checkbox": "Предупреждать при архивации зарезервированных желаний",
+        "web.receipt.modal_title": "Отметить получение",
+        "web.receipt.remaining_label": "Осталось: {count}",
+        "web.receipt.quantity_label": "Сколько штук получено",
+        "web.receipt.summary_many": (
+            "Будет отмечено получено: {chosen} шт. из {remaining} оставшихся"
+        ),
+        "web.receipt.summary_one": "Будет отмечено получено: 1 шт.",
+        "web.receipt.summary_template": (
+            "Будет отмечено получено: {chosen} шт. из {remaining} оставшихся"
+        ),
+        "web.receipt.irreversible": "Это действие нельзя отменить.",
+        "web.receipt.confirm_btn": "Отметить полученным",
+        "web.receipt.recorded_notice": "Отмечено получено: {count} шт. («{title}»)",
+        "web.receipt.generic_failure": "Не удалось сохранить отметку. Повторите попытку.",
+        "web.receipt.error.quantity_invalid": "Укажите целое число не меньше 1.",
+        "web.receipt.error.quantity_above_remaining": (
+            "Нельзя отметить больше, чем осталось. Осталось: {n}."
+        ),
+        "web.receipt.error.nothing_remaining": "Это желание уже полностью получено.",
+        "web.receipt.error.wish_archived": (
+            "Желание в архиве. Восстановите его, чтобы отметить получение."
+        ),
+        "web.receipt.error.wishlist_not_active": "Вишлист не активен, отметить получение нельзя.",
+        "web.receipt.error.forbidden": "У вас нет права отмечать получение в этом вишлисте.",
+        "web.receipt.error.not_found": "Желание не найдено. Обновите страницу.",
+        "web.receipt.error.busy": "Не удалось сохранить отметку сейчас. Повторите попытку.",
+        "web.share.modal_title": "Поделиться списком",
+        "web.share.public_link_label": "Публичная ссылка для дарителей",
+        "web.share.public_link_hint": (
+            "Дарители увидят список желаний и смогут бронировать подарки втайне от вас."
+        ),
+        "web.share.invite_link_label": "Ссылка-приглашение для соавторов",
+        "web.share.invite_link_hint": (
+            "Соавторы смогут добавлять и редактировать желания в этом списке."
+        ),
+        "web.share.regenerate_invite": "Отозвать и создать новую ссылку",
+        "web.share.owner_fallback": "Владелец списка",
+        "web.share.role_owner": "Владелец",
+        "web.share.role_admin": "Администратор",
+        "web.share.role_member": "Участник",
+        "web.share.member_id": "Участник ID: {user_id}",
+        "web.invite.page_title_valid": "Приглашение в {title} — Wishenka",
+        "web.invite.page_title_error": "Ошибка приглашения — Wishenka",
+        "web.invite.unavailable_heading": "Приглашение недоступно",
+        "web.invite.invalid_or_expired": (
+            "Ссылка приглашения недействительна или истек срок действия."
+        ),
+        "web.invite.go_home": "На главную",
+        "web.invite.invited_by": (
+            "Пользователь {owner} приглашает вас стать соавтором этого списка желаний."
+        ),
+        "web.invite.join_btn": "Присоединиться к списку",
+        "web.invite.join_success": "Вы успешно присоединились к вишлисту!",
+        "web.reservations.title": "Мои бронирования",
+        "web.reservations.status_booked": "Забронировано",
+        "web.reservations.status_bought": "Куплено",
+        "web.reservations.empty": "Нет бронирований",
+        "web.reservations.wish_received": "Желание получено владельцем",
+        "web.reservations.for_recipient": "Для: {name}",
+        "web.reservations.wish_archived": "Желание в архиве",
+        "web.reservations.list_archived": "Вишлист в архиве",
+        "web.reservations.go_to_wish": "К желанию",
     },
 }
 

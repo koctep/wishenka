@@ -311,12 +311,14 @@ def _open_page(
     url: str,
     token: str | None,
     viewport: tuple[int, int],
+    *,
+    accept_language: str | None = None,
 ) -> CdpPage:
     browser.ensure_alive()
     page = browser.new_page(viewport)
     pages.append(page)
     if token is not None:
-        page.set_bearer(token)
+        page.set_bearer(token, accept_language=accept_language)
     page.navigate(url)
     return page
 
@@ -333,11 +335,22 @@ def wishlist_page(
     """
 
     def factory(
-        seeded: Seeded, *, as_user: str = "owner", viewport: tuple[int, int] = (412, 800)
+        seeded: Seeded,
+        *,
+        as_user: str = "owner",
+        viewport: tuple[int, int] = (412, 800),
+        accept_language: str | None = None,
     ) -> CdpPage:
         token = seeded.owner_token if as_user == "owner" else seeded.viewer_token
         url = f"{wishlist_server.base_url}/web/wishlists/{seeded.wishlist_id}"
-        return _open_page(chromium_browser, _browser_pages, url, token, viewport)
+        return _open_page(
+            chromium_browser,
+            _browser_pages,
+            url,
+            token,
+            viewport,
+            accept_language=accept_language,
+        )
 
     return factory
 
@@ -353,10 +366,21 @@ def share_page(
     """
 
     def factory(
-        seeded: Seeded, *, as_user: str | None = None, viewport: tuple[int, int] = (412, 800)
+        seeded: Seeded,
+        *,
+        as_user: str | None = None,
+        viewport: tuple[int, int] = (412, 800),
+        accept_language: str | None = None,
     ) -> CdpPage:
         token = seeded.viewer_token if as_user == "viewer" else None
         url = f"{wishlist_server.base_url}/share/{seeded.public_token}"
-        return _open_page(chromium_browser, _browser_pages, url, token, viewport)
+        return _open_page(
+            chromium_browser,
+            _browser_pages,
+            url,
+            token,
+            viewport,
+            accept_language=accept_language,
+        )
 
     return factory

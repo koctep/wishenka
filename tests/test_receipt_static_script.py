@@ -39,7 +39,7 @@ pytestmark = pytest.mark.timeout(30)
 # receipt separation invariant.
 # WISHENKA-61 updates the inline script to attach and reuse Idempotency-Key on reservations.
 # Pin the reviewed version until the script is externalized.
-INLINE_SCRIPT_SHA256 = "e83466996e59b5b79ab32a736e1ef7abf8cb271230d4c1aaa0a4afe17e5d3d8f"
+INLINE_SCRIPT_SHA256 = "4bd67e9899494215ccb467579f19248c4fd4c6f722e1e50e2158626745e55865"
 GUARD = re.compile(r"typeof\s+[\w.]*getResponseHeader\s*(?:!==?|===?)\s*['\"]function['\"]")
 REASON_LIKE = re.compile(r"['\"]([a-z]+(?:_[a-z]+)+)['\"]")
 
@@ -166,8 +166,8 @@ def test_receipt_script_hygiene_and_wishlist_additions(env: AppEnv) -> None:
     """N-2: no ``innerHTML``, ``eval`` or console output; the wrapper and stale handler exist."""
     wishlist = strip_js_comments(_static(env, "wishlist.js"))
     assert "window.swapWishCard" in wishlist, "wishlist.js has no swapWishCard wrapper"
-    assert "Желание больше недоступно. Обновите страницу." in wishlist
-    assert "Список изменился. Обновляем." in wishlist
+    assert "data-i18n-item-unavailable" in wishlist
+    assert "data-i18n-list-changed" in wishlist
     receipt = strip_js_comments(_static(env, "receipt.js"))
     for forbidden in ("innerHTML", "eval(", "console."):
         assert forbidden not in receipt, f"receipt.js contains {forbidden!r}"

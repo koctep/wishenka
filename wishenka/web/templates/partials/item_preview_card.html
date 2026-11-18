@@ -31,12 +31,12 @@
                     <div class="text-xs text-gray-500 break-all">{{ preview.url }}</div>
                     {% endif %}
                     <p class="text-xs text-amber-700 mt-1">
-                        Заполните название желания вручную или нажмите «Подробнее».
+                        {{ t('web.item.preview_fallback_hint', locale|default('en')) }}
                     </p>
                     <input type="text"
                            name="title"
                            value="{{ preview.title or '' }}"
-                           placeholder="Введите название подарка..."
+                           placeholder="{{ t('web.item.preview_title_placeholder', locale|default('en')) }}"
                            class="mt-1 w-full text-sm" />
                 </div>
                 {% else %}
@@ -52,7 +52,7 @@
         </div>
         <button type="button"
                 class="btn-preview-dismiss text-gray-400 text-sm"
-                aria-label="Закрыть предпросмотр"
+                aria-label="{{ t('web.item.preview_dismiss', locale|default('en')) }}"
                 onclick="document.getElementById('quick-add-preview-target').innerHTML = ''">
             ✕
         </button>
@@ -65,10 +65,10 @@
                 hx-include="#quick-add-form"
                 hx-target="#item-modal-container"
                 hx-swap="innerHTML">
-            Подробнее
+            {{ t('web.common.details', locale|default('en')) }}
         </button>
         <button type="submit" class="btn-preview-submit text-xs font-semibold">
-            Добавить
+            {{ t('web.common.add', locale|default('en')) }}
         </button>
     </div>
 </div>

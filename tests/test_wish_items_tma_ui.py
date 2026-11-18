@@ -53,7 +53,10 @@ def auth_header(
     name: str = "User",
 ) -> dict[str, str]:
     """Generate Authorization header with valid session bearer token."""
-    return {"Authorization": f"Bearer {sessions.create_token(user_id, name)}"}
+    return {
+        "Authorization": f"Bearer {sessions.create_token(user_id, name)}",
+        "Accept-Language": "ru",
+    }
 
 
 @pytest.fixture
@@ -903,7 +906,11 @@ def test_tma_ui_observability_privacy_invariants(
     owner = make_user(101, "Alice")
     gifter = make_user(777888, "SuperSecretGifterName")
     bearer_token = sessions.create_token(101, "Alice")
-    owner_headers = {"Authorization": f"Bearer {bearer_token}", "HX-Request": "true"}
+    owner_headers = {
+        "Authorization": f"Bearer {bearer_token}",
+        "HX-Request": "true",
+        "Accept-Language": "ru",
+    }
 
     async def seed() -> tuple[int, str, str]:
         wl = await service.create_wishlist(owner=owner, title="Privacy Audit List")

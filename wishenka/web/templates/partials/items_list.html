@@ -4,6 +4,6 @@
     {% endwith %}
 {% else %}
     <p id="empty-items-placeholder" class="text-gray-500 text-center py-8">
-        В этом списке желаний пока нет подарков.
+        {{ t('web.wishlist.empty', locale|default('en')) }}
     </p>
 {% endfor %}

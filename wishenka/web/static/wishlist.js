@@ -544,7 +544,8 @@
       const gone = document.createElement('p');
       gone.className = 'item-card-unavailable';
       gone.setAttribute('role', 'status');
-      gone.textContent = 'Желание больше недоступно. Обновите страницу.';
+      gone.textContent = (document.body && document.body.getAttribute('data-i18n-item-unavailable'))
+        || 'This wish is no longer available. Please refresh the page.';
       card.replaceWith(gone);
     };
   }
@@ -561,7 +562,8 @@
     }
     const notice = document.getElementById('list-notice');
     if (notice) {
-      notice.textContent = 'Список изменился. Обновляем.';
+      notice.textContent = (document.body && document.body.getAttribute('data-i18n-list-changed'))
+        || 'The list has changed. Refreshing.';
     }
     window.setTimeout(() => window.location.reload(), STALE_RELOAD_DELAY_MS);
   });

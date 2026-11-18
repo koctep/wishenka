@@ -110,7 +110,7 @@ def _owner_page(
     quantities: list[int],
 ) -> tuple[Seeded, CdpPage]:
     seeded = seed_wishlist(titles, quantities=quantities)
-    page = wishlist_page(seeded)
+    page = wishlist_page(seeded, accept_language="ru")
     _assert_script_loaded(page)
     return seeded, page
 
@@ -445,7 +445,7 @@ def test_stale_giver_card_is_neutral(
     """U-19: a refresh of a received wish ends in a neutral text; a valid refresh still swaps."""
     seeded = seed_wishlist(["Gone", "Stays"], quantities=[1, 3])
     gone, stays = seeded.item_ids
-    page = share_page(seeded, as_user="viewer")
+    page = share_page(seeded, as_user="viewer", accept_language="ru")
     _assert_script_loaded(page)
     button = f"#item-card-{gone} form button[type=submit]"
     assert page.evaluate(f"!!document.querySelector({js_str(button)})"), "giver form missing"

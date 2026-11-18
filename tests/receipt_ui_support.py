@@ -82,7 +82,11 @@ def hx(
 ) -> dict[str, str]:
     """Bearer plus ``HX-Request`` headers of a Mini App page request."""
     token = sessions.create_token(user_id, name)
-    return {"Authorization": f"Bearer {token}", "HX-Request": "true"}
+    return {
+        "Authorization": f"Bearer {token}",
+        "HX-Request": "true",
+        "Accept-Language": "ru",
+    }
 
 
 def ui_module() -> ModuleType:
@@ -99,6 +103,7 @@ def render_partial(name: str, **context: Any) -> str:
         template = templates.get_template(name)
     except TemplateNotFound:
         raise AssertionError(f"template {name} does not exist yet") from None
+    context.setdefault("locale", "ru")
     return template.render(context)
 
 

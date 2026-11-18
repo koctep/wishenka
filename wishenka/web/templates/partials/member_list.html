@@ -1,11 +1,11 @@
 <div id="member-list" class="member-list space-y-2">
     <div class="member-item flex items-center justify-between p-3 bg-gray-50 rounded border">
         <div class="member-info">
-            <span class="font-medium text-gray-800">{{ owner_name or "Владелец списка" }}</span>
+            <span class="font-medium text-gray-800">{{ owner_name or t('web.share.owner_fallback', locale|default('en')) }}</span>
         </div>
         <span class="badge badge-owner px-2 py-1 text-xs font-semibold rounded"
               style="background-color: #f3e8ff; color: #6b21a8;">
-            Владелец
+            {{ t('web.share.role_owner', locale|default('en')) }}
         </span>
     </div>
 
@@ -14,16 +14,16 @@
     <div class="member-item flex items-center justify-between p-3 bg-white rounded border"
          id="member-{{ member.user_id }}">
         <div class="member-info flex items-center gap-2">
-            <span class="text-sm text-gray-700">Участник ID: {{ member.user_id }}</span>
+            <span class="text-sm text-gray-700">{{ t('web.share.member_id', locale|default('en'), user_id=member.user_id) }}</span>
             {% if member.role.value == "admin" or member.role == "admin" %}
             <span class="badge badge-admin px-2 py-0.5 text-xs font-semibold rounded"
                   style="background-color: #dbeafe; color: #1e40af;">
-                Администратор
+                {{ t('web.share.role_admin', locale|default('en')) }}
             </span>
             {% else %}
             <span class="badge badge-member px-2 py-0.5 text-xs font-semibold rounded"
                   style="background-color: #dcfce7; color: #166534;">
-                Участник
+                {{ t('web.share.role_member', locale|default('en')) }}
             </span>
             {% endif %}
         </div>
@@ -32,7 +32,7 @@
                 hx-target="#member-list"
                 hx-swap="outerHTML"
                 class="btn-delete text-xs text-red-600 font-medium px-2 py-1 border rounded">
-            Удалить
+            {{ t('web.common.delete', locale|default('en')) }}
         </button>
         {% endif %}
     </div>

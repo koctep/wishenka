@@ -3,11 +3,11 @@
     <div class="modal-sheet bg-white w-full max-w-lg rounded-t-xl p-4 shadow-lg">
         <div class="modal-header flex justify-between items-center pb-3 border-b">
             <h2 class="text-lg font-bold">
-                {% if is_edit %}Редактировать желание{% else %}Новое желание{% endif %}
+                {% if is_edit %}{{ t('web.item.modal_edit_title', locale|default('en')) }}{% else %}{{ t('web.item.modal_new_title', locale|default('en')) }}{% endif %}
             </h2>
             <button type="button"
                     class="btn-modal-close text-gray-500"
-                    aria-label="Закрыть"
+                    aria-label="{{ t('web.common.close', locale|default('en')) }}"
                     onclick="document.getElementById('item-modal-container').innerHTML = ''">
                 ✕
             </button>
@@ -31,18 +31,18 @@
               hx-swap="beforeend"
               {% endif %}>
             <div class="form-group">
-                <label for="item-title-input">Название подарка *</label>
+                <label for="item-title-input">{{ t('web.item.field_title', locale|default('en')) }}</label>
                 <input type="text"
                        id="item-title-input"
                        name="title"
                        required
                        maxlength="255"
                        value="{{ form.title or '' }}"
-                       placeholder="Например: Набор винных бокалов" />
+                       placeholder="{{ t('web.item.field_title_placeholder', locale|default('en')) }}" />
             </div>
 
             <div class="form-group">
-                <label for="item-link-input">Ссылка на магазин</label>
+                <label for="item-link-input">{{ t('web.item.field_link', locale|default('en')) }}</label>
                 <input type="url"
                        id="item-link-input"
                        name="link"
@@ -52,7 +52,7 @@
 
             <div class="form-row flex gap-2">
                 <div class="form-group flex-1">
-                    <label for="item-price-input">Ориентировочная цена</label>
+                    <label for="item-price-input">{{ t('web.item.field_price', locale|default('en')) }}</label>
                     <input type="number"
                            id="item-price-input"
                            name="price"
@@ -62,7 +62,7 @@
                            placeholder="0" />
                 </div>
                 <div class="form-group w-28">
-                    <label for="item-currency-select">Валюта</label>
+                    <label for="item-currency-select">{{ t('web.item.field_currency', locale|default('en')) }}</label>
                     <select id="item-currency-select" name="currency">
                         {% for code, label in CURRENCY_OPTIONS %}
                         <option value="{{ code }}" {% if (form.currency or DEFAULT_CURRENCY) == code %}selected{% endif %}>
@@ -74,11 +74,11 @@
             </div>
 
             <div class="form-group">
-                <label for="item-quantity-input">Требуемое количество (шт.)</label>
+                <label for="item-quantity-input">{{ t('web.item.field_quantity', locale|default('en')) }}</label>
                 <div class="quantity-control flex items-center gap-2">
                     <button type="button"
                             class="btn-step btn-decrement"
-                            aria-label="Уменьшить количество"
+                            aria-label="{{ t('web.item.decrease_qty', locale|default('en')) }}"
                             onclick="var inp = document.getElementById('item-quantity-input'); var v = parseInt(inp.value || '1', 10); if (v > {{ min_quantity }}) { inp.value = v - 1; }">
                         -
                     </button>
@@ -92,50 +92,50 @@
                            class="w-24 text-center font-bold" />
                     <button type="button"
                             class="btn-step btn-increment"
-                            aria-label="Увеличить количество"
+                            aria-label="{{ t('web.item.increase_qty', locale|default('en')) }}"
                             onclick="var inp = document.getElementById('item-quantity-input'); var v = parseInt(inp.value || '1', 10); if (v < 1000) { inp.value = v + 1; }">
                         +
                     </button>
                 </div>
                 {% if locked_quantity > 0 %}
                 <div class="alert alert-warning text-xs mt-2 text-amber-700 bg-amber-50 p-2 rounded">
-                    ℹ️ Забронировано дарителями: {{ locked_quantity }} шт. Нельзя указать меньше забронированного объема.
+                    {{ t('web.item.locked_quantity_hint', locale|default('en'), count=locked_quantity) }}
                 </div>
                 {% endif %}
             </div>
 
             {% if is_collaborative %}
             <div class="form-group recipient-targeting-group">
-                <label for="recipient-user-select">Кому предназначен подарок</label>
+                <label for="recipient-user-select">{{ t('web.item.field_recipient', locale|default('en')) }}</label>
                 <select id="recipient-user-select" name="recipient_user_id">
-                    <option value="">Общий подарок (для всех)</option>
+                    <option value="">{{ t('web.item.recipient_shared', locale|default('en')) }}</option>
                     {% for member in collaborative_members %}
                     <option value="{{ member.user_id }}" {% if form.recipient_user_id == member.user_id %}selected{% endif %}>
                         {{ member.display_name }}
                     </option>
                     {% endfor %}
                 </select>
-                <label for="recipient-name-input" class="mt-2">Или укажите имя получателя вручную</label>
+                <label for="recipient-name-input" class="mt-2">{{ t('web.item.field_recipient_manual', locale|default('en')) }}</label>
                 <input type="text"
                        id="recipient-name-input"
                        name="recipient_name"
                        maxlength="100"
                        value="{{ form.recipient_name or '' }}"
-                       placeholder="Например: Малыш, Бабушка" />
+                       placeholder="{{ t('web.item.field_recipient_placeholder', locale|default('en')) }}" />
             </div>
             {% endif %}
 
             <div class="form-group">
-                <label for="item-description-input">Описание и комментарий</label>
+                <label for="item-description-input">{{ t('web.item.field_description', locale|default('en')) }}</label>
                 <textarea id="item-description-input"
                           name="description"
                           maxlength="4000"
                           rows="3"
-                          placeholder="Размер, цвет, пожелания...">{{ form.description or '' }}</textarea>
+                          placeholder="{{ t('web.item.field_description_placeholder', locale|default('en')) }}">{{ form.description or '' }}</textarea>
             </div>
 
             <div class="form-group">
-                <label for="item-image-url-input">Ссылка на изображение</label>
+                <label for="item-image-url-input">{{ t('web.item.field_image_url', locale|default('en')) }}</label>
                 <input type="url"
                        id="item-image-url-input"
                        name="image_url"
@@ -144,7 +144,7 @@
                 {% if form.image_url %}
                 <div class="mt-2 flex items-center gap-2">
                     <img src="{{ form.image_url }}"
-                         alt="Предпросмотр"
+                         alt="{{ t('web.item.image_preview_alt', locale|default('en')) }}"
                          class="w-16 h-16 object-cover rounded border" />
                 </div>
                 {% endif %}
@@ -152,23 +152,23 @@
 
             <div class="form-row flex gap-2">
                 <div class="form-group flex-1">
-                    <label for="item-priority-select">Приоритет</label>
+                    <label for="item-priority-select">{{ t('web.item.field_priority', locale|default('en')) }}</label>
                     <select id="item-priority-select" name="priority">
-                        {% for val, label in [('low', 'Если останется'), ('medium', 'Обычный'), ('high', 'Очень хочется')] %}
+                        {% for val, key in [('low', 'web.item.priority_opt_low'), ('medium', 'web.item.priority_opt_medium'), ('high', 'web.item.priority_opt_high')] %}
                         <option value="{{ val }}" {% if (form.priority or 'medium') == val %}selected{% endif %}>
-                            {{ label }}
+                            {{ t(key, locale|default('en')) }}
                         </option>
                         {% endfor %}
                     </select>
                 </div>
                 <div class="form-group flex-1">
-                    <label for="item-category-input">Категория</label>
+                    <label for="item-category-input">{{ t('web.item.field_category', locale|default('en')) }}</label>
                     <input type="text"
                            id="item-category-input"
                            name="category"
                            maxlength="50"
                            value="{{ form.category or '' }}"
-                           placeholder="Гаджеты, книги, дом..." />
+                           placeholder="{{ t('web.item.field_category_placeholder', locale|default('en')) }}" />
                 </div>
             </div>
 
@@ -178,8 +178,8 @@
                     <button type="button"
                             class="btn-archive-item text-red-600 text-sm"
                             hx-post="/web/wishlists/{{ wishlist_id }}/items/{{ form.id }}/archive"
-                            hx-confirm="Перенести желание в архив? Если подарок уже забронирован, бронирования дарителей сохранятся.">
-                        В архив
+                            hx-confirm="{{ t('web.item.archive_inline_confirm', locale|default('en')) }}">
+                        {{ t('web.item.archive_inline_btn', locale|default('en')) }}
                     </button>
                     {% endif %}
                 </div>
@@ -187,10 +187,10 @@
                     <button type="button"
                             class="btn-cancel text-sm"
                             onclick="document.getElementById('item-modal-container').innerHTML = ''">
-                        Отмена
+                        {{ t('web.common.cancel', locale|default('en')) }}
                     </button>
                     <button type="submit" class="btn-save text-sm font-semibold">
-                        Сохранить
+                        {{ t('web.common.save', locale|default('en')) }}
                     </button>
                 </div>
             </div>

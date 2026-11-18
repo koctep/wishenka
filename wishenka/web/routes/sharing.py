@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse
 
 from wishenka.auth.dependencies import get_current_user, get_optional_current_user
 from wishenka.auth.models import AuthenticatedUser
+from wishenka.i18n import t
 from wishenka.i18n.dependencies import LocaleDep
 from wishenka.web.templates import templates
 from wishenka.wishlists.exceptions import (
@@ -99,6 +100,7 @@ async def get_item_card_partial(
     wishlist_id: int,
     item_id: int,
     current_user: OptionalUser,
+    locale: LocaleDep,
     notice: Annotated[str | None, Query()] = None,
     is_first: bool = False,
     is_last: bool = False,
@@ -137,6 +139,7 @@ async def get_item_card_partial(
             "notice": visible_notice,
             "is_first": is_first,
             "is_last": is_last,
+            "locale": locale,
         },
     )
 
@@ -166,7 +169,7 @@ async def preview_invite(
             name="invite_preview.html",
             context={
                 "is_valid": False,
-                "error": "Ссылка приглашения недействительна или истек срок действия",
+                "error": t("web.invite.invalid_or_expired", locale),
                 "wishlist": None,
                 "token": invite_token,
                 "locale": locale,
@@ -189,7 +192,7 @@ async def preview_invite(
             name="invite_preview.html",
             context={
                 "is_valid": False,
-                "error": "Ссылка приглашения недействительна или истек срок действия",
+                "error": t("web.invite.invalid_or_expired", locale),
                 "wishlist": None,
                 "token": invite_token,
                 "locale": locale,
@@ -245,7 +248,7 @@ async def join_invite(
             name="invite_preview.html",
             context={
                 "is_valid": False,
-                "error": "Ссылка приглашения недействительна или истек срок действия",
+                "error": t("web.invite.invalid_or_expired", locale),
                 "wishlist": None,
                 "token": invite_token,
                 "locale": locale,
@@ -269,8 +272,10 @@ async def join_invite(
 
     redirect_url = f"/share/{member.wishlist.public_token}" if member.wishlist else "/"
     return HTMLResponse(
-        content="<div class='join-success p-4 bg-green-50 text-green-800 rounded'>"
-        "Вы успешно присоединились к вишлисту!</div>",
+        content=(
+            "<div class='join-success p-4 bg-green-50 text-green-800 rounded'>"
+            f"{t('web.invite.join_success', locale)}</div>"
+        ),
         status_code=status.HTTP_200_OK,
         headers={"HX-Redirect": redirect_url},
     )
@@ -281,6 +286,7 @@ async def get_members_partial(
     request: Request,
     wishlist_id: int,
     user: CurrentUser,
+    locale: LocaleDep,
 ) -> Response:
     """Render collaborator member list partial."""
     service = _get_service(request)
@@ -308,6 +314,7 @@ async def get_members_partial(
             "owner_name": wl.owner_name,
             "members": members,
             "is_owner": ctx.is_owner,
+            "locale": locale,
         },
     )
 
@@ -318,6 +325,7 @@ async def remove_member_partial(
     wishlist_id: int,
     user_id: int,
     user: CurrentUser,
+    locale: LocaleDep,
 ) -> Response:
     """Remove collaborator and return updated member list partial."""
     service = _get_service(request)
@@ -366,6 +374,7 @@ async def remove_member_partial(
             "owner_name": wl.owner_name,
             "members": members,
             "is_owner": True,
+            "locale": locale,
         },
     )
 
@@ -375,6 +384,7 @@ async def get_share_modal(
     request: Request,
     wishlist_id: int,
     user: CurrentUser,
+    locale: LocaleDep,
 ) -> Response:
     """Render share modal partial for owner."""
     service = _get_service(request)
@@ -399,6 +409,7 @@ async def get_share_modal(
             "wishlist_id": wl.id,
             "public_token": wl.public_token,
             "invite_token": wl.invite_token,
+            "locale": locale,
         },
     )
 
@@ -408,6 +419,7 @@ async def regenerate_invite_token(
     request: Request,
     wishlist_id: int,
     user: CurrentUser,
+    locale: LocaleDep,
 ) -> Response:
     """Regenerate invite token and return updated share modal partial."""
     service = _get_service(request)
@@ -451,5 +463,6 @@ async def regenerate_invite_token(
             "wishlist_id": wl.id,
             "public_token": wl.public_token,
             "invite_token": new_token,
+            "locale": locale,
         },
     )

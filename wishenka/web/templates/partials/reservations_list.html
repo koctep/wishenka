@@ -1,13 +1,13 @@
 <div id="reservations-cabinet">
     {% if notice_kind == "shortage" %}
     <p class="reservation-notice">
-        Бронь не изменилась. Свободно: {{ free_remainder }}.
+        {{ t('web.item.notice_shortage', locale|default('en'), available=free_remainder) }}
     </p>
     {% elif notice_kind == "refused" %}
-    <p class="reservation-notice">Бронь не изменилась.</p>
+    <p class="reservation-notice">{{ t('web.item.notice_refused', locale|default('en')) }}</p>
     {% endif %}
     {% if not groups %}
-    <p class="reservations-empty">Нет бронирований</p>
+    <p class="reservations-empty">{{ t('web.reservations.empty', locale|default('en')) }}</p>
     {% endif %}
     {% for group in groups %}
     <section class="reservation-group">
@@ -24,19 +24,19 @@
             <p class="reservation-quantity">{{ row.quantity }}</p>
             <p class="reservation-status">{{ row.status_label }}</p>
             {% if row.wish_received %}
-            <p class="reservation-wish-received">Желание получено владельцем</p>
+            <p class="reservation-wish-received">{{ t('web.reservations.wish_received', locale|default('en')) }}</p>
             {% endif %}
             {% if row.for_name %}
-            <p class="reservation-for">Для: {{ row.for_name }}</p>
+            <p class="reservation-for">{{ t('web.reservations.for_recipient', locale|default('en'), name=row.for_name) }}</p>
             {% endif %}
             {% if row.wish_archived %}
-            <p class="reservation-wish-archived">Желание в архиве</p>
+            <p class="reservation-wish-archived">{{ t('web.reservations.wish_archived', locale|default('en')) }}</p>
             {% endif %}
             {% if row.list_archived %}
-            <p class="reservation-list-archived">Вишлист в архиве</p>
+            <p class="reservation-list-archived">{{ t('web.reservations.list_archived', locale|default('en')) }}</p>
             {% endif %}
             {% if not row.wish_received %}
-            <a href="{{ row.wish_href }}">К желанию</a>
+            <a href="{{ row.wish_href }}">{{ t('web.reservations.go_to_wish', locale|default('en')) }}</a>
             {% endif %}
             {% if row.offer_actions %}
             {% set patch_url = "/api/wishlists/" ~ row.wishlist_id
@@ -49,18 +49,18 @@
                             {% if n == row.quantity %}selected{% endif %}>{{ n }}</option>
                     {% endfor %}
                 </select>
-                <button type="submit">Изменить</button>
+                <button type="submit">{{ t('web.item.change_btn', locale|default('en')) }}</button>
             </form>
             <button type="button" hx-post="{{ patch_url }}/cancel" hx-swap="none">
-                Отменить бронь
+                {{ t('web.item.cancel_reservation_btn', locale|default('en')) }}
             </button>
-            {% if row.status_label == "Забронировано" %}
+            {% if not row.is_purchased %}
             <button type="button" hx-post="{{ patch_url }}/purchase" hx-swap="none">
-                Куплено
+                {{ t('web.item.mark_purchased_btn', locale|default('en')) }}
             </button>
-            {% elif row.status_label == "Куплено" %}
+            {% else %}
             <button type="button" hx-post="{{ patch_url }}/undo-purchase" hx-swap="none">
-                Вернуть в бронь
+                {{ t('web.item.undo_purchase_btn', locale|default('en')) }}
             </button>
             {% endif %}
             {% endif %}

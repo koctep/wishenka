@@ -1,29 +1,29 @@
 <section id="gifted-items-section"{% if oob %} hx-swap-oob="outerHTML"{% endif %}>
     {% if gifted_rows is none %}
-    <p class="gifted-error" role="status">Не удалось загрузить «Подаренные». Обновите страницу.</p>
+    <p class="gifted-error" role="status">{{ t('web.wishlist.gifted_load_error', locale|default('en')) }}</p>
     {% elif gifted_rows %}
     <details class="gifted-items-details">
-        <summary>Подаренные ({{ gifted_rows|length }})</summary>
+        <summary>{{ t('web.wishlist.gifted_heading', locale|default('en'), count=gifted_rows|length) }}</summary>
         <ul id="gifted-items-list">
             {% for row in gifted_rows %}
             <li class="gifted-item" id="gifted-item-{{ row.item_id }}">
                 <span class="gifted-item-title">{{ row.title }}</span>
                 {% if row.price %}<span class="gifted-item-price">{{ row.price }}</span>{% endif %}
                 {% if row.recipient_name %}
-                <span class="gifted-item-recipient">Для: {{ row.recipient_name }}</span>
+                <span class="gifted-item-recipient">{{ t('web.wishlist.gifted_for', locale|default('en'), name=row.recipient_name) }}</span>
                 {% endif %}
                 <span class="gifted-item-count">
-                    Получено: {{ row.received }} из {{ row.requested }}
+                    {{ t('web.wishlist.gifted_received_of', locale|default('en'), received=row.received, requested=row.requested) }}
                 </span>
                 <ul class="gifted-receipts">
                     {% for act in row.acts %}
                     <li>
                         {% if act.approximate -%}
-                        ≈ {{ act.day }} (дата примерная)
+                        {{ t('web.wishlist.gifted_approx_date', locale|default('en'), day=act.day) }}
                         {%- else -%}
                         {{ act.day }}
                         {%- endif %}
-                        — {{ act.quantity }} шт.
+                        — {{ t('web.wishlist.gifted_act_qty', locale|default('en'), quantity=act.quantity) }}
                     </li>
                     {% endfor %}
                 </ul>

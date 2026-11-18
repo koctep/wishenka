@@ -224,7 +224,7 @@ def test_share_link_visit_creates_no_account(
     before = user_count(app)
     caplog.clear()
     with caplog.at_level(logging.INFO):
-        response = client.get(f"/share/{public_token}")
+        response = client.get(f"/share/{public_token}", headers={"Accept-Language": "ru"})
 
     assert response.status_code == 200, response.text
     assert response.request.url.path != "/healthz"

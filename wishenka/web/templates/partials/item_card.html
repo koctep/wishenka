@@ -17,7 +17,7 @@
             <span class="item-drag-handle"
                   data-no-toggle
                   aria-hidden="true"
-                  title="Перетащить">⠿</span>
+                  title="{{ t('web.item.drag_title', locale|default('en')) }}">⠿</span>
             {% endif %}
             {% if item.image_url %}
             <img src="{{ item.image_url }}"
@@ -33,22 +33,22 @@
                     <span class="badge badge-category">{{ item.category }}</span>
                     {% endif %}
                     {% if item.priority|string == 'high' %}
-                    <span class="badge badge-priority-high">Высокий приоритет</span>
+                    <span class="badge badge-priority-high">{{ t('web.item.priority_high', locale|default('en')) }}</span>
                     {% elif item.priority|string == 'low' %}
-                    <span class="badge badge-priority-low">Низкий приоритет</span>
+                    <span class="badge badge-priority-low">{{ t('web.item.priority_low', locale|default('en')) }}</span>
                     {% endif %}
                     {% if is_member and item.received_quantity > 0 %}
                     <span class="badge badge-quantity badge-received">
-                        Осталось {{ item.remaining_quantity }} из {{ item.quantity }}
+                        {{ t('web.item.remaining_of', locale|default('en'), remaining=item.remaining_quantity, quantity=item.quantity) }}
                     </span>
                     {% elif item.quantity > 1 %}
                     <span class="badge badge-quantity">×{{ item.quantity }}</span>
                     {% endif %}
                     {% if item.recipient_name %}
-                    <span class="badge badge-recipient">Для: {{ item.recipient_name }}</span>
+                    <span class="badge badge-recipient">{{ t('web.item.for_recipient', locale|default('en'), name=item.recipient_name) }}</span>
                     {% endif %}
                     {% if item.link %}
-                    <span class="badge badge-store">{{ item.store_name or "Магазин" }}</span>
+                    <span class="badge badge-store">{{ item.store_name or t('web.item.store_fallback', locale|default('en')) }}</span>
                     {% endif %}
                 </div>
                 {% set giver_viewer = viewer_identified|default(false) %}
@@ -65,22 +65,22 @@
                 <div class="item-giver mt-2 text-sm" data-no-toggle>
                     {% if notice == 'shortage' %}
                     <p class="giver-notice">
-                        Бронь не изменилась. Свободно: {{ item.available_quantity }}.
+                        {{ t('web.item.notice_shortage', locale|default('en'), available=item.available_quantity) }}
                     </p>
                     {% elif notice == 'refused' %}
-                    <p class="giver-notice">Бронь не изменилась.</p>
+                    <p class="giver-notice">{{ t('web.item.notice_refused', locale|default('en')) }}</p>
                     {% endif %}
                     {% if item.available_quantity >= 1 %}
                     <p class="giver-available">
-                        Доступно: {{ item.available_quantity }} из {{ item.quantity }}
+                        {{ t('web.item.available_of', locale|default('en'), available=item.available_quantity, quantity=item.quantity) }}
                     </p>
                     {% else %}
-                    <p class="giver-available">Забронировано</p>
+                    <p class="giver-available">{{ t('web.item.reserved_status', locale|default('en')) }}</p>
                     {% endif %}
                     {% if item.is_reserved_by_me %}
                     <p class="giver-own">
-                        Забронировано вами ({{ item.my_reserved_quantity }})
-                        {%- if bought_mark %} · Куплено{% endif -%}
+                        {{ t('web.item.reserved_by_you', locale|default('en'), count=item.my_reserved_quantity) }}
+                        {%- if bought_mark %}{{ t('web.item.bought_suffix', locale|default('en')) }}{% endif -%}
                     </p>
                     {% endif %}
                     {% if can_promise
@@ -101,7 +101,7 @@
                             {% endfor %}
                         </select>
                         {% endif %}
-                        <button type="submit" data-no-toggle>Забронировать</button>
+                        <button type="submit" data-no-toggle>{{ t('web.item.reserve_btn', locale|default('en')) }}</button>
                     </form>
                     {% endif %}
                     {% if can_promise and item.is_reserved_by_me %}
@@ -120,25 +120,25 @@
                                 hx-patch="{{ reservation_prefix }}/{{ item.my_reservation_id }}"
                                 hx-ext="json-enc"
                                 hx-swap="none"
-                                hx-include="closest form">Изменить</button>
+                                hx-include="closest form">{{ t('web.item.change_btn', locale|default('en')) }}</button>
                     </form>
                     {% endif %}
                     <button type="button"
                             data-no-toggle
                             hx-post="{{ reservation_prefix }}/{{ item.my_reservation_id }}/cancel"
-                            hx-swap="none">Отменить бронь</button>
+                            hx-swap="none">{{ t('web.item.cancel_reservation_btn', locale|default('en')) }}</button>
                     {% if item.my_reservation_status|string == 'active' %}
                     <button type="button"
                             data-no-toggle
                             hx-post="{{ reservation_prefix }}/{{ item.my_reservation_id }}/purchase"
-                            hx-swap="none">Куплено</button>
+                            hx-swap="none">{{ t('web.item.mark_purchased_btn', locale|default('en')) }}</button>
                     {% elif item.my_reservation_status|string == 'purchased' %}
                     {% set undo_path = reservation_prefix ~ "/" ~ item.my_reservation_id
                         ~ "/undo-purchase" %}
                     <button type="button"
                             data-no-toggle
                             hx-post="{{ undo_path }}"
-                            hx-swap="none">Вернуть в бронь</button>
+                            hx-swap="none">{{ t('web.item.undo_purchase_btn', locale|default('en')) }}</button>
                     {% endif %}
                     {% endif %}
                     <p class="giver-busy" data-giver-busy hidden></p>
@@ -160,18 +160,18 @@
 
         <div class="item-meta mt-2 flex flex-wrap gap-2 text-xs text-gray-500">
             {% if is_member and item.received_quantity > 0 %}
-            <span class="item-quantity-requested">Запрошено: {{ item.quantity }}</span>
-            <span class="item-quantity-received">Получено: {{ item.received_quantity }}</span>
-            <span class="item-quantity-remaining">Осталось: {{ item.remaining_quantity }}</span>
+            <span class="item-quantity-requested">{{ t('web.item.requested_label', locale|default('en'), count=item.quantity) }}</span>
+            <span class="item-quantity-received">{{ t('web.item.received_label', locale|default('en'), count=item.received_quantity) }}</span>
+            <span class="item-quantity-remaining">{{ t('web.item.remaining_label', locale|default('en'), count=item.remaining_quantity) }}</span>
             {% else %}
-            <span class="item-quantity">Количество: {{ item.quantity }}</span>
+            <span class="item-quantity">{{ t('web.item.quantity_label', locale|default('en'), count=item.quantity) }}</span>
             {% endif %}
             {% if item.link %}
             <a href="{{ item.link }}"
                target="_blank"
                rel="noopener noreferrer"
                class="item-link item-store-cta text-blue-600 underline">
-                Открыть в магазине{% if item.store_name %} ({{ item.store_name }}){% endif %}
+                {{ t('web.item.open_in_store', locale|default('en')) }}{% if item.store_name %} ({{ item.store_name }}){% endif %}
             </a>
             {% endif %}
         </div>
@@ -186,7 +186,7 @@
                     hx-get="{{ item_web }}/receipt"
                     hx-target="#item-modal-container"
                     hx-swap="innerHTML">
-                Получено
+                {{ t('web.item.receipt_btn', locale|default('en')) }}
             </button>
             {% endif %}
             <button type="button"
@@ -195,12 +195,12 @@
                     hx-get="{{ item_web }}/edit"
                     hx-target="#item-modal-container"
                     hx-swap="innerHTML">
-                Редактировать
+                {{ t('web.common.edit', locale|default('en')) }}
             </button>
             <button type="button"
                     class="btn-move-up"
                     data-no-toggle
-                    aria-label="Переместить выше"
+                    aria-label="{{ t('web.item.move_up', locale|default('en')) }}"
                     {% if is_first %}disabled{% endif %}
                     hx-post="{{ item_web }}/move?direction=up"
                     hx-target="#items-list"
@@ -210,7 +210,7 @@
             <button type="button"
                     class="btn-move-down"
                     data-no-toggle
-                    aria-label="Переместить ниже"
+                    aria-label="{{ t('web.item.move_down', locale|default('en')) }}"
                     {% if is_last %}disabled{% endif %}
                     hx-post="{{ item_web }}/move?direction=down"
                     hx-target="#items-list"
@@ -223,7 +223,7 @@
                     hx-get="{{ item_web }}/archive-confirm"
                     hx-target="#item-modal-container"
                     hx-swap="innerHTML">
-                Архивировать
+                {{ t('web.item.archive_btn', locale|default('en')) }}
             </button>
         </div>
         {% endif %}
