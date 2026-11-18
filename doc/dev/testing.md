@@ -601,6 +601,73 @@ WISHENKA_TEST_TMPDIR to a fast directory (for example /dev/shm)`. Прогон �
 - D-16 (файл `core`): существующий WISHENKA-126. D-14 (эта документация) выполнен, D-15
   исправлен в артефакте.
 
+## Стресс-тесты конкурентного жизненного цикла желаний (WISHENKA-102)
+
+### Overview
+
+Модуль `tests/test_wish_lifecycle_stress.py` проверяет конкурентную корректность операций жизненного
+цикла желаний в `WishlistService` (`add_wish_item`, `reorder_wish_items`, `archive_wish_item`) поверх
+файловой SQLite БД в режиме WAL с транзакциями `BEGIN IMMEDIATE`.
+
+Покрытые сценарии:
+
+- `test_concurrent_reorders_single_store_preserve_permutation` — 24 параллельных `reorder_wish_items`
+  через один `WishlistStore` (роли `OWNER`, `ADMIN`, `MEMBER`).
+- `test_concurrent_reorders_multiple_stores_preserve_permutation` — 20 параллельных
+  `reorder_wish_items` через 4 независимых экземпляра `WishlistStore` на одном файле БД.
+- `test_concurrent_add_and_reorder_preserve_all_items` — одновременные `add_wish_item` (8 задач) и
+  `reorder_wish_items` (10 задач) с проверкой атомарного отклонения устаревших снимков через
+  `ValueError`.
+- `test_concurrent_archive_and_reorder_exclude_archived_items` — одновременные `archive_wish_item`
+  (3 задачи), `add_wish_item` (4 задачи) и `reorder_wish_items` (8 задач).
+- `test_mixed_lifecycle_waves_owner_and_coauthors` — 3 последовательные волны смешанных операций
+  через 2 экземпляра `WishlistStore` от имени владельца и соавторов.
+- `test_concurrent_lifecycle_isolation_across_wishlists` — параллельные мутации на 3 независимых
+  вишлистах без взаимного влияния.
+
+### Architecture
+
+- `_open_wal_store(db_path)` — инициализирует `WishlistStore(f"sqlite+aiosqlite:///{db_path}")`,
+  проверяет `PRAGMA journal_mode == "wal"`, `PRAGMA foreign_keys == 1` и `PRAGMA busy_timeout == 5000`,
+  гарантирует `await store.dispose()` в `finally`.
+- `_run_barrier_tasks(factories, ...)` — синхронизирует старт всех корутин через общий барьер
+  (`asyncio.Event`), ограничивает ожидание барьера и пакета через `asyncio.wait_for` и отменяет
+  незавершённые задачи в `finally`.
+- `_assert_wishlist_invariants(store, ...)` — сверяет инварианты из двух источников: прямым SQL к
+  таблице `wl_items` и через `WishlistService.get_wishlist_view()`. Проверяются точные множества
+  активных и архивных `id`, отсутствие пересечений, уникальность `display_order` среди активных
+  желаний (и непрерывность `0..N-1`, если `require_contiguous_order=True`).
+
+### Usage
+
+Запуск только стресс-набора:
+
+```bash
+.venv/bin/pytest tests/test_wish_lifecycle_stress.py
+```
+
+Запуск через `Makefile` в составе полного набора или последовательно:
+
+```bash
+make test-serial PYTEST_ARGS="tests/test_wish_lifecycle_stress.py"
+```
+
+### Configuration
+
+- Маркер таймаута модуля: `pytestmark = pytest.mark.timeout(120)`.
+- Внутренние ограниченные ожидания: `_BARRIER_TIMEOUT_SECONDS = 15.0`,
+  `_BATCH_TIMEOUT_SECONDS = 45.0`.
+- Временные файлы БД создаются в `tmp_path` (наследуют `WISHENKA_TEST_TMPDIR`, по умолчанию
+  `/dev/shm` при наличии быстрого tmpfs).
+
+### Troubleshooting
+
+- **Таймаут или `InventoryBusyError` на медленном диске.** Если `tmp_path` расположен на медленном
+  хранилище с высоким `fsync`, задайте быстрый каталог: `export WISHENKA_TEST_TMPDIR=/dev/shm`.
+- **`ValueError` в `reorder_wish_items`.** Ожидаемое поведение при конкурентном `add_wish_item` или
+  `archive_wish_item`: перестановка со старым набором активных `item_ids` атомарно отклоняется до
+  записи в БД и не должна приводить к частичному изменению `display_order`.
+
 ## Известные ограничения
 
 Пункты отслежены в Jira (источники: `ai-tasks/WISHENKA-124/60-tech-debt.md` и `ai-tasks/WISHENKA-110/60-tech-debt.md`):
