@@ -27,6 +27,7 @@ from wishenka.wishlists.exceptions import (
     PermissionDeniedError,
     QuantityAboveRemainingError,
     QuantityInvalidError,
+    ReceiptNotFoundError,
     WishArchivedError,
     WishlistArchivedError,
     WishlistDeletedError,
@@ -66,6 +67,7 @@ _REFUSALS: tuple[tuple[type[Exception], int, str, str], ...] = (
         "Nothing remains to receive",
     ),
     (PermissionDeniedError, status.HTTP_403_FORBIDDEN, "forbidden", "Forbidden"),
+    (ReceiptNotFoundError, status.HTTP_404_NOT_FOUND, "receipt_not_found", _NOT_FOUND),
     (ItemNotFoundError, status.HTTP_404_NOT_FOUND, "not_found", _NOT_FOUND),
     (WishlistNotFoundError, status.HTTP_404_NOT_FOUND, "not_found", _NOT_FOUND),
 )
@@ -116,6 +118,7 @@ async def _run[T](
     idempotency_key: str | None = None,
     request_hash: str | None = None,
     response_status: int = status.HTTP_201_CREATED,
+    operation_name: str = "record_item_fulfillment",
 ) -> T | Response:
     """Run one action: a single-wish transaction for a command, a full snapshot for a read."""
     operation = getattr(request.scope.get("endpoint"), "__name__", "")
@@ -142,15 +145,13 @@ async def _run[T](
                 request_hash=request_hash,
                 retention_hours=retention_hours_from_request(request),
                 item_id=item_id,
-                operation_name="record_item_fulfillment",
+                operation_name=operation_name,
                 require_member=True,
             )
             return build_replay_response(outcome.status_code, outcome.content_type, outcome.body)
         return cast(
             T,
-            await store.execute_wish(
-                action, item_id=item_id, operation_name="record_item_fulfillment"
-            ),
+            await store.execute_wish(action, item_id=item_id, operation_name=operation_name),
         )
     except InventoryBusyError as exc:
         raise _busy(exc, operation, context) from exc
@@ -172,6 +173,7 @@ async def _run[T](
         WishlistDeletedError,
         NothingRemainingError,
         PermissionDeniedError,
+        ReceiptNotFoundError,
         ItemNotFoundError,
         WishlistNotFoundError,
     ) as exc:
@@ -242,3 +244,114 @@ async def list_gifted(wishlist_id: int, user: User, request: Request) -> list[Gi
         return await svc.list_gifted_items(wishlist_id, user)
 
     return cast(list[GiftedItemDTO], await _run(request, action, user, wishlist_id=wishlist_id))
+
+
+@router.delete(
+    "/items/{item_id}/receipts/{receipt_id}",
+    status_code=status.HTTP_200_OK,
+    response_model=ReceiptResultDTO,
+)
+async def cancel_receipt(
+    wishlist_id: int,
+    item_id: int,
+    receipt_id: int,
+    user: User,
+    request: Request,
+) -> ReceiptResultDTO | Response:
+    """Cancel (undo) a single receipt record on a wish."""
+    idempotency_key = parse_idempotency_key(request)
+
+    async def action(svc: WishlistService) -> ReceiptResultDTO:
+        item = await svc.cancel_item_receipt(item_id, receipt_id, user, wishlist_id=wishlist_id)
+        return ReceiptResultDTO(
+            item=recipient_view(item),
+            received_now=0,
+            received_quantity=item.received_quantity,
+            remaining_quantity=item.remaining_quantity,
+            is_fully_received=item.is_fully_received,
+        )
+
+    request_hash = (
+        compute_request_hash(
+            "cancel_receipt",
+            {"wishlist_id": wishlist_id, "item_id": item_id, "receipt_id": receipt_id},
+            {},
+        )
+        if idempotency_key is not None
+        else None
+    )
+    result = await _run(
+        request,
+        action,
+        user,
+        wishlist_id=wishlist_id,
+        item_id=item_id,
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        response_status=status.HTTP_200_OK,
+        operation_name="cancel_item_receipt",
+    )
+    logger.info(
+        "Receipt %s cancelled for item %s",
+        receipt_id,
+        item_id,
+        extra={"event": "receipt_cancelled_http", "item_id": item_id, "receipt_id": receipt_id},
+    )
+    return result
+
+
+@router.patch(
+    "/items/{item_id}/receipts/{receipt_id}",
+    status_code=status.HTTP_200_OK,
+    response_model=ReceiptResultDTO,
+)
+async def correct_receipt(
+    wishlist_id: int,
+    item_id: int,
+    receipt_id: int,
+    payload: ReceiptRequestDTO,
+    user: User,
+    request: Request,
+) -> ReceiptResultDTO | Response:
+    """Correct the quantity of an existing receipt record."""
+    idempotency_key = parse_idempotency_key(request)
+
+    async def action(svc: WishlistService) -> ReceiptResultDTO:
+        item = await svc.correct_item_receipt(
+            item_id, receipt_id, user, payload.quantity, wishlist_id=wishlist_id
+        )
+        return ReceiptResultDTO(
+            item=recipient_view(item),
+            received_now=payload.quantity,
+            received_quantity=item.received_quantity,
+            remaining_quantity=item.remaining_quantity,
+            is_fully_received=item.is_fully_received,
+        )
+
+    request_hash = (
+        compute_request_hash(
+            "correct_receipt",
+            {"wishlist_id": wishlist_id, "item_id": item_id, "receipt_id": receipt_id},
+            {"quantity": payload.quantity},
+        )
+        if idempotency_key is not None
+        else None
+    )
+    result = await _run(
+        request,
+        action,
+        user,
+        wishlist_id=wishlist_id,
+        item_id=item_id,
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        response_status=status.HTTP_200_OK,
+        operation_name="correct_item_receipt",
+    )
+    logger.info(
+        "Receipt %s corrected for item %s",
+        receipt_id,
+        item_id,
+        extra={"event": "receipt_corrected_http", "item_id": item_id, "receipt_id": receipt_id},
+    )
+    return result

@@ -18,6 +18,8 @@ SAFE_SHARED_EVENTS = frozenset(
         "list_restored",
         "membership_changed",
         "reservation_confirmation",
+        "receipt_reverted",
+        "receipt_increased",
     }
 )
 

@@ -34,9 +34,23 @@ class Reminder:
     claim_token: str
 
 
+def _event_category(kind: object) -> str:
+    if kind in ("list", "birthday"):
+        return "reminders"
+    if kind in ("reservation_changed", "reservation_confirmation"):
+        return "reservation_changes"
+    if kind in ("receipt_reverted", "receipt_increased"):
+        return "gift_received"
+    return "wishlist_changes"
+
+
 def _render(kind: str, title: str, item: str | None, date: str, language: str | None) -> str:
     locale = resolve_telegram_locale(language)
     safe = title[:100]
+    if kind == "receipt_reverted":
+        return t("notices.receipt_reverted", locale, wish=(item or "")[:100], wishlist=safe)
+    if kind == "receipt_increased":
+        return t("notices.gift_received", locale, wish=(item or "")[:100], wishlist=safe)
     if kind not in ("list", "birthday"):
         subject = f"{item[:100]} — {safe}" if item else safe
         return t(f"notices.reminder.{kind}", locale, subject=subject)
@@ -90,6 +104,22 @@ async def _event_authorized(conn: AsyncConnection, row: Any) -> bool:
                 "JOIN wl_reservations r ON r.wish_item_id=i.id AND r.user_id=:user "
                 "WHERE i.id=:item AND l.id=:list AND l.status='active' "
                 "AND (i.recipient_user_id IS NULL OR i.recipient_user_id<>:user) "
+                "AND (l.is_collaborative=1 OR l.owner_id<>:user) LIMIT 1"
+            ),
+            {"user": data["user_id"], "item": data["item_id"], "list": data["list_id"]},
+        )
+        if not allowed:
+            return False
+    if data["kind"] in ("receipt_reverted", "receipt_increased"):
+        extra = "AND i.received_quantity > 0 " if data["kind"] == "receipt_increased" else ""
+        allowed = await conn.scalar(
+            text(
+                "SELECT 1 FROM wl_items i JOIN wl_lists l ON l.id=i.wishlist_id "
+                "JOIN wl_reservations r ON r.wish_item_id=i.id AND r.user_id=:user "
+                "WHERE i.id=:item AND l.id=:list AND l.status IN ('active','archived') "
+                "AND r.status IN ('active','purchased') "
+                "AND (i.recipient_user_id IS NULL OR i.recipient_user_id<>:user) "
+                f"{extra}"
                 "AND (l.is_collaborative=1 OR l.owner_id<>:user) LIMIT 1"
             ),
             {"user": data["user_id"], "item": data["item_id"], "list": data["list_id"]},
@@ -174,13 +204,7 @@ async def claim_reminder(
         )
         for row in rows:
             is_change = row["kind"] not in ("list", "birthday")
-            category = (
-                "reservation_changes"
-                if row["kind"] in ("reservation_changed", "reservation_confirmation")
-                else "wishlist_changes"
-                if is_change
-                else "reminders"
-            )
+            category = _event_category(row["kind"])
             if not await _event_authorized(conn, row):
                 await conn.execute(
                     text(
@@ -376,13 +400,7 @@ async def refresh_reminder(store: WishlistStore, claim: Reminder, now: int) -> R
             return None
         if not await _event_authorized(conn, row):
             return None
-        category = (
-            "reminders"
-            if row["kind"] in ("list", "birthday")
-            else "reservation_changes"
-            if row["kind"] in ("reservation_changed", "reservation_confirmation")
-            else "wishlist_changes"
-        )
+        category = _event_category(row["kind"])
         enabled = await _read_user_setting(conn, row["user_id"], row["kind"], category)
         if row["list_id"] is not None:
             override = await conn.scalar(

@@ -215,6 +215,10 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
             "Wish ‘{wish}’ from ‘{wishlist}’ was marked received. "
             "Check your reservation and change it if necessary."
         ),
+        "notices.receipt_reverted": (
+            "Receipt mark for wish ‘{wish}’ from ‘{wishlist}’ was cancelled or corrected. "
+            "Check your reservation and keep or update it if needed."
+        ),
         "notices.reminder.occasion": "Upcoming occasion: {title} ({date}).",
         "notices.reminder.item_created": "Wish added: {subject}.",
         "notices.reminder.item_updated": "Wish updated: {subject}.",
@@ -444,9 +448,24 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "web.receipt.summary_template": (
             "Will mark as received: {chosen} pcs. of {remaining} remaining"
         ),
-        "web.receipt.irreversible": "This action cannot be undone.",
+        "web.receipt.irreversible": "You can correct or undo this receipt later in Gifted.",
         "web.receipt.confirm_btn": "Mark received",
         "web.receipt.recorded_notice": 'Marked as received: {count} pcs. ("{title}")',
+        "web.receipt.edit_btn": "Edit",
+        "web.receipt.cancel_btn": "Undo",
+        "web.receipt.edit_modal_title": "Correct receipt quantity",
+        "web.receipt.edit_quantity_label": "How many pieces were received",
+        "web.receipt.edit_max_label": "Maximum: {count}",
+        "web.receipt.edit_date_note": "The original receipt date will be preserved.",
+        "web.receipt.edit_confirm_btn": "Save changes",
+        "web.receipt.corrected_notice": 'Receipt updated: {count} pcs. ("{title}")',
+        "web.receipt.cancel_modal_title": "Undo gift receipt?",
+        "web.receipt.cancel_confirm_body": (
+            'Remove the receipt record of {count} pcs. for "{title}"? '
+            "The unreceived units will become available again."
+        ),
+        "web.receipt.cancel_confirm_btn": "Yes, undo receipt",
+        "web.receipt.cancelled_notice": 'Receipt undone ("{title}")',
         "web.receipt.generic_failure": "Could not save the receipt. Please try again.",
         "web.receipt.error.quantity_invalid": "Enter a whole number of at least 1.",
         "web.receipt.error.quantity_above_remaining": (
@@ -461,6 +480,9 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
             "You do not have permission to mark items received in this wishlist."
         ),
         "web.receipt.error.not_found": "Wish not found. Please refresh the page.",
+        "web.receipt.error.receipt_not_found": (
+            "This receipt record was already removed. Please refresh the page."
+        ),
         "web.receipt.error.busy": "Could not save the receipt right now. Please try again.",
         "web.share.modal_title": "Share wishlist",
         "web.share.public_link_label": "Public link for givers",
@@ -703,6 +725,11 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
             "Желание «{wish}» из списка «{wishlist}» отмечено как полученное.\n"
             "Проверьте свою бронь и при необходимости измените или отмените её."
         ),
+        "notices.receipt_reverted": (
+            "Отметка о получении желания «{wish}» из списка «{wishlist}» "
+            "была отменена или скорректирована.\n"
+            "Проверьте свою бронь и при необходимости оставьте или измените её."
+        ),
         "notices.reminder.occasion": "Приближается событие: {title} ({date}).",
         "notices.reminder.item_created": "Желание добавлено: {subject}.",
         "notices.reminder.item_updated": "Желание изменено: {subject}.",
@@ -935,9 +962,26 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "web.receipt.summary_template": (
             "Будет отмечено получено: {chosen} шт. из {remaining} оставшихся"
         ),
-        "web.receipt.irreversible": "Это действие нельзя отменить.",
+        "web.receipt.irreversible": (
+            "Ошибку можно будет исправить или отменить в разделе «Подаренные»."
+        ),
         "web.receipt.confirm_btn": "Отметить полученным",
         "web.receipt.recorded_notice": "Отмечено получено: {count} шт. («{title}»)",
+        "web.receipt.edit_btn": "Изменить",
+        "web.receipt.cancel_btn": "Отменить",
+        "web.receipt.edit_modal_title": "Исправить количество",
+        "web.receipt.edit_quantity_label": "Сколько штук получено",
+        "web.receipt.edit_max_label": "Максимум: {count}",
+        "web.receipt.edit_date_note": "Исходная дата получения сохранится.",
+        "web.receipt.edit_confirm_btn": "Сохранить",
+        "web.receipt.corrected_notice": "Количество обновлено: {count} шт. («{title}»)",
+        "web.receipt.cancel_modal_title": "Отменить отметку о получении?",
+        "web.receipt.cancel_confirm_body": (
+            "Удалить запись о получении ({count} шт.) для «{title}»? "
+            "Неполученные штуки снова станут доступны."
+        ),
+        "web.receipt.cancel_confirm_btn": "Да, отменить",
+        "web.receipt.cancelled_notice": "Отметка о получении отменена («{title}»)",
         "web.receipt.generic_failure": "Не удалось сохранить отметку. Повторите попытку.",
         "web.receipt.error.quantity_invalid": "Укажите целое число не меньше 1.",
         "web.receipt.error.quantity_above_remaining": (
@@ -950,6 +994,9 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "web.receipt.error.wishlist_not_active": "Вишлист не активен, отметить получение нельзя.",
         "web.receipt.error.forbidden": "У вас нет права отмечать получение в этом вишлисте.",
         "web.receipt.error.not_found": "Желание не найдено. Обновите страницу.",
+        "web.receipt.error.receipt_not_found": (
+            "Эта запись о получении уже удалена. Обновите страницу."
+        ),
         "web.receipt.error.busy": "Не удалось сохранить отметку сейчас. Повторите попытку.",
         "web.share.modal_title": "Поделиться списком",
         "web.share.public_link_label": "Публичная ссылка для дарителей",

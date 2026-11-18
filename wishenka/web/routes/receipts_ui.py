@@ -33,7 +33,12 @@ from wishenka.web.idempotency import (
     parse_idempotency_key,
     retention_hours_from_request,
 )
-from wishenka.web.routes.items_ui import _editor_card_flags, _execute, _items_list_html
+from wishenka.web.routes.items_ui import (
+    _archived_section_html,
+    _editor_card_flags,
+    _execute,
+    _items_list_html,
+)
 from wishenka.web.routes.receipts import _REFUSALS
 from wishenka.web.templates import templates
 from wishenka.wishlists.exceptions import (
@@ -43,6 +48,7 @@ from wishenka.wishlists.exceptions import (
     NothingRemainingError,
     PermissionDeniedError,
     QuantityAboveRemainingError,
+    ReceiptNotFoundError,
     WishArchivedError,
     WishlistArchivedError,
     WishlistError,
@@ -65,6 +71,7 @@ _REFUSAL_KEYS: dict[str, str] = {
     "wishlist_not_active": "web.receipt.error.wishlist_not_active",
     "forbidden": "web.receipt.error.forbidden",
     "not_found": "web.receipt.error.not_found",
+    "receipt_not_found": "web.receipt.error.receipt_not_found",
     BUSY: "web.receipt.error.busy",
 }
 _SENTENCES: dict[str, str] = {reason: t(key, "ru") for reason, key in _REFUSAL_KEYS.items()}
@@ -330,10 +337,19 @@ def _gifted_oob(
     request: Request,
     gifted: list[GiftedRow] | None,
     locale: SupportedLocale = DEFAULT_LOCALE,
+    *,
+    wishlist_id: int | None = None,
 ) -> str:
     """The «Подаренные» section as an out-of-band replacement."""
     return templates.get_template("partials/gifted_items_section.html").render(
-        {"request": request, "gifted_rows": gifted, "oob": True, "locale": locale}
+        {
+            "request": request,
+            "gifted_rows": gifted,
+            "wishlist_id": wishlist_id,
+            "can_edit_wishlist": wishlist_id is not None,
+            "oob": True,
+            "locale": locale,
+        }
     )
 
 
@@ -379,7 +395,7 @@ async def _effect_fragments(
     title = title or next((row.title for row in gifted if row.item_id == item_id), "")
     parts = [
         _list_oob(request, wishlist_id, state.items, locale),
-        _gifted_oob(request, state.gifted, locale),
+        _gifted_oob(request, state.gifted, locale, wishlist_id=wishlist_id),
     ]
     if dialog_oob:
         parts.append(
@@ -437,7 +453,7 @@ async def record_receipt_ui(
             oob_text("item-modal-container"),
             notice,
             main,
-            _gifted_oob(request, state.gifted, locale),
+            _gifted_oob(request, state.gifted, locale, wishlist_id=wishlist_id),
         ]
         return "\n".join(parts)
 
@@ -487,3 +503,319 @@ async def record_receipt_ui(
         return _refusal_fragment(http_status, reason, _sentence(reason, exc, locale), extra or "")
     _log(logging.INFO, "receipt_recorded_http", "Receipt recorded", ids)
     return HTMLResponse(_render_receipt_html(done), status_code=status.HTTP_201_CREATED)
+
+
+@dataclass(frozen=True)
+class _ReceiptEntryOpen:
+    """Advisory state of a receipt edit/cancel modal request."""
+
+    title: str
+    current_quantity: int
+    max_allowed: int
+    refusal: Exception | None
+
+
+@dataclass(frozen=True)
+class _FullMutationState:
+    """Committed state read for edit/cancel OOB updates (active, archive, gifted)."""
+
+    title: str
+    items: list[_View]
+    archived: list[WishItemRecipientViewDTO]
+    gifted: list[GiftedRow] | None
+
+
+async def _check_receipt_entry_open(
+    svc: WishlistService,
+    wishlist_id: int,
+    item_id: int,
+    receipt_id: int,
+    user: AuthenticatedUser,
+) -> _ReceiptEntryOpen:
+    """Validate membership, list status, item, and receipt record for edit/cancel modal open."""
+    wishlist = await svc.get_wishlist_by_id(wishlist_id)
+    item = next((wish for wish in wishlist.items if wish.id == item_id), None)
+    if item is None:
+        raise ItemNotFoundError(f"Item {item_id} not found")
+    if not WishlistAccessPolicy.resolve_context(user, wishlist).is_member:
+        raise PermissionDeniedError("Actor cannot modify receipts in this wishlist")
+    if wishlist.status != WishlistStatus.ACTIVE:
+        return _ReceiptEntryOpen(
+            item.title, 0, 0, WishlistArchivedError(f"Wishlist {wishlist_id} is archived")
+        )
+    receipt = next((r for r in item.receipts if r.id == receipt_id), None)
+    if receipt is None:
+        return _ReceiptEntryOpen(
+            item.title, 0, 0, ReceiptNotFoundError(f"Receipt {receipt_id} not found")
+        )
+    return _ReceiptEntryOpen(
+        item.title, receipt.quantity, receipt.quantity + item.remaining_quantity, None
+    )
+
+
+async def _read_full_mutation_state(
+    svc: WishlistService,
+    wishlist_id: int,
+    user: AuthenticatedUser,
+    title: str,
+    locale: SupportedLocale,
+) -> _FullMutationState:
+    items = await svc.list_wish_items(wishlist_id=wishlist_id, actor=user)
+    view = await svc.get_wishlist_view(wishlist_id, user)
+    gifted = await read_gifted_rows(svc, wishlist_id, user, locale)
+    return _FullMutationState(title, items, list(view.archived_items), gifted)
+
+
+def _render_mutation_oob(
+    request: Request,
+    wishlist_id: int,
+    state: _FullMutationState,
+    notice_text: str,
+    locale: SupportedLocale,
+) -> str:
+    parts = [
+        str(oob_text("item-modal-container")),
+        str(oob_text("list-notice", notice_text)),
+        str(_list_oob(request, wishlist_id, state.items, locale)),
+        _gifted_oob(request, state.gifted, locale, wishlist_id=wishlist_id),
+        _archived_section_html(request, wishlist_id, state.archived, locale),
+    ]
+    return "\n".join(parts)
+
+
+async def _open_receipt_entry_modal(
+    template_name: str,
+    wishlist_id: int,
+    item_id: int,
+    receipt_id: int,
+    request: Request,
+    user: AuthenticatedUser,
+    locale: SupportedLocale,
+) -> Response:
+    ids = _ids(wishlist_id, item_id, user)
+    title = ""
+    current_quantity = 0
+    max_allowed = 0
+    refusal: Exception | None
+    try:
+        opened = await _execute(
+            request,
+            lambda svc: _check_receipt_entry_open(svc, wishlist_id, item_id, receipt_id, user),
+        )
+        title = opened.title
+        current_quantity = opened.current_quantity
+        max_allowed = opened.max_allowed
+        refusal = opened.refusal
+    except WishlistError as exc:
+        refusal = exc
+
+    ctx: dict[str, Any] = {
+        "wishlist_id": wishlist_id,
+        "item_id": item_id,
+        "receipt_id": receipt_id,
+        "item_title": title,
+        "current_quantity": current_quantity,
+        "max_allowed": max_allowed,
+        "locale": locale,
+    }
+    if refusal is None:
+        _log(
+            logging.INFO,
+            "ui_receipt_entry_form_opened",
+            "Receipt entry dialog opened",
+            ids,
+            receipt_id=receipt_id,
+        )
+        return HTMLResponse(templates.get_template(template_name).render(ctx))
+
+    if isinstance(refusal, InventoryBusyError):
+        http_status, reason = 503, BUSY
+    else:
+        verdict = _classify(refusal)
+        if verdict is None:
+            raise refusal
+        http_status, reason = verdict
+    _log_refusal("ui_receipt_entry_form_refused", ids, reason, http_status, refusal)
+    ctx["blocked"] = True
+    ctx["feedback"] = _sentence(reason, refusal, locale)
+    return HTMLResponse(
+        content=templates.get_template(template_name).render(ctx),
+        status_code=http_status,
+        headers={RECEIPT_REFUSAL_HEADER: reason},
+    )
+
+
+async def _execute_receipt_mutation_ui(
+    request: Request,
+    user: AuthenticatedUser,
+    wishlist_id: int,
+    item_id: int,
+    receipt_id: int,
+    operation_name: str,
+    success_event: str,
+    request_hash_payload: dict[str, Any],
+    action: Any,
+    notice_fn: Any,
+    locale: SupportedLocale,
+) -> Response:
+    idempotency_key = parse_idempotency_key(request)
+    ids = _ids(wishlist_id, item_id, user)
+
+    def _render_html(done: _FullMutationState) -> str:
+        return _render_mutation_oob(request, wishlist_id, done, notice_fn(done.title), locale)
+
+    try:
+        injected = getattr(request.app.state, "wishlist_service", None)
+        if idempotency_key is not None and injected is None:
+            request_hash = compute_request_hash(
+                operation_name,
+                {"wishlist_id": wishlist_id, "item_id": item_id},
+                request_hash_payload,
+            )
+
+            async def serialized_action(svc: WishlistService) -> tuple[int, str, str]:
+                done = await action(svc)
+                return status.HTTP_200_OK, HTML_MEDIA_TYPE, _render_html(done)
+
+            outcome = await request.app.state.wishlist_store.execute_wish_idempotent(
+                serialized_action,
+                actor_id=user.telegram_id,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                retention_hours=retention_hours_from_request(request),
+                item_id=item_id,
+                operation_name=operation_name,
+                require_member=True,
+            )
+            _log(
+                logging.INFO,
+                success_event,
+                "Receipt mutation applied",
+                ids,
+                receipt_id=receipt_id,
+            )
+            return build_replay_response(outcome.status_code, outcome.content_type, outcome.body)
+        done = await _execute(request, action)
+    except InventoryBusyError:
+        _log(logging.WARNING, "receipt_inventory_busy", "Receipt busy", ids)
+        return _refusal_fragment(
+            status.HTTP_503_SERVICE_UNAVAILABLE, BUSY, _sentence(BUSY, locale=locale)
+        )
+    except IdempotencyConflictError as exc:
+        _log_refusal("receipt_refused", ids, "idempotency_conflict", status.HTTP_409_CONFLICT, exc)
+        return _refusal_fragment(status.HTTP_409_CONFLICT, "idempotency_conflict", str(exc))
+    except WishlistError as exc:
+        verdict = _classify(exc)
+        if verdict is None:
+            raise
+        http_status, reason = verdict
+        _log_refusal("receipt_refused", ids, reason, http_status, exc)
+        return _refusal_fragment(http_status, reason, _sentence(reason, exc, locale))
+    _log(logging.INFO, success_event, "Receipt mutation applied", ids, receipt_id=receipt_id)
+    return HTMLResponse(_render_html(done), status_code=status.HTTP_200_OK)
+
+
+@router.get("/items/{item_id}/receipts/{receipt_id}/edit", response_class=HTMLResponse)
+async def get_receipt_edit_dialog(
+    wishlist_id: int,
+    item_id: int,
+    receipt_id: int,
+    request: Request,
+    user: User,
+    locale: LocaleDep,
+) -> Response:
+    """Open the receipt quantity correction modal."""
+    return await _open_receipt_entry_modal(
+        "partials/receipt_edit_modal.html",
+        wishlist_id,
+        item_id,
+        receipt_id,
+        request,
+        user,
+        locale,
+    )
+
+
+@router.post("/items/{item_id}/receipts/{receipt_id}/edit", response_class=HTMLResponse)
+async def correct_receipt_ui(
+    wishlist_id: int,
+    item_id: int,
+    receipt_id: int,
+    request: Request,
+    user: User,
+    locale: LocaleDep,
+    quantity: Annotated[str, Form()] = "",
+) -> Response:
+    """Correct a receipt record quantity and return OOB fragments."""
+    count = _quantity_of(quantity)
+
+    async def action(svc: WishlistService) -> _FullMutationState:
+        item = await svc.correct_item_receipt(
+            item_id, receipt_id, user, count, wishlist_id=wishlist_id
+        )
+        return await _read_full_mutation_state(svc, wishlist_id, user, item.title, locale)
+
+    return await _execute_receipt_mutation_ui(
+        request,
+        user,
+        wishlist_id,
+        item_id,
+        receipt_id,
+        "correct_receipt_ui",
+        "receipt_corrected_http",
+        {"receipt_id": receipt_id, "quantity": count},
+        action,
+        lambda title: t("web.receipt.corrected_notice", locale, count=count, title=title),
+        locale,
+    )
+
+
+@router.get("/items/{item_id}/receipts/{receipt_id}/cancel", response_class=HTMLResponse)
+async def get_receipt_cancel_dialog(
+    wishlist_id: int,
+    item_id: int,
+    receipt_id: int,
+    request: Request,
+    user: User,
+    locale: LocaleDep,
+) -> Response:
+    """Open the receipt cancellation confirmation modal."""
+    return await _open_receipt_entry_modal(
+        "partials/receipt_cancel_modal.html",
+        wishlist_id,
+        item_id,
+        receipt_id,
+        request,
+        user,
+        locale,
+    )
+
+
+@router.post("/items/{item_id}/receipts/{receipt_id}/cancel", response_class=HTMLResponse)
+async def cancel_receipt_ui(
+    wishlist_id: int,
+    item_id: int,
+    receipt_id: int,
+    request: Request,
+    user: User,
+    locale: LocaleDep,
+) -> Response:
+    """Cancel a receipt record and return OOB fragments."""
+
+    async def action(svc: WishlistService) -> _FullMutationState:
+        item = await svc.cancel_item_receipt(item_id, receipt_id, user, wishlist_id=wishlist_id)
+        return await _read_full_mutation_state(svc, wishlist_id, user, item.title, locale)
+
+    return await _execute_receipt_mutation_ui(
+        request,
+        user,
+        wishlist_id,
+        item_id,
+        receipt_id,
+        "cancel_receipt_ui",
+        "receipt_cancelled_http",
+        {"receipt_id": receipt_id},
+        action,
+        lambda title: t("web.receipt.cancelled_notice", locale, title=title),
+        locale,
+    )

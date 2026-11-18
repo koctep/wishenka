@@ -300,7 +300,7 @@ def test_gifted_route_and_read_data(test_app: AppEnv) -> None:
     entries = response.json()
     assert [entry["id"] for entry in entries] == [item_id]
     assert set(entries[0]) == set(gifted_dto.model_fields)
-    assert set(entries[0]["receipts"][0]) == {"received_at", "quantity", "is_approximate"}
+    assert set(entries[0]["receipts"][0]) == {"id", "received_at", "quantity", "is_approximate"}
     assert client.get(gifted_url, headers=bearer(sessions, GIFTER_ID, "Greta")).status_code == 403
     assert client.get(gifted_url).status_code == 401
 

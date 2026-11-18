@@ -1065,7 +1065,14 @@ async def _nothing_remaining_response(
         parts.append(_archived_section_html(request, wishlist_id, archived, locale))
         parts.append(
             templates.get_template("partials/gifted_items_section.html").render(
-                {"request": request, "gifted_rows": gifted, "oob": True, "locale": locale}
+                {
+                    "request": request,
+                    "gifted_rows": gifted,
+                    "wishlist_id": wishlist_id,
+                    "can_edit_wishlist": True,
+                    "oob": True,
+                    "locale": locale,
+                }
             )
         )
     return HTMLResponse(

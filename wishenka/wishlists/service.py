@@ -33,6 +33,7 @@ from wishenka.wishlists.exceptions import (
     PermissionDeniedError,
     QuantityAboveRemainingError,
     QuantityInvalidError,
+    ReceiptNotFoundError,
     ReservationError,
     ReservationNotFoundError,
     SelfReservationError,
@@ -77,6 +78,8 @@ _ITEM_INVENTORY_METHODS = frozenset(
         "create_reservation",
         "update_wish_item",
         "record_item_fulfillment",
+        "cancel_item_receipt",
+        "correct_item_receipt",
     }
 )
 _RESERVATION_INVENTORY_METHODS = frozenset(
@@ -273,6 +276,8 @@ class WishlistService:
         self._next_view_history_id: int = 0
         # Effects of the current unit of work; the store flushes them with the transaction.
         self._new_receipts: list[ReceiptRecord] = []
+        self._updated_receipts: list[ReceiptRecord] = []
+        self._deleted_receipt_ids: list[int] = []
         self._new_notices: list[NoticeDraft] = []
         self._new_shared_item_events: list[SharedEvent] = []
         self._flushed_shared_events: list[tuple[str, int]] = []
@@ -342,6 +347,32 @@ class WishlistService:
         if by_user is not None:
             return by_user, "user"
         return True, None
+
+    def _record_receipt_change_event(self, kind: str, item: WishItem) -> None:
+        """Queue a SharedEvent for open-promise givers (excluding recipients) on receipt changes."""
+        wl = item.wishlist
+        if wl is None:
+            return
+        givers: list[int] = []
+        for reservation in item.reservations:
+            if (
+                reservation.status in (ReservationStatus.ACTIVE, ReservationStatus.PURCHASED)
+                and reservation.user_id not in givers
+                and not WishlistAccessPolicy.is_recipient_id(reservation.user_id, item)
+            ):
+                givers.append(reservation.user_id)
+        if not givers:
+            return
+        self._new_shared_item_events.append(
+            SharedEvent(
+                kind,
+                wl.id,
+                item.id,
+                secrets.token_hex(16),
+                tuple(sorted(givers)),
+                frozenset(member.user_id for member in wl.members),
+            )
+        )
 
     def _draft_receipt_notices(self, item: WishItem, receipt: ReceiptRecord) -> None:
         """Queue one notice draft per distinct promising giver, skipped when a setting says so."""
@@ -1500,6 +1531,7 @@ class WishlistService:
                 is_archived=item.is_archived,
                 receipts=[
                     ReceiptEntryDTO(
+                        id=r.id,
                         received_at=r.received_at,
                         quantity=r.quantity,
                         is_approximate=r.is_approximate,
@@ -2491,6 +2523,158 @@ class WishlistService:
                 "received_quantity": item.received_quantity,
                 "total_quantity": item.quantity,
                 "fully_received": item.is_fully_received,
+            },
+        )
+        return item
+
+    def _validate_receipt_mutation_access(
+        self,
+        item_id: int,
+        actor: AuthenticatedUser,
+        wishlist_id: int | None,
+        action: str,
+    ) -> WishItem:
+        """Validate item existence, list membership, and active list status for receipt edits."""
+        item = self._items.get(item_id)
+        if item is None or (wishlist_id is not None and item.wishlist_id != wishlist_id):
+            raise ItemNotFoundError(f"Item {item_id} not found")
+        wl = item.wishlist
+        if wl is not None:
+            ctx = WishlistAccessPolicy.resolve_context(actor, wl)
+            if not ctx.is_member:
+                logger.warning(
+                    "Actor %s denied permission to %s item %s in wishlist %s",
+                    actor.telegram_id,
+                    action,
+                    item_id,
+                    wl.id,
+                    extra={
+                        "event": "access_denied",
+                        "actor_id": actor.telegram_id,
+                        "user_id": actor.telegram_id,
+                        "wishlist_id": wl.id,
+                        "item_id": item_id,
+                        "action": action,
+                    },
+                )
+                raise PermissionDeniedError("Actor cannot modify receipts in this wishlist")
+            if wl.status == WishlistStatus.DELETED:
+                raise WishlistDeletedError(f"Wishlist {wl.id} is deleted")
+            if wl.status == WishlistStatus.ARCHIVED:
+                raise WishlistArchivedError(f"Wishlist {wl.id} is archived")
+        return item
+
+    async def cancel_item_receipt(
+        self,
+        item_id: int,
+        receipt_id: int,
+        actor: AuthenticatedUser,
+        *,
+        wishlist_id: int | None = None,
+    ) -> WishItem:
+        """Cancel (undo) a single receipt record on a wish in an active list.
+
+        Raises:
+            ItemNotFoundError: Unknown wish, or ``wishlist_id`` does not match.
+            PermissionDeniedError: The actor is not a list member.
+            WishlistDeletedError: The list is deleted.
+            WishlistArchivedError: The list is archived.
+            ReceiptNotFoundError: ``receipt_id`` does not exist on this wish.
+        """
+        item = self._validate_receipt_mutation_access(
+            item_id, actor, wishlist_id, "cancel_item_receipt"
+        )
+        async with self._concurrency_coordinator.acquire(item_id):
+            receipt = next((r for r in item.receipts if r.id == receipt_id), None)
+            if receipt is None:
+                raise ReceiptNotFoundError(f"Receipt {receipt_id} not found for item {item_id}")
+            item.receipts.remove(receipt)
+            item.received_quantity = max(0, item.received_quantity - receipt.quantity)
+            item.updated_at = datetime.now(UTC)
+            self._deleted_receipt_ids.append(receipt.id)
+            self._record_receipt_change_event("receipt_reverted", item)
+
+        wl = item.wishlist
+        logger.info(
+            "Receipt %s cancelled on item %s by user %s",
+            receipt_id,
+            item_id,
+            actor.telegram_id,
+            extra={
+                "event": "receipt_cancelled",
+                "wishlist_id": wl.id if wl else None,
+                "item_id": item.id,
+                "receipt_id": receipt_id,
+                "user_id": actor.telegram_id,
+                "actor_id": actor.telegram_id,
+                "received_quantity": item.received_quantity,
+                "total_quantity": item.quantity,
+            },
+        )
+        return item
+
+    async def correct_item_receipt(
+        self,
+        item_id: int,
+        receipt_id: int,
+        actor: AuthenticatedUser,
+        new_quantity: int,
+        *,
+        wishlist_id: int | None = None,
+    ) -> WishItem:
+        """Correct the quantity of an existing receipt record, preserving its original date.
+
+        Raises:
+            ItemNotFoundError: Unknown wish, or ``wishlist_id`` does not match.
+            PermissionDeniedError: The actor is not a list member.
+            WishlistDeletedError: The list is deleted.
+            WishlistArchivedError: The list is archived.
+            QuantityInvalidError: ``new_quantity`` is below one.
+            ReceiptNotFoundError: ``receipt_id`` does not exist on this wish.
+            QuantityAboveRemainingError: ``new_quantity`` would exceed requested quantity.
+        """
+        item = self._validate_receipt_mutation_access(
+            item_id, actor, wishlist_id, "correct_item_receipt"
+        )
+        if new_quantity < 1:
+            raise QuantityInvalidError()
+
+        async with self._concurrency_coordinator.acquire(item_id):
+            receipt = next((r for r in item.receipts if r.id == receipt_id), None)
+            if receipt is None:
+                raise ReceiptNotFoundError(f"Receipt {receipt_id} not found for item {item_id}")
+            max_allowed = receipt.quantity + item.remaining_quantity
+            if new_quantity > max_allowed:
+                raise QuantityAboveRemainingError(max_allowed)
+            if new_quantity == receipt.quantity:
+                return item
+            old_quantity = receipt.quantity
+            receipt.quantity = new_quantity
+            item.received_quantity = max(0, item.received_quantity - old_quantity + new_quantity)
+            item.updated_at = datetime.now(UTC)
+            self._updated_receipts.append(receipt)
+            kind = "receipt_increased" if new_quantity > old_quantity else "receipt_reverted"
+            self._record_receipt_change_event(kind, item)
+
+        wl = item.wishlist
+        logger.info(
+            "Receipt %s corrected on item %s from %s to %s by user %s",
+            receipt_id,
+            item_id,
+            old_quantity,
+            new_quantity,
+            actor.telegram_id,
+            extra={
+                "event": "receipt_corrected",
+                "wishlist_id": wl.id if wl else None,
+                "item_id": item.id,
+                "receipt_id": receipt_id,
+                "user_id": actor.telegram_id,
+                "actor_id": actor.telegram_id,
+                "old_quantity": old_quantity,
+                "new_quantity": new_quantity,
+                "received_quantity": item.received_quantity,
+                "total_quantity": item.quantity,
             },
         )
         return item

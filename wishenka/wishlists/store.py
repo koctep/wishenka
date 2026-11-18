@@ -924,6 +924,23 @@ class WishlistStore:
                 },
             )
             receipt.id = int(result.lastrowid)
+        for receipt in service._updated_receipts:
+            await conn.execute(
+                text(
+                    "UPDATE wl_receipts SET quantity = :quantity "
+                    "WHERE id = :id AND wish_item_id = :wish_item_id"
+                ),
+                {
+                    "id": receipt.id,
+                    "wish_item_id": receipt.wish_item_id,
+                    "quantity": receipt.quantity,
+                },
+            )
+        for receipt_id in service._deleted_receipt_ids:
+            await conn.execute(
+                text("DELETE FROM wl_receipts WHERE id = :id"),
+                {"id": receipt_id},
+            )
         flushed: list[FlushedNotice] = []
         now = datetime.now(UTC)
         producer = EventProducer()

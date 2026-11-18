@@ -1,7 +1,7 @@
 # Gift Receipt and the «Подаренные» Section
 
 > **Status: BACKEND IMPLEMENTED by WISHENKA-23; Mini App UI IMPLEMENTED by WISHENKA-24 (see
-> [Mini App UI](#mini-app-ui-wishenka-24)).**
+> [Mini App UI](#mini-app-ui-wishenka-24)); Undo & Correction IMPLEMENTED by WISHENKA-153.**
 
 The backend is the receipt command, the gifted read, the derived views, the receipt history, the
 giver notice path (outbox, worker, sender) and the migrations. The Mini App page layer
@@ -53,7 +53,6 @@ came.
 
 - Notification settings screen (only tables and lookup exist): WISHENKA-34.
 - Metrics exporter: WISHENKA-84 (the metrics are derived from logs and SQL, see Logging).
-- Undo or correction of a receipt: WISHENKA-153. The act is final.
 - Product decisions (assumptions A to D, public «already gifted» label, history after list
   deletion, co-author who is the recipient, edit-form quantity lock): WISHENKA-154.
 - Follow-up debt of the UI story: see [Follow-up tickets](#follow-up-tickets-of-the-ui).
@@ -95,7 +94,28 @@ came.
   `QuantityAboveRemainingError`. On success it adds to the counter, appends a `ReceiptRecord`
   and drafts the notices. The store persists all effects in the same transaction
   (`WishlistStore._flush_receipt_effects`, called from `_persist_wish` and `_write`).
+- **`cancel_item_receipt(item_id, receipt_id, actor, *, wishlist_id=None)`** and
+  **`correct_item_receipt(item_id, receipt_id, actor, new_quantity, *, wishlist_id=None)`**
+  (WISHENKA-153): undo or adjust an existing `wl_receipts` row. Guards run in fixed order:
+  unknown wish or wrong `wishlist_id` -> `ItemNotFoundError`; not a member ->
+  `PermissionDeniedError`; list deleted -> `WishlistDeletedError`; list archived ->
+  `WishlistArchivedError`; (`correct_item_receipt` only) `new_quantity < 1` ->
+  `QuantityInvalidError`; acquire per-item lock; missing `receipt_id` on that wish ->
+  `ReceiptNotFoundError` (`reason = "receipt_not_found"`, HTTP 404); (`correct_item_receipt` only)
+  `new_quantity > receipt.quantity + item.remaining_quantity` -> `QuantityAboveRemainingError`.
+  Note that `item.is_archived` does **not** block cancelling or correcting a receipt: an archived
+  remainder wish stays `is_archived = True` with its updated `remaining_quantity`.
+  `correct_item_receipt` preserves `received_at` and `is_approximate`, and treats
+  `new_quantity == receipt.quantity` as a no-op (no `updated_at` change, no notices).
+  `WishlistStore._flush_receipt_effects` flushes `_updated_receipts` (`UPDATE wl_receipts SET
+  quantity = ...`) and `_deleted_receipt_ids` (`DELETE FROM wl_receipts`) in the same
+  `BEGIN IMMEDIATE` transaction, and records `SharedEvent` (`receipt_reverted` on cancel or
+  downward correction; `receipt_increased` on upward correction) into `reminder_outbox` for
+  distinct open-promise givers (`ACTIVE`/`PURCHASED`, excluding `is_recipient_id`). Using
+  `reminder_outbox` avoids `notification_outbox.receipt_id ON DELETE CASCADE` on cancel and
+  `notice_receipt_keys` deduplication on upward correction.
 - **Exceptions** (`wishlists/exceptions.py`): `WishRefusalError` base with a stable `reason`;
+  `ReceiptNotFoundError` (`reason = "receipt_not_found"`);
   `QuantityInvalidError` and `QuantityAboveRemainingError` also derive from `ValueError`;
   `NothingRemainingError` and `QuantityAboveRemainingError` carry `remaining_quantity`.
 - **Policy** (`wishlists/policy.py`): `is_recipient_id(user_id, item)` (and `is_recipient`
@@ -178,11 +198,34 @@ Records one receipt act.
   | `NothingRemainingError` | 409 | `nothing_remaining` | Nothing remains to receive |
   | `PermissionDeniedError` | 403 | `forbidden` | Forbidden |
   | `ItemNotFoundError`, `WishlistNotFoundError` | 404 | `not_found` | Resource not found |
+  | `ReceiptNotFoundError` | 404 | `receipt_not_found` | Resource not found |
   | `InventoryBusyError` | 503 | `busy` | the promise-route sentence, nothing changed, retry |
 
   A wish id that exists in another list is `not_found`. The route constant of the
   `quantity_invalid` message differs from the `QuantityInvalidError` default ("Quantity must be
   a positive whole number"); WISHENKA-155 unifies them. Clients should map by `reason`.
+
+### `DELETE /api/wishlists/{wishlist_id}/items/{item_id}/receipts/{receipt_id}` (WISHENKA-153)
+
+Cancels (undoes) a single receipt act, removes the `wl_receipts` row, decrements
+`received_quantity`, and queues `receipt_reverted` in `reminder_outbox` for open-promise givers.
+Accepts `Idempotency-Key` (see [idempotency.md](idempotency.md)).
+
+- **Success**: HTTP 200, `ReceiptResultDTO` with `received_now=0` and updated counters.
+- **Refusals**: same `_REFUSALS` table as `POST`, including 404 `receipt_not_found` when
+  `receipt_id` is absent on the wish.
+
+### `PATCH /api/wishlists/{wishlist_id}/items/{item_id}/receipts/{receipt_id}` (WISHENKA-153)
+
+Corrects the quantity of an existing receipt act while preserving `received_at` and
+`is_approximate`. Accepts `Idempotency-Key`.
+
+- **Body** (`ReceiptRequestDTO`, `extra="forbid"`): `{"quantity": <int>}`.
+- **Success**: HTTP 200, `ReceiptResultDTO` with `received_now=payload.quantity` and updated
+  counters. Same-quantity correction is a no-op (no `updated_at` change, no notices).
+- **Refusals**: same `_REFUSALS` table (`quantity_invalid`, `quantity_above_remaining` with
+  `max_allowed = old_quantity + remaining_quantity`, `receipt_not_found`, `wishlist_not_active`,
+  `forbidden`, `not_found`, `busy`).
 
 ### `GET /api/wishlists/{wishlist_id}/gifted`
 
@@ -196,7 +239,7 @@ list is archived. Order: newest receipt first (a wish without records falls back
   (default `RUB`), `store_name`, `store_icon_url`, `recipient_user_id`, `recipient_name`,
   `quantity` (1), `received_quantity` (0), `remaining_quantity` (0), `is_archived`, and
   `receipts`.
-- `ReceiptEntryDTO`: `received_at`, `quantity`, `is_approximate` (false). Entries are oldest
+- `ReceiptEntryDTO`: `id` (default 0), `received_at`, `quantity`, `is_approximate` (false). Entries are oldest
   first. No reservation, giver or promise field exists on either DTO.
 
 ### Other read data changed by this story
@@ -375,10 +418,11 @@ this section and the code differ, the code wins.
 
 | File | Role |
 | ---- | ---- |
-| `wishenka/web/routes/receipts_ui.py` | Router `/web/wishlists/{wishlist_id}` (tag `receipts-ui`): the dialog (`get_receipt_dialog`) and the command (`record_receipt_ui`). Included in `create_app` after `items_ui_router`. |
-| `wishenka/web/gifted_view.py` | `RECEIPT_REFUSAL_HEADER` (`X-Receipt-Refusal`), `NOTHING_REMAINING_TEXT`, the escaping helper `oob_text`, the view models `GiftedAct`, `GiftedRow`, `utc_day`, `build_gifted_rows`, and `read_gifted_rows` (fail-soft). |
-| `wishenka/web/templates/partials/item_receipt_modal.html` | The dialog, context `wishlist_id`, `item_id`, `item_title`, `remaining`, `selected`, `feedback`, `blocked`, `oob`. |
-| `wishenka/web/templates/partials/gifted_items_section.html` | The «Подаренные» section, context `gifted_rows`, `oob`. |
+| `wishenka/web/routes/receipts_ui.py` | Router `/web/wishlists/{wishlist_id}` (tag `receipts-ui`): receipt creation (`get_receipt_dialog`, `record_receipt_ui`) and per-act edit/cancel (`get_receipt_edit_dialog`, `correct_receipt_ui`, `get_receipt_cancel_dialog`, `cancel_receipt_ui`). Included in `create_app` after `items_ui_router`. |
+| `wishenka/web/gifted_view.py` | `RECEIPT_REFUSAL_HEADER` (`X-Receipt-Refusal`), `NOTHING_REMAINING_TEXT`, the escaping helper `oob_text`, the view models `GiftedAct` (carries `receipt_id`), `GiftedRow`, `utc_day`, `build_gifted_rows`, and `read_gifted_rows` (fail-soft). |
+| `wishenka/web/templates/partials/item_receipt_modal.html` | Receipt creation dialog, context `wishlist_id`, `item_id`, `item_title`, `remaining`, `selected`, `feedback`, `blocked`, `oob`. |
+| `wishenka/web/templates/partials/receipt_edit_modal.html`, `receipt_cancel_modal.html` | Per-act correction and cancellation confirmation modals (WISHENKA-153). |
+| `wishenka/web/templates/partials/gifted_items_section.html` | The «Подаренные» section, context `gifted_rows`, `wishlist_id`, `can_edit_wishlist`, `oob`. |
 | `wishenka/web/static/receipt.js` | Dialog behaviour (classic script in an IIFE, `defer`, after `wishlist.js`). |
 | `wishenka/web/static/wishlist.js` | Two additions: the `swapWishCard` wrapper and the `htmx:responseError` listener for a stale reorder. |
 | `partials/item_card.html`, `archived_items_section.html`, `item_archive_modal.html`, `reservations_list.html`, `wishlist_detail.html`, `base.html`, `static/miniapp.css` | Owner card, archive texts, cabinet marker, page wiring, script tag, styles. |
@@ -411,6 +455,17 @@ every non-GET htmx request in `htmx:configRequest` once the token is fetched.
      from the list); a full receipt: the whole `#items-list` (`innerHTML:#items-list`) because
      the wish left the list and the flags and the empty text come along;
   4. the «Подаренные» section (`outerHTML`).
+- **`GET /web/wishlists/{wishlist_id}/items/{item_id}/receipts/{receipt_id}/edit`** and
+  **`GET /web/wishlists/{wishlist_id}/items/{item_id}/receipts/{receipt_id}/cancel`**
+  (WISHENKA-153): open the correction modal (`partials/receipt_edit_modal.html`) or cancellation
+  confirmation modal (`partials/receipt_cancel_modal.html`) for a specific `receipt_id` (INFO
+  `ui_receipt_entry_form_opened`). Refusals return the blocked modal with `X-Receipt-Refusal`.
+- **`POST /web/wishlists/{wishlist_id}/items/{item_id}/receipts/{receipt_id}/edit`** (form field
+  `quantity`) and **`POST /web/wishlists/{wishlist_id}/items/{item_id}/receipts/{receipt_id}/cancel`**
+  (WISHENKA-153): call `correct_item_receipt` or `cancel_item_receipt`, accept `Idempotency-Key`,
+  and on 200 return OOB fragments emptying `#item-modal-container` and updating `#list-notice`,
+  `#items-list`, `#gifted-items-section`, and `#archived-items-section`. `receipt.js` submits
+  both forms via `submitReceipt` (with or without a `quantity` input).
 
 ### Dialog flow
 
@@ -451,6 +506,7 @@ the JSON route table, read-only, from `receipts._REFUSALS` (`_classify`). The se
 | `wishlist_not_active` | 409 or 404 | Вишлист не активен, отметить получение нельзя. |
 | `forbidden` | 403 | У вас нет права отмечать получение в этом вишлисте. |
 | `not_found` | 404 | Желание не найдено. Обновите страницу. |
+| `receipt_not_found` | 404 | Эта запись о получении уже удалена. Обновите страницу. (`web.receipt.error.receipt_not_found`) |
 | `busy` | 503 | Не удалось сохранить отметку сейчас. Повторите попытку. |
 
 - `busy` is the UI mapping of `InventoryBusyError`. It is not in `_REFUSALS`; the constant is
@@ -539,8 +595,11 @@ expected.
   Wish order is the service order (newest receipt first). With no rows the element is empty
   (it stays as the target of out-of-band updates); when the read failed (`gifted_rows is
   none`) it shows «Не удалось загрузить «Подаренные». Обновите страницу.».
-- **No data beyond the read.** `GiftedRow` has no promise, giver or booking field because
-  `GiftedItemDTO` has none; the section has no controls.
+- **No data beyond the read, active-list controls.** `GiftedRow` has no promise, giver or
+  booking field because `GiftedItemDTO` has none. When `can_edit_wishlist` is true (active list
+  and member), each act with `act.receipt_id > 0` renders edit and cancel buttons targeting the
+  `/receipts/{receipt_id}/edit` and `/receipts/{receipt_id}/cancel` modals; on archived lists
+  «Подаренные» is read-only.
 - **Freshness.** Every receipt response carries the section as an out-of-band element, built by
   `read_gifted_rows` (a domain error gives `None`, never a failed response).
 
@@ -590,8 +649,12 @@ Logger `wishenka.web.receipts_ui`, every record has `extra={"event": ...}`, fixe
 | Event | Level | Written by | Extra keys besides ids |
 | ----- | ----- | ---------- | ---------------------- |
 | `ui_receipt_form_opened` | INFO | GET, dialog opened | none |
+| `ui_receipt_entry_form_opened` | INFO | GET, edit/cancel dialog opened | `receipt_id` |
 | `ui_receipt_form_refused` | WARNING | GET, any refusal incl. `busy` | `reason`, `http_status`, `remaining_quantity`? |
+| `ui_receipt_entry_form_refused` | WARNING | GET, edit/cancel dialog refusal incl. `busy` | `reason`, `http_status`, `remaining_quantity`? |
 | `receipt_recorded_http` | INFO | POST, after commit and state read | none |
+| `receipt_corrected_http` | INFO | POST `/edit`, after commit and state read | `receipt_id` |
+| `receipt_cancelled_http` | INFO | POST `/cancel`, after commit and state read | `receipt_id` |
 | `receipt_refused` | WARNING | POST, refusal | `reason`, `http_status`, `remaining_quantity`? |
 | `receipt_inventory_busy` | WARNING | POST, `InventoryBusyError` | none |
 
@@ -684,7 +747,10 @@ Every record sets `extra={"event": ...}`. The notice path correlates by `outbox_
 | Event | Level | Logger | Keys |
 | ----- | ----- | ------ | ---- |
 | `item_fulfilled` | INFO | `wishenka.wishlists` | `wishlist_id`, `item_id`, `user_id`, `actor_id`, `quantity`, `received_quantity`, `total_quantity`, `fully_received` |
+| `receipt_cancelled` | INFO | `wishenka.wishlists` | `wishlist_id`, `item_id`, `receipt_id`, `user_id`, `actor_id`, `received_quantity`, `total_quantity` |
+| `receipt_corrected` | INFO | `wishenka.wishlists` | `wishlist_id`, `item_id`, `receipt_id`, `user_id`, `actor_id`, `old_quantity`, `new_quantity`, `received_quantity`, `total_quantity` |
 | `receipt_recorded_http` | INFO | `wishenka.web.receipts` | `item_id` |
+| `receipt_cancelled_http`, `receipt_corrected_http` | INFO | `wishenka.web.receipts` | `item_id`, `receipt_id` |
 | `receipt_refused` | WARNING | `wishenka.web.receipts` | `operation`, `wishlist_id`, `item_id`, `actor_id`, `reason`, `http_status`, `remaining_quantity` (the two remaining-quantity reasons only) |
 | `fulfillment_quantity_exceeded` | WARNING | `wishenka.wishlists` | `item_id`, `wishlist_id`, `user_id`, `received_quantity`, `remaining_unfulfilled` |
 | `access_denied` (`action=record_item_fulfillment`) | WARNING | `wishenka.wishlists` | `actor_id`, `user_id`, `wishlist_id`, `item_id`, `action` |
@@ -705,7 +771,7 @@ Every record sets `extra={"event": ...}`. The notice path correlates by `outbox_
 | `receipt_notice_send_failed`, `receipt_notice_retry_scheduled`, `receipt_notice_failed_terminal`, `receipt_notice_uncertain` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `attempt`, `error_class` |
 | `receipt_notice_late_write_ignored` | DEBUG | `wishenka.wishlists.notices` | `outbox_id` |
 | `receipt_notice_batch_processed` | DEBUG | `wishenka.wishlists.notices` | `rows` |
-| `ui_receipt_form_opened`, `ui_receipt_form_refused`, `receipt_recorded_http`, `receipt_refused`, `receipt_inventory_busy` | INFO or WARNING | `wishenka.web.receipts_ui` | ids only, see [Log events of the UI](#log-events-of-the-ui) |
+| `ui_receipt_form_opened`, `ui_receipt_entry_form_opened`, `ui_receipt_form_refused`, `ui_receipt_entry_form_refused`, `receipt_recorded_http`, `receipt_corrected_http`, `receipt_cancelled_http`, `receipt_refused`, `receipt_inventory_busy` | INFO or WARNING | `wishenka.web.receipts_ui` | ids only, see [Log events of the UI](#log-events-of-the-ui) |
 
 Rules:
 
@@ -810,7 +876,7 @@ metric uses a DEBUG event, and labels never use a user, wishlist, item or giver.
 - **«Подаренные» is missing.** It is rendered only for a member of a non-deleted list, and the
   element is empty when nothing was received. «Не удалось загрузить «Подаренные»» means
   `read_gifted_rows` got a domain error; reload the page.
-- **Not built yet** (see Overview): undo (WISHENKA-153), settings screen (WISHENKA-34), metrics
+- **Not built yet** (see Overview): settings screen (WISHENKA-34), metrics
   exporter (WISHENKA-84), product decisions (WISHENKA-154), the UI follow-ups WISHENKA-160 to
   164.
 
@@ -833,5 +899,6 @@ reason table, logging), `test_receipt_card_ui.py` (owner card, button, archive t
 archive and restore, giver guard, stale reorder header), `test_gifted_section_ui.py`,
 `test_cabinet_received_marker.py`, `test_receipt_static_script.py` (script served and ordered,
 inline script hash, closed reason set, no inline handlers), `test_receipt_ui_observability.py`
-(full-flow log scan) and the browser module `test_receipt_modal_browser.py`; helper
-`tests/receipt_ui_support.py`. See [testing.md](testing.md).
+(full-flow log scan), `test_receipt_undo_correction_repro.py` (WISHENKA-153: service, notices,
+JSON `DELETE`/`PATCH`, and UI edit/cancel modals) and the browser module
+`test_receipt_modal_browser.py`; helper `tests/receipt_ui_support.py`. See [testing.md](testing.md).

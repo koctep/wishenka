@@ -505,13 +505,15 @@ wish items without full-page reloads.
   Archived items render below via `partials/archived_items_section.html` (owner/editor only).
   The «Подаренные» section (`partials/gifted_items_section.html`, members only) sits between the
   list and the archive section.
-- **Receipt (WISHENKA-24)**: for a list member a wish with received units shows the badge
-  «Осталось N из M» and the details «Запрошено», «Получено», «Осталось» instead of `×M` and
-  «Количество». The button `.btn-receipt-item` («Получено», in `.item-actions`, while
-  `remaining_quantity > 0`) opens the receipt dialog with `hx-get` into
-  `#item-modal-container`. A giver card of a fully received wish has no promise controls.
-  The flow, routes, refusals and invariants are in
-  [gift-receipt.md](gift-receipt.md#mini-app-ui-wishenka-24).
+- **Receipt (WISHENKA-24, WISHENKA-153)**: for a list member a wish with received units shows
+  the badge «Осталось N из M» and the details «Запрошено», «Получено», «Осталось» instead of `×M`
+  and «Количество». The button `.btn-receipt-item` («Получено», in `.item-actions`, while
+  `remaining_quantity > 0`) opens the receipt dialog with `hx-get` into `#item-modal-container`.
+  In «Подаренные» (`partials/gifted_items_section.html`), when `can_edit_wishlist` is true
+  (active list + member), each receipt act with `receipt_id > 0` renders edit and cancel buttons
+  opening `partials/receipt_edit_modal.html` and `partials/receipt_cancel_modal.html`. A giver
+  card of a fully received wish has no promise controls. The flow, routes, refusals and invariants
+  are in [gift-receipt.md](gift-receipt.md#mini-app-ui-wishenka-24).
 - **Compact/expanded**: `.item-card-summary` is the compact row (`aria-expanded` starts `false`).
   `.item-card-details` is rendered with `hidden`. The delegated toggle in
   [`wishlist.js`](../../wishenka/web/static/wishlist.js) clears `hidden` to expand and sets it to
@@ -787,11 +789,13 @@ The HTMX wish item UI router (`wishenka.web.items_ui`) emits structured telemetr
 | `ui_item_archived` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id` | Wish item archived via HTMX UI. |
 | `ui_item_restored` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id` | Archived wish item restored via HTMX UI. |
 
-The receipt router (`wishenka.web.receipts_ui`, WISHENKA-24) writes `ui_receipt_form_opened`,
-`ui_receipt_form_refused`, `receipt_recorded_http`, `receipt_refused` and
-`receipt_inventory_busy` with `wishlist_id`, `item_id`, `actor_id` and, for refusals, `reason`,
-`http_status` and (two reasons only) `remaining_quantity`. No `user_id`, quantity or title. The
-table is in [gift-receipt.md](gift-receipt.md#log-events-of-the-ui).
+The receipt router (`wishenka.web.receipts_ui`, WISHENKA-24, WISHENKA-153) writes
+`ui_receipt_form_opened`, `ui_receipt_entry_form_opened`, `ui_receipt_form_refused`,
+`ui_receipt_entry_form_refused`, `receipt_recorded_http`, `receipt_corrected_http`,
+`receipt_cancelled_http`, `receipt_refused` and `receipt_inventory_busy` with `wishlist_id`, `item_id`, `actor_id` (plus `receipt_id` for
+entry-level events) and, for refusals, `reason`, `http_status` and (two reasons only)
+`remaining_quantity`. No `user_id` or title. The table is in
+[gift-receipt.md](gift-receipt.md#log-events-of-the-ui).
 
 ### Telemetry Privacy Invariants
 - **Zero Raw URLs Logged**: Only the normalized hostname (`domain`, e.g., `ozon.ru`) and canonical

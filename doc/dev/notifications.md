@@ -151,7 +151,7 @@ Two Alembic revisions extend the wishlist database schema (see [`doc/dev/migrati
 
      | Category (`event_type`) | Covers `kind` / queue | Default when unset |
      | ----------------------- | --------------------- | ------------------ |
-     | `gift_received` | `notification_outbox` (`gift_received`) | Enabled (`1`) |
+     | `gift_received` | `notification_outbox` (`gift_received`), `reminder_outbox` (`receipt_reverted`, `receipt_increased`) | Enabled (`1`) |
      | `wishlist_changes` | `item_*`, `list_*`, `membership_changed` | Enabled (`1`) |
      | `reminders` | `list`, `birthday` | Enabled (`1`) |
      | `reservation_changes` | `reservation_confirmation` (`reservation_changed` always suppressed) | Disabled (`0`) |
@@ -164,10 +164,13 @@ Two Alembic revisions extend the wishlist database schema (see [`doc/dev/migrati
      transactions before claiming and again immediately before calling `NoticeSender.send`:
      - The user must have an active `bot_destinations` row (`active = 1`).
      - If `requires_membership = 1`, the user must still be in `wl_members` for `list_id`.
-     - For `gift_received`, the list must not be `deleted`, the wish must have `received_quantity > 0`
-       (so pending notices for a partial receipt survive subsequent archival of the remaining
-       unreceived units), the user must not be the wish recipient, the `gift_received` setting must
-       be enabled, and the user must still hold a reservation on the wish.
+     - For `gift_received`, `receipt_reverted`, and `receipt_increased`, the list must not be
+       `deleted`, the wish must have `received_quantity > 0` (for `gift_received` and
+       `receipt_increased`, so pending notices for a partial receipt survive subsequent archival of
+       the remaining unreceived units; `receipt_reverted` stays eligible even when
+       `received_quantity` drops to `0`), the user must not be the wish recipient, the
+       `gift_received` setting must be enabled, and the user must still hold an `ACTIVE` or
+       `PURCHASED` reservation on the wish.
      - For `reservation_confirmation`, the list must be `active`, the user must still hold a
        reservation on the item, must not be the recipient, and `reservation_changes` must be
        explicitly `1`.
@@ -343,7 +346,8 @@ await producer.record(conn, event, now=int(time.time()))
 
 - **`SAFE_SHARED_EVENTS`**: `"item_created"`, `"item_updated"`, `"item_archived"`,
   `"item_restored"`, `"list_updated"`, `"list_archived"`, `"list_restored"`,
-  `"membership_changed"`, `"reservation_confirmation"`. Passing any other `kind` raises
+  `"membership_changed"`, `"reservation_confirmation"`, `"receipt_reverted"`,
+  `"receipt_increased"`. Passing any other `kind` raises
   `ValueError("Unsupported shared notification event")`.
 
 ### Running the Reminder Scheduler (`wishenka.notices.scheduler`)

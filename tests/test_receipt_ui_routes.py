@@ -149,7 +149,7 @@ def test_get_modal_content_for_member(env: AppEnv, title: str) -> None:
     assert label is not None and text_of(label) == "Сколько штук получено"
     summary = soup.select_one("[data-receipt-summary]")
     assert text_of(summary) == "Будет отмечено получено: 1 шт. из 5 оставшихся"
-    assert "Это действие нельзя отменить." in text_of(root)
+    assert "Ошибку можно будет исправить или отменить в разделе «Подаренные»." in text_of(root)
     buttons = [text_of(b) for b in root.select("button")]
     assert "Отметить полученным" in buttons and "Отмена" in buttons
     feedback = root.select_one("#receipt-feedback")

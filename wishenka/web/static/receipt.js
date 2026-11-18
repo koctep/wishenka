@@ -26,6 +26,7 @@
     'nothing_remaining',
     'forbidden',
     'not_found',
+    'receipt_not_found',
     'busy',
   ]);
 
@@ -125,8 +126,9 @@
     }
     const feedback = document.getElementById(FEEDBACK_ID);
     if (feedback && feedback.textContent.trim() === '') {
-      feedback.textContent = (document.body && document.body.getAttribute('data-i18n-receipt-failure'))
-        || DEFAULT_GENERIC_FAILURE;
+      const genericFailure =
+        document.body && document.body.getAttribute('data-i18n-receipt-failure');
+      feedback.textContent = genericFailure || DEFAULT_GENERIC_FAILURE;
     }
   };
 
@@ -151,7 +153,8 @@
       feedback.textContent = '';
     }
     const field = form.elements.namedItem('quantity');
-    const qty = field ? field.value : '';
+    const qty = field ? field.value : 'cancel';
+    const values = field ? { quantity: field.value } : {};
     let idemKey = form.dataset.idempotencyKey;
     if (!idemKey || form.dataset.idempotencyQty !== qty) {
       idemKey =
@@ -167,7 +170,7 @@
         window.htmx.ajax('POST', form.getAttribute('action'), {
           target: `#${FEEDBACK_ID}`,
           swap: 'none',
-          values: { quantity: qty },
+          values,
           headers: { 'Idempotency-Key': idemKey },
         }),
       );

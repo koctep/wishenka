@@ -33,7 +33,7 @@
     </section>
 
     {% if can_view_gifted %}
-        {% with oob=false %}{% include "partials/gifted_items_section.html" %}{% endwith %}
+        {% with oob=false, wishlist_id=wishlist.id %}{% include "partials/gifted_items_section.html" %}{% endwith %}
     {% endif %}
 
     {% if can_edit_wishlist %}

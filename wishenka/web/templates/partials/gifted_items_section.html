@@ -18,12 +18,30 @@
                 <ul class="gifted-receipts">
                     {% for act in row.acts %}
                     <li>
-                        {% if act.approximate -%}
+                        <span class="gifted-act-text">{% if act.approximate -%}
                         {{ t('web.wishlist.gifted_approx_date', locale|default('en'), day=act.day) }}
                         {%- else -%}
                         {{ act.day }}
                         {%- endif %}
-                        — {{ t('web.wishlist.gifted_act_qty', locale|default('en'), quantity=act.quantity) }}
+                        — {{ t('web.wishlist.gifted_act_qty', locale|default('en'), quantity=act.quantity) }}</span>
+                        {% if can_edit_wishlist and wishlist_id and act.receipt_id %}
+                        <span class="gifted-act-actions">
+                            <button
+                                type="button"
+                                class="btn-receipt-edit"
+                                hx-get="/web/wishlists/{{ wishlist_id }}/items/{{ row.item_id }}/receipts/{{ act.receipt_id }}/edit"
+                                hx-target="#item-modal-container"
+                                hx-swap="innerHTML"
+                            >{{ t('web.receipt.edit_btn', locale|default('en')) }}</button>
+                            <button
+                                type="button"
+                                class="btn-receipt-cancel"
+                                hx-get="/web/wishlists/{{ wishlist_id }}/items/{{ row.item_id }}/receipts/{{ act.receipt_id }}/cancel"
+                                hx-target="#item-modal-container"
+                                hx-swap="innerHTML"
+                            >{{ t('web.receipt.cancel_btn', locale|default('en')) }}</button>
+                        </span>
+                        {% endif %}
                     </li>
                     {% endfor %}
                 </ul>

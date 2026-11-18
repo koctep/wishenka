@@ -1,0 +1,21 @@
+<div class="modal-backdrop receipt-backdrop" id="item-receipt-modal" data-receipt-modal
+     {% if oob %}hx-swap-oob="outerHTML" {% endif %}role="dialog" aria-labelledby="receipt-title">
+    <div class="modal-sheet receipt-sheet">
+        <h2 id="receipt-title">{{ t('web.receipt.edit_modal_title', locale|default('en')) }}</h2>
+        {% if item_title %}<p class="receipt-wish">{{ item_title }}</p>{% endif %}
+        {% if not blocked %}<p class="receipt-remaining">{{ t('web.receipt.edit_max_label', locale|default('en'), count=max_allowed) }}</p>{% endif %}
+        <div id="receipt-feedback" class="receipt-feedback" role="alert">{{ feedback }}</div>
+        {% if blocked %}
+        <button type="button" class="btn-modal-close" data-modal-close>{{ t('web.common.close', locale|default('en')) }}</button>
+        {% else %}
+        <form data-receipt-form method="post"
+              action="/web/wishlists/{{ wishlist_id }}/items/{{ item_id }}/receipts/{{ receipt_id }}/edit">
+            <label for="receipt-edit-quantity">{{ t('web.receipt.edit_quantity_label', locale|default('en')) }}</label>
+            <input id="receipt-edit-quantity" type="number" name="quantity" min="1" max="{{ max_allowed }}" value="{{ current_quantity }}" required>
+            <p class="receipt-final">{{ t('web.receipt.edit_date_note', locale|default('en')) }}</p>
+            <button type="submit" class="btn-receipt-confirm">{{ t('web.receipt.edit_confirm_btn', locale|default('en')) }}</button>
+            <button type="button" class="btn-modal-close" data-modal-close>{{ t('web.common.cancel', locale|default('en')) }}</button>
+        </form>
+        {% endif %}
+    </div>
+</div>

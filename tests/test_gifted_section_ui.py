@@ -221,11 +221,13 @@ def test_entry_content_and_order(env: AppEnv) -> None:
     first, second = entries
     assert XSS_TITLE in text_of(first)
     assert "Получено: 1 из 1" in text_of(first)
-    assert [text_of(li) for li in first.select("ul.gifted-receipts li")] == ["14.03.2026 — 1 шт."]
+    assert [text_of(s) for s in first.select("ul.gifted-receipts .gifted-act-text")] == [
+        "14.03.2026 — 1 шт."
+    ]
     body = text_of(second)
     for expected in ("Alpha", "1500 RUB", "Для: Маша", "Получено: 3 из 5"):
         assert expected in body, body
-    assert [text_of(li) for li in second.select("ul.gifted-receipts li")] == [
+    assert [text_of(s) for s in second.select("ul.gifted-receipts .gifted-act-text")] == [
         "10.03.2026 — 2 шт.",
         "12.03.2026 — 1 шт.",
     ]
@@ -244,12 +246,12 @@ def test_approximate_date_marked(env: AppEnv) -> None:
 
     section = _section(env, wishlist_id)
 
-    acts = [text_of(li) for li in section.select("ul.gifted-receipts li")]
+    acts = [text_of(s) for s in section.select("ul.gifted-receipts .gifted-act-text")]
     assert acts == ["≈ 15.03.2026 (дата примерная) — 2 шт."]
 
 
 def test_section_has_no_controls_or_booking_data(env: AppEnv) -> None:
-    """U-14, U-20: no control, link, hx attribute, giver name, id or booking word."""
+    """U-14, U-20: only receipt edit/cancel buttons; no booking/item-edit controls or leaks."""
     _client, _sessions, app = env
     wishlist_id, (item_id, *_rest) = seed_list(app, [Wish("Kettle", 50)])
     promise(app, item_id, GIFTER, 37)
@@ -259,14 +261,23 @@ def test_section_has_no_controls_or_booking_data(env: AppEnv) -> None:
     section = _section(env, wishlist_id)
 
     assert section.select_one("li.gifted-item") is not None
-    assert section.select("button, form, a, input, select, textarea") == []
+    assert section.select("form, a, input, select, textarea") == []
+    buttons = section.select("button")
+    assert len(buttons) == 2
+    assert {tuple(btn.get("class") or []) for btn in buttons} == {
+        ("btn-receipt-edit",),
+        ("btn-receipt-cancel",),
+    }
     hx_attrs = [
         (tag.name, attr)
         for tag in [section, *section.find_all(True)]
         for attr in tag.attrs
         if attr.lower().startswith("hx-") and attr.lower() != "hx-swap-oob"
     ]
-    assert hx_attrs == []
+    assert all(
+        tag_name == "button" and attr.lower() in {"hx-get", "hx-target", "hx-swap"}
+        for tag_name, attr in hx_attrs
+    )
     assert on_attributes(parse(str(section))) == []
     text = text_of(section)
     lowered = text.lower()

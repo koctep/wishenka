@@ -109,6 +109,15 @@ class WishArchivedError(WishRefusalError):
         super().__init__(message)
 
 
+class ReceiptNotFoundError(WishRefusalError):
+    """Raised when a receipt record cannot be found for the wish."""
+
+    reason = "receipt_not_found"
+
+    def __init__(self, message: str = "Receipt record not found") -> None:
+        super().__init__(message)
+
+
 class InvalidIdempotencyKeyError(WishlistError, ValueError):
     """Raised when a client-supplied Idempotency-Key header is empty or malformed."""
 

@@ -34,6 +34,7 @@ class GiftedAct:
     day: str
     quantity: int
     approximate: bool
+    receipt_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -71,7 +72,12 @@ def build_gifted_rows(
             received=item.received_quantity,
             requested=item.quantity,
             acts=tuple(
-                GiftedAct(utc_day(act.received_at, locale), act.quantity, act.is_approximate)
+                GiftedAct(
+                    utc_day(act.received_at, locale),
+                    act.quantity,
+                    act.is_approximate,
+                    act.id,
+                )
                 for act in item.receipts
             ),
         )

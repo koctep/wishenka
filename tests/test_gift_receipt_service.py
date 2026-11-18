@@ -358,7 +358,7 @@ def test_gifted_dto_has_no_promise_fields() -> None:
     forbidden = ("reserv", "giver", "gifter", "promise", "purchase", "available", "href", "action")
     for name in (*dto.model_fields, *entry.model_fields):
         assert not any(mark in name for mark in forbidden), name
-    assert set(entry.model_fields) == {"received_at", "quantity", "is_approximate"}
+    assert set(entry.model_fields) == {"id", "received_at", "quantity", "is_approximate"}
     assert {"remaining_quantity", "received_quantity", "receipts"} <= set(dto.model_fields)
 
 

@@ -139,6 +139,7 @@ class ReceiptEntryDTO(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    id: int = 0
     received_at: datetime
     quantity: int
     is_approximate: bool = False
