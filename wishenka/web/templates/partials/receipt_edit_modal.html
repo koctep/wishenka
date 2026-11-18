@@ -1,10 +1,10 @@
 <div class="modal-backdrop receipt-backdrop" id="item-receipt-modal" data-receipt-modal
-     {% if oob %}hx-swap-oob="outerHTML" {% endif %}role="dialog" aria-labelledby="receipt-title">
+     {% if oob %}hx-swap-oob="outerHTML" {% endif %}role="dialog" aria-modal="true" aria-labelledby="receipt-title">
     <div class="modal-sheet receipt-sheet">
         <h2 id="receipt-title">{{ t('web.receipt.edit_modal_title', locale|default('en')) }}</h2>
         {% if item_title %}<p class="receipt-wish">{{ item_title }}</p>{% endif %}
         {% if not blocked %}<p class="receipt-remaining">{{ t('web.receipt.edit_max_label', locale|default('en'), count=max_allowed) }}</p>{% endif %}
-        <div id="receipt-feedback" class="receipt-feedback" role="alert">{{ feedback }}</div>
+        <div id="receipt-feedback" class="receipt-feedback" role="alert" tabindex="-1">{{ feedback }}</div>
         {% if blocked %}
         <button type="button" class="btn-modal-close" data-modal-close>{{ t('web.common.close', locale|default('en')) }}</button>
         {% else %}

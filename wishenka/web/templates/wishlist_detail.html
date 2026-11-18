@@ -25,7 +25,7 @@
     </header>
 
     {% if is_member %}
-    <div id="list-notice" role="status" aria-live="polite"></div>
+    <div id="list-notice" role="status" aria-live="polite" tabindex="-1"></div>
     {% endif %}
 
     <section class="wishlist-items" id="items-list" data-wishlist-id="{{ wishlist.id }}">

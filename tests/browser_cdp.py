@@ -54,6 +54,7 @@ _KEYS: dict[str, tuple[str, str, int, str]] = {
     "Space": (" ", "Space", 32, " "),
     "Escape": ("Escape", "Escape", 27, ""),
     "ArrowDown": ("ArrowDown", "ArrowDown", 40, ""),
+    "Tab": ("Tab", "Tab", 9, ""),
 }
 
 
@@ -361,14 +362,20 @@ class CdpPage:
         self._mouse("mouseReleased", x, y, button="left", clickCount=1)
 
     def press_key(self, key: str) -> None:
-        """``keyDown`` and ``keyUp`` for ``Enter``, ``Space``, ``Escape``, ``ArrowDown``, a letter.
+        """``keyDown`` and ``keyUp`` for ``Enter``, ``Space``, ``Escape``, ``ArrowDown``, ``Tab``,
+        ``Shift+Tab``, or a letter.
 
         ``Space`` is sent with ``key=" "`` and ``text=" "``. The key goes to the focused element.
         """
-        if key in _KEYS:
-            name, code, virtual, text = _KEYS[key]
-        elif len(key) == 1 and key.isalpha():
-            name, code, virtual, text = key, f"Key{key.upper()}", ord(key.upper()), key
+        modifiers = 0
+        lookup = key
+        if key == "Shift+Tab":
+            modifiers = 8
+            lookup = "Tab"
+        if lookup in _KEYS:
+            name, code, virtual, text = _KEYS[lookup]
+        elif len(lookup) == 1 and lookup.isalpha():
+            name, code, virtual, text = lookup, f"Key{lookup.upper()}", ord(lookup.upper()), lookup
         else:
             raise ValueError(f"unsupported key {key!r}")
         down: dict[str, Any] = {
@@ -377,13 +384,20 @@ class CdpPage:
             "code": code,
             "windowsVirtualKeyCode": virtual,
         }
+        if modifiers:
+            down["modifiers"] = modifiers
         if text:
             down["text"] = text
+        up: dict[str, Any] = {
+            "type": "keyUp",
+            "key": name,
+            "code": code,
+            "windowsVirtualKeyCode": virtual,
+        }
+        if modifiers:
+            up["modifiers"] = modifiers
         self._send("Input.dispatchKeyEvent", down)
-        self._send(
-            "Input.dispatchKeyEvent",
-            {"type": "keyUp", "key": name, "code": code, "windowsVirtualKeyCode": virtual},
-        )
+        self._send("Input.dispatchKeyEvent", up)
 
     def _native_drag(
         self, source_selector: str, release: tuple[float, float], *, drop: bool

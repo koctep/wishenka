@@ -152,10 +152,17 @@ html.is-touch-reordering { overscroll-behavior-y: contain; }
 .receipt-sheet form {
   margin: 0; padding: 0; background: var(--receipt-bg); color: var(--receipt-text);
 }
-.receipt-sheet select { background: var(--receipt-bg); color: var(--receipt-text); }
-.receipt-sheet select {
-  box-sizing: border-box; width: 100%; min-height: var(--touch-target); font: inherit;
+.receipt-sheet select,
+.receipt-sheet .quantity-control input {
+  box-sizing: border-box;
+  min-height: var(--touch-target);
+  min-width: var(--touch-target);
+  font: inherit;
+  background: var(--receipt-bg);
+  color: var(--receipt-text);
 }
+.receipt-sheet select { width: 100%; }
+.receipt-sheet .quantity-control { margin: .25rem 0 .5rem; }
 .receipt-sheet button { min-height: var(--touch-target); min-width: var(--touch-target); }
 .receipt-wish { font-weight: 600; overflow-wrap: anywhere; }
 .receipt-final { color: var(--receipt-error); }

@@ -1,7 +1,8 @@
 # Gift Receipt and the «Подаренные» Section
 
 > **Status: BACKEND IMPLEMENTED by WISHENKA-23; Mini App UI IMPLEMENTED by WISHENKA-24 (see
-> [Mini App UI](#mini-app-ui-wishenka-24)); Undo & Correction IMPLEMENTED by WISHENKA-153.**
+> [Mini App UI](#mini-app-ui-wishenka-24)); Undo & Correction IMPLEMENTED by WISHENKA-153;
+> Dialog Accessibility & Mobile UX IMPLEMENTED by WISHENKA-161.**
 
 The backend is the receipt command, the gifted read, the derived views, the receipt history, the
 giver notice path (outbox, worker, sender) and the migrations. The Mini App page layer
@@ -514,24 +515,53 @@ every non-GET htmx request in `htmx:configRequest` once the token is fetched.
 1. The card button `.btn-receipt-item` («Получено») does `hx-get` on the GET route into
    `#item-modal-container` (`innerHTML`). It is inside `.item-actions`, so only under
    `can_edit_wishlist` (member of an active list), and only while `item.remaining_quantity > 0`.
-2. The dialog is `#item-receipt-modal` (`role="dialog"`, `aria-labelledby="receipt-title"`). With
-   remaining above 1 it has a labelled `<select id="receipt-quantity" name="quantity"
-   data-receipt-quantity>` with the options 1 to remaining and a summary line
-   (`[data-receipt-summary]`, `aria-live="polite"`); with 1 remaining it has a hidden field and
-   no choice. It states that the act cannot be undone. `#receipt-feedback` is `role="alert"`.
-3. `receipt.js` updates the summary on `change` (`updateSummary`), closes the dialog without a
-   request on `[data-modal-close]`, the backdrop and Escape (`closeDialog`, focus goes back to
-   the summary of the card that opened it), and moves focus into the dialog after a swap into
-   `#item-modal-container`.
-4. On `submit` of `form[data-receipt-form]` the script prevents the browser submit and calls
+2. The dialog is `#item-receipt-modal` (`role="dialog"`, `aria-modal="true"`,
+   `aria-labelledby="receipt-title"` across `item_receipt_modal.html`, `receipt_edit_modal.html`,
+   and `receipt_cancel_modal.html`). Quantity selection in `item_receipt_modal.html` is
+   thresholded by `RECEIPT_SELECT_MAX = 20` (`select_max` in `receipts_ui.py`):
+   - `remaining == 1`: hidden field (`value="1"`), no choice;
+   - `1 < remaining <= 20`: labelled `<select id="receipt-quantity" name="quantity"
+     data-receipt-quantity data-remaining="...">`;
+   - `remaining > 20`: `.quantity-control` with `-`/`+` `.btn-step` buttons
+     (`data-receipt-step="-1"` / `"1"`) and `<input id="receipt-quantity" type="number"
+     name="quantity" data-receipt-quantity data-remaining="..." min="1" max="..." step="1"
+     inputmode="numeric" required>`.
+   Both interactive modes render a live summary (`[data-receipt-summary]`, `aria-live="polite"`)
+   and state that the act cannot be undone. `#receipt-feedback` has `role="alert"` and
+   `tabindex="-1"`.
+3. **Modal isolation, focus trap, and lifecycle (`receipt.js`, WISHENKA-161)**:
+   - On `htmx:afterSwap` into `#item-modal-container`, `setBackgroundInert(true)` walks from
+     `#item-modal-container` up to `document.body` and sets `inert` and `aria-hidden="true"` on
+     non-ancestor element siblings (skipping `<script>`, `<style>`, `<template>`), keeping the
+     modal itself interactive. Focus moves to `#receipt-feedback` if non-empty (blocked/refusal),
+     otherwise to the first interactive control.
+   - `Tab` / `Shift+Tab` inside `#item-receipt-modal` is trapped by `getFocusable(modal)` across
+     visible, enabled descendants.
+   - `closeDialog()` (Cancel, Escape, or backdrop click) clears `#item-modal-container`, calls
+     `setBackgroundInert(false)` (restoring only elements marked by `receipt.js`), and restores
+     focus (`restoreFocusToPage`) to `#${openerCardId} .item-card-summary`, else `openerElement`,
+     else `#list-notice` (`tabindex="-1"`).
+   - `receipt.js` updates `[data-receipt-summary]` on `change`, `input`, and `[data-receipt-step]`
+     clicks (clamping to `[1, remaining]`).
+4. On `submit` of `form[data-receipt-form]`, if `field` is an `<input type="number">` and
+   `!field.checkValidity()`, `receipt.js` calls `field.reportValidity()` and aborts submission.
+   Otherwise it prevents the browser submit, captures whether
+   `#gifted-items-section details.gifted-items-details` is currently `open` (`giftedWasOpen`,
+   captured in `submitReceipt` and restored in `finishAttempt`), and calls
    `htmx.ajax('POST', action, {target: '#receipt-feedback', swap: 'none', values: {quantity}})`
    once (`submitReceipt`; this is the only `htmx.ajax` call of the script). The result arrives
    through out-of-band elements only. While the request is open the form has `data-pending`
    and `aria-busy`, the confirm button is disabled and a second submit does nothing. The
-   feedback is emptied at the start of every attempt. When the attempt ends (`finishAttempt`)
-   with the form still in the document and the feedback still empty, the generic sentence
-   «Не удалось сохранить отметку. Повторите попытку.» is shown; a form replaced by the answer
-   needs nothing.
+   feedback is emptied at the start of every attempt.
+5. When the `htmx.ajax` Promise settles, `finishAttempt(form, giftedWasOpen)`:
+   - restores `details.gifted-items-details.open = true` if `giftedWasOpen` was true;
+   - if `#item-receipt-modal` is still in `document` (refusal, including
+     `quantity_above_remaining` OOB replacement, or network failure): keeps background `inert`,
+     clears busy state if `form` is connected, shows «Не удалось сохранить отметку. Повторите
+     попытку.» if feedback is empty, and focuses `#receipt-feedback` (or primary control);
+   - if `#item-receipt-modal` left `document` (receipt succeeded): removes background `inert`,
+     focuses `#${openerCardId} .item-card-summary` (partial receipt) or `#list-notice`
+     (`tabindex="-1"`, full receipt), and clears `openerCardId`.
 
 ### Refusals and the marker header
 
@@ -669,13 +699,10 @@ expected.
 
 ### Accepted limits
 
-- **S-3.** Focus is not returned to the card after a successful receipt: the dialog container
-  is emptied by the out-of-band swap and the card is replaced, `closeDialog` runs only for
-  Cancel, Escape and the backdrop. Keyboard and screen-reader users land on `body`.
-- **S-4.** No focus trap (Tab leaves the dialog to the page behind, which is not `inert`), no
-  `aria-modal`, the `<details>` of «Подаренные» collapses again after every out-of-band swap,
-  and the quantity `<select>` has one option per remaining unit (500 options for a wish of
-  500). None of these is tested.
+- **S-3 & S-4 (resolved by WISHENKA-161).** Focus return after partial/full receipt and refusal,
+  `aria-modal="true"`, `inert`/`aria-hidden` background isolation, `Tab`/`Shift+Tab` focus trap,
+  `details.gifted-items-details` open-state preservation, and the `RECEIPT_SELECT_MAX = 20`
+  stepper (`> 20`) are implemented and covered in `tests/test_receipt_accessibility_browser.py`.
 - The new Russian texts were written by the implementer only and are not reviewed by the
   product owner; «шт.» does not decline.
 - Older modals (edit, archive) still show no 4xx or 5xx answers and have no CSS of their own;
@@ -741,7 +768,7 @@ Covered by WISHENKA-145 (real-htmx smoke test) and WISHENKA-162 (stub and assert
 | Ticket | Subject |
 | ------ | ------- |
 | WISHENKA-160 | Bug (High): older modals show no 4xx/5xx answers and have no CSS (edit 409 and 503, archive 409, reorder 400); link to WISHENKA-90 |
-| WISHENKA-161 | Receipt dialog accessibility and mobile behaviour: focus after success (S-3), focus trap, `aria-modal`, `<details>`, option count (S-4) |
+| WISHENKA-161 | Implemented: receipt dialog accessibility (`aria-modal`, `inert`, Tab trap, focus return), `gifted-items-details` open state, `RECEIPT_SELECT_MAX = 20` stepper, 44 px mobile touch targets |
 | WISHENKA-162 | Stub docstring, XHR gate, console assertions (with WISHENKA-145) |
 | WISHENKA-163 | Web-layer structure: shared OOB helpers, private imports, page-state dataclass, constants module, notice text in the sentence table |
 | WISHENKA-164 | Wording review of the new Russian texts, quantity forms |
@@ -942,5 +969,8 @@ archive and restore, giver guard, stale reorder header), `test_gifted_section_ui
 `test_cabinet_received_marker.py`, `test_receipt_static_script.py` (script served and ordered,
 inline script hash, closed reason set, no inline handlers), `test_receipt_ui_observability.py`
 (full-flow log scan), `test_receipt_undo_correction_repro.py` (WISHENKA-153: service, notices,
-JSON `DELETE`/`PATCH`, and UI edit/cancel modals) and the browser module
-`test_receipt_modal_browser.py`; helper `tests/receipt_ui_support.py`. See [testing.md](testing.md).
+JSON `DELETE`/`PATCH`, and UI edit/cancel modals), and the browser modules
+`test_receipt_modal_browser.py` and `test_receipt_accessibility_browser.py` (WISHENKA-161:
+`aria-modal`/background `inert`/Tab trap, focus return on partial/full/refusal,
+`gifted-items-details` open state, `remaining=500` stepper, 44 px mobile touch targets & quick-add
+overlay at `390x844`); helper `tests/receipt_ui_support.py`. See [testing.md](testing.md).

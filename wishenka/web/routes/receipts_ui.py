@@ -136,6 +136,9 @@ def _refusal_fragment(
     )
 
 
+RECEIPT_SELECT_MAX = 20
+
+
 def _dialog_html(wishlist_id: int, item_id: int, title: str, remaining: int, **context: Any) -> str:
     """Render the receipt dialog; ``title`` is empty for a viewer who is not a member."""
     return templates.get_template("partials/item_receipt_modal.html").render(
@@ -144,6 +147,7 @@ def _dialog_html(wishlist_id: int, item_id: int, title: str, remaining: int, **c
             "item_id": item_id,
             "item_title": title,
             "remaining": remaining,
+            "select_max": RECEIPT_SELECT_MAX,
             **context,
         }
     )

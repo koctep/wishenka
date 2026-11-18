@@ -230,6 +230,27 @@ def test_get_modal_remaining_one_has_no_choice(env: AppEnv) -> None:
     assert "Осталось: 1" in text_of(soup)
 
 
+def test_get_modal_large_quantity_renders_stepper_not_large_select(env: AppEnv) -> None:
+    """WISHENKA-161: remaining > 20 renders numeric input + stepper instead of a large select."""
+    _client, _sessions, app = env
+    wishlist_id, (item_id, *_rest) = seed_list(app, [Wish("Tiles", 500)])
+
+    response = _get(env, wishlist_id, item_id)
+
+    assert response.status_code == 200, response.text
+    soup = parse(response.text)
+    assert soup.select_one("select") is None
+    assert len(soup.select("option")) == 0
+    qty = soup.select_one('form input[type="number"][name="quantity"][data-receipt-quantity]')
+    assert qty is not None
+    assert qty.get("min") == "1"
+    assert qty.get("max") == "500"
+    assert qty.get("data-remaining") == "500"
+    steps = soup.select("form [data-receipt-step]")
+    assert [s.get("data-receipt-step") for s in steps] == ["-1", "1"]
+    assert on_attributes(soup) == []
+
+
 def test_get_modal_has_no_booking_data(env: AppEnv) -> None:
     """U-20, N-1: promises, giver names and ids never reach the dialog."""
     _client, _sessions, app = env

@@ -100,7 +100,9 @@ constants as Jinja globals, so item, preview, archive and edit partials can use 
 and out-of-band renders. Existing explicit currencies remain unchanged; the options list does
 not impose a new validation rule. Historical migration defaults are intentionally unchanged.
 
-`static/miniapp.css` owns semantic dimensions, layer and receipt color tokens. The receipt sheet,
+`static/miniapp.css` owns semantic dimensions, layer (`--layer-receipt: 100` above
+`--layer-quick-add: 40`), `--touch-target` (`44px`, enforced on `.receipt-sheet .btn-step` and
+`.receipt-sheet .quantity-control input`), and receipt color tokens. The receipt sheet,
 nested form and select use Telegram's `--tg-theme-bg-color` and `--tg-theme-text-color` as a
 pair, with light fallbacks outside Telegram. The confirm button uses fixed green and white,
 and the notice has its own explicit foreground/background pair. CSS responds to changed theme variables without a separate dark-mode switch. The
@@ -379,11 +381,13 @@ wish items without full-page reloads.
     both `#quick-add-bar` and the per-card `.btn-edit-item` triggers are omitted from the DOM.
   - All mutating UI endpoints enforce `_ensure_member_and_active`, returning `404 Not Found` for
     non-members and `409 Conflict` if the wishlist is archived.
-- **Receipt context (WISHENKA-24)**: the page also gets `is_member` (`ctx.is_member`),
-  `can_view_gifted` (`WishlistAccessPolicy.can_view_gifted`, a member of a non-deleted list) and
-  `gifted_rows` (read only when `can_view_gifted`, `None` on a domain error). For a member the
-  template renders `<div id="list-notice" role="status" aria-live="polite">` above `#items-list`
-  (the target of the receipt notice and of the stale-reorder notice), and for `can_view_gifted`
+- **Receipt context (WISHENKA-24, WISHENKA-161)**: the page also gets `is_member`
+  (`ctx.is_member`), `can_view_gifted` (`WishlistAccessPolicy.can_view_gifted`, a member of a
+  non-deleted list) and `gifted_rows` (read only when `can_view_gifted`, `None` on a domain
+  error). For a member the template renders
+  `<div id="list-notice" role="status" aria-live="polite" tabindex="-1">` above `#items-list`
+  (the target of the receipt notice, programmatic focus after a full receipt, and the
+  stale-reorder notice), and for `can_view_gifted`
   the section `#gifted-items-section` right after `#items-list`. The empty
   `<div id="item-modal-container">` is the target of every modal, including the receipt dialog.
   Details: [gift-receipt.md](gift-receipt.md#mini-app-ui-wishenka-24).
@@ -512,8 +516,10 @@ wish items without full-page reloads.
   In «Подаренные» (`partials/gifted_items_section.html`), when `can_edit_wishlist` is true
   (active list + member), each receipt act with `receipt_id > 0` renders edit and cancel buttons
   opening `partials/receipt_edit_modal.html` and `partials/receipt_cancel_modal.html`. A giver
-  card of a fully received wish has no promise controls. The flow, routes, refusals and invariants
-  are in [gift-receipt.md](gift-receipt.md#mini-app-ui-wishenka-24).
+  card of a fully received wish has no promise controls. The flow, routes, refusals, accessibility
+  (`aria-modal`, background `inert`, Tab trap, focus return, `gifted-items-details` open state,
+  `RECEIPT_SELECT_MAX = 20` stepper), and invariants are in
+  [gift-receipt.md](gift-receipt.md#mini-app-ui-wishenka-24).
 - **Compact/expanded**: `.item-card-summary` is the compact row (`aria-expanded` starts `false`).
   `.item-card-details` is rendered with `hidden`. The delegated toggle in
   [`wishlist.js`](../../wishenka/web/static/wishlist.js) clears `hidden` to expand and sets it to

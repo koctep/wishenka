@@ -5,8 +5,9 @@
 Тесты с маркером `browser` управляют настоящим Chromium/Chrome через Chrome DevTools Protocol (CDP):
 `tests/test_wishlist_management_browser.py`, `tests/test_wishlist_sections_ui.py`, три модуля
 поведенческих тестов списка желаний (раздел «Browser UI-тесты списка желаний (WISHENKA-110)» ниже)
-и модуль диалога получения `tests/test_receipt_modal_browser.py` (WISHENKA-24, раздел «Диалог
-получения (WISHENKA-24)»).
+и модули диалога получения `tests/test_receipt_modal_browser.py` (WISHENKA-24) и
+`tests/test_receipt_accessibility_browser.py` (WISHENKA-161, раздел «Диалог получения
+(WISHENKA-24, WISHENKA-161)»).
 Для них нужен исполняемый браузер. Раньше его отсутствие приводило к пропуску тестов и «зелёному» прогону.
 
 Теперь поведение такое:
@@ -210,7 +211,7 @@ export WISHENKA_CHROMIUM_BIN=/path/to/chrome
 
 | Файл | Назначение |
 | --- | --- |
-| `tests/browser_cdp.py` | Собственный драйвер на `websockets.sync` без потоков: один читатель событий. `CdpBrowser` (запуск Chromium с временным профилем, `new_page`, `stop`: terminate, `wait(5)`, kill) и `CdpPage` (навигация, `evaluate`, `wait_for`, клик, клавиши, мышь и нативный drag-and-drop через `Input.setInterceptDrags`, касания с несколькими пальцами, `snapshot`, `screenshot`). Ожидания ограничены по времени; `PageWaitTimeout` наследует `AssertionError`. |
+| `tests/browser_cdp.py` | Собственный драйвер на `websockets.sync` без потоков: один читатель событий. `CdpBrowser` (запуск Chromium с временным профилем, `new_page`, `stop`: terminate, `wait(5)`, kill) и `CdpPage` (навигация, `evaluate`, `wait_for`, клик, клавиши включая `Tab` и `Shift+Tab`, мышь и нативный drag-and-drop через `Input.setInterceptDrags`, касания с несколькими пальцами, `snapshot`, `screenshot`). Ожидания ограничены по времени; `PageWaitTimeout` наследует `AssertionError`. |
 | `tests/browser_helpers.py` | Общие помощники модулей: `Seeded`, селекторы (`card`, `summary`, `title`, `handle`), `assert_order`, `assert_cards`, `assert_clean_console`, `assert_gesture_clean`, `begin_touch_drag`, `retarget_touch_drag`, `wait_suppression_window_over` и др.; для диалога получения (WISHENKA-24) добавлены `record_receipt`, `archive_item_rest`, `open_receipt_dialog`, `posts_to`, `scroll_to`. |
 | `tests/browser_assets/htmx_stub.js` | Офлайн-заглушка htmx (собственный код): только `htmx.ajax`; расширена в WISHENKA-24 (раздел «Диалог получения (WISHENKA-24)»). |
 | `tests/conftest.py` | Фикстуры (ниже). |
@@ -276,7 +277,7 @@ make deps-browser
   `tests/browser_helpers.py`; если окно в `wishlist.js` вырастет, тест следующего тапа упадёт, если
   уменьшится, тест просто будет ждать дольше.
 
-### Диалог получения (WISHENKA-24)
+### Диалог получения (WISHENKA-24, WISHENKA-161)
 
 Модуль `tests/test_receipt_modal_browser.py` (`pytestmark = [pytest.mark.timeout(45),
 pytest.mark.browser]`, девять тестов B-1 - B-6) проверяет настоящие `receipt.js`, `wishlist.js`,
@@ -308,6 +309,24 @@ XHR; проверки `assert_clean_console` упали бы под настоя
 (WISHENKA-24)». Хеш SHA-256 встроенного скрипта `base.html` закреплён тестом
 `test_inline_script_is_unchanged_and_free_of_receipt_code`: осознанная правка скрипта
 (WISHENKA-140) требует обновить хеш.
+
+Модуль `tests/test_receipt_accessibility_browser.py` (`pytestmark = [pytest.mark.timeout(45),
+pytest.mark.browser]`, 5 тестов, мобильный viewport `390x844`) проверяет доработки
+`WISHENKA-161` с использованием `Tab`/`Shift+Tab` в `tests/browser_cdp.py`:
+
+1. `test_modal_semantics_background_isolation_and_tab_trap`: `aria-modal="true"`, `inert` и
+   `aria-hidden="true"` на фоновых элементах (`#items-list`, `#quick-add-bar`, `nav.top-nav`),
+   замыкание `Tab` / `Shift+Tab` внутри `#item-receipt-modal`.
+2. `test_focus_return_partial_full_and_refusal`: возврат фокуса на `.item-card-summary` после
+   частичного получения, на `#list-notice` после полного получения и удержание на
+   `#receipt-feedback` при отказе (`InventoryBusyError` 503).
+3. `test_gifted_section_open_state_preserved`: сохранение `details.gifted-items-details.open`
+   после out-of-band обновления `#gifted-items-section`.
+4. `test_large_quantity_stepper_updates_summary_and_submits`: при `remaining = 500` рендерится
+   `.quantity-control` (`input[type="number"]` + `[data-receipt-step]`) вместо `<select>`,
+   кнопка `+` обновляет сводку и отправляет выбранное количество.
+5. `test_mobile_touch_targets_and_quick_add_overlay`: размеры интерактивных элементов диалога не
+   менее `44x44` px и `document.elementFromPoint` попадает в кнопки диалога поверх `#quick-add-bar`.
 
 ### Диагностика при падении
 

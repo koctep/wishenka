@@ -1,24 +1,53 @@
 <div class="modal-backdrop receipt-backdrop" id="item-receipt-modal" data-receipt-modal
-     {% if oob %}hx-swap-oob="outerHTML" {% endif %}role="dialog" aria-labelledby="receipt-title">
+     {% if oob %}hx-swap-oob="outerHTML" {% endif %}role="dialog" aria-modal="true" aria-labelledby="receipt-title">
     <div class="modal-sheet receipt-sheet">
         <h2 id="receipt-title">{{ t('web.receipt.modal_title', locale|default('en')) }}</h2>
         {% if item_title %}<p class="receipt-wish">{{ item_title }}</p>{% endif %}
         {% if not blocked %}<p class="receipt-remaining">{{ t('web.receipt.remaining_label', locale|default('en'), count=remaining) }}</p>{% endif %}
-        <div id="receipt-feedback" class="receipt-feedback" role="alert">{{ feedback }}</div>
+        <div id="receipt-feedback" class="receipt-feedback" role="alert" tabindex="-1">{{ feedback }}</div>
         {% if blocked %}
         <button type="button" class="btn-modal-close" data-modal-close>{{ t('web.common.close', locale|default('en')) }}</button>
         {% else %}
         {% set chosen = selected|default(1) %}
+        {% set select_limit = select_max|default(20) %}
         <form data-receipt-form method="post"
               action="/web/wishlists/{{ wishlist_id }}/items/{{ item_id }}/receipt">
             {% if remaining > 1 %}
             <label for="receipt-quantity">{{ t('web.receipt.quantity_label', locale|default('en')) }}</label>
+            {% if remaining <= select_limit %}
             <select id="receipt-quantity" name="quantity" data-receipt-quantity
                     data-remaining="{{ remaining }}">
                 {% for n in range(1, remaining + 1) %}
                 <option value="{{ n }}"{% if n == chosen %} selected{% endif %}>{{ n }}</option>
                 {% endfor %}
             </select>
+            {% else %}
+            <div class="quantity-control">
+                <button type="button"
+                        class="btn-step btn-decrement"
+                        data-receipt-step="-1"
+                        aria-label="{{ t('web.item.decrease_qty', locale|default('en')) }}">
+                    -
+                </button>
+                <input id="receipt-quantity"
+                       type="number"
+                       name="quantity"
+                       data-receipt-quantity
+                       data-remaining="{{ remaining }}"
+                       min="1"
+                       max="{{ remaining }}"
+                       step="1"
+                       inputmode="numeric"
+                       value="{{ chosen }}"
+                       required>
+                <button type="button"
+                        class="btn-step btn-increment"
+                        data-receipt-step="1"
+                        aria-label="{{ t('web.item.increase_qty', locale|default('en')) }}">
+                    +
+                </button>
+            </div>
+            {% endif %}
             <p class="receipt-summary" data-receipt-summary aria-live="polite">
                 {{ t('web.receipt.summary_many', locale|default('en'), chosen=chosen, remaining=remaining) }}
             </p>
