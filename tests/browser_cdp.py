@@ -120,10 +120,25 @@ def _stub_bodies() -> dict[str, bytes]:
     }
 
 
+def _real_htmx_bodies() -> dict[str, bytes]:
+    return {
+        HTMX_URL: (ASSETS_DIR / "htmx-1.9.12.min.js").read_bytes(),
+        JSON_ENC_URL: (ASSETS_DIR / "htmx-json-enc-1.9.12.js").read_bytes(),
+        TELEGRAM_URL: b"",
+    }
+
+
 class CdpPage:
     """One browser tab driven over CDP (Page Object used by the tests)."""
 
-    def __init__(self, ws: ClientConnection, target_id: str, debug_url: str) -> None:
+    def __init__(
+        self,
+        ws: ClientConnection,
+        target_id: str,
+        debug_url: str,
+        *,
+        use_real_htmx: bool = False,
+    ) -> None:
         self._ws = ws
         self._target_id = target_id
         self._debug_url = debug_url
@@ -134,7 +149,7 @@ class CdpPage:
         self._requests: list[RecordedRequest] = []
         self._request_index: dict[str, int] = {}
         self._external: list[str] = []
-        self._stubs = _stub_bodies()
+        self._stubs = _real_htmx_bodies() if use_real_htmx else _stub_bodies()
         self._loaded = False
         self._drag_data: dict[str, Any] | None = None
         self._fingers: dict[int, tuple[float, float]] = {}
@@ -160,6 +175,21 @@ class CdpPage:
         if accept_language:
             headers["Accept-Language"] = accept_language
         self._send("Network.setExtraHTTPHeaders", {"headers": headers})
+
+    def set_cookie(self, name: str, value: str, url: str) -> None:
+        """Set a cookie (``HttpOnly``, ``SameSite=Lax``) on the tab via ``Network.setCookie``."""
+        self._send("Network.enable")
+        result = self._send(
+            "Network.setCookie",
+            {
+                "name": name,
+                "value": value,
+                "url": url,
+                "httpOnly": True,
+                "sameSite": "Lax",
+            },
+        )
+        assert result.get("success", True), f"Network.setCookie failed: {result}"
 
     def _send(
         self, method: str, params: dict[str, Any] | None = None, timeout: float = COMMAND_TIMEOUT
@@ -728,7 +758,9 @@ class CdpBrowser:
         if self._process is None or self._process.poll() is not None:
             self._launch()
 
-    def new_page(self, viewport: tuple[int, int] = (412, 800)) -> CdpPage:
+    def new_page(
+        self, viewport: tuple[int, int] = (412, 800), *, use_real_htmx: bool = False
+    ) -> CdpPage:
         """Open a new tab (``PUT /json/new``) and attach a ``CdpPage``."""
         target = httpx.put(f"{self._debug_url}/json/new?about:blank", timeout=5).json()
         # ``legacy=True`` is the documented way to hold a connection open without ``with``.
@@ -739,7 +771,7 @@ class CdpBrowser:
             max_size=None,
             legacy=True,
         )
-        page = CdpPage(ws, str(target["id"]), self._debug_url)
+        page = CdpPage(ws, str(target["id"]), self._debug_url, use_real_htmx=use_real_htmx)
         try:
             page.setup(viewport)
         except BaseException:

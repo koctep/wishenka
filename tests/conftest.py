@@ -15,7 +15,7 @@ import uuid
 from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 import pytest
@@ -221,13 +221,15 @@ def wishlist_server(migrated_db_template: Path, tmp_path: Path) -> Iterator[Brow
 
     database = tmp_path / "browser.db"
     shutil.copyfile(migrated_db_template, database)
-    settings = Settings(
-        database_url=f"sqlite+aiosqlite:///{database}", secret_key=BROWSER_TEST_SECRET
-    )
     listen = socket.socket()
     listen.bind(("127.0.0.1", 0))
     listen.listen(128)
     port = listen.getsockname()[1]
+    settings = Settings(
+        database_url=f"sqlite+aiosqlite:///{database}",
+        secret_key=BROWSER_TEST_SECRET,
+        application_origin=f"http://127.0.0.1:{port}",
+    )
     server = uvicorn.Server(uvicorn.Config(create_app(settings), log_level="error", lifespan="on"))
     thread = threading.Thread(target=server.run, kwargs={"sockets": [listen]}, daemon=True)
     thread.start()
@@ -313,12 +315,17 @@ def _open_page(
     viewport: tuple[int, int],
     *,
     accept_language: str | None = None,
+    auth_mode: Literal["bearer", "cookie"] = "bearer",
+    use_real_htmx: bool = False,
 ) -> CdpPage:
     browser.ensure_alive()
-    page = browser.new_page(viewport)
+    page = browser.new_page(viewport, use_real_htmx=use_real_htmx)
     pages.append(page)
     if token is not None:
-        page.set_bearer(token, accept_language=accept_language)
+        if auth_mode == "cookie":
+            page.set_cookie("session_id", token, url)
+        else:
+            page.set_bearer(token, accept_language=accept_language)
     page.navigate(url)
     return page
 
@@ -329,8 +336,9 @@ def wishlist_page(
 ) -> Callable[..., CdpPage]:
     """Factory ``wishlist_page(seeded, *, as_user="owner", viewport=(412, 800)) -> CdpPage``.
 
-    Opens ``/web/wishlists/<id>`` in a fresh tab with the Bearer token of ``as_user``
-    (``"owner"`` or ``"viewer"``), offline stubs for the three external scripts and touch
+    Opens ``/web/wishlists/<id>`` in a fresh tab with the Bearer token (or ``session_id`` cookie
+    when ``auth_mode="cookie"``) of ``as_user`` (``"owner"`` or ``"viewer"``), offline stubs (or
+    vendored real htmx when ``use_real_htmx=True``) for the three external scripts and touch
     emulation disabled (tests call ``CdpPage.enable_touch`` when needed).
     """
 
@@ -340,6 +348,8 @@ def wishlist_page(
         as_user: str = "owner",
         viewport: tuple[int, int] = (412, 800),
         accept_language: str | None = None,
+        auth_mode: Literal["bearer", "cookie"] = "bearer",
+        use_real_htmx: bool = False,
     ) -> CdpPage:
         token = seeded.owner_token if as_user == "owner" else seeded.viewer_token
         url = f"{wishlist_server.base_url}/web/wishlists/{seeded.wishlist_id}"
@@ -350,6 +360,8 @@ def wishlist_page(
             token,
             viewport,
             accept_language=accept_language,
+            auth_mode=auth_mode,
+            use_real_htmx=use_real_htmx,
         )
 
     return factory

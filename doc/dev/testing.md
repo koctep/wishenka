@@ -211,7 +211,7 @@ export WISHENKA_CHROMIUM_BIN=/path/to/chrome
 
 | Файл | Назначение |
 | --- | --- |
-| `tests/browser_cdp.py` | Собственный драйвер на `websockets.sync` без потоков: один читатель событий. `CdpBrowser` (запуск Chromium с временным профилем, `new_page`, `stop`: terminate, `wait(5)`, kill) и `CdpPage` (навигация, `evaluate`, `wait_for`, клик, клавиши включая `Tab` и `Shift+Tab`, мышь и нативный drag-and-drop через `Input.setInterceptDrags`, касания с несколькими пальцами, `snapshot`, `screenshot`). Ожидания ограничены по времени; `PageWaitTimeout` наследует `AssertionError`. |
+| `tests/browser_cdp.py` | Собственный драйвер на `websockets.sync` без потоков: один читатель событий. `CdpBrowser` (запуск Chromium с временным профилем, `new_page(..., use_real_htmx=False)`, `stop`: terminate, `wait(5)`, kill) и `CdpPage` (навигация, `set_bearer`, `set_cookie` через `Network.setCookie`, `evaluate`, `wait_for`, клик, клавиши включая `Tab` и `Shift+Tab`, мышь и нативный drag-and-drop через `Input.setInterceptDrags`, касания с несколькими пальцами, `snapshot`, `screenshot`). Ожидания ограничены по времени; `PageWaitTimeout` наследует `AssertionError`. |
 | `tests/browser_helpers.py` | Общие помощники модулей: `Seeded`, селекторы (`card`, `summary`, `title`, `handle`), `assert_order`, `assert_cards`, `assert_clean_console`, `assert_gesture_clean`, `begin_touch_drag`, `wait_suppression_window_over` и др.; для диалога получения (WISHENKA-24) добавлены `record_receipt`, `archive_item_rest`, `open_receipt_dialog`, `posts_to`, `scroll_to`. |
 | `tests/browser_assets/htmx_stub.js` | Офлайн-заглушка htmx (собственный код): только `htmx.ajax`; расширена в WISHENKA-24 (раздел «Диалог получения (WISHENKA-24)»). |
 | `tests/conftest.py` | Фикстуры (ниже). |
@@ -223,12 +223,16 @@ export WISHENKA_CHROMIUM_BIN=/path/to/chrome
 - `migrated_db_template` (сессия): база с применёнными миграциями Alembic создаётся один раз;
   в каждый тест копируется только файл `.db`.
 - `wishlist_server` (тест): `uvicorn.Server` в потоке на `127.0.0.1` со случайным портом и своей копией
-  базы; остановка ограничена по времени (`SERVER_STOP_TIMEOUT`).
+  базы; передаёт `application_origin=f"http://127.0.0.1:{port}"` в `Settings(...)`, чтобы
+  `BrowserSecurityMiddleware` принимал `Origin` локального браузера при cookie-мутациях;
+  остановка ограничена по времени (`SERVER_STOP_TIMEOUT`).
 - `seed_wishlist(titles, *, quantities=None)`: фабрика, создаёт список и желания через REST (httpx);
   возвращает `Seeded` с идентификаторами и токенами.
-- `wishlist_page(seeded, *, as_user="owner" | "viewer", viewport=(412, 800))` и
+- `wishlist_page(seeded, *, as_user="owner" | "viewer", viewport=(412, 800), auth_mode="bearer" | "cookie", use_real_htmx=False)` и
   `share_page(seeded, *, as_user=None | "viewer", viewport=(412, 800))`: фабрики, открывают вкладку
-  и страницу; касания включаются вызовом `page.enable_touch()`.
+  и страницу; при `auth_mode="cookie"` выставляется `HttpOnly`, `SameSite=Lax` cookie `session_id`
+  через `CdpPage.set_cookie(...)` вместо заголовка `Bearer`, а при `use_real_htmx=True` отдаются
+  вендорные файлы `htmx@1.9.12` вместо заглушки; касания включаются вызовом `page.enable_touch()`.
 - `_browser_pages` (тест): закрывает вкладки; при падении пишет диагностику (см. ниже).
 
 ### Запуск
@@ -247,26 +251,32 @@ make deps-browser
 ### Офлайн-гарантия
 
 Тесты не ходят в сеть. `base.html` подключает три внешних адреса, драйвер перехватывает их через
-`Fetch.enable` и отвечает локально: `https://unpkg.com/htmx.org@1.9.12` отдаётся заглушкой
-`htmx_stub.js`, `.../dist/ext/json-enc.js` и `https://telegram.org/js/telegram-web-app.js` пустым
-телом (HTTP 200). Любой другой внешний запрос блокируется (`BlockedByClient`) и попадает в
-`page.external_requests`; `test_page_loads_offline_with_real_assets` проверяет, что список пуст.
-Запросы к `127.0.0.1` и `localhost` проходят и записываются в `page.requests` со статусом ответа.
-Адреса продублированы в `tests/browser_cdp.py` (`HTMX_URL`, `JSON_ENC_URL`, `TELEGRAM_URL`) и должны
-совпадать с `base.html`: при расхождении запрос блокируется, и тесты падают со снимком страницы.
-Смена версии htmx требует правки в обоих местах.
+`Fetch.enable` и отвечает локально: по умолчанию (`use_real_htmx=False`)
+`https://unpkg.com/htmx.org@1.9.12` отдаётся заглушкой `htmx_stub.js`, а `.../dist/ext/json-enc.js`
+и `https://telegram.org/js/telegram-web-app.js` пустым телом (HTTP 200). При `use_real_htmx=True`
+(`_real_htmx_bodies()`) отдаются вендорные файлы `tests/browser_assets/htmx-1.9.12.min.js` и
+`tests/browser_assets/htmx-json-enc-1.9.12.js`, а `TELEGRAM_URL` остаётся пустым телом. Любой другой
+внешний запрос блокируется (`BlockedByClient`) и попадает в `page.external_requests`;
+`test_page_loads_offline_with_real_assets` и `test_real_htmx_move_button_with_cookie_and_csrf`
+проверяют, что список пуст. Запросы к `127.0.0.1` и `localhost` проходят и записываются в
+`page.requests` со статусом ответа. Адреса продублированы в `tests/browser_cdp.py` (`HTMX_URL`,
+`JSON_ENC_URL`, `TELEGRAM_URL`) и должны совпадать с `wishenka/web/templates/base.html`:
+синхронность проверяет статический гард `test_browser_cdp_urls_match_base_template()` в
+`tests/test_browser_prerequisites.py`. Смена версии htmx требует правки в обоих местах и обновления
+вендорных файлов в `tests/browser_assets/`.
 
 ### Пределы достоверности
 
 - Заглушка htmx не обрабатывает атрибуты `hx-*`, не вызывает `htmx:configRequest`, делает
   `innerHTML`-замену (значение `swap` записывается в `window.__ajaxCalls`; единственное
   исключение `swap: 'none'`, добавленное в WISHENKA-24; внеполосные элементы применяются
-  отдельно). Поэтому тесты,
-  которым нужна замена списка, вызывают `window.htmx.ajax(...)` явно, а не нажимают кнопки
-  перемещения. Ошибка в `hx-post`/`hx-target` кнопок или изменение событий htmx при обновлении
-  библиотеки тестами не поймаются (WISHENKA-145).
-- Аутентификация через Bearer (`Network.setExtraHTTPHeaders`), а не cookie-сессия: путь CSRF не
-  проверяется.
+  отдельно). Поэтому 53 теста `WISHENKA-110` и тесты диалога получения, которым нужна замена
+  списка, вызывают `window.htmx.ajax(...)` явно, а не нажимают кнопки перемещения. Реальный путь
+  `hx-post`, `htmx:configRequest`, cookie-сессии и CSRF-проверки покрыт отдельным дымовым тестом
+  `tests/test_wishlist_htmx_smoke_browser.py` (`WISHENKA-145`).
+- По умолчанию используется аутентификация через Bearer (`Network.setExtraHTTPHeaders`), а не
+  cookie-сессия; проверка cookie + CSRF включается параметром `auth_mode="cookie"` в
+  `wishlist_page`.
 - Касания синтезируются через `Input.dispatchTouchEvent`; это не настоящий стек касаний устройства.
   Поведение в Telegram WebView, автопрокрутка у краёв и порядок вызовов Telegram SDK не
   проверяются (чек-лист на устройствах: WISHENKA-143). `visibilitychange` и `blur` тесты
@@ -327,6 +337,39 @@ pytest.mark.browser]`, 5 тестов, мобильный viewport `390x844`) п
    кнопка `+` обновляет сводку и отправляет выбранное количество.
 5. `test_mobile_touch_targets_and_quick_add_overlay`: размеры интерактивных элементов диалога не
    менее `44x44` px и `document.elementFromPoint` попадает в кнопки диалога поверх `#quick-add-bar`.
+
+### Дымовой тест с настоящим htmx и cookie/CSRF (WISHENKA-145)
+
+Модуль `tests/test_wishlist_htmx_smoke_browser.py` (`pytestmark = [pytest.mark.timeout(45),
+pytest.mark.browser]`) содержит офлайн smoke-тест `test_real_htmx_move_button_with_cookie_and_csrf`,
+который проверяет реальную связку декларативного `hx-post`, вендорного `htmx.org@1.9.12` +
+`json-enc`, cookie-сессии и `BrowserSecurityMiddleware` без обращения в сеть:
+
+- **Инициализация страницы (`tests/conftest.py` и `tests/browser_cdp.py`):**
+  `wishlist_page(seeded, auth_mode="cookie", use_real_htmx=True)` открывает вкладку через
+  `CdpBrowser.new_page(viewport, use_real_htmx=True)`, выставляет `HttpOnly` / `SameSite=Lax`
+  cookie `session_id` через `CdpPage.set_cookie("session_id", token, url)` (`Network.setCookie`)
+  вместо `Authorization: Bearer`, а локальный сервер `wishlist_server` настроен с
+  `application_origin=f"http://127.0.0.1:{port}"`, чтобы `BrowserSecurityMiddleware` принимал
+  заголовок `Origin` от Chromium.
+- **Офлайн-подмена реальных ассетов:** при `use_real_htmx=True` перехват `Fetch.enable` отдаёт
+  `_real_htmx_bodies()` — `tests/browser_assets/htmx-1.9.12.min.js` и
+  `tests/browser_assets/htmx-json-enc-1.9.12.js` (и пустое тело для `TELEGRAM_URL`), проверяя
+  `window.htmx.version == "1.9.12"` и `page.external_requests == []`.
+- **Синхронность URL:** `tests/test_browser_prerequisites.py::test_browser_cdp_urls_match_base_template`
+  сверяет внешние `<script src="https://...">` из `wishenka/web/templates/base.html` с
+  `HTMX_URL`, `JSON_ENC_URL` и `TELEGRAM_URL` в `tests/browser_cdp.py`.
+- **Сценарий теста:** дожидается `GET /api/auth/csrf` (статус `200`, `window.csrfToken`), раскрывает
+  первую карточку и нажимает реальную кнопку `.btn-move-down` (`hx-post=".../move?direction=down"`),
+  подтверждает отправку `X-CSRF-Token` через `htmx:configRequest`, обновление `#items-list` в DOM,
+  статус `200` для `POST .../move`, сохранение порядка после перезагрузки страницы и чистую консоль
+  (`assert_clean_console`).
+
+Запуск отдельно и вместе с гардом URL:
+
+```bash
+make test-serial PYTEST_ARGS="tests/test_wishlist_htmx_smoke_browser.py tests/test_browser_prerequisites.py"
+```
 
 ### Диагностика при падении
 
@@ -704,7 +747,9 @@ make test-serial PYTEST_ARGS="tests/test_wish_lifecycle_stress.py"
   таймаут нельзя настроить, до четырёх зависших кандидатов могут занять 40 с из 45 с лимита теста,
   stderr обрезается до 300 символов, определение snap идёт по подстроке.
 - [WISHENKA-145](https://pypost.atlassian.net/browse/WISHENKA-145): заглушка htmx не покрывает
-  настоящий htmx, `hx-*` и путь CSRF; нужен один дымовой тест на реальной библиотеке без сети.
+  настоящий htmx, `hx-*` и путь CSRF; **закрыто** дымовым тестом
+  `tests/test_wishlist_htmx_smoke_browser.py` (`use_real_htmx=True`, `auth_mode="cookie"`),
+  существующие 53 теста `WISHENKA-110` по-прежнему используют `htmx_stub.js` и `Bearer`.
 - [WISHENKA-146](https://pypost.atlassian.net/browse/WISHENKA-146): два старых браузерных модуля не
   используют общий драйвер `tests/browser_cdp.py`; диапазон версий `websockets` не согласован с
   `legacy=True`.

@@ -548,3 +548,18 @@ def test_new_browser_modules_declare_marker_and_timeout() -> None:
         if BROWSER_MODULE_TIMEOUT not in timeouts:
             problems.append(f"{module.name}: pytestmark lacks timeout({BROWSER_MODULE_TIMEOUT})")
     assert not problems, "; ".join(problems)
+
+
+def test_browser_cdp_urls_match_base_template() -> None:
+    """External script URLs intercepted in ``tests/browser_cdp.py`` match ``base.html``."""
+    from tests.browser_cdp import HTMX_URL, JSON_ENC_URL, TELEGRAM_URL
+
+    base_html = (
+        Path(__file__).resolve().parent.parent / "wishenka" / "web" / "templates" / "base.html"
+    ).read_text(encoding="utf-8")
+    template_urls = set(re.findall(r'<script\s+src="(https://[^"]+)"', base_html))
+    cdp_urls = {TELEGRAM_URL, HTMX_URL, JSON_ENC_URL}
+    assert template_urls == cdp_urls, (
+        f"base.html external script URLs {sorted(template_urls)} != "
+        f"browser_cdp.py URLs {sorted(cdp_urls)}"
+    )
