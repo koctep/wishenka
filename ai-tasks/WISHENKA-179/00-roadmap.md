@@ -22,7 +22,7 @@
 - [x] **STEP 7: Technical Debt Analysis**
   - [x] Analyzed `wishenka/wishlists/store.py`, `wishenka/bot/capture.py`, and `tests/test_bot_capture_atomic_store_repro.py`; created `ai-tasks/WISHENKA-179/60-tech-debt.md`
 - [x] **STEP 8: Dev Docs**
-  - [x] Updated `doc/dev/bot-scenarios.md`, `doc/dev/architecture.md`, and `doc/dev/testing.md`
+  - [x] Updated `doc/dev/bot-scenarios.md`, `doc/dev/wishlists.md`, and `doc/dev/testing.md` to document `WishlistStore.execute_with_connection`, the `wishenka/bot/capture.py:mutate` migration, and `tests/test_bot_capture_atomic_store_repro.py`.
 - [x] **COMMIT: Commit Changes**
 
 ## Status Legend
