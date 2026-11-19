@@ -142,7 +142,11 @@
                 <div class="mt-2 flex items-center gap-2">
                     <img src="{{ form.image_url }}"
                          alt="{{ t('web.item.image_preview_alt', locale|default('en')) }}"
-                         class="w-16 h-16 object-cover rounded border" />
+                         loading="lazy"
+                         referrerpolicy="no-referrer"
+                         data-img-fallback
+                         class="item-thumbnail item-thumbnail--lg w-16 h-16 object-cover rounded border" />
+                    <div class="item-thumbnail-placeholder item-thumbnail-placeholder--lg w-16 h-16 rounded border" aria-hidden="true" hidden>🎁</div>
                 </div>
                 {% endif %}
             </div>

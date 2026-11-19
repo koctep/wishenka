@@ -773,6 +773,47 @@ of inline JavaScript and inline `on*` event handlers from SSR templates so a str
     `_oob_modal_notice` return `text/html` `hx-swap-oob` fragments that clear
     `#item-modal-container` and write a localized notice into `#list-notice` via `oob_text`.
 
+#### 9.10. External Product Image Lazy-Loading, No-Referrer & Broken-Image Fallback (WISHENKA-107)
+
+External product thumbnails (`item.image_url`, `preview.image_url`, `form.image_url`) are rendered
+across three Jinja2 partials with privacy, performance, and CSP-safe broken-image handling:
+
+- **Template Contracts (`wishenka/web/templates/partials/`)**:
+  - [`partials/item_card.html`](../../wishenka/web/templates/partials/item_card.html),
+    [`partials/item_preview_card.html`](../../wishenka/web/templates/partials/item_preview_card.html),
+    and [`partials/item_edit_modal.html`](../../wishenka/web/templates/partials/item_edit_modal.html)
+    render `<img>` elements with:
+    - `loading="lazy"` — defers off-screen image fetches until near the viewport.
+    - `referrerpolicy="no-referrer"` — prevents leaking the TMA origin in `Referer` headers and
+      avoids third-party hotlink rejections.
+    - `data-img-fallback` — opts the image into the global capture-phase fallback handler.
+  - Each `<img>` is paired with a pre-rendered sibling placeholder in the same parent container:
+    `<div class="item-thumbnail-placeholder ..." aria-hidden="true" hidden>🎁</div>`.
+  - When `image_url` is absent, `item_card.html` renders the visible `.item-thumbnail-placeholder`
+    (without `hidden`), whereas `item_preview_card.html` and `item_edit_modal.html` omit the
+    thumbnail/placeholder block altogether.
+- **Thumbnail CSS & `[hidden]` Override (`static/miniapp.css`)**:
+  - [`wishenka/web/static/miniapp.css`](../../wishenka/web/static/miniapp.css) defines
+    `.item-thumbnail` and `.item-thumbnail-placeholder` at `3rem × 3rem` (`border-radius: 0.375rem`,
+    `flex-shrink: 0`) for cards and previews, plus `--lg` modifiers (`.item-thumbnail--lg`,
+    `.item-thumbnail-placeholder--lg` at `4rem × 4rem`) for `partials/item_edit_modal.html`.
+  - `.item-thumbnail[hidden], .item-thumbnail-placeholder[hidden] { display: none; }` is required
+    so the HTML `hidden` attribute overrides `.item-thumbnail-placeholder`'s `display: flex`.
+- **Capture-Phase Fallback Handler (`handleImageError` in `static/app.js`)**:
+  - [`wishenka/web/static/app.js`](../../wishenka/web/static/app.js) registers
+    `document.addEventListener('error', handleImageError, true)` in the **capture phase** (because
+    `error` events on `<img>` do not bubble). This covers both initial SSR HTML and dynamically
+    swapped HTMX partials without inline `onerror` attributes (preserving strict CSP readiness).
+  - When `event.target` is an `<img>` with `data-img-fallback`, `handleImageError` sets
+    `target.hidden = true` and reveals `target.parentElement.querySelector('.item-thumbnail-placeholder')`
+    (`placeholder.hidden = false`).
+  - Do **not** inspect `img.complete && img.naturalWidth === 0` on `DOMContentLoaded`: with
+    `loading="lazy"`, off-screen images not yet fetched can report `complete === true` and
+    `naturalWidth === 0` before any network request is made.
+- **Verification**: `tests/test_item_image_loading_repro.py` verifies SSR/HTMX template attributes,
+  `.item-thumbnail[hidden]` / `--lg` CSS rules, capture-phase `handleImageError` behavior, and
+  absence of inline `on*` handlers.
+
 ---
 
 ## HTTP Endpoints Reference
@@ -949,3 +990,13 @@ The following settings configure the Mini App and web security layer:
   (WISHENKA-160).
 - **Solution**: Check the response headers of the `/web/.../receipt` request. See
   [gift-receipt.md](gift-receipt.md#refusals-and-the-marker-header).
+
+### 14. External Product Thumbnail Shows Placeholder or Remains Visible Alongside It
+- **Cause**: Either the external CDN returned an error (403/404/timeout) and `handleImageError` in
+  `static/app.js` swapped the broken `<img>` for `.item-thumbnail-placeholder`, or the `[hidden]`
+  CSS rule in `static/miniapp.css` is missing/overridden so `display: flex` keeps the hidden
+  placeholder visible.
+- **Solution**: Verify `img[data-img-fallback]` and its sibling `.item-thumbnail-placeholder[hidden]`
+  share the same parent container, `static/app.js` is loaded, and
+  `.item-thumbnail[hidden], .item-thumbnail-placeholder[hidden] { display: none; }` is present in
+  `static/miniapp.css`.

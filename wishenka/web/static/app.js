@@ -466,5 +466,26 @@
     }
   });
 
+  /**
+   * Swap a broken external product image (`img[data-img-fallback]`) for its
+   * pre-rendered sibling `.item-thumbnail-placeholder`.
+   *
+   * @param {Event} event - Capture-phase error event.
+   * @returns {void}
+   */
+  function handleImageError(event) {
+    const target = event && event.target;
+    if (!target || target.tagName !== 'IMG' || !target.hasAttribute('data-img-fallback')) {
+      return;
+    }
+    target.hidden = true;
+    const parent = target.parentElement;
+    const placeholder = parent && parent.querySelector('.item-thumbnail-placeholder');
+    if (placeholder) {
+      placeholder.hidden = false;
+    }
+  }
+
+  document.addEventListener('error', handleImageError, true);
   document.addEventListener('click', handleDelegatedClick);
 })();

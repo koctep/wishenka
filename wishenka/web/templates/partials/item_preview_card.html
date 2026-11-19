@@ -18,7 +18,11 @@
             {% if preview.image_url %}
             <img src="{{ preview.image_url }}"
                  alt="{{ preview.title or preview.store_name or 'Preview' }}"
-                 class="w-12 h-12 object-cover rounded" />
+                 loading="lazy"
+                 referrerpolicy="no-referrer"
+                 data-img-fallback
+                 class="item-thumbnail w-12 h-12 object-cover rounded" />
+            <div class="item-thumbnail-placeholder w-12 h-12 rounded" aria-hidden="true" hidden>🎁</div>
             {% endif %}
             <div class="preview-info flex-1">
                 {% if preview.store_name %}

@@ -22,7 +22,11 @@
             {% if item.image_url %}
             <img src="{{ item.image_url }}"
                  alt="{{ item.title }}"
+                 loading="lazy"
+                 referrerpolicy="no-referrer"
+                 data-img-fallback
                  class="item-thumbnail w-12 h-12 object-cover rounded" />
+            <div class="item-thumbnail-placeholder w-12 h-12 rounded" aria-hidden="true" hidden>🎁</div>
             {% else %}
             <div class="item-thumbnail-placeholder w-12 h-12 rounded" aria-hidden="true">🎁</div>
             {% endif %}
