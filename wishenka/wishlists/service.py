@@ -460,6 +460,23 @@ class WishlistService:
         if wishlist.status == WishlistStatus.DELETED:
             raise WishlistDeletedError("Cannot modify a deleted wishlist")
 
+    @staticmethod
+    def _require_item_wishlist(item: WishItem) -> Wishlist:
+        """Return the item's parent wishlist or fail closed if context is missing."""
+        if item.wishlist is None:
+            logger.error(
+                "Invariant violation: item %s has no parent wishlist (wishlist_id=%s)",
+                item.id,
+                item.wishlist_id,
+                extra={
+                    "event": "item_missing_parent_wishlist",
+                    "item_id": item.id,
+                    "wishlist_id": item.wishlist_id,
+                },
+            )
+            raise WishlistNotFoundError(f"Wishlist {item.wishlist_id} not found")
+        return item.wishlist
+
     async def create_wishlist(
         self,
         owner: AuthenticatedUser | None = None,
@@ -1353,60 +1370,58 @@ class WishlistService:
             if item.is_archived:
                 raise WishlistArchivedError(f"Cannot edit archived item {item_id}")
 
-            wl = item.wishlist
-            if wl is not None:
-                if wl.status == WishlistStatus.ARCHIVED:
-                    logger.warning(
-                        "Attempted to edit item in archived wishlist %s by actor %s",
-                        wl.id,
-                        actor.telegram_id,
-                        extra={
-                            "event": "item_mutation_blocked_archived",
-                            "item_id": item.id,
-                            "wishlist_id": wl.id,
-                            "actor_id": actor.telegram_id,
-                        },
-                    )
-                    raise WishlistArchivedError(f"Wishlist {wl.id} is archived")
-                if wl.status == WishlistStatus.DELETED:
-                    logger.warning(
-                        "Attempted to edit item in deleted wishlist %s by actor %s",
-                        wl.id,
-                        actor.telegram_id,
-                        extra={
-                            "event": "item_mutation_blocked_deleted",
-                            "item_id": item.id,
-                            "wishlist_id": wl.id,
-                            "actor_id": actor.telegram_id,
-                        },
-                    )
-                    raise WishlistDeletedError(f"Wishlist {wl.id} is deleted")
+            wl = self._require_item_wishlist(item)
+            if wl.status == WishlistStatus.ARCHIVED:
+                logger.warning(
+                    "Attempted to edit item in archived wishlist %s by actor %s",
+                    wl.id,
+                    actor.telegram_id,
+                    extra={
+                        "event": "item_mutation_blocked_archived",
+                        "item_id": item.id,
+                        "wishlist_id": wl.id,
+                        "actor_id": actor.telegram_id,
+                    },
+                )
+                raise WishlistArchivedError(f"Wishlist {wl.id} is archived")
+            if wl.status == WishlistStatus.DELETED:
+                logger.warning(
+                    "Attempted to edit item in deleted wishlist %s by actor %s",
+                    wl.id,
+                    actor.telegram_id,
+                    extra={
+                        "event": "item_mutation_blocked_deleted",
+                        "item_id": item.id,
+                        "wishlist_id": wl.id,
+                        "actor_id": actor.telegram_id,
+                    },
+                )
+                raise WishlistDeletedError(f"Wishlist {wl.id} is deleted")
 
-                ctx = WishlistAccessPolicy.resolve_context(actor, wl)
-                if not WishlistAccessPolicy.can_add_or_edit_item(ctx, wl):
-                    logger.warning(
-                        "Actor %s denied permission to edit item %s in wishlist %s",
-                        actor.telegram_id,
-                        item.id,
-                        wl.id,
-                        extra={
-                            "event": "item_access_denied",
-                            "actor_id": actor.telegram_id,
-                            "wishlist_id": wl.id,
-                            "item_id": item.id,
-                            "action": "edit_item",
-                            "role": ctx.role.value if ctx.role else None,
-                        },
-                    )
-                    raise PermissionDeniedError("Actor cannot edit this item")
+            ctx = WishlistAccessPolicy.resolve_context(actor, wl)
+            if not WishlistAccessPolicy.can_add_or_edit_item(ctx, wl):
+                logger.warning(
+                    "Actor %s denied permission to edit item %s in wishlist %s",
+                    actor.telegram_id,
+                    item.id,
+                    wl.id,
+                    extra={
+                        "event": "item_access_denied",
+                        "actor_id": actor.telegram_id,
+                        "wishlist_id": wl.id,
+                        "item_id": item.id,
+                        "action": "edit_item",
+                        "role": ctx.role.value if ctx.role else None,
+                    },
+                )
+                raise PermissionDeniedError("Actor cannot edit this item")
 
-                if recipient_user_id is not None:
-                    member_uids = {wl.owner_id} | {m.user_id for m in wl.members}
-                    if recipient_user_id not in member_uids:
-                        raise ValueError(
-                            f"Recipient user {recipient_user_id} is not a member "
-                            f"of wishlist {wl.id}"
-                        )
+            if recipient_user_id is not None:
+                member_uids = {wl.owner_id} | {m.user_id for m in wl.members}
+                if recipient_user_id not in member_uids:
+                    raise ValueError(
+                        f"Recipient user {recipient_user_id} is not a member of wishlist {wl.id}"
+                    )
 
             quantity_delta = 0
             updated_fields: list[str] = []
@@ -1425,7 +1440,7 @@ class WishlistService:
                         extra={
                             "event": "item_quantity_reduction_rejected",
                             "item_id": item.id,
-                            "wishlist_id": wl.id if wl else None,
+                            "wishlist_id": wl.id,
                             "actor_id": actor.telegram_id,
                             "requested_quantity": quantity,
                             "locked_quantity": active_locked,
@@ -1482,7 +1497,7 @@ class WishlistService:
                 item.recipient_user_id,
                 item.recipient_name,
             )
-            if before_update != after_update and wl is not None:
+            if before_update != after_update:
                 self._record_shared_event("item_updated", wl, item, actor.telegram_id)
             logger.info(
                 "Item %s updated by actor %s (delta=%s, new_qty=%s)",
@@ -1493,7 +1508,7 @@ class WishlistService:
                 extra={
                     "event": "item_updated",
                     "item_id": item.id,
-                    "wishlist_id": wl.id if wl else None,
+                    "wishlist_id": wl.id,
                     "actor_id": actor.telegram_id,
                     "updated_fields": sorted(updated_fields),
                     "quantity": item.quantity,
@@ -1870,36 +1885,35 @@ class WishlistService:
             item = self._items[item_id]
             if wishlist_id is not None and item.wishlist_id != wishlist_id:
                 raise ItemNotFoundError(f"Item {item_id} not found")
-            wl = item.wishlist
-            if wl is not None:
-                if wl.status == WishlistStatus.ARCHIVED:
-                    logger.warning(
-                        "Reservation blocked on archived wishlist %s for item %s by gifter %s",
-                        wl.id,
-                        item_id,
-                        gifter_id,
-                        extra={
-                            "event": "reservation_blocked_archived",
-                            "wishlist_id": wl.id,
-                            "item_id": item_id,
-                            "gifter_id": gifter_id,
-                        },
-                    )
-                    raise WishlistArchivedError(f"Cannot reserve: wishlist {wl.id} is archived")
-                if wl.status == WishlistStatus.DELETED:
-                    logger.warning(
-                        "Reservation blocked on deleted wishlist %s for item %s by gifter %s",
-                        wl.id,
-                        item_id,
-                        gifter_id,
-                        extra={
-                            "event": "reservation_blocked_deleted",
-                            "wishlist_id": wl.id,
-                            "item_id": item_id,
-                            "gifter_id": gifter_id,
-                        },
-                    )
-                    raise WishlistDeletedError(f"Cannot reserve: wishlist {wl.id} is deleted")
+            wl = self._require_item_wishlist(item)
+            if wl.status == WishlistStatus.ARCHIVED:
+                logger.warning(
+                    "Reservation blocked on archived wishlist %s for item %s by gifter %s",
+                    wl.id,
+                    item_id,
+                    gifter_id,
+                    extra={
+                        "event": "reservation_blocked_archived",
+                        "wishlist_id": wl.id,
+                        "item_id": item_id,
+                        "gifter_id": gifter_id,
+                    },
+                )
+                raise WishlistArchivedError(f"Cannot reserve: wishlist {wl.id} is archived")
+            if wl.status == WishlistStatus.DELETED:
+                logger.warning(
+                    "Reservation blocked on deleted wishlist %s for item %s by gifter %s",
+                    wl.id,
+                    item_id,
+                    gifter_id,
+                    extra={
+                        "event": "reservation_blocked_deleted",
+                        "wishlist_id": wl.id,
+                        "item_id": item_id,
+                        "gifter_id": gifter_id,
+                    },
+                )
+                raise WishlistDeletedError(f"Cannot reserve: wishlist {wl.id} is deleted")
             if item.is_archived:
                 logger.warning(
                     "Reservation blocked on archived item %s by gifter %s",
@@ -1913,15 +1927,15 @@ class WishlistService:
                 )
                 raise WishlistArchivedError(f"Cannot reserve: item {item_id} is archived")
 
-            ctx = WishlistAccessPolicy.resolve_context(user, wl) if wl is not None else None
-            if ctx is not None and not WishlistAccessPolicy.can_reserve_item(user, ctx, item):
+            ctx = WishlistAccessPolicy.resolve_context(user, wl)
+            if not WishlistAccessPolicy.can_reserve_item(user, ctx, item):
                 logger.warning(
                     "Self-reservation blocked: recipient %s cannot reserve item %s",
                     gifter_id,
                     item_id,
                     extra={
                         "event": "self_reservation_blocked",
-                        "wishlist_id": wl.id if wl else None,
+                        "wishlist_id": wl.id,
                         "item_id": item_id,
                         "user_id": gifter_id,
                         "gifter_id": gifter_id,
@@ -1942,7 +1956,7 @@ class WishlistService:
                     gifter_id,
                     extra={
                         "event": "insufficient_quantity_blocked",
-                        "wishlist_id": wl.id if wl else None,
+                        "wishlist_id": wl.id,
                         "item_id": item_id,
                         "user_id": gifter_id,
                         "gifter_id": gifter_id,
@@ -2495,29 +2509,28 @@ class WishlistService:
             )
             raise ItemNotFoundError(f"Item {item_id} not found")
 
-        wl = item.wishlist
-        if wl is not None:
-            ctx = WishlistAccessPolicy.resolve_context(actor, wl)
-            if not ctx.is_member:
-                logger.warning(
-                    "Actor %s denied permission to fulfill item %s in wishlist %s",
-                    actor.telegram_id,
-                    item_id,
-                    wl.id,
-                    extra={
-                        "event": "access_denied",
-                        "actor_id": actor.telegram_id,
-                        "user_id": actor.telegram_id,
-                        "wishlist_id": wl.id,
-                        "item_id": item_id,
-                        "action": "record_item_fulfillment",
-                    },
-                )
-                raise PermissionDeniedError("Actor cannot fulfill items in this wishlist")
-            if wl.status == WishlistStatus.DELETED:
-                raise WishlistDeletedError(f"Wishlist {wl.id} is deleted")
-            if wl.status == WishlistStatus.ARCHIVED:
-                raise WishlistArchivedError(f"Wishlist {wl.id} is archived")
+        wl = self._require_item_wishlist(item)
+        ctx = WishlistAccessPolicy.resolve_context(actor, wl)
+        if not ctx.is_member:
+            logger.warning(
+                "Actor %s denied permission to fulfill item %s in wishlist %s",
+                actor.telegram_id,
+                item_id,
+                wl.id,
+                extra={
+                    "event": "access_denied",
+                    "actor_id": actor.telegram_id,
+                    "user_id": actor.telegram_id,
+                    "wishlist_id": wl.id,
+                    "item_id": item_id,
+                    "action": "record_item_fulfillment",
+                },
+            )
+            raise PermissionDeniedError("Actor cannot fulfill items in this wishlist")
+        if wl.status == WishlistStatus.DELETED:
+            raise WishlistDeletedError(f"Wishlist {wl.id} is deleted")
+        if wl.status == WishlistStatus.ARCHIVED:
+            raise WishlistArchivedError(f"Wishlist {wl.id} is archived")
 
         if item.is_archived:
             raise WishArchivedError("The wish is archived")
@@ -2535,7 +2548,7 @@ class WishlistService:
                     extra={
                         "event": "fulfillment_quantity_exceeded",
                         "item_id": item_id,
-                        "wishlist_id": wl.id if wl else None,
+                        "wishlist_id": wl.id,
                         "user_id": actor.telegram_id,
                         "received_quantity": received_quantity,
                         "remaining_unfulfilled": remaining,
@@ -2559,7 +2572,7 @@ class WishlistService:
             actor.telegram_id,
             extra={
                 "event": "item_fulfilled",
-                "wishlist_id": wl.id if wl else None,
+                "wishlist_id": wl.id,
                 "item_id": item.id,
                 "user_id": actor.telegram_id,
                 "actor_id": actor.telegram_id,
@@ -2582,30 +2595,29 @@ class WishlistService:
         item = self._items.get(item_id)
         if item is None or (wishlist_id is not None and item.wishlist_id != wishlist_id):
             raise ItemNotFoundError(f"Item {item_id} not found")
-        wl = item.wishlist
-        if wl is not None:
-            ctx = WishlistAccessPolicy.resolve_context(actor, wl)
-            if not ctx.is_member:
-                logger.warning(
-                    "Actor %s denied permission to %s item %s in wishlist %s",
-                    actor.telegram_id,
-                    action,
-                    item_id,
-                    wl.id,
-                    extra={
-                        "event": "access_denied",
-                        "actor_id": actor.telegram_id,
-                        "user_id": actor.telegram_id,
-                        "wishlist_id": wl.id,
-                        "item_id": item_id,
-                        "action": action,
-                    },
-                )
-                raise PermissionDeniedError("Actor cannot modify receipts in this wishlist")
-            if wl.status == WishlistStatus.DELETED:
-                raise WishlistDeletedError(f"Wishlist {wl.id} is deleted")
-            if wl.status == WishlistStatus.ARCHIVED:
-                raise WishlistArchivedError(f"Wishlist {wl.id} is archived")
+        wl = self._require_item_wishlist(item)
+        ctx = WishlistAccessPolicy.resolve_context(actor, wl)
+        if not ctx.is_member:
+            logger.warning(
+                "Actor %s denied permission to %s item %s in wishlist %s",
+                actor.telegram_id,
+                action,
+                item_id,
+                wl.id,
+                extra={
+                    "event": "access_denied",
+                    "actor_id": actor.telegram_id,
+                    "user_id": actor.telegram_id,
+                    "wishlist_id": wl.id,
+                    "item_id": item_id,
+                    "action": action,
+                },
+            )
+            raise PermissionDeniedError("Actor cannot modify receipts in this wishlist")
+        if wl.status == WishlistStatus.DELETED:
+            raise WishlistDeletedError(f"Wishlist {wl.id} is deleted")
+        if wl.status == WishlistStatus.ARCHIVED:
+            raise WishlistArchivedError(f"Wishlist {wl.id} is archived")
         return item
 
     async def cancel_item_receipt(

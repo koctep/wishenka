@@ -555,6 +555,25 @@ an item has been booked, how many units remain, or who reserved it.
    own line, or promise control exists in the rendered HTML. See
    [Wish-card giver controls](reservations.md#6-wish-card-giver-controls).
 
+### Fail-Closed Parent Wishlist Invariant
+
+Every `WishItem` mutation that depends on parent wishlist lifecycle state or `WishlistAccessPolicy`
+authorization must fail closed when `item.wishlist` is absent:
+
+- **Guard Helper**: [`WishlistService._require_item_wishlist(item)`](../../wishenka/wishlists/service.py)
+  returns `item.wishlist` as a non-optional `Wishlist`. If `item.wishlist is None`, it emits an
+  `ERROR` structured log (`event="item_missing_parent_wishlist"`, `item_id`, `wishlist_id`) and
+  raises `WishlistNotFoundError` (mapped to HTTP 404 by web routes) before any state mutation.
+- **Guarded Entrypoints**:
+  - `update_wish_item`
+  - `create_reservation`
+  - `record_item_fulfillment`
+  - `cancel_item_receipt` (via `_validate_receipt_mutation_access`)
+  - `correct_item_receipt` (via `_validate_receipt_mutation_access`)
+- **Regression Coverage**: [`tests/test_wishlist_fail_closed_repro.py`](../../tests/test_wishlist_fail_closed_repro.py)
+  verifies that detaching `item.wishlist = None` causes all five entrypoints to raise
+  `WishlistNotFoundError` with zero state mutation.
+
 ---
 
 ## Usage / API
@@ -1477,6 +1496,7 @@ Settings in `wishenka.config.Settings` (prefixed with `WISHENKA_` in environment
 | `wishlist_restore_retention_expired` | `WARNING` | Service restore past retention | `wishlist_id`, `actor_id`, `retention_days` |
 | `wishlist_retention_expired` | `WARNING` | HTTP 410 retention expired | `operation` |
 | `public_link_rate_limited` | `WARNING` | Public share/invite link throttled (`wishenka.web.rate_limit`) | `route` (`/share/{token}`, `/invite/{token}`, `/invite/{token}/join`), `method`, `client_ip`, `retry_after` |
+| `item_missing_parent_wishlist` | `ERROR` | `WishItem.wishlist` is `None` in `_require_item_wishlist` | `item_id`, `wishlist_id` |
 
 ---
 
@@ -1506,6 +1526,15 @@ WishlistError
   trying to delete).
 - **Resolution**: Verify user role via `WishlistAccessPolicy.resolve_context`. Only `Owner` can
   delete wishlists or promote/demote members to `Admin`.
+
+#### `WishlistNotFoundError` (Missing Parent Wishlist Invariant)
+- **Root Cause**: A `WishItem` was passed to `update_wish_item`, `create_reservation`,
+  `record_item_fulfillment`, `cancel_item_receipt`, or `correct_item_receipt` with
+  `item.wishlist is None`, triggering `WishlistService._require_item_wishlist(item)` and logging
+  `item_missing_parent_wishlist` at `ERROR` level.
+- **Resolution**: Ensure `WishItem` instances are hydrated or constructed with an attached
+  `wishlist` reference before invoking mutation methods. Inspect `item_id` and `wishlist_id` in the
+  `item_missing_parent_wishlist` log record.
 
 #### `SelfReservationError`
 - **Root Cause**: Recipient attempted to reserve an item designated for themselves.
