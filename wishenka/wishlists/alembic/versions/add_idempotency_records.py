@@ -6,6 +6,7 @@ revision = "add_idempotency_records"
 down_revision = "add_support_channel"
 branch_labels = None
 depends_on = None
+ROLLBACK_POLICY = "reversible"
 
 
 def upgrade() -> None:

@@ -6,6 +6,7 @@ revision = "add_support_channel"
 down_revision = "add_notice_uncertain"
 branch_labels = None
 depends_on = None
+ROLLBACK_POLICY = "reversible"
 
 
 def upgrade() -> None:

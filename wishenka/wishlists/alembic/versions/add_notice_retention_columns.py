@@ -1,16 +1,19 @@
 """Add retention timestamps and anonymize legacy deleted birthdays."""
 
-from alembic import op
+from alembic import context, op
 from sqlalchemy import text
 
 revision = "add_notice_retention_columns"
 down_revision = "add_deleted_session_revocations"
 branch_labels = None
 depends_on = None
+ROLLBACK_POLICY = "reversible"
 
 
 def _columns(table: str) -> set[str]:
-    """Return existing column names for ``table``."""
+    """Return existing column names for ``table`` (empty set in offline mode)."""
+    if context.is_offline_mode():
+        return set()
     return {row[1] for row in op.get_bind().execute(text(f"PRAGMA table_info({table})"))}
 
 

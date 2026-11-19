@@ -10,6 +10,7 @@ revision = "add_item_order_index"
 down_revision = "add_display_order"
 branch_labels = None
 depends_on = None
+ROLLBACK_POLICY = "reversible"
 
 
 def upgrade() -> None:

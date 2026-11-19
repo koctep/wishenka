@@ -1,11 +1,12 @@
 """Add bilingual locale and locale_source columns to users profile table."""
 
-from alembic import op
+from alembic import context, op
 
 revision = "add_user_locale"
 down_revision = "add_idempotency_records"
 branch_labels = None
 depends_on = None
+ROLLBACK_POLICY = "reversible"
 
 _CREATE_USERS_SQL = """
 CREATE TABLE IF NOT EXISTS users (
@@ -48,6 +49,13 @@ WHERE locale IS NULL
 
 def upgrade() -> None:
     """Create or migrate users table with locale and locale_source and backfill existing rows."""
+    if context.is_offline_mode():
+        op.execute(_CREATE_USERS_SQL)
+        op.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id)")
+        op.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
+        op.execute(_REPAIR_INVALID_SQL)
+        return
+
     bind = op.get_bind()
     bind.exec_driver_sql(_CREATE_USERS_SQL)
     bind.exec_driver_sql(

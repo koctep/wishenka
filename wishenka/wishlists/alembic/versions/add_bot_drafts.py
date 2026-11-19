@@ -6,6 +6,7 @@ revision = "add_bot_drafts"
 down_revision = "add_notice_outbox"
 branch_labels = None
 depends_on = None
+ROLLBACK_POLICY = "reversible"
 
 
 def upgrade() -> None:

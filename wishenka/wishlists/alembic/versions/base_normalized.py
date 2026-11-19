@@ -4,12 +4,19 @@ Revision ID: base_normalized
 Revises:
 """
 
+import logging
+import os
+
 from alembic import op
 
 revision = "base_normalized"
 down_revision = None
 branch_labels = None
 depends_on = None
+ROLLBACK_POLICY = "one-way"
+
+_ALLOW_DESTRUCTIVE_ENV = "WISHENKA_ALLOW_DESTRUCTIVE_BASELINE_DOWNGRADE"
+logger = logging.getLogger("wishenka.wishlists.migrations")
 
 
 DDL = (
@@ -67,6 +74,23 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Drop baseline tables only when explicitly opted in via environment variable."""
+    if os.environ.get(_ALLOW_DESTRUCTIVE_ENV) != "1":
+        logger.warning(
+            "Refusing one-way downgrade of revision %s",
+            revision,
+            extra={"event": "wishlist_migration_downgrade_refused", "revision": revision},
+        )
+        raise NotImplementedError(
+            "Refusing to downgrade 'base_normalized': dropping the baseline schema would destroy "
+            "all core wishlist data. Restore from a database backup instead, or set "
+            f"{_ALLOW_DESTRUCTIVE_ENV}=1 for disposable/test databases."
+        )
+    logger.warning(
+        "Executing destructive baseline downgrade because %s=1",
+        _ALLOW_DESTRUCTIVE_ENV,
+        extra={"event": "wishlist_migration_destructive_baseline_downgrade"},
+    )
     for table in (
         "wl_counters",
         "wl_invite_tokens",

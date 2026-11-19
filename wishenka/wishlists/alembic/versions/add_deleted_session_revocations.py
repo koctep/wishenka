@@ -6,6 +6,7 @@ revision = "add_deleted_session_revocations"
 down_revision = "add_user_locale"
 branch_labels = None
 depends_on = None
+ROLLBACK_POLICY = "reversible"
 
 
 def upgrade() -> None:

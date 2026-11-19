@@ -6,6 +6,7 @@ revision = "add_birthday_reminders"
 down_revision = "add_bot_capture_order"
 branch_labels = None
 depends_on = None
+ROLLBACK_POLICY = "reversible"
 
 
 def upgrade() -> None:

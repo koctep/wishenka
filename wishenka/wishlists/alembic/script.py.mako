@@ -12,6 +12,7 @@ revision = ${repr(up_revision)}
 down_revision = ${repr(down_revision)}
 branch_labels = ${repr(branch_labels)}
 depends_on = ${repr(depends_on)}
+ROLLBACK_POLICY = "reversible"  # "reversible" or "one-way" (see doc/dev/migrations.md)
 
 
 def upgrade() -> None:

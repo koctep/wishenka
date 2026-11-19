@@ -15,13 +15,14 @@ lose receipt history.
 
 import logging
 
-from alembic import op
+from alembic import context, op
 from sqlalchemy import text
 
 revision = "add_gift_receipts"
 down_revision = "add_item_order_index"
 branch_labels = None
 depends_on = None
+ROLLBACK_POLICY = "one-way"
 
 logger = logging.getLogger("wishenka.wishlists.migrations")
 
@@ -54,6 +55,11 @@ def upgrade() -> None:
         "CREATE INDEX IF NOT EXISTS idx_wl_receipts_item "
         "ON wl_receipts(wish_item_id, received_at, id)"
     )
+    if context.is_offline_mode():
+        op.execute(text(_BACKFILL))
+        op.execute(text(_NORMALISE))
+        return
+
     connection = op.get_bind()
     backfilled = connection.execute(text(_BACKFILL)).rowcount
     logger.info(
@@ -69,4 +75,12 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Refuse to downgrade: the normalisation and the history cannot be restored."""
-    raise NotImplementedError("add_gift_receipts is irreversible")
+    logger.warning(
+        "Refusing one-way downgrade of revision %s",
+        revision,
+        extra={"event": "wishlist_migration_downgrade_refused", "revision": revision},
+    )
+    raise NotImplementedError(
+        "Refusing to downgrade 'add_gift_receipts': receipt backfill and archived-row "
+        "normalisation are irreversible. Restore from a database backup instead."
+    )

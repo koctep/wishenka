@@ -158,15 +158,19 @@ without the "Unable to initialize wishlist storage" wrapper. The migrations-leve
    alembic -c alembic.ini revision -m "add example column" --rev-id add_example_column
    ```
 
-   The file lands in `wishenka/wishlists/alembic/versions/` as `<rev-id>_<slug>.py`; Alembic
-   fills `down_revision` with the current head (`add_notice_outbox` at the time of writing),
-   keep the chain linear. The existing revisions use descriptive string ids and plain
-   `<rev-id>.py` file names, so rename the generated file to match.
+   The file lands in `wishenka/wishlists/alembic/versions/` as `<rev-id>_<slug>.py`, generated from
+   `wishenka/wishlists/alembic/script.py.mako` (which scaffolds
+   `ROLLBACK_POLICY = "reversible"`). Alembic fills `down_revision` with the current head; keep the
+   chain linear. The existing revisions use descriptive string ids and plain `<rev-id>.py` file
+   names, so rename the generated file to match.
 2. Implement `upgrade()` with `op.execute(...)` or `op.add_column(...)`. For SQLite, use
    `op.batch_alter_table` for operations it cannot do in place, and review the lock duration of
-   table rebuilds on large files.
-3. Implement `downgrade()` deliberately: either a safe reverse operation or an explicit refusal
-   (see [Downgrade caveats](#downgrade-caveats)).
+   table rebuilds on large files. If `upgrade()` inspects live database state (for example via
+   `PRAGMA`), guard that inspection with `context.is_offline_mode()` so offline SQL generation
+   continues to work.
+3. Set `ROLLBACK_POLICY` (`"reversible"` or `"one-way"`) and implement `downgrade()` accordingly:
+   either a safe reverse operation or an explicit `NotImplementedError` refusal with
+   backup-restoration guidance (see [Downgrade policy](#downgrade-policy)).
 4. Update `_REVISIONS` in `wishenka/wishlists/migrations.py` if the new revision changes the
    structural markers used to recognize legacy databases. The adoption map names the head
    revision explicitly and nothing enforces this (WISHENKA-129). A legacy database already at
@@ -186,6 +190,22 @@ This is the supported way: it takes the lock, adopts legacy files and selects WA
 `alembic upgrade` CLI is not equivalent: `alembic.ini` carries only the placeholder
 `sqlalchemy.url = sqlite://` (an in-memory database), and the CLI neither adopts legacy files nor
 selects WAL. Do not run migrations by hand against a database used by a running service.
+
+### Offline SQL generation
+
+To inspect the DDL statements without connecting to a live database, run Alembic in offline mode
+from the repository root:
+
+```bash
+alembic -c alembic.ini upgrade head --sql
+```
+
+Programmatically, `command.upgrade(_configured(url), "head", sql=True)` writes the same SQL script
+without creating or opening a database file (`env.py` routes to `run_migrations_offline()` with
+`literal_binds=True`). Revisions that inspect live tables during online upgrades
+(`add_gift_receipts`, `add_notice_uncertain`, `add_user_locale`, `add_notice_retention_columns`,
+and `add_user_fk_cascades`) branch on `context.is_offline_mode()` so offline script generation
+completes cleanly.
 
 ### Legacy-schema adoption rules
 
@@ -229,6 +249,7 @@ an unsupported schema.
 | Lock wait | constants `_LOCK_TIMEOUT_SECONDS`, `_LOCK_POLL_SECONDS` | 60 s, polled every 0.05 s |
 | `busy_timeout`, `foreign_keys` | store connection hook | `5000` ms, `ON` |
 | `journal_mode` | migration startup | `WAL` (file databases; a `:memory:` store is a temporary file and gets it too) |
+| `WISHENKA_ALLOW_DESTRUCTIVE_BASELINE_DOWNGRADE` | environment | Set to `"1"` to allow `base_normalized.downgrade()` to drop the 9 baseline tables (disposable/test databases only; refused by default) |
 
 The runner locates `alembic.ini` as `<repository root>/alembic.ini` (`Path(__file__).parents[2]`),
 so it works from a source checkout only (WISHENKA-130).
@@ -244,6 +265,8 @@ Database paths and URLs are never logged.
 | `wishlist_migration_legacy_schema_adopted` | INFO | `revision` | A recognized legacy database was stamped |
 | `wishlist_migration_completed` | INFO | `duration_ms` | Adoption, upgrade and WAL selection finished (message: `Wishlist database migration completed in N ms`) |
 | `wishlist_migration_failed` | ERROR (with traceback) | - | Any exception; it is re-raised after logging |
+| `wishlist_migration_downgrade_refused` | WARNING | `revision` | A one-way revision's `downgrade()` (including `base_normalized` without `WISHENKA_ALLOW_DESTRUCTIVE_BASELINE_DOWNGRADE=1`) refused execution |
+| `wishlist_migration_destructive_baseline_downgrade` | WARNING | - | `base_normalized.downgrade()` executed with `WISHENKA_ALLOW_DESTRUCTIVE_BASELINE_DOWNGRADE=1` |
 | `user_fk_migration_orphans_cleaned` | WARNING | `table`, `rows_removed`, `rows_kept` | `add_user_fk_cascades` upgrade removed orphaned rows while rebuilding `table` |
 | `user_fk_migration_table_rebuilt` | INFO | `table`, `rows_kept` | `add_user_fk_cascades` upgrade rebuilt `table` with `user_id` cascade FK (0 orphans removed) |
 | `user_fk_migration_completed` | INFO | `tables`, `total_orphans_removed` | `add_user_fk_cascades` upgrade finished rebuilding all target tables |
@@ -281,29 +304,56 @@ database logs `started` and `completed` only. There is no alert threshold yet (W
   store was not disposed. Call `await store.dispose()`.
 - **Import error for `fcntl` on Windows.** Windows is not supported; see the lock section.
 
-### Downgrade caveats
+### Downgrade policy
 
-Downgrades are not a supported operational path. The policy is not finalized (WISHENKA-128).
-Current state of the `downgrade()` functions:
+Every Alembic revision module under `wishenka/wishlists/alembic/versions/` (and the template
+`wishenka/wishlists/alembic/script.py.mako`) declares a module-level `ROLLBACK_POLICY` constant
+with one of two values:
 
-| Revision | `downgrade()` |
-| --- | --- |
-| `add_user_fk_cascades` | Works: rebuilds `wl_view_history`, `wl_favorites`, and `wl_members` in reverse order without `REFERENCES users(telegram_id) ON DELETE CASCADE` and recreates indexes (orphans cleaned during upgrade are not restored) |
-| `add_notice_retention_columns` | Works: drops `idx_notice_receipt_keys_created`, `notice_receipt_keys.created_at`, `idx_bot_destinations_active_updated`, `bot_destinations.updated_at`, `idx_birthday_entries_deleted_at`, and `birthday_entries.deleted_at` |
-| `add_support_channel` | Works: drops `idx_support_tickets_owner_time`, `support_tickets`, and `support_input` |
-| `add_notice_uncertain` | Works: drops `requires_membership` from `reminder_outbox`, drops `notice_receipt_keys`, and rebuilds `notification_outbox` (mapping `uncertain` rows to `failed`) |
-| `add_birthday_reminders` | Works: drops `notice_scheduler_cursors`, `notice_rate_slots`, `reminder_outbox`, `birthday_input`, `birthday_entries`, and `bot_destinations` |
-| `add_bot_capture_order` | Works: drops `bot_capture_order` |
-| `add_bot_drafts` | Works: drops `bot_drafts` |
-| `add_notice_outbox` | Works: drops the three notice tables (queued notices are lost) |
-| `add_gift_receipts` | Raises `NotImplementedError` (irreversible: the normalised archived rows cannot be told apart and the receipt history would be lost) |
-| `add_item_order_index` | Works: `DROP INDEX idx_wl_items_order` |
-| `add_display_order` | Raises `NotImplementedError` (SQLite cannot drop a column without a table rebuild) |
-| `add_warn_on_delete_reserved` | Raises `NotImplementedError` (same reason) |
-| `base_normalized` | Drops all nine baseline tables in reverse dependency order and destroys all wishlist data; no guard |
+- `"reversible"` — `downgrade()` reverses the schema change cleanly (any discarded transient or
+  feature-specific data is noted below).
+- `"one-way"` — `downgrade()` cannot safely reverse the change without data loss or a risky
+  SQLite table rebuild. Calling `downgrade()` logs `wishlist_migration_downgrade_refused`
+  (`WARNING`, `extra={"event": "wishlist_migration_downgrade_refused", "revision": ...}`) and
+  raises `NotImplementedError` with backup-restoration guidance.
 
-So a downgrade from head drops the notice tables, then fails at `add_gift_receipts`. Never run
-`alembic downgrade base` on a database with data; restore from a backup instead.
+Production rollbacks across `"one-way"` revisions are handled by restoring a database backup taken
+prior to the upgrade rather than running `alembic downgrade`.
+
+#### Baseline safeguard (`base_normalized`)
+
+`base_normalized` is classified as `"one-way"`. By default, `base_normalized.downgrade()` refuses
+to run: it logs `wishlist_migration_downgrade_refused` (`revision="base_normalized"`) and raises
+`NotImplementedError` without dropping any tables or data.
+
+For disposable or test databases that intentionally need `alembic downgrade base`, set
+`WISHENKA_ALLOW_DESTRUCTIVE_BASELINE_DOWNGRADE=1`. When this opt-in is set,
+`base_normalized.downgrade()` logs `wishlist_migration_destructive_baseline_downgrade` (`WARNING`)
+and drops all nine baseline tables in reverse dependency order.
+
+#### Per-revision classification
+
+| Revision | `ROLLBACK_POLICY` | `downgrade()` behavior |
+| --- | --- | --- |
+| `add_user_fk_cascades` | `reversible` | Rebuilds `wl_view_history`, `wl_favorites`, and `wl_members` in reverse order without `REFERENCES users(telegram_id) ON DELETE CASCADE` and recreates indexes (orphans cleaned during upgrade are not restored) |
+| `add_notice_retention_columns` | `reversible` | Drops `idx_notice_receipt_keys_created`, `notice_receipt_keys.created_at`, `idx_bot_destinations_active_updated`, `bot_destinations.updated_at`, `idx_birthday_entries_deleted_at`, and `birthday_entries.deleted_at` (discards retention timestamps) |
+| `add_deleted_session_revocations` | `reversible` | Drops `deleted_session_revocations` (discards session revocation records) |
+| `add_user_locale` | `reversible` | Drops `locale_source` and `locale` from `users` if present (discards user locale preferences) |
+| `add_idempotency_records` | `reversible` | Drops `wl_idempotency_records` and `idx_wl_idempotency_expires_at` (discards cached idempotency responses) |
+| `add_support_channel` | `reversible` | Drops `idx_support_tickets_owner_time`, `support_tickets`, and `support_input` (discards support channel state) |
+| `add_notice_uncertain` | `reversible` | Drops `requires_membership` from `reminder_outbox`, drops `notice_receipt_keys`, and rebuilds `notification_outbox` (mapping `uncertain` rows to `failed`) |
+| `add_birthday_reminders` | `reversible` | Drops `notice_scheduler_cursors`, `notice_rate_slots`, `reminder_outbox`, `birthday_input`, `birthday_entries`, and `bot_destinations` (discards reminder and destination state) |
+| `add_bot_capture_order` | `reversible` | Drops `bot_capture_order` (discards capture ordering watermarks) |
+| `add_bot_drafts` | `reversible` | Drops `bot_drafts` (discards in-progress capture drafts) |
+| `add_notice_outbox` | `reversible` | Drops `wl_list_notification_settings`, `user_notification_settings`, and `notification_outbox` (discards queued notices and settings) |
+| `add_gift_receipts` | `one-way` | Logs `wishlist_migration_downgrade_refused` and raises `NotImplementedError` with backup-restoration guidance (normalised archived rows and receipt history cannot be reversed) |
+| `add_item_order_index` | `reversible` | `DROP INDEX idx_wl_items_order` (no data loss) |
+| `add_display_order` | `one-way` | Logs `wishlist_migration_downgrade_refused` and raises `NotImplementedError` with backup-restoration guidance (SQLite column drop requires rebuilding `wl_items`) |
+| `add_warn_on_delete_reserved` | `one-way` | Logs `wishlist_migration_downgrade_refused` and raises `NotImplementedError` with backup-restoration guidance (SQLite column drop requires rebuilding `wl_lists`) |
+| `base_normalized` | `one-way` | Guarded: logs `wishlist_migration_downgrade_refused` and raises `NotImplementedError` by default; logs `wishlist_migration_destructive_baseline_downgrade` and drops all 9 baseline tables only when `WISHENKA_ALLOW_DESTRUCTIVE_BASELINE_DOWNGRADE=1` |
+
+A downgrade from head therefore succeeds cleanly down to `add_gift_receipts` and refuses at
+`add_gift_receipts` with backup-restoration guidance.
 
 ## Testing
 
@@ -313,13 +363,15 @@ So a downgrade from head drops the notice tables, then fails at `add_gift_receip
 | `tests/test_wishlist_migrations_concurrency.py` | Several processes start concurrently on one file, fresh and legacy `base_normalized`; the expected head is `head_revision()` |
 | `tests/test_gift_receipt_migration.py` | Back-fill and normalisation, repeatable upgrade, no giver column, irreversible downgrade, cascade on purge |
 | `tests/test_wishlist_migrations_observability.py` | `started`/`completed` events, `legacy_schema_adopted` with `revision`, `failed` with re-raise, no paths in log fields |
+| `tests/test_wishlist_migration_rollback_policy.py` | `ROLLBACK_POLICY` declared on all revisions; `base_normalized` default guard and `WISHENKA_ALLOW_DESTRUCTIVE_BASELINE_DOWNGRADE=1` opt-in; one-way refusal messages and `wishlist_migration_downgrade_refused` logs; reversible tail downgrades (`head` to `add_gift_receipts`); idempotent second startup; non-SQLite URL rejection; offline SQL generation (`sql=True`) |
 
 Run them with the project test target (see [infrastructure.md](infrastructure.md)), for example:
 
 ```bash
 pytest tests/test_wishlist_alembic_migrations.py \
   tests/test_wishlist_migrations_concurrency.py \
-  tests/test_wishlist_migrations_observability.py
+  tests/test_wishlist_migrations_observability.py \
+  tests/test_wishlist_migration_rollback_policy.py
 ```
 
 ## Known Limitations
@@ -332,8 +384,6 @@ Tracked as Debt issues; details in `ai-tasks/WISHENKA-111/60-tech-debt.md`.
   repository root, not gitignored.
 - [WISHENKA-127](https://pypost.atlassian.net/browse/WISHENKA-127) - missing tests: adoption of
   each mapped revision and of the rejection paths, byte-identical file on failure.
-- [WISHENKA-128](https://pypost.atlassian.net/browse/WISHENKA-128) - downgrade policy is
-  undecided; tests for idempotent second start, non-SQLite URL and offline mode are missing.
 - [WISHENKA-129](https://pypost.atlassian.net/browse/WISHENKA-129) - `_adopt_known_schema` is long;
   historical marker DDL and the head revision name are duplicated in `migrations.py`.
 - [WISHENKA-130](https://pypost.atlassian.net/browse/WISHENKA-130) - config depends on the

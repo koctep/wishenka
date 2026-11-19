@@ -3,7 +3,7 @@
 import logging
 from typing import NamedTuple
 
-from alembic import op
+from alembic import context, op
 from sqlalchemy import text
 
 logger = logging.getLogger("wishenka.wishlists.migrations")
@@ -12,6 +12,7 @@ revision = "add_user_fk_cascades"
 down_revision = "add_notice_retention_columns"
 branch_labels = None
 depends_on = None
+ROLLBACK_POLICY = "reversible"
 
 _ENSURE_USERS_SQL = """
 CREATE TABLE IF NOT EXISTS users (
@@ -131,6 +132,16 @@ def _rebuild_table(spec: _TableSpec, *, with_fk: bool) -> int:
         if with_fk
         else ""
     )
+    if context.is_offline_mode():
+        op.execute(
+            f"INSERT INTO {spec.name} ({spec.columns}) "
+            f"SELECT {spec.columns} FROM {legacy_name}{where_clause}"
+        )
+        op.execute(f"DROP TABLE {legacy_name}")
+        for index_sql in spec.indexes:
+            op.execute(index_sql)
+        return 0
+
     connection = op.get_bind()
     total_rows = int(connection.execute(text(f"SELECT COUNT(*) FROM {legacy_name}")).scalar_one())
     inserted = connection.execute(

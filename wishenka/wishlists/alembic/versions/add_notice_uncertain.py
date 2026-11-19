@@ -1,21 +1,28 @@
 """Preserve uncertain receipt sends without automatic retries."""
 
-from alembic import op
+from alembic import context, op
 from sqlalchemy import text
 
 revision = "add_notice_uncertain"
 down_revision = "add_birthday_reminders"
 branch_labels = None
 depends_on = None
+ROLLBACK_POLICY = "reversible"
 
 
 def upgrade() -> None:
     """Rebuild the receipt table with an explicit uncertain state."""
-    columns = {row[1] for row in op.get_bind().execute(text("PRAGMA table_info(reminder_outbox)"))}
-    if "requires_membership" not in columns:
-        op.execute(
-            "ALTER TABLE reminder_outbox ADD COLUMN requires_membership INTEGER NOT NULL DEFAULT 0"
-        )
+    add_col_sql = (
+        "ALTER TABLE reminder_outbox ADD COLUMN requires_membership INTEGER NOT NULL DEFAULT 0"
+    )
+    if context.is_offline_mode():
+        op.execute(add_col_sql)
+    else:
+        columns = {
+            row[1] for row in op.get_bind().execute(text("PRAGMA table_info(reminder_outbox)"))
+        }
+        if "requires_membership" not in columns:
+            op.execute(add_col_sql)
     op.execute("DROP INDEX IF EXISTS idx_notice_outbox_due")
     op.execute("ALTER TABLE notification_outbox RENAME TO notice_outbox_legacy")
     op.execute("""

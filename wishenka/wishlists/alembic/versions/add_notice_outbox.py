@@ -13,6 +13,7 @@ revision = "add_notice_outbox"
 down_revision = "add_gift_receipts"
 branch_labels = None
 depends_on = None
+ROLLBACK_POLICY = "reversible"
 
 _STATEMENTS = (
     """
