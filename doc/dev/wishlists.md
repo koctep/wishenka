@@ -241,8 +241,33 @@ member management, and token rotation without client-side JavaScript SPA framewo
       `HX-Redirect: /share/{public_token}` triggering client navigation.
     - `200 OK` (Error Card): If token expired or list was deleted concurrently, returns
       the friendly error card template.
+    - `429 Too Many Requests`: Returned by `PublicLinkRateLimitMiddleware` if the client exceeds
+      the configured sliding-window limit.
   - **Observability**: Logs `invite_joined` with `wishlist_id`, `user_id`, and assigned role,
     or `invite_join_failed` on error. Access logs redact the path to `/invite/{token}/join`.
+
+#### Public Link Rate Limiting
+
+Unauthenticated and public capability routes are protected by
+`PublicLinkRateLimitMiddleware` and `SlidingWindowRateLimiter` in
+[`wishenka.web.rate_limit`](../../wishenka/web/rate_limit.py) (wired onto
+`app.state.public_link_rate_limiter` in [`wishenka.web.app`](../../wishenka/web/app.py)):
+
+- **Protected Routes** (`match_public_link_route`):
+  - `GET /share/{token}`
+  - `GET /invite/{token}`
+  - `POST /invite/{token}/join`
+- **Algorithm & Bounds**: `SlidingWindowRateLimiter` maintains an in-memory per-client
+  timestamp `deque` inside an `OrderedDict` (`max_requests` within `window_seconds`, bounded by
+  `max_clients` with expired-bucket pruning and oldest-client eviction).
+- **Client IP Resolution (`resolve_client_ip`)**: Uses `request.client.host` by default.
+  `X-Forwarded-For` (leftmost IP) and `X-Real-IP` are consulted only when
+  `public_rate_limit_trust_proxy_headers` is `True`.
+- **429 Response (`_build_rate_limit_response`)**: Returns `429 Too Many Requests` with a
+  `Retry-After` header and a localized RU/EN body (`web.rate_limit.title` and
+  `web.rate_limit.message`, resolved via `?lang=` or `Accept-Language`). Returns JSON
+  (`{"detail": ..., "retry_after": ...}`) when `Accept` includes `application/json`, or
+  HTML-escaped markup otherwise, without echoing any token.
 
 #### Member Administration
 
@@ -1372,6 +1397,22 @@ Settings in `wishenka.config.Settings` (prefixed with `WISHENKA_` in environment
 - **`background_cleanup_enabled`** (`bool`, default: `True`):
   Master flag to spawn cleanup worker in lifespan. Set `False` in test environments.
   Environment: `WISHENKA_BACKGROUND_CLEANUP_ENABLED`.
+- **`public_rate_limit_enabled`** (`bool`, default: `True`):
+  Enables `PublicLinkRateLimitMiddleware` for public share and invite routes.
+  Environment: `WISHENKA_PUBLIC_RATE_LIMIT_ENABLED`.
+- **`public_rate_limit_max_requests`** (`int`, default: `30`, range `1..10000`):
+  Maximum requests allowed per client within the sliding window.
+  Environment: `WISHENKA_PUBLIC_RATE_LIMIT_MAX_REQUESTS`.
+- **`public_rate_limit_window_seconds`** (`int`, default: `60`, range `1..86400`):
+  Sliding window duration in seconds.
+  Environment: `WISHENKA_PUBLIC_RATE_LIMIT_WINDOW_SECONDS`.
+- **`public_rate_limit_trust_proxy_headers`** (`bool`, default: `False`):
+  When `True`, `resolve_client_ip` reads `X-Forwarded-For` (first IP) or `X-Real-IP` before
+  falling back to `request.client.host`. Keep `False` unless behind a trusted reverse proxy.
+  Environment: `WISHENKA_PUBLIC_RATE_LIMIT_TRUST_PROXY_HEADERS`.
+- **`public_rate_limit_max_clients`** (`int`, default: `10000`, minimum `100`):
+  Maximum number of client IP buckets retained in `SlidingWindowRateLimiter` memory.
+  Environment: `WISHENKA_PUBLIC_RATE_LIMIT_MAX_CLIENTS`.
 
 ### Security Invariant
 
@@ -1428,6 +1469,7 @@ Settings in `wishenka.config.Settings` (prefixed with `WISHENKA_` in environment
 | `wishlist_restored_from_deleted` | `INFO` | Soft-deleted list restored | `wishlist_id`, `actor_id` / `user_id`, `from_status`, `to_status`, `retention_days` |
 | `wishlist_restore_retention_expired` | `WARNING` | Service restore past retention | `wishlist_id`, `actor_id`, `retention_days` |
 | `wishlist_retention_expired` | `WARNING` | HTTP 410 retention expired | `operation` |
+| `public_link_rate_limited` | `WARNING` | Public share/invite link throttled (`wishenka.web.rate_limit`) | `route` (`/share/{token}`, `/invite/{token}`, `/invite/{token}/join`), `method`, `client_ip`, `retry_after` |
 
 ---
 
@@ -1498,3 +1540,12 @@ WishlistError
   failure, including a non-token constraint violation, raises this error.
 - **Resolution**: Verify database file permissions and health. Error traces suppress sensitive SQL
   parameters to protect token secrecy.
+
+#### `429 Too Many Requests` on `/share/{token}` or `/invite/{token}`
+- **Root Cause**: Client exceeded `WISHENKA_PUBLIC_RATE_LIMIT_MAX_REQUESTS` within
+  `WISHENKA_PUBLIC_RATE_LIMIT_WINDOW_SECONDS`. Behind a reverse proxy, if
+  `WISHENKA_PUBLIC_RATE_LIMIT_TRUST_PROXY_HEADERS` is `False`, all users may share the proxy's
+  peer IP and trip the shared bucket.
+- **Resolution**: Wait for the `Retry-After` interval, tune `WISHENKA_PUBLIC_RATE_LIMIT_*`
+  settings, or enable `WISHENKA_PUBLIC_RATE_LIMIT_TRUST_PROXY_HEADERS=true` when deployed behind
+  a trusted reverse proxy that sets `X-Forwarded-For` or `X-Real-IP`.

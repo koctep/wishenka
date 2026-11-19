@@ -514,6 +514,10 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "web.reservations.wish_archived": "Wish is archived",
         "web.reservations.list_archived": "Wishlist is archived",
         "web.reservations.go_to_wish": "Go to wish",
+        "web.rate_limit.title": "Too many requests",
+        "web.rate_limit.message": (
+            "Too many requests. Please wait {seconds} seconds and try again."
+        ),
     },
     "ru": {
         # Mini App navigation and shell
@@ -1034,6 +1038,10 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "web.reservations.wish_archived": "Желание в архиве",
         "web.reservations.list_archived": "Вишлист в архиве",
         "web.reservations.go_to_wish": "К желанию",
+        "web.rate_limit.title": "Слишком много запросов",
+        "web.rate_limit.message": (
+            "Слишком много запросов. Пожалуйста, подождите {seconds} сек. и повторите попытку."
+        ),
     },
 }
 

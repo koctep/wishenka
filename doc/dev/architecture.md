@@ -141,7 +141,7 @@ CRUD настроек `user_notification_settings` / `wl_list_notification_setti
   (к реализации в `WISHENKA-33`, `WISHENKA-34`, `WISHENKA-35`): модель профиля и дельта Alembic,
   протокол синхронизации локали `RU`/`EN` (TMA ↔ бот ↔ outbox), транзакционное удаление аккаунта
   в `BEGIN IMMEDIATE`, `deleted_session_revocations` и контракты наблюдаемости.
-- [`doc/dev/wishlists.md`](wishlists.md) — Домен вишлистов: ролевая модель (RBAC/ABAC), жизненный цикл, Surprise Invariant, бронирование и токены шеринга.
+- [`doc/dev/wishlists.md`](wishlists.md) — Домен вишлистов: ролевая модель (RBAC/ABAC), жизненный цикл, Surprise Invariant, бронирование, токены шеринга и rate limiting публичных ссылок (`PublicLinkRateLimitMiddleware`).
 - [`doc/dev/notifications.md`](notifications.md) — Сервис уведомлений и напоминаний (WISHENKA-29):
   защита тайны сюрприза и live-проверки получателей, приватное отслеживание `/birthdays`,
   UTC-планировщик событий, межпроцессный rate limiter, карантин `uncertain` и CLI оператора.

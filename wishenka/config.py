@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     support_max_message_length: int = Field(default=2000, ge=100, le=3500)
     support_rate_limit_window_seconds: int = Field(default=3600, ge=60)
     support_rate_limit_max_tickets: int = Field(default=3, ge=1, le=50)
+    public_rate_limit_enabled: bool = True
+    public_rate_limit_max_requests: int = Field(default=30, ge=1, le=10000)
+    public_rate_limit_window_seconds: int = Field(default=60, ge=1, le=86400)
+    public_rate_limit_trust_proxy_headers: bool = False
+    public_rate_limit_max_clients: int = Field(default=10000, ge=100)
 
     model_config = SettingsConfigDict(
         env_prefix="WISHENKA_",

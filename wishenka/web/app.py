@@ -25,6 +25,10 @@ from wishenka.notices.sender import NoticeSender, build_sender
 from wishenka.notices.store import NoticeStore
 from wishenka.notices.worker import NoticeWorker
 from wishenka.users.store import UserStore
+from wishenka.web.rate_limit import (
+    PublicLinkRateLimitMiddleware,
+    SlidingWindowRateLimiter,
+)
 from wishenka.web.routes.auth import router as auth_router
 from wishenka.web.routes.items import router as items_router
 from wishenka.web.routes.items_ui import router as items_ui_router
@@ -255,7 +259,13 @@ def create_app(
     app.state.notice_store = NoticeStore(app.state.wishlist_store, settings)
     app.state.notice_task = None
     app.state.notice_sender = None
+    app.state.public_link_rate_limiter = SlidingWindowRateLimiter(
+        max_requests=settings.public_rate_limit_max_requests,
+        window_seconds=settings.public_rate_limit_window_seconds,
+        max_clients=settings.public_rate_limit_max_clients,
+    )
 
+    app.add_middleware(PublicLinkRateLimitMiddleware)
     app.add_middleware(RequestLoggingMiddleware)
     app.add_middleware(BrowserSecurityMiddleware)
     app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
