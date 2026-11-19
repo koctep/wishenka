@@ -68,9 +68,12 @@ Revision chain (linear):
 17. `add_bot_capture_order_retention` - adds `updated_at INTEGER` and
     `idx_bot_capture_order_updated_at` to `bot_capture_order`, and backfills existing rows (see
     [bot-scenarios.md](bot-scenarios.md)).
-18. `add_reminder_outbox_updated_at` (head) - adds `updated_at INTEGER` and
+18. `add_reminder_outbox_updated_at` - adds `updated_at INTEGER` and
     `idx_reminder_outbox_status_updated(status, updated_at)` to `reminder_outbox`, and backfills
     `COALESCE(claimed_at, next_attempt_at)` (see [notifications.md](notifications.md)).
+19. `add_receipt_delivery_fence` (head) - creates `receipt_delivery_fence` and
+    `receipt_delivery_fence_audit` for per-giver receipt delivery coordination and audited fence
+    resolution (see [notifications.md](notifications.md)).
 
 Details of revisions 5 and 6 are in [gift-receipt.md](gift-receipt.md), revisions 7 and 8 in
 [bot-scenarios.md](bot-scenarios.md), revisions 9 and 10 in [notifications.md](notifications.md),
@@ -341,6 +344,7 @@ and drops all nine baseline tables in reverse dependency order.
 
 | Revision | `ROLLBACK_POLICY` | `downgrade()` behavior |
 | --- | --- | --- |
+| `add_receipt_delivery_fence` | `reversible` | Drops `receipt_delivery_fence_audit` and `receipt_delivery_fence` (discards active delivery fences and audit history) |
 | `add_reminder_outbox_updated_at` | `reversible` | Drops `idx_reminder_outbox_status_updated` and `reminder_outbox.updated_at` if present (discards reminder retention timestamps) |
 | `add_bot_capture_order_retention` | `reversible` | Drops `idx_bot_capture_order_updated_at` and `bot_capture_order.updated_at` if present (discards capture watermark retention timestamps) |
 | `add_user_fk_cascades` | `reversible` | Rebuilds `wl_view_history`, `wl_favorites`, and `wl_members` in reverse order without `REFERENCES users(telegram_id) ON DELETE CASCADE` and recreates indexes (orphans cleaned during upgrade are not restored) |

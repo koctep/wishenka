@@ -11,6 +11,13 @@ from collections.abc import Callable
 
 from wishenka.config import Settings
 from wishenka.i18n import DEFAULT_LOCALE, resolve_telegram_locale, t
+from wishenka.notices.fence import (
+    begin_attempt,
+    claim_key,
+    defer_claim,
+    delivery_lock,
+    finish_attempt,
+)
 from wishenka.notices.scheduler import ReminderScheduler
 from wishenka.notices.sender import NoticeSender, SendOutcome, SendResult
 from wishenka.notices.store import ClaimedNotice, NoticeStore
@@ -166,70 +173,162 @@ class NoticeWorker:
         """
         rows = 0
         while (claim := await self._store.claim_next(self._time(now))) is not None:
-            refreshed = await self._store.refresh_claim(claim)
-            if refreshed is None:
-                if await self._store.skip_claim(claim, self._time(now)):
-                    self._debug(
-                        "receipt_notice_skipped_ineligible",
-                        "Notice queue row skipped as ineligible",
-                        claim,
-                    )
-                rows += 1
+            store = self._store.transactional_store
+            key = await claim_key(store, "gift", claim.outbox_id, claim.claim_token)
+            if key is None:
                 continue
-            result = await self._send(refreshed)
-            await self._settle(refreshed, result, self._time(now))
-            rows += 1
-        while (reminder := await self._store.claim_reminder(self._time(now))) is not None:
-            refreshed_reminder = await self._store.refresh_reminder(reminder, self._time(now))
-            if refreshed_reminder is None:
-                if await self._store.settle_reminder(reminder, "skipped", self._time(now)):
-                    self._reminder_counts["skipped"] += 1
+            attempt_started = False
+            try:
+                async with delivery_lock(store.database_url, *key):
+                    refreshed = await self._store.refresh_claim(claim)
+                    if refreshed is None:
+                        if await self._store.skip_claim(claim, self._time(now)):
+                            self._debug(
+                                "receipt_notice_skipped_ineligible",
+                                "Notice queue row skipped as ineligible",
+                                claim,
+                            )
+                        rows += 1
+                        continue
+                    if not await begin_attempt(
+                        store, key, "gift", claim.outbox_id, claim.claim_token
+                    ):
+                        await defer_claim(
+                            store, "gift", claim.outbox_id, claim.claim_token, self._time(now)
+                        )
+                        logger.debug(
+                            "Receipt notice claim deferred: active delivery fence",
+                            extra={
+                                "event": "receipt_notice_deferred",
+                                "outbox_id": claim.outbox_id,
+                                "reason": "fence_active",
+                            },
+                        )
+                        break
+                    attempt_started = True
+                    result = await self._send(refreshed)
+                    settled = await self._settle(refreshed, result, self._time(now))
+                    await finish_attempt(
+                        store,
+                        key,
+                        claim.claim_token,
+                        settled and result.outcome is not SendOutcome.AMBIGUOUS,
+                    )
+                    rows += 1
+            except OSError:
+                if not attempt_started:
+                    await defer_claim(
+                        store, "gift", claim.outbox_id, claim.claim_token, self._time(now)
+                    )
                     logger.debug(
-                        "Service notice skipped: reason=refresh_ineligible",
+                        "Receipt notice claim deferred: delivery lock busy",
                         extra={
-                            "event": "service_notice_skipped",
-                            "outbox_id": reminder.ident,
-                            "reason": "refresh_ineligible",
+                            "event": "receipt_notice_deferred",
+                            "outbox_id": claim.outbox_id,
+                            "reason": "lock_busy",
                         },
                     )
-                rows += 1
-                continue
-            reminder = refreshed_reminder
+                break
+        while (reminder := await self._store.claim_reminder(self._time(now))) is not None:
+            store = self._store.transactional_store
+            key = await claim_key(store, "reminder", reminder.ident, reminder.claim_token)
+            attempt_started = False
             try:
-                result = await asyncio.wait_for(
-                    self._sender.send(reminder.chat_id, reminder.body), timeout=self._send_timeout
-                )
-            except Exception:
-                result = SendResult(SendOutcome.AMBIGUOUS)
-            if result.outcome is SendOutcome.DELIVERED:
-                status = "sent"
-            elif result.outcome is SendOutcome.AMBIGUOUS:
-                status = "uncertain"
-            elif result.outcome is SendOutcome.REJECTED or reminder.attempt >= self._max_attempts:
-                status = "failed"
-            else:
-                status = "pending"
-            delay = (
-                max(
-                    self._store.backoff_seconds(reminder.attempt),
-                    math.ceil(result.retry_after or 0),
-                )
-                if status == "pending"
-                else 0
-            )
-            settled_at = self._time(now)
-            settled = await self._store.settle_reminder(
-                reminder,
-                status,
-                settled_at + delay,
-                result.error_class,
-                settled_at + math.ceil(result.retry_after) if result.retry_after else None,
-                updated_at=settled_at,
-            )
-            if settled:
-                counter = {"pending": "retried", "failed": "failed_terminal"}.get(status, status)
-                self._reminder_counts[counter] += 1
-            rows += 1
+                async with contextlib.AsyncExitStack() as locks:
+                    if key is not None:
+                        await locks.enter_async_context(delivery_lock(store.database_url, *key))
+                    refreshed_reminder = await self._store.refresh_reminder(
+                        reminder, self._time(now)
+                    )
+                    if refreshed_reminder is None:
+                        if await self._store.settle_reminder(reminder, "skipped", self._time(now)):
+                            self._reminder_counts["skipped"] += 1
+                            logger.debug(
+                                "Service notice skipped: reason=refresh_ineligible",
+                                extra={
+                                    "event": "service_notice_skipped",
+                                    "outbox_id": reminder.ident,
+                                    "reason": "refresh_ineligible",
+                                },
+                            )
+                        rows += 1
+                        continue
+                    reminder = refreshed_reminder
+                    if key is not None and not await begin_attempt(
+                        store, key, "reminder", reminder.ident, reminder.claim_token
+                    ):
+                        await defer_claim(
+                            store, "reminder", reminder.ident, reminder.claim_token, self._time(now)
+                        )
+                        logger.debug(
+                            "Service notice claim deferred: active delivery fence",
+                            extra={
+                                "event": "service_notice_deferred",
+                                "outbox_id": reminder.ident,
+                                "reason": "fence_active",
+                            },
+                        )
+                        break
+                    attempt_started = True
+                    try:
+                        result = await asyncio.wait_for(
+                            self._sender.send(reminder.chat_id, reminder.body),
+                            timeout=self._send_timeout,
+                        )
+                    except Exception:
+                        result = SendResult(SendOutcome.AMBIGUOUS)
+                    if result.outcome is SendOutcome.DELIVERED:
+                        status = "sent"
+                    elif result.outcome is SendOutcome.AMBIGUOUS:
+                        status = "uncertain"
+                    elif (
+                        result.outcome is SendOutcome.REJECTED
+                        or reminder.attempt >= self._max_attempts
+                    ):
+                        status = "failed"
+                    else:
+                        status = "pending"
+                    delay = (
+                        max(
+                            self._store.backoff_seconds(reminder.attempt),
+                            math.ceil(result.retry_after or 0),
+                        )
+                        if status == "pending"
+                        else 0
+                    )
+                    settled_at = self._time(now)
+                    settled = await self._store.settle_reminder(
+                        reminder,
+                        status,
+                        settled_at + delay,
+                        result.error_class,
+                        settled_at + math.ceil(result.retry_after) if result.retry_after else None,
+                        updated_at=settled_at,
+                    )
+                    if key is not None:
+                        await finish_attempt(
+                            store, key, reminder.claim_token, settled and status != "uncertain"
+                        )
+                    if settled:
+                        counter = {"pending": "retried", "failed": "failed_terminal"}.get(
+                            status, status
+                        )
+                        self._reminder_counts[counter] += 1
+                    rows += 1
+            except OSError:
+                if not attempt_started:
+                    await defer_claim(
+                        store, "reminder", reminder.ident, reminder.claim_token, self._time(now)
+                    )
+                    logger.debug(
+                        "Service notice claim deferred: delivery lock busy",
+                        extra={
+                            "event": "service_notice_deferred",
+                            "outbox_id": reminder.ident,
+                            "reason": "lock_busy",
+                        },
+                    )
+                break
         if rows:
             logger.debug(
                 "Notice batch processed",
@@ -251,37 +350,42 @@ class NoticeWorker:
         except Exception as error:  # a cancellation is not an Exception and passes through
             return SendResult(SendOutcome.AMBIGUOUS, error_class=type(error).__name__)
 
-    async def _settle(self, claim: ClaimedNotice, result: SendResult, now: int) -> None:
+    async def _settle(self, claim: ClaimedNotice, result: SendResult, now: int) -> bool:
         """Record the outcome with the guarded write of the attempt table (design 7)."""
         outcome = result.outcome
         if outcome is SendOutcome.DELIVERED:
-            if await self._store.complete(claim, now):
+            settled = await self._store.complete(claim, now)
+            if settled:
                 self._counts["sent"] += 1
             self._debug("receipt_notice_sent", "Notice sent", claim)
-            return
+            return settled
         if outcome is SendOutcome.AMBIGUOUS:
             self._debug("receipt_notice_send_failed", "Notice send failed", claim, result)
-            if await self._store.uncertain(claim, now, result.error_class):
+            settled = await self._store.uncertain(claim, now, result.error_class)
+            if settled:
                 self._counts["uncertain"] += 1
             self._debug("receipt_notice_uncertain", "Notice delivery uncertain", claim, result)
-            return
+            return settled
         self._debug("receipt_notice_send_failed", "Notice send failed", claim, result)
         give_up = outcome is SendOutcome.REJECTED or claim.attempt >= self._max_attempts
         if give_up:
-            if await self._store.fail(
+            settled = await self._store.fail(
                 claim, now, result.error_class, retry_after=result.retry_after
-            ):
+            )
+            if settled:
                 self._counts["failed_terminal"] += 1
             self._debug("receipt_notice_failed_terminal", "Notice failed for good", claim, result)
-            return
-        if await self._store.reschedule(
+            return settled
+        settled = await self._store.reschedule(
             claim,
             now,
             error_class=result.error_class,
             retry_after=result.retry_after,
-        ):
+        )
+        if settled:
             self._counts["retried"] += 1
         self._debug("receipt_notice_retry_scheduled", "Notice retry scheduled", claim, result)
+        return settled
 
     def _debug(
         self,

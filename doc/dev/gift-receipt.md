@@ -81,19 +81,17 @@ shortcut E) are settled in `in-docs/spec.md` (`WISHENKA-154`):
 - **`FR-5` (Q12, implemented in `WISHENKA-218`):** Authors may reduce quantity to
   `max(1, received_quantity)` without seeing or being blocked by occupied units. If received plus
   occupied exceeds the new quantity, the wish is over-booked and eligible givers are notified.
-- **Planned / target spec rule (not yet implemented in code):**
-  - **`FR-6` (Shortcut E, planned in `WISHENKA-219`):** Add an explicit «Завершено»
-    («Завершить» / «Подарок вручён») completion action for **purchased** promises on fully
-    received wishes, moving the promise to a closed state (freeing occupied units, excluding it
-    from active «Мои бронирования» counters, and stopping further receipt/undo notices). Intended
-    (unpurchased) promises cannot be completed directly.
+- **`FR-6` (Shortcut E, implemented in `WISHENKA-219`):** Purchased promises on fully received
+  wishes can be explicitly completed («Завершено» via `POST .../complete` /
+  `complete_reservation`), moving the promise to `ReservationStatus.COMPLETED` (freeing occupied
+  units, excluding it from active «Мои бронирования» counters, and stopping further receipt/undo
+  notices). Active (unpurchased) promises cannot be completed directly. See
+  [reservations.md](reservations.md).
 
 ### Not implemented
 
 - Notification settings screen (only tables and lookup exist): WISHENKA-34.
 - Metrics exporter: WISHENKA-84 (the metrics are derived from logs and SQL, see Logging).
-- Planned target rule from `WISHENKA-154`: «Завершено» state for purchased promises
-  (`FR-6` / Shortcut E) in `WISHENKA-219`.
 - Follow-up debt of the UI story: see [Follow-up tickets](#follow-up-tickets-of-the-ui).
 - Follow-up debt of the backend (all Low): WISHENKA-155 (one digit-free `quantity_invalid`
   message), 156 (opt-in real-Telegram smoke test, two-process worker race test), 157 (log-contract
@@ -380,10 +378,18 @@ row in order:
 
 Immediately before network send, `NoticeWorker.run_once` calls `NoticeStore.refresh_claim(claim)`
 to re-verify `claim_token`, live eligibility, language, and current titles; if eligibility changed,
-`skip_claim` marks the row `skipped`. The settle writes (`complete`, `uncertain`, `fail`,
-`reschedule`, `skip_claim`) are one guarded `UPDATE ... WHERE id = :id AND status = 'sending' AND
-claim_token = :token`. If the claim was lost the write changes nothing and the DEBUG event
-`receipt_notice_late_write_ignored` is logged.
+`skip_claim` marks the row `skipped`. For receipt notices (`gift_received` and
+`receipt_increased`/`receipt_reverted`), the worker also acquires `delivery_lock(database_url,
+wish_item_id, user_id)` and calls `begin_attempt` (`receipt_delivery_fence`) before sending, then
+`finish_attempt` after settlement (or `defer_claim` if the lock or fence is busy, returning the row
+to `pending` without consuming an attempt). If the giver completes their last open promise via
+`complete_reservation` (`WISHENKA-219`), pending and `sending` receipt rows for `(wish_item_id,
+user_id)` are atomically suppressed (`skipped`) inside `WishlistStore._persist_wish`. See
+[notifications.md](notifications.md#fenced-claims-retries-and-uncertain-delivery-quarantine).
+
+The settle writes (`complete`, `uncertain`, `fail`, `reschedule`, `skip_claim`) are one guarded
+`UPDATE ... WHERE id = :id AND status = 'sending' AND claim_token = :token`. If the claim was lost
+the write changes nothing and the DEBUG event `receipt_notice_late_write_ignored` is logged.
 
 `NoticeWorker.run_once` drains all due receipt and service/reminder rows, reading the clock afresh
 for every claim and settle. The send is wrapped in `asyncio.wait_for(..., request_timeout + 5)`.
@@ -958,8 +964,7 @@ metric uses a DEBUG event, and labels never use a user, wishlist, item or giver.
   element is empty when nothing was received. «Не удалось загрузить «Подаренные»» means
   `read_gifted_rows` got a domain error; reload the page.
 - **Not built yet** (see Overview): settings screen (WISHENKA-34), metrics
-  exporter (WISHENKA-84), target rule `FR-6` (`WISHENKA-219`) from `WISHENKA-154`, and the UI
-  follow-ups WISHENKA-160 to 164.
+  exporter (WISHENKA-84), and the UI follow-ups WISHENKA-160 to 164.
 
 ## Tests
 

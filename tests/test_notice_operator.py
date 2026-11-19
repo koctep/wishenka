@@ -27,7 +27,15 @@ async def test_explicit_resolution_is_fenced_and_exposes_only_counts(tmp_path: P
         assert await list_uncertain(store, "receipt") == [
             {"id": env.outbox_one()["id"], "attempts": 1}
         ]
-        assert await resolve(store, "receipt", env.outbox_one()["id"], "retry", now + 1)
+        assert await resolve(
+            store,
+            "receipt",
+            env.outbox_one()["id"],
+            "retry",
+            now + 1,
+            operator="test",
+            evidence="sender stopped; remote outcome reconciled",
+        )
         assert not await resolve(store, "receipt", env.outbox_one()["id"], "retry", now + 1)
         await worker.run_once(now + 1)
         assert len(sender.calls) == 2

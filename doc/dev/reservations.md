@@ -4,7 +4,7 @@
 
 The reservation subsystem in the **Wishlist Service («Вишенка»)** Telegram Mini App coordinates the commitment and purchase workflow for gifts. It enables gifters to book individual units of multi-quantity wish items, mark them as purchased in the real world, cancel bookings, or adjust reserved counts, while guaranteeing strict data confidentiality for the gift recipient.
 
-Clients reach that workflow through five authenticated HTTP routes on
+Clients reach that workflow through six authenticated HTTP routes on
 one wish. The contract is under [HTTP promise actions](#http-promise-actions).
 The wish card calls those same routes. Giver controls sit on the existing
 card summary, compact and expanded. See
@@ -41,12 +41,14 @@ card summary, compact and expanded. See
 2. **Surprise Invariant (Zero-Leak Guarantee)**:
    The recipient of a gift must never observe or infer whether an item is reserved, who reserved it, how many units remain, or whether it has been purchased. Recipient projections completely omit booking metadata.
 3. **Discrete Lifecycle State Machine**:
-   Explicit states (`ACTIVE`, `PURCHASED`, `CANCELLED`) track a gifter's
+   Explicit states (`ACTIVE`, `PURCHASED`, `CANCELLED`, `COMPLETED` via
+   `ReservationStatus.COMPLETED` / `complete_reservation`) track a gifter's
    promise. Receipt is not a status change.
-   - **Planned / target spec rule (`WISHENKA-154` `FR-6` / Shortcut E, tracked in `WISHENKA-219`)**:
-     Add an explicit «Завершено» (`completed`) state for a `PURCHASED` promise on a fully
-     received wish (freeing occupied units, excluding it from active «Мои бронирования» counters,
-     and stopping further receipt/undo notices; `ACTIVE` promises cannot be completed directly).
+   - **«Завершено» (`COMPLETED`, `WISHENKA-219` / `FR-6`)**: A `PURCHASED`
+     promise on a fully received wish can be marked complete via
+     `complete_reservation` (freeing occupied units, excluding it from active
+     «Мои бронирования» counters, and stopping further receipt/undo notices;
+     `ACTIVE` promises cannot be completed directly).
 4. **Wish-scoped write exclusion**:
    Concurrent booking is excluded by the wish-scoped SQLite transaction
    (`BEGIN IMMEDIATE`). `execute_wish` builds a new `WishlistService` per
@@ -63,9 +65,9 @@ card summary, compact and expanded. See
    The cabinet lists only that caller's occupying promises. See
    [My reservations cabinet](#7-my-reservations-cabinet).
 7. **Authenticated promise HTTP API**:
-   Five routes under
+   Six routes under
    `/api/wishlists/{wishlist_id}/items/{item_id}/reservations`
-   create, resize, cancel, purchase, or undo one promise. Each call goes
+   create, resize, cancel, purchase, undo, or complete one promise. Each call goes
    through `execute_wish`. There is no second lock. Success is
    `PromiseActionDTO`: the promise just changed, plus the gifter wish view.
 
@@ -115,17 +117,20 @@ stateDiagram-v2
     PURCHASED --> ACTIVE: revert_reservation_to_active
     ACTIVE --> CANCELLED: cancel_reservation / wishlist delete
     PURCHASED --> CANCELLED: cancel_reservation / wishlist delete
+    PURCHASED --> COMPLETED: complete_reservation (item.is_fully_received)
     CANCELLED --> [*]
+    COMPLETED --> [*]
 ```
 
 - **`ACTIVE`**: The initial state when a gifter reserves units of an item. Locks inventory from other gifters.
 - **`PURCHASED`**: The gifter confirmed purchasing the gift in the physical world. Crucially, **`PURCHASED` reservations continue locking inventory** so other gifters cannot book the same units.
 - **`CANCELLED`**: The gifter cancelled the reservation or the parent wishlist was deleted. The reserved units are immediately released back to `available_quantity`. This is a terminal state.
+- **`COMPLETED`** (`WISHENKA-219`): The gifter explicitly closed a `PURCHASED` reservation after the wish became fully received (`item.is_fully_received`). Only `complete_reservation` transitions `PURCHASED` to `COMPLETED` (direct completion of `ACTIVE`, already-closed, or partially received items raises `ReservationError`). Completion is allowed on archived lists (deleted lists remain 404), preserves receipt records and other reservations, releases occupied units, excludes the row from active «Мои бронирования» counters, and atomically suppresses pending receipt notices for that `(wish_item_id, user_id)` when no other `ACTIVE` or `PURCHASED` promise remains. This is a terminal state; subsequent receipt undo does not reopen a completed promise.
 - **Receipt leaves the promise open**:
   [`record_item_fulfillment`](file:///home/src/wishenka/wishlists/service.py)
   only adds `received_quantity` (and a dated `ReceiptRecord`). It does not cancel the
   reservation or set `ReservationStatus.COMPLETED`. There is no `FULFILLED` status. The promise
-  stays `ACTIVE` or `PURCHASED`.
+  stays `ACTIVE` or `PURCHASED` until the gifter explicitly completes it.
 
 Receipt also notifies each giver with an open promise (`ACTIVE` or `PURCHASED`, the wish
 recipient excluded) through the `notification_outbox` queue, one notice per giver per act, subject
@@ -282,7 +287,7 @@ Giver controls live on the existing wish card
 [`partials/item_card.html`](file:///home/src/wishenka/web/templates/partials/item_card.html).
 One block, `.item-giver`, sits inside `.item-card-summary`. The summary
 stays on screen when the details open, so the same block is the compact
-card and the expanded card. Writes use the five routes above and
+card and the expanded card. Writes use the six routes above (the card calls the first five) and
 [`execute_wish`](file:///home/src/wishenka/wishlists/store.py#L942-L997).
 This card adds no reservation write route. The cabinet reads are
 [My reservations cabinet](#7-my-reservations-cabinet). They load
@@ -442,9 +447,9 @@ make test PYTEST_ARGS='-n 0 tests/test_giver_csrf_repro_browser.py'
 
 The home card and the cabinet are read-only HTML. The router is
 [`wishenka/web/routes/reservations_ui.py`](../../wishenka/web/routes/reservations_ui.py),
-included from `wishenka/web/app.py`. Writes stay on the five routes in
+included from `wishenka/web/app.py`. Writes stay on the six routes in
 [HTTP promise actions](#http-promise-actions). These reads use the
-snapshot load below. Writes stay on those five routes.
+snapshot load below. Writes stay on those six routes.
 
 A missing session is HTTP 401 `{"detail":"Authentication required"}`.
 The body does not contain «Мои бронирования», «Нет бронирований», or
@@ -550,7 +555,7 @@ Deleting a list sets its occupying promises to `CANCELLED`. Those
 rows then leave the cabinet and the distinct-wish count. The cabinet
 does not add a second cancel path.
 
-#### Link and the four actions
+#### Link and the cabinet actions
 
 Every row includes «К желанию». The href is
 `/web/wishlists/{wishlist_id}#item-card-{wish_item_id}`.
@@ -563,10 +568,12 @@ not render «Изменить», «Отменить бронь», «Куплен
 way. The card edits the latest promise. See
 [Wish-card giver controls](#6-wish-card-giver-controls).
 
-The four actions render when the wish is archived or fully received
-and the list is active (`offer_actions` in `CabinetRow`, which the
-template uses to gate the whole action block). Each
-control posts that row's `reservation_id` on the five existing
+The four standard actions (`Изменить`, `Отменить бронь`, `Куплено`,
+`Вернуть в бронь`) render when the wish is archived or fully received
+and the list is active (`offer_actions` in `CabinetRow`). The fifth action
+(`Завершено` / `POST /{reservation_id}/complete`) renders whenever
+`row.wish_received` and `row.is_purchased`, including on archived lists. Each
+control posts that row's `reservation_id` on the six existing
 promise routes. Create stays on the wish card. An earlier promise
 keeps its own id.
 
@@ -576,6 +583,7 @@ keeps its own id.
 | `Отменить бронь` | `POST` `{row}/cancel` |
 | `Куплено` | `POST` `{row}/purchase` when the label is «Забронировано» |
 | `Вернуть в бронь` | `POST` `{row}/undo-purchase` when the label is «Куплено» |
+| `Завершено` | `POST` `{row}/complete` when `row.wish_received` and `row.is_purchased` (rendered even on archived lists) |
 
 `{row}` is
 `/api/wishlists/{wishlist_id}/items/{item_id}/reservations/{reservation_id}`
@@ -583,7 +591,7 @@ and `reservation_id` is that row's id. The quantity form sends
 `hx-patch`, `hx-ext="json-enc"`, and `hx-swap="none"`. The select
 runs from 1 through `change_ceiling`. That ceiling is this promise's
 quantity plus the wish's `available_quantity`. The selected option
-is this row's quantity. Cancel, purchase, and undo are buttons with
+is this row's quantity. Cancel, purchase, undo, and complete are buttons with
 `hx-post` and `hx-swap="none"`. HTMX does not insert the JSON body.
 
 Backend of the cabinet for a fully received wish: `MyReservationItemDTO.is_fully_received` and
@@ -599,7 +607,10 @@ giver card that is refreshed into a different answer becomes the neutral text «
 [gift-receipt.md](gift-receipt.md#owner-card-archive-and-cabinet).
 
 An archived list keeps the row and «К желанию», shows
-«Вишлист в архиве», and omits the four actions. The four writes on
+«Вишлист в архиве», and omits the four standard actions (`Изменить`,
+`Отменить бронь`, `Куплено`, `Вернуть в бронь`), while still rendering
+the fifth action (`Завершено` / `POST /{reservation_id}/complete`) when
+`row.wish_received` and `row.is_purchased`. The four standard writes on
 an archived list return HTTP 409 (`WishlistArchivedError`). A
 deleted list cancels occupying promises, so the group leaves the
 cabinet. A write that still reaches those routes is HTTP 404
@@ -615,7 +626,12 @@ partial and does not write the action `responseText` into the page.
 
 - **HTTP 200 or 201.** The script requests
   `GET /web/reservations/list` and replaces `#reservations-cabinet`
-  with that partial (`outerHTML`), then calls `htmx.process`. The
+  with that partial (`outerHTML`), then calls `htmx.process`. If the
+  request path ends with `/complete`, it passes `notice=completed`
+  (rendering localized `web.reservations.completed`) and calls
+  `refreshReservationBadge()` (`GET /web/reservations/card`) to update
+  `.reservations-badge`; `pageshow` (`event.persisted`) also calls
+  `refreshReservationBadge()` when restoring a cached page. The
   list is the caller's occupying promises only, so the refresh does
   not name another gifter.
 - **HTTP 409.** The same GET adds `notice=shortage` when the
@@ -671,7 +687,7 @@ and application logs without adding reservation details to these events.
 
 ### HTTP promise actions
 
-Five authenticated routes share the prefix
+Six authenticated routes share the prefix
 `/api/wishlists/{wishlist_id}/items/{item_id}/reservations`.
 The router is `wishenka/web/routes/reservations.py`, included from
 `wishenka/web/app.py`. Each handler depends on `get_current_user`.
@@ -681,9 +697,16 @@ The reservation method is not called, and no row is written.
 
 After create's early quantity check, each handler calls one existing method
 through `execute` in that module. `execute` passes the action to
-`WishlistStore.execute_wish`. Create passes
-`item_id`. The other four pass `reservation_id`. There is no second lock.
-Cross-process exclusion remains `BEGIN IMMEDIATE` on the wish.
+`WishlistStore.execute_wish` (or `execute_wish_idempotent` when `Idempotency-Key`
+is supplied). Create passes `item_id`. The other five pass `reservation_id`.
+`complete_reservation` additionally acquires `delivery_lock(store.database_url,
+item_id, user.telegram_id)` and checks `has_fence(store, item_id,
+user.telegram_id)` before entering `execute` (see [notifications.md](notifications.md)):
+if `wishlist_store` is missing on `app.state`, an active/uncertain fence exists,
+or the nonblocking lock is busy (`OSError`), it fails closed with HTTP 503
+(`Receipt delivery coordination unavailable`, `Receipt delivery is unresolved`,
+or `Receipt delivery is busy`) without mutating state. Cross-process inventory
+exclusion remains `BEGIN IMMEDIATE` on the wish.
 
 | Method  | Path under the prefix             | Success |
 | ------- | --------------------------------- | :-----: |
@@ -692,23 +715,26 @@ Cross-process exclusion remains `BEGIN IMMEDIATE` on the wish.
 | `POST`  | `/{reservation_id}/cancel`        | `200`   |
 | `POST`  | `/{reservation_id}/purchase`      | `200`   |
 | `POST`  | `/{reservation_id}/undo-purchase` | `200`   |
+| `POST`  | `/{reservation_id}/complete`      | `200`   |
 
-The wish card sends these five calls from `.item-giver`. Which control
+The wish card sends the first five calls from `.item-giver`. Which control
 sends which method is in
 [Wish-card giver controls](#6-wish-card-giver-controls).
-The cabinet sends the four mutation calls, each with that row's
-reservation id, only for an archived or fully received wish on an active list. See
+The cabinet sends the four standard mutation calls for an archived or fully
+received wish on an active list, and sends `POST /{reservation_id}/complete`
+for a purchased promise on a fully received wish (including archived lists). See
 [My reservations cabinet](#7-my-reservations-cabinet).
 
 Create calls `create_reservation`. Quantity change calls
 `update_reservation_quantity`. Cancel calls `cancel_reservation`. Purchase
 calls `mark_reservation_purchased`. Undo calls `revert_reservation_to_active`.
+Complete calls `complete_reservation`.
 
 The success body is `PromiseActionDTO`. `response_model` is that model
 alone. It is the promise the call just changed, plus the gifter wish view:
 
 - `reservation_id`, `wish_item_id`, `quantity`, and `status` come from that
-  one row. `status` is `active`, `purchased`, or `cancelled`.
+  one row. `status` is `active`, `purchased`, `cancelled`, or `completed`.
 - `available_quantity` is the wish balance after the change.
 - `item` is `WishItemGifterViewDTO` from `project_wish_item`.
 
@@ -766,10 +792,10 @@ async def promise_one_unit(
     return response.json()
 ```
 
-Quantity change, cancel, purchase, and undo use that same prefix plus
+Quantity change, cancel, purchase, undo, and complete use that same prefix plus
 `/{reservation_id}`, `/{reservation_id}/cancel`,
-`/{reservation_id}/purchase`, or `/{reservation_id}/undo-purchase`. Those
-four return 200 and the same `PromiseActionDTO`.
+`/{reservation_id}/purchase`, `/{reservation_id}/undo-purchase`, or
+`/{reservation_id}/complete`. Those five return 200 and the same `PromiseActionDTO`.
 
 ### Domain methods
 
@@ -911,7 +937,7 @@ async def fulfill_item(service: WishlistService, item_id: int, author: Authentic
 
 ### HTTP route configuration
 
-The five promise routes add no environment variable and no second lock.
+The six promise routes add no environment variable and no second lock.
 The wish card adds none either. The cabinet reads add none either.
 Cookie clicks on the card and on the cabinet use the existing
 `GET /api/auth/csrf` token and `csrf_secret_key`, as in
@@ -939,6 +965,7 @@ All reservation operations emit structured logs using `wishenka.wishlists` logge
 |---|---|---|---|
 | `item_reserved` | INFO | `event`, `wishlist_id`, `item_id`, `user_id`, `reservation_id`, `quantity` | Emitted when a gifter successfully reserves item units |
 | `reservation_purchased` | INFO | `event`, `wishlist_id`, `item_id`, `user_id`, `reservation_id`, `quantity` | Emitted when a gifter transitions reservation to `PURCHASED` |
+| `reservation_completed` | INFO | `event`, `wishlist_id`, `item_id`, `reservation_id`, `actor_id` | Emitted when a gifter completes a `PURCHASED` reservation on a fully received wish |
 | `reservation_reverted` | INFO | `event`, `wishlist_id`, `item_id`, `user_id`, `reservation_id`, `quantity` | Emitted when a reservation is reverted from `PURCHASED` to `ACTIVE` |
 | `reservation_cancelled` | INFO | `event`, `wishlist_id`, `item_id`, `user_id`, `reservation_id`, `quantity` | Emitted when a reservation is cancelled and restocked |
 | `reservation_quantity_updated` | INFO | `event`, `wishlist_id`, `item_id`, `user_id`, `reservation_id`, `quantity`, `old_quantity` | Emitted when a reservation's quantity is increased or decreased |
@@ -965,9 +992,9 @@ them includes a gifter id, name, or token.
 
 - **INFO** `reservation_action_completed`: a promise action returned
   `PromiseActionDTO`. Fields are `operation`, `item_id`, `reservation_id`,
-  and `status`. `status` is that promise (`active`, `purchased`, or
-  `cancelled`), not the HTTP code. The record has no quantity and no wish
-  view.
+  and `status`. `status` is that promise (`active`, `purchased`,
+  `cancelled`, or `completed`), not the HTTP code. The record has no quantity
+  and no wish view.
 - **WARNING** `reservation_action_refused`: the fixed recipient answers.
   Create is HTTP 403. A mutation the recipient must not see, and a missing
   promise, are HTTP 404 `Resource not found`. Fields are `http_status`,
@@ -976,6 +1003,12 @@ them includes a gifter id, name, or token.
 - **WARNING** `reservation_inventory_busy`: `InventoryBusyError` became
   HTTP 503. Fields are `operation` and the path ids. The wish-scoped
   transaction rolled back and changed nothing.
+- **WARNING** `reservation_complete_fence_blocked` / `reservation_complete_lock_busy`:
+  `complete_reservation` was deferred with HTTP 503 because an unresolved
+  `receipt_delivery_fence` exists or `delivery_lock` is busy (`error_class`
+  included on `reservation_complete_lock_busy`; no `actor_id`).
+- **ERROR** `receipt_delivery_coordination_unavailable`: `complete_reservation`
+  returned HTTP 503 because `app.state.wishlist_store` was unavailable.
 - **WARNING** `reservation_permission_denied`: `PermissionDeniedError`
   became HTTP 403 `{"detail":"Forbidden"}`. Fields are `operation` and the
   path ids. The record has no gifter id.
@@ -986,7 +1019,7 @@ them includes a gifter id, name, or token.
 
 `operation` is the route function name: `create_reservation`,
 `update_reservation_quantity`, `cancel_reservation`,
-`purchase_reservation`, or `undo_reservation_purchase`.
+`purchase_reservation`, `undo_reservation_purchase`, or `complete_reservation`.
 
 `GET /wishlists/{wishlist_id}/items/{item_id}/card` writes none of these
 records. The wish-card refresh reads that partial, or the browser shows
@@ -1079,7 +1112,7 @@ Key metrics derived from structured log events:
 
 ### 6. Missing session (HTTP 401)
 
-- **Symptom**: Any of the five promise routes without a session returns
+- **Symptom**: Any of the six promise routes without a session returns
   `401` and `{"detail":"Authentication required"}`.
 - **Cause**: `get_current_user` rejected the call. `execute_wish` does not
   run, and no promise row is written.
@@ -1123,7 +1156,7 @@ Key metrics derived from structured log events:
 
 ### 10. Wish busy on a promise route (HTTP 503)
 
-- **Symptom**: One of the five routes returns `503`. The attempt changed
+- **Symptom**: One of the six routes returns `503`. The attempt changed
   nothing.
 - **Cause**: The wish-scoped `BEGIN IMMEDIATE` writer waited past
   `busy_timeout`. `execute_wish` raised `InventoryBusyError`. The route log

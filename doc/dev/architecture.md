@@ -91,6 +91,10 @@
   `add_gift_receipts`).
 - `wl_idempotency_records` — клиентские ключи идемпотентности для мутаций бронирования и получения
   подарков (ревизия `add_idempotency_records`, см. [`doc/dev/idempotency.md`](idempotency.md)).
+- `receipt_delivery_fence` и `receipt_delivery_fence_audit` — долговечный межпроцессный барьер
+  доставки уведомлений о получении (`in_flight` / `uncertain`) по ключу `(wish_item_id, user_id)` и
+  аудит его ручного разрешения (ревизия `add_receipt_delivery_fence`, см.
+  [`doc/dev/notifications.md`](notifications.md)).
 
 Реализовано (WISHENKA-23): уведомление дарителям о получении подарка — производитель в
 `notification_outbox` внутри транзакции прихода, настройки действуют на двух уровнях (вишлист,
@@ -123,6 +127,16 @@ opt-in подтверждений собственной брони (`reminder_o
 секретных capability-токенов (`redact_capabilities`), безопасный метаданный контекст
 (`DiagnosticContext`), sliding-window rate limit (`support_tickets`) и пересылка в чат поддержки /
 администраторам. См. [`doc/dev/bot-support.md`](bot-support.md).
+
+Реализовано (WISHENKA-219): явное завершение купленной брони (`PURCHASED` -> `COMPLETED`) после
+полного получения желания (`WishlistService.complete_reservation`,
+`POST /api/wishlists/{wishlist_id}/items/{item_id}/reservations/{reservation_id}/complete`,
+кнопка «Завершено» в кабинете «Мои бронирования», в том числе для архивных списков). Завершение
+освобождает занятые единицы, исключает бронь из активных счётчиков, атомарно подавляет ожидающие
+уведомления о получении в `notification_outbox` и `reminder_outbox` при отсутствии других открытых
+броней того же дарителя на это желание и координируется с воркером доставки через `delivery_lock`
+и `receipt_delivery_fence`. См. [`doc/dev/reservations.md`](reservations.md) и
+[`doc/dev/notifications.md`](notifications.md).
 
 Согласованный целевой контракт (`WISHENKA-32`, к реализации в `WISHENKA-33/34/35`, в коде пока не реализовано):
 единая ревизия Alembic от `add_idempotency_records` (эволюция `users`: `avatar_url`, `birthday`,
@@ -157,12 +171,14 @@ CRUD настроек `user_notification_settings` / `wl_list_notification_setti
   `support_input`, редактирование capability-токенов, rate limiting (`support_tickets`) и
   диагностика.
 - [`doc/dev/reservations.md`](reservations.md) — Домен бронирования подарков:
-  жизненный цикл броней (`ACTIVE`, `PURCHASED`, `CANCELLED`). Приход
+  жизненный цикл броней (`ACTIVE`, `PURCHASED`, `CANCELLED`, `COMPLETED`). Приход
   добавляет полученные штуки и оставляет обещание открытым: статуса
   `FULFILLED` нет, и `record_item_fulfillment` не ставит
-  `ReservationStatus.COMPLETED`. Гарантия Surprise Invariant и личный
-  кабинет дарителя «Мои бронирования». Исключение записи — wish-scoped
-  транзакция SQLite, а не `asyncio.Lock`.
+  `ReservationStatus.COMPLETED`; в `COMPLETED` переводит только явное действие дарителя
+  (`complete_reservation`) для купленной брони после полного получения желания. Гарантия
+  Surprise Invariant и личный кабинет дарителя «Мои бронирования». Исключение записи —
+  wish-scoped транзакция SQLite, а не `asyncio.Lock` (плюс `delivery_lock` для координации
+  завершения с отправкой уведомлений о получении).
 - [`doc/dev/migrations.md`](migrations.md) — Миграции БД вишлистов (Alembic): ревизии, усыновление legacy-схемы, межпроцессная блокировка, выбор WAL, журналирование, диагностика и ограничения (WISHENKA-111).
 - [`doc/dev/items.md`](items.md) — Домен элементов желаний: универсальный ввод (текст, ссылки, шеринг), каскадный парсинг метаданных (JSON-LD, OpenGraph, Microdata), graceful fallback при антибот-защите, штучный учет и wish-scoped запись инвентаря.
 - [`doc/dev/auth.md`](auth.md) — Аутентификация Telegram Mini App, валидация initData и

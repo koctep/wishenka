@@ -1101,7 +1101,8 @@ class WishlistStore:
         row = (
             await conn.execute(
                 text(
-                    "SELECT i.wishlist_id, i.recipient_user_id, w.owner_id, w.status "
+                    "SELECT i.wishlist_id, i.recipient_user_id, w.owner_id, w.status, "
+                    "w.is_collaborative "
                     "FROM wl_items i JOIN wl_lists w ON w.id = i.wishlist_id "
                     "WHERE i.id = :item_id"
                 ),
@@ -1112,7 +1113,10 @@ class WishlistStore:
             raise ItemNotFoundError(f"Item {resolved_item_id} not found")
         if row.status == WishlistStatus.DELETED.value:
             raise WishlistDeletedError(f"Wishlist {row.wishlist_id} has been deleted")
-        if check_not_recipient and row.recipient_user_id == actor_id:
+        if check_not_recipient and (
+            row.recipient_user_id == actor_id
+            or (not row.is_collaborative and row.owner_id == actor_id)
+        ):
             raise SelfReservationError("Recipient cannot access reservation replay")
         if require_member and row.owner_id != actor_id:
             is_member = await conn.scalar(
@@ -1171,6 +1175,13 @@ class WishlistStore:
             if existing is not None and datetime.fromisoformat(existing.expires_at) > effective_now:
                 if existing.request_hash != request_hash:
                     raise IdempotencyConflictError()
+                if operation_name == "complete_reservation":
+                    owns = await conn.scalar(
+                        text("SELECT 1 FROM wl_reservations WHERE id=:id AND user_id=:actor"),
+                        {"id": reservation_id, "actor": actor_id},
+                    )
+                    if not owns:
+                        raise ReservationNotFoundError("Reservation not found")
                 await self._verify_idempotent_replay_access(
                     conn,
                     actor_id=actor_id,
@@ -1515,6 +1526,52 @@ class WishlistStore:
                     },
                 )
                 written += 1
+
+        for reservation in service._reservations.values():
+            previous = snapshot.reservations.get(reservation.id)
+            if (
+                not previous
+                or previous[3] != "purchased"
+                or reservation.status.value != "completed"
+            ):
+                continue
+            params = {"item": reservation.wish_item_id, "user": reservation.user_id}
+            open_promise = await conn.scalar(
+                text(
+                    "SELECT 1 FROM wl_reservations WHERE wish_item_id=:item AND user_id=:user "
+                    "AND status IN ('active','purchased') LIMIT 1"
+                ),
+                params,
+            )
+            if open_promise:
+                continue
+            gift_res = await conn.execute(
+                text(
+                    "UPDATE notification_outbox SET status='skipped',skip_reason='target_gone', "
+                    "claim_token=NULL,claimed_at=NULL WHERE wish_item_id=:item "
+                    "AND giver_user_id=:user AND status IN ('pending','sending')"
+                ),
+                params,
+            )
+            reminder_res = await conn.execute(
+                text(
+                    "UPDATE reminder_outbox SET status='skipped',claim_token=NULL,claimed_at=NULL "
+                    "WHERE item_id=:item AND user_id=:user AND status IN ('pending','sending') "
+                    "AND kind IN ('receipt_increased','receipt_reverted')"
+                ),
+                params,
+            )
+            if gift_res.rowcount or reminder_res.rowcount:
+                notice_logger.info(
+                    "Suppressed pending receipt notices after promise completion",
+                    extra={
+                        "event": "receipt_notices_suppressed",
+                        "item_id": reservation.wish_item_id,
+                        "user_id": reservation.user_id,
+                        "gift_skipped": gift_res.rowcount,
+                        "reminder_skipped": reminder_res.rowcount,
+                    },
+                )
 
         if service._next_reservation_id != snapshot.reservation_counter:
             await conn.execute(

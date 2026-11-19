@@ -18,6 +18,23 @@
   let csrfGeneration = 0;
   const pendingGiverControls = new WeakSet();
 
+  function refreshReservationBadge() {
+    const badge = document.querySelector('.reservations-badge');
+    if (!badge) return;
+    fetch('/web/reservations/card', { credentials: 'same-origin' })
+      .then((response) => response.ok ? response.text() : '')
+      .then((markup) => {
+        const parsed = new DOMParser().parseFromString(markup, 'text/html');
+        const updated = parsed.querySelector('.reservations-badge');
+        if (updated) badge.textContent = updated.textContent;
+      })
+      .catch(() => {});
+  }
+
+  window.addEventListener('pageshow', (event) => {
+    if (event.persisted) refreshReservationBadge();
+  });
+
   /**
    * Fetch and cache a CSRF token for the current session.
    * Deduplicates concurrent requests and resolves to `''` on timeout or error.
@@ -318,6 +335,9 @@
         notice = 'refused';
       } else if (rowStatus !== 200 && rowStatus !== 201) {
         return;
+      } else if (reservationRequestPath(elt).endsWith('/complete')) {
+        notice = 'completed';
+        refreshReservationBadge();
       }
       let listUrl = '/web/reservations/list';
       if (notice) {

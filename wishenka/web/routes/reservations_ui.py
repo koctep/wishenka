@@ -24,7 +24,7 @@ router = APIRouter(tags=["reservations-ui"])
 
 User = Annotated[AuthenticatedUser, Depends(get_current_user)]
 
-_NOTICES = frozenset({"shortage", "refused"})
+_NOTICES = frozenset({"shortage", "refused", "completed"})
 
 
 @dataclass(frozen=True)

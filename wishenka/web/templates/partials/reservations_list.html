@@ -5,6 +5,8 @@
     </p>
     {% elif notice_kind == "refused" %}
     <p class="reservation-notice">{{ t('web.item.notice_refused', locale|default('en')) }}</p>
+    {% elif notice_kind == "completed" %}
+    <p class="reservation-notice">{{ t('web.reservations.completed', locale|default('en')) }}</p>
     {% endif %}
     {% if not groups %}
     <p class="reservations-empty">{{ t('web.reservations.empty', locale|default('en')) }}</p>
@@ -37,6 +39,11 @@
             {% endif %}
             {% if not row.wish_received %}
             <a href="{{ row.wish_href }}">{{ t('web.reservations.go_to_wish', locale|default('en')) }}</a>
+            {% endif %}
+            {% if row.wish_received and row.is_purchased %}
+            <button type="button" hx-post="/api/wishlists/{{ row.wishlist_id }}/items/{{ row.wish_item_id }}/reservations/{{ row.reservation_id }}/complete" hx-swap="none">
+                {{ t('web.reservations.complete', locale|default('en')) }}
+            </button>
             {% endif %}
             {% if row.offer_actions %}
             {% set patch_url = "/api/wishlists/" ~ row.wishlist_id

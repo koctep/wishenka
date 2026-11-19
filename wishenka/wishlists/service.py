@@ -29,6 +29,7 @@ from wishenka.wishlists.exceptions import (
     CannotReduceQuantityBelowReservedError,
     InsufficientQuantityError,
     InvalidInviteTokenError,
+    InventoryBusyError,
     ItemNotFoundError,
     NothingRemainingError,
     PermissionDeniedError,
@@ -105,6 +106,7 @@ _RESERVATION_INVENTORY_METHODS = frozenset(
         "cancel_reservation",
         "update_reservation_quantity",
         "mark_reservation_purchased",
+        "complete_reservation",
         "revert_reservation_to_active",
     }
 )
@@ -146,6 +148,66 @@ def _transactional[T](method: Callable[..., Awaitable[T]]) -> Callable[..., Awai
 
         async def call(service: WishlistService) -> T:
             return await method(service, *args, **kwargs)
+
+        if method.__name__ == "complete_reservation":
+            from sqlalchemy import text
+
+            from wishenka.notices.fence import delivery_lock, has_fence
+
+            bound = signature(method).bind(None, *args, **kwargs)
+            target_reservation_id = int(bound.arguments["reservation_id"])
+            user = bound.arguments["user"]
+
+            async def resolve(conn: Any) -> int | None:
+                value = await conn.scalar(
+                    text("SELECT wish_item_id FROM wl_reservations WHERE id=:id AND user_id=:user"),
+                    {"id": target_reservation_id, "user": user.telegram_id},
+                )
+                return int(value) if value is not None else None
+
+            resolved_item_id = await self._store.transaction(resolve)
+            if resolved_item_id is None:
+                logger.warning(
+                    "Complete reservation failed: reservation %s not found for actor %s",
+                    target_reservation_id,
+                    user.telegram_id,
+                    extra={
+                        "event": "reservation_not_found",
+                        "reservation_id": target_reservation_id,
+                        "actor_id": user.telegram_id,
+                    },
+                )
+                raise ReservationNotFoundError("Reservation not found")
+            try:
+                async with delivery_lock(
+                    self._store.database_url, resolved_item_id, user.telegram_id
+                ):
+                    if await has_fence(self._store, resolved_item_id, user.telegram_id):
+                        logger.warning(
+                            "Complete reservation blocked by unresolved receipt delivery fence",
+                            extra={
+                                "event": "reservation_complete_fence_blocked",
+                                "reservation_id": target_reservation_id,
+                                "item_id": resolved_item_id,
+                                "actor_id": user.telegram_id,
+                            },
+                        )
+                        raise InventoryBusyError("Receipt delivery is unresolved")
+                    return await self._store.execute_wish(
+                        call, reservation_id=target_reservation_id, operation_name=method.__name__
+                    )
+            except OSError as exc:
+                logger.warning(
+                    "Complete reservation blocked: receipt delivery lock busy",
+                    extra={
+                        "event": "reservation_complete_lock_busy",
+                        "reservation_id": target_reservation_id,
+                        "item_id": resolved_item_id,
+                        "actor_id": user.telegram_id,
+                        "error_class": type(exc).__name__,
+                    },
+                )
+                raise InventoryBusyError("Receipt delivery is busy") from exc
 
         if scope is None:
             return await self._store.execute(call)
@@ -2099,6 +2161,79 @@ class WishlistService:
             )
             raise ReservationNotFoundError(f"Reservation {reservation_id} not found")
         return self._reservations[reservation_id].status
+
+    async def complete_reservation(
+        self,
+        reservation_id: int,
+        user: AuthenticatedUser,
+        *,
+        wishlist_id: int | None = None,
+        item_id: int | None = None,
+    ) -> Reservation:
+        """Complete the caller's purchased promise on a fully received wish."""
+        res = self._reservations.get(reservation_id)
+        if res is None or res.user_id != user.telegram_id:
+            logger.warning(
+                "Complete reservation failed: reservation %s not found for actor %s",
+                reservation_id,
+                user.telegram_id,
+                extra={
+                    "event": "reservation_not_found",
+                    "reservation_id": reservation_id,
+                    "actor_id": user.telegram_id,
+                },
+            )
+            raise ReservationNotFoundError("Reservation not found")
+        item = res.wish_item
+        if (
+            item is None
+            or item.wishlist is None
+            or (item_id is not None and item.id != item_id)
+            or (wishlist_id is not None and item.wishlist_id != wishlist_id)
+            or item.wishlist.status == WishlistStatus.DELETED
+            or WishlistAccessPolicy.is_recipient(user, item)
+        ):
+            logger.warning(
+                "Complete reservation failed: item or wishlist ineligible for reservation %s",
+                reservation_id,
+                extra={
+                    "event": "reservation_not_found",
+                    "reservation_id": reservation_id,
+                    "item_id": item.id if item is not None else item_id,
+                    "actor_id": user.telegram_id,
+                },
+            )
+            raise ReservationNotFoundError("Reservation not found")
+        async with self._concurrency_coordinator.acquire(res.wish_item_id):
+            if res.status != ReservationStatus.PURCHASED or not item.is_fully_received:
+                logger.warning(
+                    "Invalid reservation transition to COMPLETED from status %s for reservation %s",
+                    res.status,
+                    reservation_id,
+                    extra={
+                        "event": "invalid_reservation_transition",
+                        "reservation_id": reservation_id,
+                        "from_status": res.status,
+                        "to_status": ReservationStatus.COMPLETED,
+                        "is_fully_received": item.is_fully_received,
+                    },
+                )
+                raise ReservationError("Promise cannot be completed in its current state")
+            res.status = ReservationStatus.COMPLETED
+            res.updated_at = datetime.now(UTC)
+        logger.info(
+            "Reservation %s completed by actor %s",
+            reservation_id,
+            user.telegram_id,
+            extra={
+                "event": "reservation_completed",
+                "wishlist_id": item.wishlist_id,
+                "item_id": res.wish_item_id,
+                "reservation_id": reservation_id,
+                "actor_id": user.telegram_id,
+            },
+        )
+        return res
 
     async def mark_reservation_purchased(
         self,

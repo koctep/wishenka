@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from wishenka.auth.dependencies import get_current_user
 from wishenka.auth.models import AuthenticatedUser
+from wishenka.notices.fence import delivery_lock, has_fence
 from wishenka.web.idempotency import (
     build_replay_response,
     compute_request_hash,
@@ -396,6 +397,86 @@ async def cancel_reservation(
         actor_id=user.telegram_id,
         request_hash=request_hash,
     )
+
+
+@router.post("/{reservation_id}/complete", response_model=PromiseActionDTO)
+async def complete_reservation(
+    wishlist_id: int,
+    item_id: int,
+    reservation_id: int,
+    user: User,
+    request: Request,
+) -> PromiseActionDTO | Response:
+    """Complete the caller's purchased promise on a fully received wish."""
+    idempotency_key = parse_idempotency_key(request)
+
+    async def action(svc: WishlistService) -> PromiseActionDTO:
+        reservation = await svc.complete_reservation(
+            reservation_id, user, wishlist_id=wishlist_id, item_id=item_id
+        )
+        return project_reservation_action(reservation, user)
+
+    request_hash = (
+        compute_request_hash(
+            "complete_reservation",
+            {"wishlist_id": wishlist_id, "item_id": item_id, "reservation_id": reservation_id},
+        )
+        if idempotency_key is not None
+        else None
+    )
+    store = getattr(request.app.state, "wishlist_store", None)
+    injected = getattr(request.app.state, "wishlist_service", None)
+
+    async def run() -> PromiseActionDTO | Response:
+        return await execute(
+            request,
+            action,
+            item_id=item_id,
+            reservation_id=reservation_id,
+            idempotency_key=idempotency_key,
+            actor_id=user.telegram_id,
+            request_hash=request_hash,
+        )
+
+    if injected is not None:
+        return await run()
+    if store is None:
+        logger.error(
+            "Receipt delivery coordination unavailable",
+            extra={
+                "event": "receipt_delivery_coordination_unavailable",
+                "operation": "complete_reservation",
+                "item_id": item_id,
+                "reservation_id": reservation_id,
+            },
+        )
+        raise HTTPException(status_code=503, detail="Receipt delivery coordination unavailable")
+    try:
+        async with delivery_lock(store.database_url, item_id, user.telegram_id):
+            if await has_fence(store, item_id, user.telegram_id):
+                logger.warning(
+                    "Complete reservation deferred: unresolved receipt delivery fence",
+                    extra={
+                        "event": "reservation_complete_fence_blocked",
+                        "operation": "complete_reservation",
+                        "item_id": item_id,
+                        "reservation_id": reservation_id,
+                    },
+                )
+                raise HTTPException(status_code=503, detail="Receipt delivery is unresolved")
+            return await run()
+    except OSError as exc:
+        logger.warning(
+            "Complete reservation deferred: receipt delivery lock busy",
+            extra={
+                "event": "reservation_complete_lock_busy",
+                "operation": "complete_reservation",
+                "item_id": item_id,
+                "reservation_id": reservation_id,
+                "error_class": type(exc).__name__,
+            },
+        )
+        raise HTTPException(status_code=503, detail="Receipt delivery is busy") from exc
 
 
 @router.post("/{reservation_id}/purchase", response_model=PromiseActionDTO)

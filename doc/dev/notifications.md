@@ -81,7 +81,7 @@ Private /birthdays -------- birthday_entries /
 
 ### Database Schema and Migrations
 
-Four Alembic revisions extend the wishlist database schema for notifications, reminders, and retention (see [`doc/dev/migrations.md`](migrations.md)):
+Five Alembic revisions extend the wishlist database schema for notifications, reminders, and retention (see [`doc/dev/migrations.md`](migrations.md)):
 
 1. **`add_birthday_reminders`** (down revision `add_bot_capture_order`):
    - `bot_destinations(user_id PRIMARY KEY, chat_id, active DEFAULT 1)`: records verified private
@@ -123,6 +123,11 @@ Four Alembic revisions extend the wishlist database schema for notifications, re
      `wishenka/notices/reminders.py`, `wishenka/notices/store.py`, `wishenka/notices/worker.py`,
      and `wishenka/notices/operator.py`) stamp `updated_at` on inserts and state transitions so
      retention age is measured from the last update/settlement timestamp.
+5. **`add_receipt_delivery_fence`** (down revision `add_reminder_outbox_updated_at`):
+   - Creates `receipt_delivery_fence(wish_item_id, user_id, attempt_id, queue, row_id, state CHECK(state IN ('in_flight','uncertain')), PRIMARY KEY(wish_item_id, user_id))`
+     to coordinate external receipt delivery attempts across processes and block concurrent promise completion.
+   - Creates `receipt_delivery_fence_audit(id PRIMARY KEY, wish_item_id, user_id, attempt_id, operator, evidence, resolved_at DEFAULT CURRENT_TIMESTAMP)`
+     to record audited manual resolutions of unresolved fences.
 
 ### Surprise Protection and Live Eligibility Rules
 
@@ -330,6 +335,28 @@ Implemented in `wishenka/bot/birthdays.py` (`create_birthday_router`), mounted b
     `status = 'uncertain'` (with `ambiguous = 1` and `last_error_class = 'StaleClaim'` for expired
     receipt claims). **Uncertain rows are quarantined and never automatically retried**, preventing
     blind duplicate sends when Telegram may have accepted the message before the connection failed.
+- **Per-giver receipt delivery lock & durable fence (`wishenka.notices.fence`, `WISHENKA-219`):**
+  Both `notification_outbox` (`gift_received`) and `reminder_outbox` (`receipt_increased`,
+  `receipt_reverted`) share the coordination key `(wish_item_id, user_id)`:
+  1. `delivery_lock(database_url, item_id, user_id)` acquires a nonblocking per-key `asyncio.Lock`
+     within the process and a nonblocking exclusive `fcntl.flock` on
+     `<db>.receipt-locks/<sha256(item_id:user_id)>` across processes on the same host (mode `0700`
+     directory, `0600` lock files, never unlinked while running).
+  2. Before sending a claimed receipt notice, `NoticeWorker.run_once` enters `delivery_lock`, calls
+     `begin_attempt(store, key, queue, row_id, token)` (which re-verifies the `sending` claim token,
+     checks for an `active`/`purchased` promise in `wl_reservations`, and inserts an `in_flight`
+     row into `receipt_delivery_fence`), holds the lock across network I/O, and calls
+     `finish_attempt(store, key, token, definitive=...)` to delete the fence on definitive outcomes
+     or mark it `uncertain` on ambiguous outcomes.
+  3. If the lock is busy or `begin_attempt` fails because a fence is already active, `defer_claim`
+     returns the unsent row to `pending` (`attempts = MAX(0, attempts - 1)`) without consuming a
+     retry attempt.
+  4. `complete_reservation` acquires the same `delivery_lock` and checks `has_fence` before its wish
+     transaction; if busy or fenced, it fails closed with HTTP 503. When completion commits in
+     `WishlistStore._persist_wish` and no other `active` or `purchased` promise exists for
+     `(wish_item_id, user_id)`, pending/sending `notification_outbox` rows (`skip_reason = 'target_gone'`)
+     and `reminder_outbox` rows (`kind IN ('receipt_increased', 'receipt_reverted')`) are atomically
+     marked `skipped` in the same transaction.
 
 ### Retention Cleanup
 
@@ -459,6 +486,10 @@ python -m wishenka.notices.operator fail --queue reminder --id 42
 
 # 4. Explicitly re-queue an uncertain row as pending (WARNING: may send a duplicate)
 python -m wishenka.notices.operator retry --queue receipt --id 17
+
+# 5. Resolve a row that has an active receipt_delivery_fence (operator and evidence required)
+python -m wishenka.notices.operator fail --queue receipt --id 17 \
+  --operator oncall-name --evidence "Confirmed process exited and Telegram delivered message"
 ```
 
 Programmatic functions in `wishenka.notices.operator`:
@@ -468,9 +499,16 @@ Programmatic functions in `wishenka.notices.operator`:
 - `await list_uncertain(store, queue, limit=100) -> list[dict[str, int]]`: returns
   `[{"id": <int>, "attempts": <int>}, ...]` for `queue in ("receipt", "reminder")` and
   `1 <= limit <= 100`.
-- `await resolve(store, queue, ident, action, now) -> bool`: transitions row `ident` from
-  `uncertain` to `pending` (`action="retry"`, clearing `ambiguous=0` on `receipt`) or `failed`
-  (`action="fail"`). Returns `True` if a row was updated, `False` if not found or not `uncertain`.
+- `await resolve(store, queue, ident, action, now, *, operator="", evidence="") -> bool`:
+  transitions row `ident` from `uncertain` to `pending` (`action="retry"`, clearing `ambiguous=0`
+  on `receipt`) or `failed` (`action="fail"`). When a `receipt_delivery_fence` row exists for
+  `(queue, ident)`, non-empty `operator` and `evidence` are required (`ValueError` otherwise);
+  `resolve` acquires `delivery_lock`, records the resolution in `receipt_delivery_fence_audit`, and
+  deletes the fence in the same transaction. Returns `True` if a row was updated, `False` if not
+  found or not `uncertain`.
+- `await resolve_attempt(store, item_id, user_id, *, operator, evidence) -> bool`
+  (`wishenka.notices.fence`): directly resolves a reconciled `receipt_delivery_fence` entry under
+  `delivery_lock`, writing `receipt_delivery_fence_audit` and removing the fence.
 
 ## Configuration
 
@@ -523,6 +561,14 @@ labels or dates, wish/list titles, capability links, bot tokens, or raw exceptio
 | `receipt_notice_retry_scheduled` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `attempt`, `max_attempts`, `error_class` (when present) |
 | `receipt_notice_skipped_ineligible` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `attempt` |
 | `receipt_notice_uncertain` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `attempt`, `error_class` (when a receipt send is ambiguous or lease expires) |
+| `receipt_notices_suppressed` | INFO | `wishenka.wishlists.notices` | `item_id`, `user_id`, `gift_skipped`, `reminder_skipped` (when `complete_reservation` suppresses pending/sending receipt notices) |
+| `receipt_notice_deferred` / `service_notice_deferred` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `reason` (`fence_active` or `lock_busy`), plus `attempt` or `kind` |
+| `receipt_claim_deferred` | INFO | `wishenka.notices.fence` | `queue`, `row_id` (when an unsent claim is returned to `pending` without consuming an attempt) |
+| `receipt_fence_resolved` | INFO | `wishenka.notices.fence` | `item_id`, `user_id`, `operator`, `resolved_rows` (omits full `evidence` text) |
+| `receipt_fence_busy` / `receipt_fence_uncertain` | WARNING | `wishenka.notices.fence` | `item_id`, `user_id` (plus `queue`, `row_id` on `receipt_fence_busy`) |
+| `receipt_fence_stale_claim`, `receipt_fence_no_open_promise`, `receipt_fence_recorded`, `receipt_fence_cleared`, `receipt_fence_resolve_noop` | DEBUG | `wishenka.notices.fence` | `item_id`, `user_id` (plus `queue`/`row_id` or `operator` where applicable) |
+| `operator_notice_resolved` | INFO | `wishenka.notices.operator` | `queue`, `row_id`, `action`, `has_fence`, `operator` |
+| `operator_notice_resolve_noop` | WARNING | `wishenka.notices.operator` | `queue`, `row_id`, `action` |
 
 ### SQL Gauge Semantics (`notification_outbox`) and Domain Log Contracts
 
@@ -533,8 +579,9 @@ labels or dates, wish/list titles, capability links, bot tokens, or raw exceptio
 
 See [`ai-tasks/WISHENKA-29/50-observability.md`](../../ai-tasks/WISHENKA-29/50-observability.md),
 [`ai-tasks/WISHENKA-60/50-observability.md`](../../ai-tasks/WISHENKA-60/50-observability.md),
-[`ai-tasks/WISHENKA-181/50-observability.md`](../../ai-tasks/WISHENKA-181/50-observability.md), and
-[`ai-tasks/WISHENKA-157/50-observability.md`](../../ai-tasks/WISHENKA-157/50-observability.md) for
+[`ai-tasks/WISHENKA-181/50-observability.md`](../../ai-tasks/WISHENKA-181/50-observability.md),
+[`ai-tasks/WISHENKA-157/50-observability.md`](../../ai-tasks/WISHENKA-157/50-observability.md), and
+[`ai-tasks/WISHENKA-219/50-observability.md`](../../ai-tasks/WISHENKA-219/50-observability.md) for
 the complete observability specifications.
 
 ## Troubleshooting

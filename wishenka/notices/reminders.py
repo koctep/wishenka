@@ -544,6 +544,16 @@ async def settle_reminder(
             await deactivate_bot_destination(conn, claim.chat_id)
         if result.rowcount and throttle_until is not None:
             await block_until(conn, throttle_until)
+        if result.rowcount:
+            statement = (
+                "UPDATE receipt_delivery_fence SET state='uncertain'"
+                if status == "uncertain"
+                else "DELETE FROM receipt_delivery_fence"
+            )
+            await conn.execute(
+                text(statement + " WHERE queue='reminder' AND row_id=:id AND attempt_id=:token"),
+                {"id": claim.ident, "token": claim.claim_token},
+            )
         return bool(result.rowcount)
 
     return await store.transaction(work)

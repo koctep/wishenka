@@ -124,8 +124,8 @@ async def test_titles_are_cut_at_one_hundred_characters(tmp_path: Path) -> None:
         assert "tail" not in text
 
 
-async def test_promise_cancelled_after_the_receipt_still_gets_its_notice(tmp_path: Path) -> None:
-    """Design 8: the notice is addressed at commit time; a later cancellation does not drop it."""
+async def test_promise_cancelled_after_receipt_does_not_get_notice(tmp_path: Path) -> None:
+    """Receipt notices are delivered only while the giver has an open promise."""
     async with _store_env(tmp_path) as env:
         await env.seed(5, ((GIFTER, 1),))
         await env.receive(1)
@@ -134,8 +134,8 @@ async def test_promise_cancelled_after_the_receipt_still_gets_its_notice(tmp_pat
 
         await env.worker(sender).run_once(_base())
 
-        assert [chat for chat, _text in sender.calls] == [GIFTER_ID]
-        assert [row["status"] for row in outbox_rows(env.db)] == ["sent"]
+        assert sender.calls == []
+        assert [row["status"] for row in outbox_rows(env.db)] == ["skipped"]
 
 
 def _info_events(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:

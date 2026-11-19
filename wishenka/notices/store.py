@@ -98,6 +98,11 @@ class NoticeStore:
         exponent = max(attempts, 1) - 1
         return int(min(self._backoff_base * 2**exponent, self._backoff_max))
 
+    @property
+    def transactional_store(self) -> WishlistStore:
+        """Expose the shared transaction boundary for delivery coordination."""
+        return self._store
+
     async def transaction(self, work: Callable[[AsyncConnection], Awaitable[T]]) -> T:
         """Run ``work`` in one ``BEGIN IMMEDIATE`` transaction via the underlying store."""
         return await self._store.transaction(work)
@@ -307,6 +312,16 @@ class NoticeStore:
                 await deactivate_bot_destination(conn, claim.giver_user_id, now)
             if result.rowcount and throttle_until is not None:
                 await block_until(conn, throttle_until)
+            if result.rowcount:
+                statement = (
+                    "UPDATE receipt_delivery_fence SET state='uncertain'"
+                    if status == "uncertain"
+                    else "DELETE FROM receipt_delivery_fence"
+                )
+                await conn.execute(
+                    text(statement + " WHERE queue='gift' AND row_id=:id AND attempt_id=:token"),
+                    {"id": claim.outbox_id, "token": claim.claim_token},
+                )
             return bool(result.rowcount)
 
         changed = await self._store.transaction(work)
@@ -565,7 +580,7 @@ class NoticeStore:
                         "(SELECT 1 FROM wl_members m WHERE m.wishlist_id=o.wishlist_id "
                         "AND m.user_id=o.giver_user_id)) "
                         "AND EXISTS (SELECT 1 FROM wl_reservations r WHERE r.wish_item_id=i.id "
-                        "AND r.user_id=o.giver_user_id)"
+                        "AND r.user_id=o.giver_user_id AND r.status IN ('active', 'purchased'))"
                     ),
                     {"id": ident},
                 )
