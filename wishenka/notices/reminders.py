@@ -15,9 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from wishenka.i18n import DEFAULT_LOCALE, SUPPORTED_LOCALES, resolve_telegram_locale, t
 from wishenka.notices.destinations import deactivate_bot_destination
+from wishenka.notices.models import TransactionalStore
 from wishenka.notices.rate import block_until, reserve_permit
 from wishenka.notices.scheduler import utc_event_date
-from wishenka.wishlists.store import WishlistStore
 
 logger = logging.getLogger("wishenka.wishlists.notices")
 locale_logger = logging.getLogger("wishenka.notices.reminders")
@@ -170,7 +170,7 @@ async def _read_user_setting(
 
 
 async def claim_reminder(
-    store: WishlistStore, now: int, lease: int, global_limit: int, chat_interval: int
+    store: TransactionalStore, now: int, lease: int, global_limit: int, chat_interval: int
 ) -> Reminder | None:
     """Claim a due row after checking its current access, settings and date."""
     skipped: list[tuple[int, str, str]] = []
@@ -381,7 +381,7 @@ async def claim_reminder(
     return claimed
 
 
-async def refresh_reminder(store: WishlistStore, claim: Reminder, now: int) -> Reminder | None:
+async def refresh_reminder(store: TransactionalStore, claim: Reminder, now: int) -> Reminder | None:
     """Recheck consent and refresh authorized text immediately before sending."""
 
     async def work(conn: AsyncConnection) -> Reminder | None:
@@ -494,7 +494,7 @@ async def refresh_reminder(store: WishlistStore, claim: Reminder, now: int) -> R
 
 
 async def settle_reminder(
-    store: WishlistStore,
+    store: TransactionalStore,
     claim: Reminder,
     status: str,
     next_attempt: int,

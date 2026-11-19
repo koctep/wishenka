@@ -2,11 +2,25 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, TypeVar
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncConnection
+
     from wishenka.wishlists.models import ReceiptRecord
+
+T = TypeVar("T")
+
+
+class TransactionalStore(Protocol):
+    """Store providing an atomic ``BEGIN IMMEDIATE`` transaction boundary."""
+
+    async def transaction(self, work: Callable[[AsyncConnection], Awaitable[T]]) -> T:
+        """Run ``work`` inside one ``BEGIN IMMEDIATE`` transaction."""
+        ...
+
 
 EVENT_GIFT_RECEIVED = "gift_received"
 

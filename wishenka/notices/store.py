@@ -5,8 +5,10 @@ from __future__ import annotations
 import logging
 import math
 import secrets
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from typing import TypeVar
 
 from sqlalchemy import text
 from sqlalchemy.engine import RowMapping
@@ -14,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from wishenka.config import Settings
 from wishenka.i18n import DEFAULT_LOCALE, SUPPORTED_LOCALES
+from wishenka.notices import reminders
 from wishenka.notices.destinations import deactivate_bot_destination
 from wishenka.notices.models import (
     SKIP_TARGET_GONE,
@@ -25,6 +28,8 @@ from wishenka.notices.models import (
 )
 from wishenka.notices.rate import block_until, reserve_permit
 from wishenka.wishlists.store import WishlistStore
+
+T = TypeVar("T")
 
 logger = logging.getLogger("wishenka.wishlists.notices")
 locale_logger = logging.getLogger("wishenka.notices.store")
@@ -91,6 +96,35 @@ class NoticeStore:
         """Delay after the ``attempts``-th failed attempt: ``min(base * 2**(n-1), max)``."""
         exponent = max(attempts, 1) - 1
         return int(min(self._backoff_base * 2**exponent, self._backoff_max))
+
+    async def transaction(self, work: Callable[[AsyncConnection], Awaitable[T]]) -> T:
+        """Run ``work`` in one ``BEGIN IMMEDIATE`` transaction via the underlying store."""
+        return await self._store.transaction(work)
+
+    async def claim_reminder(self, now: int) -> reminders.Reminder | None:
+        """Claim a due reminder row using this store's lease and rate-limit settings."""
+        return await reminders.claim_reminder(
+            self, now, self._lease, self.global_limit, self.chat_interval
+        )
+
+    async def refresh_reminder(
+        self, claim: reminders.Reminder, now: int
+    ) -> reminders.Reminder | None:
+        """Recheck consent and refresh authorized reminder text before sending."""
+        return await reminders.refresh_reminder(self, claim, now)
+
+    async def settle_reminder(
+        self,
+        claim: reminders.Reminder,
+        status: str,
+        next_attempt: int,
+        error_class: str | None = None,
+        throttle_until: int | None = None,
+    ) -> bool:
+        """Settle a fenced reminder claim inside one ``BEGIN IMMEDIATE`` transaction."""
+        return await reminders.settle_reminder(
+            self, claim, status, next_attempt, error_class, throttle_until
+        )
 
     async def claim_next(self, now: int) -> ClaimedNotice | None:
         """Claim the oldest due ``pending`` row, settling dead rows on the way (design 7).

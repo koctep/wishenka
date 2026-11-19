@@ -67,10 +67,11 @@ Private /birthdays -------- birthday_entries /
 | --------- | ------ | -------------- |
 | `EventProducer` / `SharedEvent` | `wishenka/notices/events.py` | Enqueues content-free shared wishlist and opt-in reservation confirmation intents inside the domain transaction |
 | `NotificationPreferencesStore` | `wishenka/notices/preferences.py` | Manages global (`user_notification_settings`) and per-wishlist (`wl_list_notification_settings`) notification preferences, access checks, and effective preference resolution |
-| `NoticeStore` / `ClaimedNotice` | `wishenka/notices/store.py` | Fenced claiming, pre-send eligibility refresh, settlement, and unified retention purge for `notification_outbox` and `reminder_outbox` |
+| `TransactionalStore` | `wishenka/notices/models.py` | `Protocol` defining an atomic `BEGIN IMMEDIATE` `transaction(work)` boundary satisfied by `WishlistStore` and `NoticeStore` |
+| `NoticeStore` / `ClaimedNotice` | `wishenka/notices/store.py` | Public `transaction(work)` boundary, fenced claiming, pre-send eligibility refresh, reminder lifecycle (`claim_reminder`, `refresh_reminder`, `settle_reminder`), settlement, and unified retention purge for `notification_outbox` and `reminder_outbox` |
 | `upsert_bot_destination` / `deactivate_bot_destination` | `wishenka/notices/destinations.py` | Shared `bot_destinations` lifecycle helpers that maintain `active` and `updated_at` across bot and notice call sites |
-| `claim_reminder` / `refresh_reminder` / `settle_reminder` | `wishenka/notices/reminders.py` | Fenced claiming, live authorization/preference refresh, localized rendering, and settlement for `reminder_outbox` |
-| `ReminderScheduler` / `utc_event_date` | `wishenka/notices/scheduler.py` | Bounded, cursor-driven UTC scanner for dated wishlists and private birthday entries |
+| `claim_reminder` / `refresh_reminder` / `settle_reminder` | `wishenka/notices/reminders.py` | `TransactionalStore`-backed fenced claiming, live authorization/preference refresh, localized rendering, and settlement for `reminder_outbox` |
+| `ReminderScheduler` / `utc_event_date` | `wishenka/notices/scheduler.py` | Bounded, cursor-driven UTC scanner for dated wishlists and private birthday entries using `TransactionalStore` |
 | `reserve_permit` / `block_until` | `wishenka/notices/rate.py` | Cross-process SQLite rate limiter and `RetryAfter` throttle state in `notice_rate_slots` |
 | `NoticeWorker` | `wishenka/notices/worker.py` | Lifespan background loop driving the hourly scheduler, draining both queues, and emitting windowed summaries |
 | `NoticeSender` / `classify_error` | `wishenka/notices/sender.py` | Aiogram-backed Telegram sender mapping outcomes to `DELIVERED`, `REJECTED`, `RETRYABLE`, or `AMBIGUOUS` |
@@ -383,16 +384,36 @@ await producer.record(conn, event, now=int(time.time()))
   `"receipt_increased"`. Passing any other `kind` raises
   `ValueError("Unsupported shared notification event")`.
 
+### Notice Store Transaction Boundary and Reminder Operations (`wishenka.notices.models`, `wishenka.notices.store`)
+
+`TransactionalStore` (`wishenka/notices/models.py`) defines the shared `BEGIN IMMEDIATE`
+transaction protocol (`async def transaction(self, work: Callable[[AsyncConnection], Awaitable[T]]) -> T`)
+implemented by both `WishlistStore` and `NoticeStore`.
+
+`NoticeStore` (`wishenka/notices/store.py`) exposes public transaction and reminder methods so
+`NoticeWorker` and `wishenka/notices/` modules never reach into `NoticeStore._store`:
+
+- **`NoticeStore.transaction(work)`**: Runs `work(conn)` inside a single `BEGIN IMMEDIATE`
+  transaction via the underlying `WishlistStore`.
+- **`NoticeStore.claim_reminder(now)`**: Claims a due `reminder_outbox` row using the store's
+  configured lease, `global_limit`, and `chat_interval` settings.
+- **`NoticeStore.refresh_reminder(claim, now)`**: Rechecks live consent and eligibility and
+  refreshes authorized reminder text before delivery.
+- **`NoticeStore.settle_reminder(claim, status, next_attempt, error_class=None, throttle_until=None)`**:
+  Settles a fenced reminder claim inside one `BEGIN IMMEDIATE` transaction.
+
 ### Running the Reminder Scheduler (`wishenka.notices.scheduler`)
 
 ```python
 from wishenka.notices.scheduler import ReminderScheduler, utc_event_date
 
 event_day = utc_event_date("2026-12-25T00:00:00Z")
-scheduler = ReminderScheduler(wishlist_store, settings)
+scheduler = ReminderScheduler(store, settings)  # store: TransactionalStore (NoticeStore or WishlistStore)
 more_pages = await scheduler.run_once(now=int(time.time()))
 ```
 
+- **`ReminderScheduler(store, settings)`**: Accepts any `TransactionalStore` (e.g., `NoticeStore`
+  when instantiated by `NoticeWorker`, or `WishlistStore` directly).
 - **`run_once(now)`**: Scans up to 1000 active dated wishlists and 1000 active birthday entries in
   UTC. Returns `True` if either scan hit `PAGE_SIZE` (indicating more pages remain), or `False`
   when the full cycle completed and cursors reset to `0`.
@@ -611,8 +632,6 @@ WISHENKA_TELEGRAM_SMOKE_INVALID_CHAT_ID="-1" \
 - **[WISHENKA-35](https://pypost.atlassian.net/browse/WISHENKA-35):** Account deletion and
   personal-data erasure must include `bot_destinations`, `birthday_entries`, `birthday_input`,
   `reminder_outbox`, `notice_receipt_keys`, and chat-scoped `notice_rate_slots`.
-- **[WISHENKA-180](https://pypost.atlassian.net/browse/WISHENKA-180):** Replace `NoticeWorker` access
-  to the private `NoticeStore._store` attribute with a public store transaction interface.
 - **[WISHENKA-156](https://pypost.atlassian.net/browse/WISHENKA-156):** Opt-in live Telegram smoke
   test and multiprocess worker race coverage for the expanded service queue and shared rate limits.
 - **[WISHENKA-194](https://pypost.atlassian.net/browse/WISHENKA-194) / [WISHENKA-195](https://pypost.atlassian.net/browse/WISHENKA-195) / [WISHENKA-196](https://pypost.atlassian.net/browse/WISHENKA-196):**

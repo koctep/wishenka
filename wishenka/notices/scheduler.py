@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from wishenka.config import Settings
-from wishenka.wishlists.store import WishlistStore
+from wishenka.notices.models import TransactionalStore
 
 logger = logging.getLogger("wishenka.notices.scheduler")
 PAGE_SIZE = 1000
@@ -25,7 +25,7 @@ def utc_event_date(value: str) -> date:
 class ReminderScheduler:
     """Scan current dates in UTC and persist one intent per recipient and occurrence."""
 
-    def __init__(self, store: WishlistStore, settings: Settings) -> None:
+    def __init__(self, store: TransactionalStore, settings: Settings) -> None:
         self._store = store
         self._leads = getattr(settings, "notice_reminder_lead_days", (7,))
 

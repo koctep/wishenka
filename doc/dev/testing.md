@@ -822,6 +822,25 @@ Telegram Bot API и офлайн-проверки безопасности:
 make test PYTEST_JOBS=0 PYTEST_ARGS="tests/test_bot_capture_atomic_store_repro.py"
 ```
 
+## Публичная транзакционная граница NoticeStore (WISHENKA-180)
+
+Модуль `tests/test_notice_store_transaction_repro.py` (`pytestmark = pytest.mark.timeout(30)`)
+проверяет публичный интерфейс `NoticeStore.transaction` и отсутствие обращений к приватному
+атрибуту `_store` в пакете `wishenka/notices/`:
+
+- `test_notice_store_exposes_public_transaction` — проверяет, что `NoticeStore.transaction(work)`
+  выполняет `work(conn)` в транзакции и возвращает результат.
+- `test_notice_store_transaction_rolls_back_on_error` — проверяет откат незафиксированных
+  изменений при исключении внутри `NoticeStore.transaction`.
+- `test_notices_package_has_no_private_store_access` — AST-проверка того, что модули в
+  `wishenka/notices/` (кроме `store.py`) не обращаются к приватному атрибуту `._store`.
+
+Запуск модуля:
+
+```bash
+make test PYTEST_JOBS=0 PYTEST_ARGS="tests/test_notice_store_transaction_repro.py"
+```
+
 ## Известные ограничения
 
 Пункты отслежены в Jira (источники: `ai-tasks/WISHENKA-124/60-tech-debt.md` и `ai-tasks/WISHENKA-110/60-tech-debt.md`):

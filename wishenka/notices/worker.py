@@ -11,7 +11,6 @@ from collections.abc import Callable
 
 from wishenka.config import Settings
 from wishenka.i18n import DEFAULT_LOCALE, resolve_telegram_locale, t
-from wishenka.notices.reminders import claim_reminder, refresh_reminder, settle_reminder
 from wishenka.notices.scheduler import ReminderScheduler
 from wishenka.notices.sender import NoticeSender, SendOutcome, SendResult
 from wishenka.notices.store import ClaimedNotice, NoticeStore
@@ -47,9 +46,8 @@ class NoticeWorker:
         self._store = store
         self._sender = sender
         self._max_attempts = settings.receipt_notice_max_attempts
-        self._lease = settings.receipt_notice_claim_lease_seconds
         self._scheduler = (
-            ReminderScheduler(store._store, settings) if isinstance(store, NoticeStore) else None
+            ReminderScheduler(store, settings) if isinstance(store, NoticeStore) else None
         )
         self._next_schedule = 0.0
         self._send_timeout = settings.receipt_notice_request_timeout_seconds + 5
@@ -181,20 +179,10 @@ class NoticeWorker:
             result = await self._send(refreshed)
             await self._settle(refreshed, result, self._time(now))
             rows += 1
-        while (
-            reminder := await claim_reminder(
-                self._store._store,
-                self._time(now),
-                self._lease,
-                self._store.global_limit,
-                self._store.chat_interval,
-            )
-        ) is not None:
-            refreshed_reminder = await refresh_reminder(
-                self._store._store, reminder, self._time(now)
-            )
+        while (reminder := await self._store.claim_reminder(self._time(now))) is not None:
+            refreshed_reminder = await self._store.refresh_reminder(reminder, self._time(now))
             if refreshed_reminder is None:
-                if await settle_reminder(self._store._store, reminder, "skipped", self._time(now)):
+                if await self._store.settle_reminder(reminder, "skipped", self._time(now)):
                     self._reminder_counts["skipped"] += 1
                     logger.debug(
                         "Service notice skipped: reason=refresh_ineligible",
@@ -229,8 +217,7 @@ class NoticeWorker:
                 if status == "pending"
                 else 0
             )
-            settled = await settle_reminder(
-                self._store._store,
+            settled = await self._store.settle_reminder(
                 reminder,
                 status,
                 self._time(now) + delay,
