@@ -17,6 +17,8 @@
   - [x] Migrated `mutate` in `wishenka/bot/capture.py` from `store.transaction` + `store._read`/`store._write` to `store.execute_with_connection`, and added an AST private-access assertion in `tests/test_bot_capture_atomic_store_repro.py`.
   - [x] Verified `make analyze` (`ruff check`, `ruff format --check`, `mypy`) and pytest (`55 passed` across `tests/test_bot_capture_atomic_store_repro.py`, `tests/test_bot_capture_repro.py`, `tests/test_bot_capture_order_retention.py`, `tests/test_bot_capture_order_retention_repro.py`, `tests/test_receipt_concurrency.py`).
 - [x] **STEP 5: Code Cleanup**
+  - [x] Verified `make analyze` (`ruff check`, `ruff format --check`, `mypy` across 226 source files) and targeted pytest (`55 passed` across `tests/test_bot_capture_atomic_store_repro.py`, `tests/test_bot_capture_repro.py`, `tests/test_bot_capture_order_retention.py`, `tests/test_bot_capture_order_retention_repro.py`, `tests/test_receipt_concurrency.py`).
+  - [x] Created `ai-tasks/WISHENKA-179/40-code-cleanup.md` (awaiting review gate).
 - [x] **STEP 6: Observability**
   - [x] Evaluated production observability of `WishlistStore.execute_with_connection` (`wishenka/wishlists/store.py`) and `wishenka/bot/capture.py:mutate`; confirmed existing structured logging and post-commit log flushing (`flushed`, `flushed_shared`, `pending_commit_logs`, `receipt_notice_enqueue_failed`, `bot_capture_save`, `bot_capture_action_error`) cover all paths without new ad-hoc logs. Created `ai-tasks/WISHENKA-179/50-observability.md`.
 - [x] **STEP 7: Technical Debt Analysis**
