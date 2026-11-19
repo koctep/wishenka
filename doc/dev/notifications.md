@@ -521,11 +521,71 @@ the complete observability specifications.
 
 ## Testing
 
-Run the focused notification, reminder, upgrade, operator, and observability test suites with:
+Run the focused notification, reminder, upgrade, operator, concurrency, and observability test suites with:
 
 ```bash
-make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_notice_delivery_repro.py tests/test_notice_wishlist_events.py tests/test_notice_upgrade.py tests/test_notice_operator.py tests/test_reminder_scan_paging.py tests/test_service_notice_observability.py tests/test_receipt_notices.py tests/test_receipt_observability.py tests/test_wishenka_60_repro.py tests/test_wishenka_60_observability.py tests/test_wishenka_34_repro.py tests/test_wishenka_34_preferences.py tests/test_wishenka_181_repro.py tests/test_notice_retention.py'
+make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_notice_delivery_repro.py tests/test_notice_wishlist_events.py tests/test_notice_upgrade.py tests/test_notice_operator.py tests/test_notice_worker_concurrency.py tests/test_telegram_notice_smoke.py tests/test_reminder_scan_paging.py tests/test_service_notice_observability.py tests/test_receipt_notices.py tests/test_receipt_observability.py tests/test_wishenka_60_repro.py tests/test_wishenka_60_observability.py tests/test_wishenka_34_repro.py tests/test_wishenka_34_preferences.py tests/test_wishenka_181_repro.py tests/test_notice_retention.py'
 ```
+
+### Live Telegram Smoke Test & Manual Verification Checklist
+
+Use this checklist before releases or after changes to `wishenka/notices/sender.py` or `notice_text`
+to verify real Telegram Bot API delivery without affecting offline CI.
+
+#### Prerequisites
+
+- A dedicated test Telegram bot token (`WISHENKA_TELEGRAM_SMOKE_TOKEN`).
+- An explicit test Telegram chat ID (`WISHENKA_TELEGRAM_SMOKE_CHAT_ID`) that has already started a
+  private conversation (`/start`) with that test bot.
+- Optionally, an invalid/unreachable chat ID (`WISHENKA_TELEGRAM_SMOKE_INVALID_CHAT_ID`, defaults to
+  `0`) for the negative rejection check.
+- Local test environment installed (`.venv/bin/pytest`).
+
+#### Safety Rules
+
+- **Explicit test chat only:** Never supply a production bot token or a real user's chat ID.
+- **No secrets in Git:** Never commit `WISHENKA_TELEGRAM_SMOKE_TOKEN` or
+  `WISHENKA_TELEGRAM_SMOKE_CHAT_ID` to `.env`, fixtures, or documentation.
+- **Default offline runs:** When the smoke environment variables are unset, `pytest` automatically
+  skips the live `@pytest.mark.telegram_smoke` tests while still running the offline guard checks in
+  `tests/test_telegram_notice_smoke.py`.
+
+#### Automated Smoke Command
+
+```bash
+WISHENKA_TELEGRAM_SMOKE_TOKEN="<test-bot-token>" \
+WISHENKA_TELEGRAM_SMOKE_CHAT_ID="<test-chat-id>" \
+.venv/bin/pytest -m telegram_smoke
+```
+
+To override the default negative target (`0`):
+
+```bash
+WISHENKA_TELEGRAM_SMOKE_TOKEN="<test-bot-token>" \
+WISHENKA_TELEGRAM_SMOKE_CHAT_ID="<test-chat-id>" \
+WISHENKA_TELEGRAM_SMOKE_INVALID_CHAT_ID="-1" \
+.venv/bin/pytest -m telegram_smoke
+```
+
+#### Manual Verification Checks
+
+- [ ] **Positive delivery:** `test_telegram_smoke_delivers_plain_text_with_special_chars_and_truncation`
+      passes (`SendOutcome.DELIVERED`) and a single notification message appears in the test chat.
+- [ ] **Plain-text & special-character rendering:** Inspect the received message in Telegram and
+      confirm `<script>`, `&`, `"`, `'`, and `>` appear literally as plain text (no HTML tag
+      stripping, no entity escaping, no parse errors).
+- [ ] **Title truncation & message size:** Confirm both the wish title and list title are capped at
+      `TITLE_LIMIT` (`100` characters) and the full message renders cleanly well below Telegram's
+      4096-character limit.
+- [ ] **Error-handling / negative check:** `test_telegram_smoke_rejects_invalid_chat` passes,
+      confirming Telegram rejects the invalid target and `AiogramNoticeSender.send` classifies the
+      error as `SendOutcome.REJECTED` with a non-empty `error_class` without messaging any real user.
+
+#### Cleanup
+
+- [ ] Unset `WISHENKA_TELEGRAM_SMOKE_TOKEN`, `WISHENKA_TELEGRAM_SMOKE_CHAT_ID`, and
+      `WISHENKA_TELEGRAM_SMOKE_INVALID_CHAT_ID` from your shell session (`unset WISHENKA_TELEGRAM_SMOKE_TOKEN WISHENKA_TELEGRAM_SMOKE_CHAT_ID WISHENKA_TELEGRAM_SMOKE_INVALID_CHAT_ID`).
+- [ ] Optionally delete the test message(s) from the test Telegram chat.
 
 ## Known Limitations and Follow-up Tasks
 

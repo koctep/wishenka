@@ -753,6 +753,54 @@ make test-serial PYTEST_ARGS="tests/test_wish_lifecycle_stress.py"
   `archive_wish_item`: перестановка со старым набором активных `item_ids` атомарно отклоняется до
   записи в БД и не должна приводить к частичному изменению `display_order`.
 
+## Тесты доставки уведомлений: живой smoke и гонка воркеров (WISHENKA-156)
+
+### `tests/test_telegram_notice_smoke.py` (маркер `telegram_smoke`)
+
+Модуль (`pytestmark = pytest.mark.timeout(60)`) объединяет opt-in smoke-тесты реальной отправки в
+Telegram Bot API и офлайн-проверки безопасности:
+
+- **Офлайн-проверки (всегда выполняются в `make test`):**
+  - `test_build_sender_rejects_placeholder_and_invalid_tokens` — проверяет, что `build_sender`
+    возвращает `None` для пустого токена, `PLACEHOLDER_TOKEN` и некорректного токена.
+  - `test_notice_text_truncates_titles_and_preserves_plain_text` — проверяет ограничение длины
+    названий (`TITLE_LIMIT = 100`), сохранение спецсимволов (`<script>&"'>`) в открытом тексте и
+    соблюдение лимита Telegram (`4096` символов).
+- **Живые smoke-тесты (`@pytest.mark.telegram_smoke`, зарегистрирован в `pyproject.toml`):**
+  - Автоматически пропускаются (`pytest.mark.skipif`), если не заданы
+    `WISHENKA_TELEGRAM_SMOKE_TOKEN` и целочисленный `WISHENKA_TELEGRAM_SMOKE_CHAT_ID`.
+  - `test_telegram_smoke_delivers_plain_text_with_special_chars_and_truncation` — отправляет
+    реальное уведомление со спецсимволами и длинными названиями (`>100` символов) через
+    `AiogramNoticeSender.send` и ожидает `SendOutcome.DELIVERED`.
+  - `test_telegram_smoke_rejects_invalid_chat` — отправляет сообщение в
+    `WISHENKA_TELEGRAM_SMOKE_INVALID_CHAT_ID` (по умолчанию `0`) и ожидает `SendOutcome.REJECTED` с
+    непустым `error_class`.
+
+Запуск живых smoke-тестов и ручной чек-лист проверки описаны в
+[`doc/dev/notifications.md`](notifications.md#live-telegram-smoke-test--manual-verification-checklist).
+
+### `tests/test_notice_worker_concurrency.py` (гонка двух процессов воркера)
+
+Модуль (`pytestmark = pytest.mark.timeout(120)`) проверяет межпроцессное соревнование двух
+независимых процессов ОС за одну очередь `notification_outbox` поверх файловой WAL SQLite БД:
+
+- **Инициализация:** засевает `10` (`_GIVER_COUNT = 10`) отложенных уведомлений для разных
+  дарителей (`users`, активные `bot_destinations`, `wl_lists`, `wl_items`, `wl_reservations`,
+  `record_item_fulfillment`), чтобы исключить пер-чатовый интервал ограничения скорости.
+- **Конкурентный запуск:** запускает 2 дочерних процесса через `multiprocessing.get_context("spawn")`,
+  синхронизирует их старт на `ctx.Barrier(2)` (`_BARRIER_TIMEOUT = 10`, `_JOIN_TIMEOUT = 15`) и в
+  каждом процессе открывает собственный `WishlistStore` / `NoticeStore` и вызывает
+  `NoticeWorker.run_once(now=...)` с `FakeNoticeSender(sleep=0.01)` для перекрытия I/O.
+- **Инварианты:** нулевые коды выхода, отсутствие ошибок БД и блокировок, ровно `10` доставок без
+  дубликатов и потерь, а все строки `notification_outbox` переходят в `status = 'sent'` с
+  `claim_token IS NULL`, `claimed_at IS NULL` и `attempts = 1`.
+
+Запуск модуля:
+
+```bash
+.venv/bin/pytest tests/test_notice_worker_concurrency.py
+```
+
 ## Известные ограничения
 
 Пункты отслежены в Jira (источники: `ai-tasks/WISHENKA-124/60-tech-debt.md` и `ai-tasks/WISHENKA-110/60-tech-debt.md`):

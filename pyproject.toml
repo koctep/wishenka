@@ -84,4 +84,5 @@ addopts = "-v --strict-markers"
 tmp_path_retention_policy = "failed"
 markers = [
     "browser: tests that drive a real Chromium over CDP",
+    "telegram_smoke: opt-in live Telegram Bot API smoke tests (requires WISHENKA_TELEGRAM_SMOKE_* env vars)",
 ]
