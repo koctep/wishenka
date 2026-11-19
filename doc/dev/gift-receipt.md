@@ -686,11 +686,13 @@ expected.
   (`Markup.format`, which escapes arguments). The notice text with the title is built as a plain
   string and passed to `oob_text` as an argument, so it is escaped too. `receipt.js`
   writes only `textContent` and never server markup.
-- **CSP readiness.** This task adds no inline handler and no inline script. The only script tag
-  is `<script src="/static/receipt.js" defer>` after `wishlist.js`. The inline script of
-  `base.html` is unchanged; a test pins its SHA-256, so an intended edit (WISHENKA-140) needs a
-  conscious hash update in `test_inline_script_is_unchanged_and_free_of_receipt_code`. The
-  pre-existing `onclick` of the archive modal is left under WISHENKA-140.
+- **CSP readiness.** All SSR pages and modal/preview partials contain zero inline `<script>`
+  blocks and zero inline `on*` attributes (completed in WISHENKA-140): `base.html` loads
+  `/static/app.js`, `/static/wishlist.js`, and `/static/receipt.js` with `defer`, and
+  `item_archive_modal.html` uses `data-clear-target="#item-modal-container"` handled via event
+  delegation in `app.js`. `tests/test_receipt_static_script.py` and
+  `tests/test_csp_inline_removal_repro.py` enforce zero inline scripts/handlers and the deferred
+  load order.
 - **Dependency on private names.** `receipts_ui.py` imports `receipts._REFUSALS`
   (`wishenka/web/routes/receipts.py`) and the private helpers `_editor_card_flags`, `_execute`,
   `_items_list_html` from `items_ui.py`. WISHENKA-158 (receipt code split) must keep

@@ -8,7 +8,7 @@
             <button type="button"
                     class="btn-modal-close text-gray-500"
                     aria-label="{{ t('web.common.close', locale|default('en')) }}"
-                    onclick="document.getElementById('item-modal-container').innerHTML = ''">
+                    data-clear-target="#item-modal-container">
                 ✕
             </button>
         </div>
@@ -79,7 +79,8 @@
                     <button type="button"
                             class="btn-step btn-decrement"
                             aria-label="{{ t('web.item.decrease_qty', locale|default('en')) }}"
-                            onclick="var inp = document.getElementById('item-quantity-input'); var v = parseInt(inp.value || '1', 10); if (v > {{ min_quantity }}) { inp.value = v - 1; }">
+                            data-qty-step="-1"
+                            data-qty-target="#item-quantity-input">
                         -
                     </button>
                     <input type="number"
@@ -93,7 +94,8 @@
                     <button type="button"
                             class="btn-step btn-increment"
                             aria-label="{{ t('web.item.increase_qty', locale|default('en')) }}"
-                            onclick="var inp = document.getElementById('item-quantity-input'); var v = parseInt(inp.value || '1', 10); if (v < 1000) { inp.value = v + 1; }">
+                            data-qty-step="1"
+                            data-qty-target="#item-quantity-input">
                         +
                     </button>
                 </div>
@@ -188,7 +190,7 @@
                 <div class="flex gap-2">
                     <button type="button"
                             class="btn-cancel text-sm"
-                            onclick="document.getElementById('item-modal-container').innerHTML = ''">
+                            data-clear-target="#item-modal-container">
                         {{ t('web.common.cancel', locale|default('en')) }}
                     </button>
                     <button type="submit" class="btn-save text-sm font-semibold">

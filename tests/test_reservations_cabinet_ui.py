@@ -517,15 +517,12 @@ def refresh_script_problems(script: str) -> list[str]:
 
 
 def base_script(client: TestClient, wishlist_id: int, headers: dict[str, str]) -> str:
-    """Return inline scripts from a page that extends base.html."""
+    """Return the served ``/static/app.js`` script referenced by pages extending ``base.html``."""
     response = client.get(f"/web/wishlists/{wishlist_id}", headers=headers)
     assert response.status_code == 200, response.text
-    parts: list[str] = []
-    for node in parse_html(response.text).find_all("script"):
-        if node.get("src"):
-            continue
-        parts.append(node.get_text())
-    return "\n".join(parts)
+    srcs = [str(node.get("src")) for node in parse_html(response.text).find_all("script", src=True)]
+    assert "/static/app.js" in srcs, f"/static/app.js not referenced; scripts: {srcs}"
+    return static_script(client, "/static/app.js")
 
 
 def static_script(client: TestClient, path: str) -> str:

@@ -9,11 +9,11 @@ set mirrors ``receipts._REFUSALS`` and the new handlers guard a missing ``xhr``.
 
 from __future__ import annotations
 
-import hashlib
 import re
 from collections.abc import Iterator
 from pathlib import Path
 
+import httpx
 import pytest
 from bs4 import BeautifulSoup
 
@@ -32,14 +32,12 @@ from tests.receipt_ui_support import (
     seed_list,
 )
 from tests.test_wishlist_touch_reorder import strip_js_comments
+from wishenka.items.models import InputType
+from wishenka.items.schemas import ItemPreviewDTO
+from wishenka.items.service import ItemPreviewService
 
 pytestmark = pytest.mark.timeout(30)
 
-# WISHENKA-123 updates the inline script to guard CSRF initialization while preserving the
-# receipt separation invariant.
-# WISHENKA-61 updates the inline script to attach and reuse Idempotency-Key on reservations.
-# Pin the reviewed version until the script is externalized.
-INLINE_SCRIPT_SHA256 = "4bd67e9899494215ccb467579f19248c4fd4c6f722e1e50e2158626745e55865"
 GUARD = re.compile(r"typeof\s+[\w.]*getResponseHeader\s*(?:!==?|===?)\s*['\"]function['\"]")
 REASON_LIKE = re.compile(r"['\"]([a-z]+(?:_[a-z]+)+)['\"]")
 
@@ -105,14 +103,24 @@ def test_pages_load_receipt_script_deferred_after_wishlist_script(env: AppEnv, k
     )
 
 
-def test_inline_script_is_unchanged_and_free_of_receipt_code(env: AppEnv) -> None:
-    """Guard: green today. N-2: the inline script of ``base.html`` is byte-for-byte unchanged."""
+def test_base_has_no_inline_scripts_and_loads_app_script_deferred(env: AppEnv) -> None:
+    """WISHENKA-140: ``base.html`` has zero inline scripts and loads ``/static/app.js`` deferred."""
     soup, _wishlist_id, _item = _owner_page(env)
     inline = [tag.get_text() for tag in soup.find_all("script") if not tag.get("src")]
-    assert len(inline) == 1, f"expected exactly one inline script, found {len(inline)}"
-    assert "receipt" not in inline[0].lower()
-    digest = hashlib.sha256(inline[0].encode("utf-8")).hexdigest()
-    assert digest == INLINE_SCRIPT_SHA256, "the inline script of base.html changed"
+    assert inline == [], f"expected zero inline scripts, found {len(inline)}"
+
+    tags = soup.find_all("script", src=True)
+    sources = [str(tag["src"]) for tag in tags]
+    assert "/static/app.js" in sources, f"app.js not referenced; scripts: {sources}"
+    app_idx = sources.index("/static/app.js")
+    assert tags[app_idx].has_attr("defer")
+    htmx_idx = next(i for i, src in enumerate(sources) if "htmx.org" in src)
+    assert app_idx > htmx_idx
+    assert app_idx < sources.index("/static/wishlist.js")
+    assert app_idx < sources.index("/static/receipt.js")
+
+    app_js = strip_js_comments(_static(env, "app.js"))
+    assert "/receipt" not in app_js.lower()
 
 
 def test_single_ajax_call_in_each_script(env: AppEnv) -> None:
@@ -123,14 +131,62 @@ def test_single_ajax_call_in_each_script(env: AppEnv) -> None:
     assert receipt.count("htmx.ajax(") == 1
 
 
-def test_pages_and_partials_carry_no_inline_handlers(env: AppEnv) -> None:
-    """N-2: the owner page (with receipts) and the receipt dialog have no ``on*`` attribute."""
+def test_pages_and_partials_carry_no_inline_handlers(
+    env: AppEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owner page, settings page, receipt dialog, and modal/preview partials have no ``on*``."""
     client, sessions, _app = env
     soup, wishlist_id, item_id = _owner_page(env)
     assert on_attributes(soup) == []
-    dialog = client.get(modal_url(wishlist_id, item_id), headers=hx(sessions))
-    assert dialog.status_code == 200, "receipt dialog route missing"
-    assert on_attributes(parse(dialog.text)) == []
+
+    settings_resp = client.get("/settings", headers=hx(sessions))
+    assert settings_resp.status_code == 200, f"/settings returned {settings_resp.status_code}"
+    settings_soup = parse(settings_resp.text)
+    assert on_attributes(settings_soup) == [], "/settings has inline on* attributes"
+    settings_inline = [
+        tag.get_text() for tag in settings_soup.find_all("script") if not tag.get("src")
+    ]
+    assert settings_inline == [], "/settings has inline <script> tags"
+    settings_tags = settings_soup.find_all("script", src=True)
+    settings_sources = [str(tag["src"]) for tag in settings_tags]
+    assert "/static/settings.js" in settings_sources
+    assert settings_tags[settings_sources.index("/static/settings.js")].has_attr("defer")
+    assert "javascript" in client.get("/static/settings.js").headers["content-type"]
+
+    for url in (
+        modal_url(wishlist_id, item_id),
+        f"/web/wishlists/{wishlist_id}/items/{item_id}/edit",
+        f"/web/wishlists/{wishlist_id}/items/{item_id}/archive-confirm",
+    ):
+        resp = client.get(url, headers=hx(sessions))
+        assert resp.status_code == 200, f"{url} returned {resp.status_code}"
+        assert on_attributes(parse(resp.text)) == [], f"{url} has inline on* attributes"
+
+    async def mock_fetch_preview(
+        self: ItemPreviewService,
+        raw_input: str,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> ItemPreviewDTO:
+        return ItemPreviewDTO(
+            input_type=InputType.EXPLICIT_URL,
+            url="https://example.com/gift",
+            title="Gift",
+            description="Nice gift",
+            image_url=None,
+            price=100,
+            currency="RUB",
+            store_name="Example",
+            is_fallback=False,
+        )
+
+    monkeypatch.setattr(ItemPreviewService, "fetch_preview", mock_fetch_preview)
+    preview = client.post(
+        f"/web/wishlists/{wishlist_id}/items/preview",
+        data={"raw_input": "https://example.com/gift"},
+        headers=hx(sessions),
+    )
+    assert preview.status_code == 200, preview.text
+    assert on_attributes(parse(preview.text)) == []
 
 
 def test_marker_namespaces_never_meet(env: AppEnv) -> None:

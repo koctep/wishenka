@@ -324,7 +324,7 @@ directory structure follows a modular component layout:
 
 ```
 wishenka/web/templates/
-├── base.html             # Master layout with viewport, CSS, Telegram SDK, HTMX, wishlist.js
+├── base.html             # Master layout with viewport, CSS, Telegram SDK, HTMX, deferred static JS
 ├── share_wishlist.html   # Full page public view for gifters and recipients
 ├── invite_preview.html   # Full page collaborator preview and friendly error screen
 └── partials/
@@ -333,21 +333,28 @@ wishenka/web/templates/
     └── share_modal.html  # Modal dialog for link sharing and regeneration
 
 wishenka/web/static/
+├── app.js                # Global CSRF, HTMX lifecycle, card/cabinet refresh, delegated modal/preview clicks (loaded by base.html)
 ├── miniapp.css           # Shared styles
 ├── miniapp.js            # Mini App SPA script (loaded only by the Mini App shell)
+├── receipt.js            # Gift receipt dialog and focus trap (loaded by base.html)
+├── settings.js           # Profile settings page controller (loaded by settings.html)
 └── wishlist.js           # Card toggle, mouse and touch drag-and-drop reorder (loaded by base.html)
 ```
 
 #### Template Specifications
 
 1. **`base.html`**:
-   - Master document providing HTML5 doctype, UTF-8 charset, responsive viewport metadata.
-   - Loads Telegram Web App SDK (`telegram-web-app.js`) and HTMX 1.9.12 runtime.
-   - Loads the static script `<script src="/static/wishlist.js" defer>` after HTMX. It owns the
-     wish-card toggle and drag-and-drop reorder (native drag for mouse, Pointer Events for touch);
-     the wishlist id for reordering comes from `data-wishlist-id` on `#items-list` (`wishlist_detail.html` and `share_wishlist.html`).
-     Details: [miniapp.md](miniapp.md#981-client-script-staticwishlistjs-wishenka-108).
-     The CSRF and reservation handlers stay in one inline script in `base.html`.
+   - Master document providing HTML5 doctype, UTF-8 charset, responsive viewport metadata, and
+     zero inline `<script>` blocks.
+   - Loads Telegram Web App SDK (`telegram-web-app.js`), HTMX 1.9.12 (`htmx.org@1.9.12`), and
+     `json-enc.js`, followed by deferred static scripts in order: `/static/app.js`,
+     `/static/wishlist.js`, and `/static/receipt.js`.
+   - `static/app.js` owns CSRF token preparation (`window.prepareCsrf`), HTMX reservation/modal
+     hooks, `swapWishCard`, and delegated `[data-clear-target]` / `[data-qty-step][data-qty-target]`
+     click handlers; `static/wishlist.js` owns the wish-card toggle and drag-and-drop reorder
+     (reading `data-wishlist-id` on `#items-list` in `wishlist_detail.html` and `share_wishlist.html`).
+     Details: [miniapp.md](miniapp.md#981-client-script-staticwishlistjs-wishenka-108) and
+     [miniapp.md](miniapp.md#982-global-app-script-staticappjs-settings-script-staticsettingsjs-and-strict-csp-readiness-wishenka-140).
    - Provides Jinja2 template extension blocks: `{% block title %}` and `{% block content %}`.
 
 2. **`share_wishlist.html`**:

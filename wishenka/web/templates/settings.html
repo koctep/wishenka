@@ -3,7 +3,15 @@
 {% block title %}{{ t('settings.page_title', locale) }}{% endblock %}
 
 {% block content %}
-<div class="settings-page">
+<div class="settings-page"
+     data-i18n-saved="{{ t('settings.saved', locale) }}"
+     data-i18n-birthdate-source-explicit="{{ t('settings.birthdate_source_explicit', locale) }}"
+     data-i18n-invalid-birthdate="{{ t('settings.invalid_birthdate', locale) }}"
+     data-i18n-invalid-notification="{{ t('settings.invalid_notification_setting', locale) }}"
+     data-i18n-state-enabled="{{ t('settings.state.enabled', locale) }}"
+     data-i18n-state-disabled="{{ t('settings.state.disabled', locale) }}"
+     data-i18n-delete-completed="{{ t('settings.delete_completed', locale) }}"
+     data-i18n-delete-failed="{{ t('settings.delete_failed', locale) }}">
     <p class="mb-4">
         <a href="/" class="back-link">{{ t('settings.back_home', locale) }}</a>
     </p>
@@ -42,7 +50,7 @@
                 {{ t('settings.birthdate_source_explicit' if birthdate.source == 'explicit' else 'settings.birthdate_source_auto', locale) }}
             </strong>
         </p>
-        <form id="birthdate-form" class="birthdate-form" onsubmit="return saveBirthdate(event)">
+        <form id="birthdate-form" class="birthdate-form">
             <label>
                 {{ t('settings.birthdate_day', locale) }}
                 <input type="number" id="birth-day" name="day" min="1" max="31" value="{{ birthdate.day or '' }}" required>
@@ -56,7 +64,7 @@
                 <input type="number" id="birth-year" name="year" min="1900" max="2100" value="{{ birthdate.year or '' }}">
             </label>
             <button type="submit">{{ t('settings.birthdate_save', locale) }}</button>
-            <button type="button" onclick="clearBirthdate()">{{ t('settings.birthdate_clear', locale) }}</button>
+            <button id="birthdate-clear-btn" type="button">{{ t('settings.birthdate_clear', locale) }}</button>
         </form>
         <p id="birthdate-feedback" role="status" aria-live="polite"></p>
     </section>
@@ -67,8 +75,9 @@
         <label class="toggle-row">
             <input type="checkbox"
                    id="toggle-birthday-reminders"
-                   {% if birthday_reminders %}checked{% endif %}
-                   onchange="updateGlobalNotification('birthday_reminders', this.checked, 'birthday-reminders-feedback')">
+                   data-global-category="birthday_reminders"
+                   data-feedback-target="birthday-reminders-feedback"
+                   {% if birthday_reminders %}checked{% endif %}>
             <span>{{ t('settings.birthday_reminders_label', locale) }}</span>
         </label>
         <p id="birthday-reminders-feedback" role="status" aria-live="polite"></p>
@@ -82,8 +91,8 @@
             <label class="toggle-row">
                 <input type="checkbox"
                        data-global-category="{{ cat }}"
-                       {% if global_notifications.get(cat) %}checked{% endif %}
-                       onchange="updateGlobalNotification('{{ cat }}', this.checked, 'global-notifications-feedback')">
+                       data-feedback-target="global-notifications-feedback"
+                       {% if global_notifications.get(cat) %}checked{% endif %}>
                 <span>{{ t('settings.category.' ~ cat, locale) }}</span>
             </label>
             {% endfor %}
@@ -107,7 +116,9 @@
                 <div class="wishlist-pref-row" data-wishlist-id="{{ wl.id }}" data-category="{{ cat }}">
                     <span class="pref-category">{{ t('settings.category.' ~ cat, locale) }}</span>
                     <select aria-label="{{ wl.title }} — {{ t('settings.category.' ~ cat, locale) }}"
-                            onchange="updateWishlistOverride({{ wl.id }}, '{{ cat }}', this.value, this)">
+                            data-wishlist-override
+                            data-wishlist-id="{{ wl.id }}"
+                            data-category="{{ cat }}">
                         <option value="inherit" {% if ov is none %}selected{% endif %}>{{ t('settings.state.inherit', locale) }}</option>
                         <option value="true" {% if ov is sameas true %}selected{% endif %}>{{ t('settings.state.enabled', locale) }}</option>
                         <option value="false" {% if ov is sameas false %}selected{% endif %}>{{ t('settings.state.disabled', locale) }}</option>
@@ -129,7 +140,7 @@
         <h2 id="delete-account-heading">{{ t('settings.delete_account_heading', locale) }}</h2>
         <p>{{ t('settings.delete_account_description', locale) }}</p>
         <div id="delete-account-entry">
-            <button id="delete-account-start-btn" type="button" onclick="openDeletionPreview()">
+            <button id="delete-account-start-btn" type="button">
                 {{ t('settings.delete_account_button', locale) }}
             </button>
         </div>
@@ -142,10 +153,10 @@
                 <li>{{ t('settings.delete_summary_reservations', locale) }} <strong id="impact-reservations">0</strong></li>
             </ul>
             <div class="delete-actions">
-                <button id="delete-account-confirm-btn" type="button" onclick="confirmAccountDeletion()">
+                <button id="delete-account-confirm-btn" type="button">
                     {{ t('settings.delete_confirm_button', locale) }}
                 </button>
-                <button id="delete-account-cancel-btn" type="button" onclick="cancelDeletionPreview()">
+                <button id="delete-account-cancel-btn" type="button">
                     {{ t('settings.delete_cancel_button', locale) }}
                 </button>
             </div>
@@ -154,117 +165,5 @@
     </section>
 </div>
 
-<script>
-async function settingsFetch(url, method, body) {
-    var token = typeof prepareCsrf === 'function' ? await prepareCsrf() : '';
-    var headers = { 'Content-Type': 'application/json' };
-    if (token) { headers['X-CSRF-Token'] = token; }
-    return fetch(url, {
-        method: method,
-        credentials: 'same-origin',
-        headers: headers,
-        body: JSON.stringify(body)
-    });
-}
-
-async function saveBirthdate(evt) {
-    evt.preventDefault();
-    var dayVal = parseInt(document.getElementById('birth-day').value, 10);
-    var monthVal = parseInt(document.getElementById('birth-month').value, 10);
-    var yearRaw = document.getElementById('birth-year').value.trim();
-    var yearVal = yearRaw ? parseInt(yearRaw, 10) : null;
-    var feedback = document.getElementById('birthdate-feedback');
-    var resp = await settingsFetch('/api/profile/birthdate', 'PATCH', {
-        day: dayVal, month: monthVal, year: yearVal
-    });
-    if (resp.ok) {
-        feedback.textContent = '{{ t("settings.saved", locale) }}';
-        document.getElementById('birthdate-source-label').textContent = '{{ t("settings.birthdate_source_explicit", locale) }}';
-    } else {
-        var err = await resp.json().catch(function () { return {}; });
-        feedback.textContent = err.detail || '{{ t("settings.invalid_birthdate", locale) }}';
-    }
-    return false;
-}
-
-async function clearBirthdate() {
-    var feedback = document.getElementById('birthdate-feedback');
-    var resp = await settingsFetch('/api/profile/birthdate', 'PATCH', { clear: true });
-    if (resp.ok) {
-        document.getElementById('birth-day').value = '';
-        document.getElementById('birth-month').value = '';
-        document.getElementById('birth-year').value = '';
-        document.getElementById('birthdate-source-label').textContent = '{{ t("settings.birthdate_source_explicit", locale) }}';
-        feedback.textContent = '{{ t("settings.saved", locale) }}';
-    }
-}
-
-async function updateGlobalNotification(category, enabled, feedbackId) {
-    var feedback = document.getElementById(feedbackId);
-    var payload = { settings: {} };
-    payload.settings[category] = enabled;
-    var resp = await settingsFetch('/api/profile/notifications/global', 'PUT', payload);
-    if (resp.ok) {
-        feedback.textContent = '{{ t("settings.saved", locale) }}';
-    } else {
-        var err = await resp.json().catch(function () { return {}; });
-        feedback.textContent = err.detail || '{{ t("settings.invalid_notification_setting", locale) }}';
-    }
-}
-
-async function updateWishlistOverride(wishlistId, category, rawVal) {
-    var feedback = document.getElementById('wishlist-notifications-feedback');
-    var val = rawVal === 'inherit' ? null : (rawVal === 'true');
-    var payload = { overrides: {} };
-    payload.overrides[category] = val;
-    var resp = await settingsFetch('/api/profile/notifications/wishlists/' + wishlistId, 'PUT', payload);
-    if (resp.ok) {
-        var data = await resp.json();
-        var badge = document.querySelector('[data-effective-for="' + wishlistId + '-' + category + '"] strong');
-        if (badge && data.effective && data.effective[category]) {
-            badge.textContent = data.effective[category].enabled
-                ? '{{ t("settings.state.enabled", locale) }}'
-                : '{{ t("settings.state.disabled", locale) }}';
-        }
-        feedback.textContent = '{{ t("settings.saved", locale) }}';
-    } else {
-        var err = await resp.json().catch(function () { return {}; });
-        feedback.textContent = err.detail || '{{ t("settings.invalid_notification_setting", locale) }}';
-    }
-}
-
-async function openDeletionPreview() {
-    var feedback = document.getElementById('delete-account-feedback');
-    feedback.textContent = '';
-    var resp = await fetch('/api/profile/deletion-preview', { credentials: 'same-origin' });
-    if (!resp.ok) {
-        feedback.textContent = '{{ t("settings.delete_failed", locale) }}';
-        return;
-    }
-    var data = await resp.json();
-    document.getElementById('impact-personal').textContent = String(data.personal_lists_count || 0);
-    document.getElementById('impact-transferred').textContent = String(data.collaborative_transferred_count || 0);
-    document.getElementById('impact-collab-deleted').textContent = String(data.collaborative_deleted_count || 0);
-    document.getElementById('impact-reservations').textContent = String(data.reservations_count || 0);
-    document.getElementById('delete-account-confirm-panel').hidden = false;
-}
-
-function cancelDeletionPreview() {
-    document.getElementById('delete-account-confirm-panel').hidden = true;
-    document.getElementById('delete-account-feedback').textContent = '';
-}
-
-async function confirmAccountDeletion() {
-    var feedback = document.getElementById('delete-account-feedback');
-    var resp = await settingsFetch('/api/profile/delete', 'POST', { confirm: true });
-    if (resp.ok) {
-        document.getElementById('delete-account-confirm-panel').hidden = true;
-        document.getElementById('delete-account-entry').hidden = true;
-        feedback.textContent = '{{ t("settings.delete_completed", locale) }}';
-    } else {
-        var err = await resp.json().catch(function () { return {}; });
-        feedback.textContent = err.detail || '{{ t("settings.delete_failed", locale) }}';
-    }
-}
-</script>
+<script src="/static/settings.js" defer></script>
 {% endblock %}

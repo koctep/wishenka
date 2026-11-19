@@ -501,10 +501,9 @@ def _restores_open_details(after_swap: str, flag: str) -> bool:
     return conditional_clear and sets_true is not None
 
 
-def assert_expanded_refresh_clears_hidden(page_html: str) -> None:
-    """Require the served page to reopen details after a successful card swap."""
-    script = inline_script(page_html)
-    assert "swapWishCard" in script, "could not read the served page script"
+def assert_expanded_refresh_clears_hidden(script: str) -> None:
+    """Require the served app script to reopen details after a successful card swap."""
+    assert "swapWishCard" in script, "could not read swapWishCard in served app.js"
     swap_at = script.find("outerHTML")
     assert swap_at != -1, "served page has no outerHTML refresh; expanded details stay hidden"
     reads = list(_ARIA_READ.finditer(script, 0, swap_at))
@@ -854,7 +853,10 @@ def test_expanded_refresh_clears_hidden_on_details(
     seeded = seed_personal(app.state.domain_service, quantity=1)
     headers = auth_header(sessions, _FRIEND_ID, "Bob")
     html = list_html(client, seeded.wishlist_id, headers)
-    assert_expanded_refresh_clears_hidden(html)
+    assert "/static/app.js" in html
+    app_js = client.get("/static/app.js")
+    assert app_js.status_code == 200, app_js.text
+    assert_expanded_refresh_clears_hidden(app_js.text)
 
 
 def test_recipient_notice_refresh_has_no_booking_sentence(

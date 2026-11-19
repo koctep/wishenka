@@ -586,10 +586,9 @@ no globals (`toggleWishCard` is no longer a global function).
 - **Caching**: `BrowserSecurityMiddleware` sends `Cache-Control: no-store` on every response,
   including `/static/*`, so `wishlist.js` is downloaded on each page load and a fix reaches users
   at once. No cache-busting URL is used. Revisiting the policy is WISHENKA-139.
-- **Still inline**: `base.html` keeps one inline `<script>` (CSRF fetch, reservation handlers,
-  `swapWishCard`), and the modal partials keep inline `onclick` handlers
-  (`item_edit_modal.html`, `item_archive_modal.html`, `item_preview_card.html`). Moving them out
-  is WISHENKA-140.
+- **Inline script & handlers removed (WISHENKA-140)**: `base.html` no longer embeds an inline
+  `<script>` (moved to `static/app.js`), and `item_edit_modal.html`, `item_archive_modal.html`, and
+  `item_preview_card.html` no longer use inline `onclick` attributes. See section 9.8.2 below.
 - **Known limits**: the reorder URL `/web/wishlists/{id}/items/reorder` is hardcoded in the script
   (WISHENKA-141). See also "Touch limits" below.
 - **Touch reorder (WISHENKA-109)**: HTML5 drag events do not fire on most touch devices, so the
@@ -682,14 +681,71 @@ no globals (`toggleWishCard` is no longer a global function).
   (WISHENKA-109) checks the four Telegram SDK tokens in `wishlist.js`, `-webkit-touch-callout: none`,
   that the summary does not block touch scrolling, the single `submitReorder` call point and the
   markup of `partials/item_card.html` (the handle is in the summary only for editors).
-- **Related debts**: WISHENKA-139 (`no-store` caching of the growing `wishlist.js`), WISHENKA-140
-  (inline scripts; reuse the Telegram SDK wrapper), WISHENKA-141 (hardcoded reorder URL; the change
+- **Related debts**: WISHENKA-139 (`no-store` caching of static JS), WISHENKA-140 (completed:
+  inline JS and `onclick` extraction to `static/app.js`), WISHENKA-141 (hardcoded reorder URL; the change
   stays inside `submitReorder`), WISHENKA-142 (list jump when an expanded card is dragged),
   WISHENKA-143 (real-device checklist), WISHENKA-144 (tidying), WISHENKA-145 (real htmx smoke test
   instead of the stub), WISHENKA-146 (shared CDP driver for the older browser modules, `websockets`
   range), WISHENKA-147 (CI upload of failure diagnostics). UI debts of the receipt story:
   WISHENKA-160 (completed: modal CSS layering, `htmx:beforeSwap`, OOB/retarget error contracts)
   and WISHENKA-161 to 165 (list in [gift-receipt.md](gift-receipt.md#follow-up-tickets-of-the-ui)).
+
+##### 9.8.2. Global App Script (`static/app.js`), Settings Script (`static/settings.js`), and Strict CSP Readiness (WISHENKA-140)
+
+[`wishenka/web/static/app.js`](../../wishenka/web/static/app.js) and
+[`wishenka/web/static/settings.js`](../../wishenka/web/static/settings.js) complete the extraction
+of inline JavaScript and inline `on*` event handlers from SSR templates so a strict
+`Content-Security-Policy` without `'unsafe-inline'` for scripts can be enforced.
+
+- **Static JS architecture and `defer` load order**:
+  - `wishenka/web/templates/base.html` loads external and static classic scripts in order:
+    `telegram-web-app.js`, `htmx.org@1.9.12`, `json-enc.js`, `<script src="/static/app.js" defer>`,
+    `<script src="/static/wishlist.js" defer>`, and `<script src="/static/receipt.js" defer>`.
+  - `wishenka/web/templates/settings.html` extends `base.html` and appends
+    `<script src="/static/settings.js" defer></script>` at the end of `{% block content %}` so it
+    executes after `/static/app.js`.
+  - Both `app.js` and `settings.js` are wrapped in an IIFE with `'use strict'` and JSDoc
+    annotations, emitting no `console.log` or `console.debug` statements.
+- **`window.prepareCsrf` bridge**:
+  - `app.js` manages CSRF token fetching, 10 s timeout (`CSRF_TIMEOUT_MS = 10000`), and in-flight
+    deduplication via `prepareCsrf()`, and explicitly exposes `window.prepareCsrf = prepareCsrf`.
+  - `settings.js` (`settingsFetch()`) calls `window.prepareCsrf()` before `PATCH`/`PUT`/`POST`
+    requests on `/settings` and attaches `X-CSRF-Token`. Because both scripts load with `defer`
+    in order and `settingsFetch()` runs inside user-triggered event handlers, `window.prepareCsrf`
+    is always initialized before invocation.
+- **`<body>` and `.settings-page` `data-*` contracts**:
+  - `<body>` in `base.html` provides `data-viewer-identified="true"` (when authenticated/identified,
+    enabling `prepareCsrf()`, `htmx:confirm` queuing, and `X-CSRF-Token` / `Idempotency-Key`
+    injection in `app.js`) and localized fallback strings: `data-i18n-prepare-error`,
+    `data-i18n-busy-error`, `data-i18n-receipt-failure`, `data-i18n-receipt-summary`,
+    `data-i18n-item-unavailable`, and `data-i18n-list-changed`.
+  - `.settings-page` in `settings.html` provides localized strings read by `settings.js` via
+    `getI18n()`: `data-i18n-saved`, `data-i18n-birthdate-source-explicit`,
+    `data-i18n-invalid-birthdate`, `data-i18n-invalid-notification`, `data-i18n-state-enabled`,
+    `data-i18n-state-disabled`, `data-i18n-delete-completed`, and `data-i18n-delete-failed`.
+- **Delegated click handlers (`handleDelegatedClick` in `app.js`)**:
+  - Replaces all six inline `onclick` attributes across three dynamically swapped partials using a
+    single `document.addEventListener('click', handleDelegatedClick)` listener:
+    - `[data-clear-target]`: queries the target selector and sets `container.innerHTML = ''`. Used
+      by `partials/item_edit_modal.html` (`.btn-modal-close`, `.btn-cancel` ->
+      `#item-modal-container`), `partials/item_archive_modal.html` (`.btn-modal-close` ->
+      `#item-modal-container`), and `partials/item_preview_card.html` (`.btn-preview-dismiss` ->
+      `#quick-add-preview-target`).
+    - `[data-qty-step][data-qty-target]`: reads `data-qty-step` (`-1` or `1`) and steps the target
+      `<input>` (`#item-quantity-input` in `partials/item_edit_modal.html`), clamping to
+      `[min, max]` with `DEFAULT_QTY_MIN = 1` and `DEFAULT_QTY_MAX = 1000` and falling back to `min`
+      when the input value is empty or `NaN`.
+- **Zero-inline-script / zero-inline-handler CSP readiness invariant and regression tests**:
+  - Rendered HTML pages (`base.html` descendants) and dynamically loaded fragments must contain
+    zero inline `<script>` elements (without `src`) and zero inline `on*` event-handler
+    attributes.
+  - `tests/test_csp_inline_removal_repro.py` verifies `/static/app.js` and `/static/settings.js`
+    HTTP serving, zero inline scripts/handlers on owner (`/web/wishlists/{id}`) and public share
+    (`/share/{token}`) pages, `defer` script order, and zero `on*` attributes plus `data-*`
+    controls on `item_edit_modal.html`, `item_archive_modal.html`, and `item_preview_card.html`.
+  - `tests/test_receipt_static_script.py` enforces zero inline `<script>` elements on `base.html`
+    pages, verifies `/static/app.js` serving and `defer` order, and preserves isolation of
+    `X-Reorder-Refusal` (`wishlist.js`) and `X-Receipt-Refusal` (`receipt.js`).
 
 #### 9.9. Modal CSS Layering, `htmx:beforeSwap` & OOB Error Contracts (WISHENKA-160)
 
@@ -706,9 +762,9 @@ no globals (`toggleWishCard` is no longer a global function).
 - **Inline Archive Target (`partials/item_edit_modal.html`)**:
   - `.btn-archive-item` carries `hx-target="#item-modal-container"` and `hx-swap="none"` so
     archive OOB responses never overwrite the button element itself.
-- **Scoped `htmx:beforeSwap` 4xx/5xx Opt-In (`base.html`)**:
+- **Scoped `htmx:beforeSwap` 4xx/5xx Opt-In (`static/app.js`)**:
   - `htmx.org@1.9.12` sets `detail.shouldSwap = false` and `detail.isError = true` for any
-    response with `status >= 400`. `base.html` registers a scoped `htmx:beforeSwap` listener that
+    response with `status >= 400`. `static/app.js` registers a scoped `htmx:beforeSwap` listener that
     sets `detail.shouldSwap = true` and `detail.isError = false` only when `xhr.status >= 400`,
     `Content-Type` includes `text/html`, and one of the following holds:
     1. `detail.target.id` is `item-modal-container`, `item-edit-sheet`, or `item-archive-modal`;
@@ -717,7 +773,7 @@ no globals (`toggleWishCard` is no longer a global function).
        fragment for `id="item-modal-container"`.
   - **Explicit Exclusions**: Responses carrying `X-Reorder-Refusal` (handled by `wishlist.js`
     `htmx:responseError`), `X-Receipt-Refusal` (handled by `receipt.js` `htmx:beforeSwap`),
-    requests matching `reservationRequestPath(detail.elt)` (handled by `base.html`
+    requests matching `reservationRequestPath(detail.elt)` (handled by `static/app.js`
     `htmx:afterRequest`), and non-HTML (e.g., JSON) responses are left untouched.
 - **Server Error Response Contracts (`wishenka/web/routes/items_ui.py`)**:
   - **Recoverable edit-modal errors (`400` validation, `409` Reduction Lock, `503` Busy)**:

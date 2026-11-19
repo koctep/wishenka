@@ -32,7 +32,7 @@
                 <button type="submit" class="btn-confirm-archive">{{ t('web.item.archive_btn', locale|default('en')) }}</button>
                 <button type="button"
                         class="btn-modal-close"
-                        onclick="document.getElementById('item-modal-container').innerHTML = ''">
+                        data-clear-target="#item-modal-container">
                     {{ t('web.common.cancel', locale|default('en')) }}
                 </button>
             </div>

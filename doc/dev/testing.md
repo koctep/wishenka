@@ -316,9 +316,10 @@ XHR; проверки `assert_clean_console` упали бы под настоя
 `test_receipt_card_ui.py`, `test_gifted_section_ui.py`, `test_cabinet_received_marker.py`,
 `test_receipt_static_script.py`, `test_receipt_ui_observability.py`, помощник
 `tests/receipt_ui_support.py`; описание: `doc/dev/gift-receipt.md`, раздел «Mini App UI
-(WISHENKA-24)». Хеш SHA-256 встроенного скрипта `base.html` закреплён тестом
-`test_inline_script_is_unchanged_and_free_of_receipt_code`: осознанная правка скрипта
-(WISHENKA-140) требует обновить хеш.
+(WISHENKA-24)». Отсутствие встроенных `<script>` и `on*`-атрибутов в страницах и фрагментах
+(`base.html`, модалки и preview), а также раздача `/static/app.js` и `/static/settings.js` и
+порядок `defer`-скриптов проверяются тестами `tests/test_csp_inline_removal_repro.py` и
+`tests/test_receipt_static_script.py` (WISHENKA-140).
 
 Модуль `tests/test_receipt_accessibility_browser.py` (`pytestmark = [pytest.mark.timeout(45),
 pytest.mark.browser]`, 5 тестов, мобильный viewport `390x844`) проверяет доработки
