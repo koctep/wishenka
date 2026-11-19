@@ -413,7 +413,7 @@ class TestMultiQuantityInvariants:
     async def test_partial_reservations_by_multiple_independent_gifters(
         self,
     ) -> None:
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(10, "Alice")
         gifter1 = make_user(20, "Bob")
         gifter2 = make_user(30, "Charlie")

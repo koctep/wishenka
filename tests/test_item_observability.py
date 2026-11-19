@@ -305,7 +305,7 @@ class TestItemObservability:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Item creation and quantity updates emit structured events with deltas and warnings."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Bob")
 

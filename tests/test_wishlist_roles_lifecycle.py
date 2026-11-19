@@ -190,7 +190,7 @@ class TestRoleModelPermissions:
     @pytest.mark.asyncio
     async def test_service_enforces_role_authorization_failures(self) -> None:
         """Service layer rejects unauthorized operations with PermissionDeniedError."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         admin = make_user(1002, "Bob")
         member = make_user(1003, "Charlie")
@@ -356,7 +356,7 @@ class TestSurpriseInvariantZeroLeak:
     @pytest.mark.asyncio
     async def test_zero_leak_projection_omits_reservation_data(self) -> None:
         """Surprise Invariant: Recipient view DTO completely strips reservation details."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         recipient_user = make_user(1001, "Alice")
         gifter_user = make_user(2001, "Dave")
 
@@ -432,7 +432,7 @@ class TestLifecycleTransitions:
     @pytest.mark.asyncio
     async def test_personal_to_collaborative_transitions_based_on_members(self) -> None:
         """Personal wishlist becomes collaborative when a collaborator joins, reverts if alone."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         member = make_user(1002, "Bob")
 
@@ -481,7 +481,7 @@ class TestLifecycleTransitions:
     @pytest.mark.asyncio
     async def test_active_to_archived_lifecycle_blocks_mutations_and_reservations(self) -> None:
         """Archiving a wishlist locks item additions and prevents new reservations."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Dave")
 
@@ -529,7 +529,7 @@ class TestLifecycleTransitions:
     @pytest.mark.asyncio
     async def test_deleted_lifecycle_invalidates_tokens_and_cancels_reservations(self) -> None:
         """Soft-deleting a wishlist cancels all active reservations and blocks access."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Dave")
 
@@ -570,7 +570,7 @@ class TestSharingTokens:
         self,
     ) -> None:
         """Public token gives Gifter view and keeps invite token secret."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         wishlist = await service.create_wishlist(owner=owner, title="Public Wishlist")
 
@@ -590,7 +590,7 @@ class TestSharingTokens:
     @pytest.mark.asyncio
     async def test_invite_token_joins_as_member_never_admin(self) -> None:
         """Joining via invite token always assigns Member role, never Admin."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         joiner = make_user(3001, "Charlie")
 
@@ -607,7 +607,7 @@ class TestSharingTokens:
     @pytest.mark.asyncio
     async def test_invite_token_expiration(self) -> None:
         """Expired invite token is rejected with InvalidInviteTokenError."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         joiner = make_user(3002, "Eve")
 
@@ -627,7 +627,7 @@ class TestSharingTokens:
     @pytest.mark.asyncio
     async def test_token_regeneration_invalidates_old_tokens(self) -> None:
         """Regenerating public or invite tokens invalidates old tokens immediately."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         joiner = make_user(3003, "Frank")
 
@@ -674,7 +674,7 @@ class TestWishlistAuditLogging:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Wishlist creation emits structured INFO log with format and time type."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         event_dt = datetime(2027, 5, 20, 12, 0, tzinfo=UTC)
 
@@ -706,7 +706,7 @@ class TestWishlistAuditLogging:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Member role assignment, invite join, and removal emit structured INFO audit logs."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         joiner = make_user(2002, "Bob")
         member_c = make_user(3003, "Charlie")
@@ -750,7 +750,7 @@ class TestWishlistAuditLogging:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Regenerating tokens logs event and actor without leaking raw token strings."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         wl = await service.create_wishlist(owner=owner, title="Security List")
 
@@ -780,7 +780,7 @@ class TestWishlistAuditLogging:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Lifecycle transitions (archive, unarchive, delete, transfer) emit audit logs."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         collaborator = make_user(2002, "Bob")
         wl = await service.create_wishlist(owner=owner, title="Lifecycle Audit")
@@ -834,7 +834,7 @@ class TestWishlistAuditLogging:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Reservation action emits structured INFO audit log with item, gifter, and quantity."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter = make_user(3003, "Dave")
         wl = await service.create_wishlist(owner=owner, title="Gifts")
@@ -867,7 +867,7 @@ class TestWishlistAuditLogging:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Access violations and surprise invariant breaches emit WARNING level logs."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         member = make_user(2002, "Bob")
         wl = await service.create_wishlist(owner=owner, title="Protected List")

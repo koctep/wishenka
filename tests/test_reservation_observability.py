@@ -33,7 +33,7 @@ class TestReservationObservability:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """create_reservation must emit structured item_reserved INFO log with context."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Bob")
 
@@ -68,7 +68,7 @@ class TestReservationObservability:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """mark_reservation_purchased must emit structured reservation_purchased INFO log."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Bob")
 
@@ -109,7 +109,7 @@ class TestReservationObservability:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """revert_reservation_to_active must emit structured reservation_reverted INFO log."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Bob")
 
@@ -151,7 +151,7 @@ class TestReservationObservability:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """cancel_reservation must emit structured reservation_cancelled INFO log."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Bob")
 
@@ -192,7 +192,7 @@ class TestReservationObservability:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """update_reservation_quantity must emit reservation_quantity_updated INFO log."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Bob")
 
@@ -235,7 +235,7 @@ class TestReservationObservability:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """record_item_fulfillment must emit structured item_fulfilled INFO log with context."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
 
         wl = await service.create_wishlist(owner=owner, title="Wedding Registry")
@@ -275,7 +275,7 @@ class TestReservationObservability:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Self-reservation attempt by recipient must emit self_reservation_blocked WARNING."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         recipient = make_user(2002, "Bob")
 
@@ -315,7 +315,7 @@ class TestReservationObservability:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Exceeding available balance must emit insufficient_quantity_blocked WARNING."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter = make_user(3003, "Charlie")
 
@@ -387,7 +387,7 @@ class TestReservationObservability:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Surprise Invariant: Recipient interactions must never leak reservation details."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter1 = make_user(2001, "Bob")
         gifter2 = make_user(2002, "Charlie")

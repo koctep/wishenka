@@ -46,7 +46,7 @@ _NEW_REFUSALS = {"QuantityInvalidError", "QuantityAboveRemainingError", "Nothing
 
 
 async def _setup(quantity: int | None = 5, **kwargs: Any) -> tuple[WishlistService, int, int]:
-    service = WishlistService()
+    service = WishlistService.in_memory()
     wishlist_id, item_id = await seed_wish(service, quantity=quantity, **kwargs)
     return service, wishlist_id, item_id
 
@@ -231,7 +231,7 @@ async def test_reduction_lock_after_receipt() -> None:
 
 async def test_views_share_one_active_predicate() -> None:
     """R-4.1, R-4.6: view, list, reorder, restore tail and projection agree on 'active'."""
-    service = WishlistService()
+    service = WishlistService.in_memory()
     wishlist_id, partly_id = await seed_wish(service, quantity=4, title="Partly")
     plain = await service.add_wish_item(wishlist_id=wishlist_id, actor=OWNER, title="Plain")
     archived = await service.add_wish_item(wishlist_id=wishlist_id, actor=OWNER, title="Archived")

@@ -645,7 +645,7 @@ async def test_confirmation_is_not_queued_for_actual_wish_recipient(collaborativ
     """The recipient exclusion applies at production time for each type of wishlist."""
     from tests.receipt_support import OWNER_ID
 
-    service = WishlistService()
+    service = WishlistService.in_memory()
     wishlist = await service.create_wishlist(owner=OWNER, title="Gift")
     if collaborative:
         await service.add_member(wishlist.id, OWNER, GIFTER_ID)

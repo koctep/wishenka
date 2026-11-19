@@ -23,7 +23,7 @@ from wishenka.wishlists.exceptions import (
 from wishenka.wishlists.models import Wishlist, WishlistRole, WishlistStatus
 from wishenka.wishlists.policy import WishlistAccessPolicy
 from wishenka.wishlists.schemas import PromiseActionDTO, ReservationQuantityDTO
-from wishenka.wishlists.service import WishlistService, project_reservation_action, recipient_view
+from wishenka.wishlists.service import WishlistService, project_reservation_action
 
 router = APIRouter()
 logger = logging.getLogger("wishenka.web.wishlists")
@@ -631,20 +631,50 @@ async def reset_share(request: Request, wishlist_id: int, user: User) -> dict[st
 
 @router.get("/api/public/wishlists/{token}")
 async def public_wishlist(request: Request, token: str) -> dict[str, Any]:
+    """Return the anonymous-safe public wishlist payload via the domain projection."""
+
     async def action(service: WishlistService) -> dict[str, Any]:
-        wl = next((w for w in service._wishlists.values() if w.public_token == token), None)
-        if wl is None or wl.status == WishlistStatus.DELETED:
+        try:
+            view = await service.get_wishlist_by_public_token(token, None)
+        except (WishlistNotFoundError, WishlistDeletedError):
             logger.warning(
                 "Public wishlist lookup failed: token not found or deleted",
                 extra={"event": "public_wishlist_not_found"},
             )
-            raise HTTPException(status_code=404, detail="Wishlist not found")
+            raise HTTPException(status_code=404, detail="Wishlist not found") from None
         logger.info(
             "Public wishlist viewed: id=%s",
-            wl.id,
-            extra={"event": "public_wishlist_viewed", "wishlist_id": wl.id},
+            view.id,
+            extra={"event": "public_wishlist_viewed", "wishlist_id": view.id},
         )
-        return projection(wl, None, True)
+        return {
+            "id": view.id,
+            "name": view.title,
+            "description": view.description,
+            "event_title": view.event_title,
+            "event_date": view.event_date,
+            "status": view.status.value,
+            "items": [
+                {
+                    "id": item.id,
+                    "title": item.title,
+                    "description": item.description,
+                    "link": item.link,
+                    "image_url": item.image_url,
+                    "price": item.price,
+                    "currency": item.currency,
+                    "quantity": item.quantity,
+                    "received_quantity": item.received_quantity,
+                    "remaining_quantity": item.remaining_quantity,
+                    "is_active": not item.is_archived and (item.remaining_quantity or 0) > 0,
+                    "priority": item.priority.value,
+                    "category": item.category,
+                    "is_archived": item.is_archived,
+                    "recipient_name": item.recipient_name,
+                }
+                for item in view.items
+            ],
+        }
 
     return await execute(request, action)
 
@@ -661,15 +691,13 @@ async def public_wishlist_view(request: Request, token: str, user: OptionalUser)
                 "Public wishlist entry unavailable", extra={"event": "public_entry_unavailable"}
             )
             raise
-        items = view.items
-        if user is None:
-            # An unauthenticated link visitor could be the recipient.
-            wishlist = await service.get_wishlist_by_id(view.id)
-            items_by_id = {item.id: item for item in wishlist.items}
-            items = [recipient_view(items_by_id[item.id]) for item in items]
         logger.info(
             "Public wishlist entry viewed",
-            extra={"event": "public_entry_viewed", "identified": user is not None},
+            extra={
+                "event": "public_entry_viewed",
+                "wishlist_id": view.id,
+                "identified": user is not None,
+            },
         )
         return {
             "id": view.id,
@@ -677,7 +705,7 @@ async def public_wishlist_view(request: Request, token: str, user: OptionalUser)
             "description": view.description,
             "status": view.status.value,
             "identified": user is not None,
-            "items": [item.model_dump(mode="json") for item in items],
+            "items": [item.model_dump(mode="json") for item in view.items],
         }
 
     return await execute(request, action)

@@ -466,7 +466,7 @@ class WishlistStore:
                 self._temporary_database_path = None
 
     async def _read(self, conn: AsyncConnection) -> tuple[WishlistService, _StorageSnapshot]:
-        service = WishlistService()
+        service = WishlistService.in_memory()
 
         l_stmt = text(
             "SELECT id, owner_id, owner_name, title, description, event_title, "
@@ -1382,7 +1382,7 @@ class WishlistStore:
                 {"item_id": item.id},
             )
         ).all()
-        service = WishlistService()
+        service = WishlistService.in_memory()
         service._wishlists[wishlist.id] = wishlist
         service._items[item.id] = item
         for reservation_row in reservation_rows:
@@ -1508,7 +1508,7 @@ class WishlistStore:
     ) -> WishlistService:
         """Hydrate only the giver's reservations and their wishes in one transaction."""
         repository = WishlistRepository(conn)
-        service = WishlistService()
+        service = WishlistService.in_memory()
         reservations = await repository.list_user_reservations(user_id)
         for reservation in reservations:
             service._register_reservation(reservation)

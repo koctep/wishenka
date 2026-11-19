@@ -93,7 +93,7 @@ def test_storage_error_traceback_does_not_expose_tokens(
 
 def test_anonymous_public_view_hides_existing_reservation(tmp_path: Path) -> None:
     """A real reservation is hidden when the visitor's recipient status is unknown."""
-    service = WishlistService()
+    service = WishlistService.in_memory()
     owner = AuthenticatedUser(telegram_id=101, first_name="Owner", auth_method="session_token")
     giver = AuthenticatedUser(telegram_id=202, first_name="Giver", auth_method="session_token")
 
@@ -289,7 +289,7 @@ def test_members_can_view_but_only_managers_can_change_settings(tmp_path: Path) 
     """Membership is resolved from the server-side aggregate, not client input."""
     from wishenka.wishlists.models import WishlistRole
 
-    service = WishlistService()
+    service = WishlistService.in_memory()
     owner = AuthenticatedUser(telegram_id=101, first_name="Owner", auth_method="session_token")
 
     async def seed() -> int:

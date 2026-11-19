@@ -49,7 +49,7 @@ class TestSurpriseInvariantIntegrity:
 
     async def test_recipient_view_has_no_reservation_attributes(self) -> None:
         """Surprise Invariant: Recipient view must NOT expose reservation attributes."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Bob")
 
@@ -106,7 +106,7 @@ class TestSurpriseInvariantIntegrity:
 
     async def test_recipient_cannot_book_own_gift_raises_self_reservation_error(self) -> None:
         """Personal wishlist owner cannot reserve their own gift."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         wl = await service.create_wishlist(owner=owner, title="Alice's Wishlist")
         item = await service.add_wish_item(
@@ -121,7 +121,7 @@ class TestSurpriseInvariantIntegrity:
 
     async def test_coauthor_cannot_book_item_where_they_are_explicit_recipient(self) -> None:
         """In collaborative wishlist, assigned co-author recipient cannot reserve own item."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         coauthor = make_user(1002, "Bob")
         gifter = make_user(2001, "Charlie")
@@ -166,7 +166,7 @@ class TestReservationLifecycleAndPurchasedState:
 
     async def test_mark_reservation_as_purchased_and_revert_to_active(self) -> None:
         """Gifter can mark reservation as PURCHASED and revert back to ACTIVE."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Bob")
 
@@ -188,7 +188,7 @@ class TestReservationLifecycleAndPurchasedState:
 
     async def test_purchased_reservation_retains_inventory_lock(self) -> None:
         """PURCHASED reservation must lock inventory; available quantity must not increase."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter1 = make_user(2001, "Bob")
         gifter2 = make_user(2002, "Charlie")
@@ -219,7 +219,7 @@ class TestReservationLifecycleAndPurchasedState:
 
     async def test_cancel_reservation_restocks_available_quantity(self) -> None:
         """Cancelling reservation in ACTIVE/PURCHASED immediately restocks available quantity."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter1 = make_user(2001, "Bob")
         gifter2 = make_user(2002, "Charlie")
@@ -245,7 +245,7 @@ class TestReservationLifecycleAndPurchasedState:
 
     async def test_update_reservation_quantity_partial_adjustments(self) -> None:
         """Gifter can adjust reserved quantity up or down with immediate inventory recalculation."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Bob")
 
@@ -273,7 +273,7 @@ class TestReservationLifecycleAndPurchasedState:
 
     async def test_update_reservation_quantity_rejects_insufficient_balance(self) -> None:
         """Attempting to increase reservation beyond balance raises InsufficientQuantityError."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter1 = make_user(2001, "Bob")
         gifter2 = make_user(2002, "Charlie")
@@ -305,7 +305,7 @@ class TestConcurrencyAndOverbookingGuards:
 
     async def test_concurrent_race_condition_prevented_by_coordinator(self) -> None:
         """Concurrent reservation attempts on remaining units serialize with zero overbooking."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         assert service.concurrency_coordinator is not None, (
             "WishlistService must have an ItemConcurrencyCoordinator"
         )
@@ -346,7 +346,7 @@ class TestItemReductionLockWithReservations:
         self,
     ) -> None:
         """Item quantity reduction blocked if quantity < active + purchased reservations."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter1 = make_user(2001, "Bob")
         gifter2 = make_user(2002, "Charlie")
@@ -386,7 +386,7 @@ class TestMyReservationsAggregatedCabinet:
 
     async def test_get_user_reservations_returns_active_and_purchased_items(self) -> None:
         """get_user_reservations returns all non-cancelled bookings of user across wishlists."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner1 = make_user(1001, "Alice")
         owner2 = make_user(1002, "Bob")
         gifter = make_user(2001, "Charlie")
@@ -435,7 +435,7 @@ class TestMyReservationsAggregatedCabinet:
 
     async def test_get_user_reservations_summary_counter(self) -> None:
         """get_user_reservations_summary returns active/purchased and distinct items counts."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Bob")
 
@@ -457,7 +457,7 @@ class TestMyReservationsAggregatedCabinet:
 
     async def test_archived_item_persists_in_my_reservations_with_flag(self) -> None:
         """Archiving an item by author keeps reservation in gifter cabinet with flag."""
-        service = WishlistService()
+        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Bob")
 

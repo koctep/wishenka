@@ -294,7 +294,7 @@ async def test_archive_events_for_partly_received_wish(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Archive and restore of a received-from wish log INFO with quantities; refusals WARNING."""
-    service = WishlistService()
+    service = WishlistService.in_memory()
     wishlist_id, item_id = await seed_wish(service, quantity=5)
     fresh = await service.add_wish_item(
         wishlist_id=wishlist_id, actor=OWNER, title="Fresh", quantity=2

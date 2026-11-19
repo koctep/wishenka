@@ -141,7 +141,7 @@ to notification settings. A failed delivery never fails the receipt. See
 [`execute_wish`](file:///home/src/wishenka/wishlists/store.py#L942-L997) builds a new
 `WishlistService` on every call
 ([`_load_wish`](file:///home/src/wishenka/wishlists/store.py#L1016) assigns
-`WishlistService()`). That instance owns a fresh
+`WishlistService.in_memory()`). That instance owns a fresh
 [`ItemConcurrencyCoordinator`](file:///home/src/wishenka/wishlists/concurrency.py#L8-L24).
 The `asyncio.Lock` lives on that instance. It is not shared across requests
 or processes, and it is not the cross-process exclusion.
@@ -783,7 +783,7 @@ from wishenka.wishlists.service import WishlistService
 from wishenka.wishlists.models import ReservationStatus
 
 async def reserve_gift():
-    service = WishlistService()
+    service = WishlistService.in_memory()
 
     # Setup author and gifter
     author = AuthenticatedUser(telegram_id=1001, first_name="Alice")

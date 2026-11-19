@@ -91,7 +91,10 @@ class _Env:
 
                     async with users.engine.begin() as conn:
                         await conn.execute(
-                            text("INSERT OR REPLACE INTO bot_destinations VALUES (:id,:chat,1)"),
+                            text(
+                                "INSERT OR REPLACE INTO bot_destinations "
+                                "(user_id, chat_id, active) VALUES (:id, :chat, 1)"
+                            ),
                             {"id": profile.id, "chat": user.telegram_id},
                         )
             finally:

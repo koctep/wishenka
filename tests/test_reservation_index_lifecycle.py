@@ -61,7 +61,7 @@ def user(uid: int) -> AuthenticatedUser:
 
 
 async def test_index_tracks_lifecycle_and_preserves_isolation() -> None:
-    service = WishlistService()
+    service = WishlistService.in_memory()
     owner, giver, other = user(1), user(2), user(3)
     wishlist = await service.create_wishlist(owner=owner, title="List")
     item = await service.add_wish_item(

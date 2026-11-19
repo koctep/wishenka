@@ -50,7 +50,7 @@ class _CountScans(dict[int, Reservation]):
 
 @pytest.mark.parametrize("method", ["list", "summary"])
 def test_memory_cabinet_does_not_scan_all_users(method: str) -> None:
-    service = WishlistService()
+    service = WishlistService.in_memory()
     reservation_id = asyncio.run(_seed(service))
     tracked = _CountScans(service._reservations)
     service._reservations = tracked

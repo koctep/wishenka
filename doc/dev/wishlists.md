@@ -92,7 +92,9 @@ rejected by the optional authentication dependency.
 
 - `POST /api/invitations/accept`: Authenticated user joins wishlist via `X-Invite-Token` header.
 
-- `GET /api/public/wishlists/{token}`: Reads the public projection, including archived lists.
+- `GET /api/public/wishlists/{token}`: Reads the anonymous-safe public projection, including archived lists.
+
+- `GET /api/public/wishlists/{token}/view`: Reads the role-specific public projection (`anonymous_safe` for unauthenticated callers, `recipient_safe` for recipients, `gifter` for authenticated non-recipients) without membership or invite secrets.
 
 - `GET /api/favorites`: Lists the caller's favorited wishlists in reverse-chronological order.
 
@@ -129,18 +131,22 @@ analytics. The application redacts public paths in request and Uvicorn access lo
 storage exceptions. Configure reverse proxies and other infrastructure separately to avoid logging
 capability URLs.
 
-The legacy `WishlistService.get_wishlist_by_public_token` domain projection can expose gifter fields
-for an anonymous caller. Use the HTTP public projection for anonymous reads; do not expose that
-domain projection directly as a public response. Follow-up work is tracked in
-[WISHENKA-63](https://pypost.atlassian.net/browse/WISHENKA-63).
+All public-link entry points — `GET /share/{public_token}`, `GET /api/public/wishlists/{token}`, and
+`GET /api/public/wishlists/{token}/view` — resolve through `WishlistService.get_wishlist_by_public_token`.
+At the domain layer, `project_wish_item(item, None)` delegates directly to `recipient_view(item)`,
+returning `WishItemRecipientViewDTO` so anonymous callers never receive reservation or giver fields.
+Authenticated non-recipient callers receive `WishItemGifterViewDTO`, while recipients (personal
+owners or collaborative item recipients) continue to receive `WishItemRecipientViewDTO`.
 
 ### Storage and configuration
 
 The application factory creates one `WishlistStore` and exposes a store-backed `WishlistService` as
-`app.state.domain_service`. Use that service for application domain operations. A bare
-`WishlistService()` is in-memory and independent; it is useful in tests but bypasses persistent app
-state. The HTTP router uses the same store. For tests only, `app.state.wishlist_service` can
-override the router's service.
+`app.state.domain_service`. Use that service for application domain operations. `WishlistService.__init__`
+enforces an explicit persistent `WishlistStore` boundary: passing `store=None` (or calling bare
+`WishlistService()`) logs `wishlist_service_store_required` and raises `ValueError`. For isolated
+unit tests or transient `WishlistStore` hydration, construct the service explicitly via
+`WishlistService.in_memory()`. The HTTP router uses the same store. For tests only,
+`app.state.wishlist_service` can override the router's service.
 
 `WISHENKA_DATABASE_URL` selects the SQLite database and defaults to
 `sqlite+aiosqlite:///data/wishenka.db`. The application initializes the normalized relational
@@ -183,8 +189,11 @@ member management, and token rotation without client-side JavaScript SPA framewo
 
 - `GET /share/{public_token}`:
   - **Description**: Renders the complete HTML page (`share_wishlist.html`) for a public wishlist.
-  - **Authentication**: Optional session (`get_optional_current_user`). Unauthenticated guests
-    can view public items and reservation status. If accessed by the list recipient or owner,
+  - **Authentication**: Optional session (`get_optional_current_user`). Resolves via
+    `WishlistService.get_wishlist_by_public_token(public_token, current_user)`. Unauthenticated
+    guests receive `WishItemRecipientViewDTO` (via `project_wish_item(item, None)` -> `recipient_view(item)`),
+    concealing reservation status. Authenticated non-recipient callers receive `WishItemGifterViewDTO`
+    and can view availability and reservation controls. If accessed by the list recipient or owner,
     the Surprise Invariant strictly conceals all reservations.
   - **Parameters**: `public_token` (str) — 16-byte URL-safe public sharing token.
   - **Responses**:
@@ -548,6 +557,27 @@ async def create_wishlist(
   - `event_date`: Optional event timestamp.
   - `invite_token_expires_in`: TTL for the invite token (defaults to 7 days).
 - **Returns**: Newly created `Wishlist` aggregate.
+
+#### `get_wishlist_by_public_token`
+
+Resolves a wishlist by its capability `public_token` and delegates to `get_wishlist_view`.
+
+```python
+async def get_wishlist_by_public_token(
+    self,
+    public_token: str,
+    current_user: AuthenticatedUser | None = None,
+) -> WishlistDetailViewDTO
+```
+
+- **Raises**: `WishlistNotFoundError`, `WishlistDeletedError`.
+- **Consolidated Projection**: Used by `GET /share/{public_token}`, `GET /api/public/wishlists/{token}`,
+  and `GET /api/public/wishlists/{token}/view`. Because `project_wish_item(item, None)` returns
+  `recipient_view(item)` (`WishItemRecipientViewDTO`), anonymous callers (`current_user=None`)
+  never receive reservation or giver fields.
+- **Observability**: Emits `public_wishlist_resolved` (`INFO`) with `wishlist_id`, `identified`,
+  `user_id`, `projection_mode` (`"anonymous_safe"`, `"recipient_safe"`, or `"gifter"`), and
+  `items_count`, without logging `public_token`.
 
 #### `get_wishlist_view`
 
@@ -1349,6 +1379,9 @@ Settings in `wishenka.config.Settings` (prefixed with `WISHENKA_` in environment
 | `invalid_invite_token` | `WARNING` | Bad invite token | None (token withheld) |
 | `wishlist_shared_view` | `INFO` | Public share rendered | `wishlist_id`, `is_recipient` |
 | `wishlist_shared_view_failed` | `WARNING` | Public view failed | None (token withheld) |
+| `public_wishlist_resolved` | `INFO` | Public token resolved | `wishlist_id`, `identified`, `user_id`, `projection_mode`, `items_count` |
+| `wishlist_service_store_required` | `ERROR` | `WishlistService` created without store | None (`ValueError` raised) |
+| `wishlist_service_in_memory_created` | `DEBUG` | `WishlistService.in_memory()` created | None |
 | `invite_preview_accessed` | `INFO` | Invite preview rendered | `wishlist_id`, `status` |
 | `invite_joined` | `INFO` | Collaborator joined | `wishlist_id`, `user_id`, `role` |
 | `invite_join_failed` | `WARNING` | Invite join failed | `user_id` |

@@ -863,7 +863,7 @@ from wishenka.wishlists.exceptions import (
 from wishenka.wishlists.models import TelegramUser
 from wishenka.wishlists.service import WishlistService, project_wish_item
 
-service = WishlistService()
+service = WishlistService.in_memory()
 owner = AuthenticatedUser(telegram_id=101, username="alice")
 gifter = AuthenticatedUser(telegram_id=202, username="bob")
 

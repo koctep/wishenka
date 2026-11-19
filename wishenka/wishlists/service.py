@@ -172,8 +172,7 @@ def project_wish_item(
     current_user: AuthenticatedUser | None = None,
 ) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
     """Project a WishItem into Recipient or Gifter view based on Surprise Invariant."""
-    is_recip = WishlistAccessPolicy.is_recipient(current_user, item)
-    if is_recip:
+    if current_user is None or WishlistAccessPolicy.is_recipient(current_user, item):
         return recipient_view(item)
 
     active_or_purchased = [
@@ -183,22 +182,17 @@ def project_wish_item(
     ]
     reserved_qty = sum(r.quantity for r in active_or_purchased)
     available_qty = max(0, item.quantity - item.received_quantity - reserved_qty)
-    my_reserved_qty = 0
+    user_reservations = [r for r in active_or_purchased if r.user_id == current_user.telegram_id]
+    my_reserved_qty = sum(r.quantity for r in user_reservations)
+    my_occupying_count = len(user_reservations)
     my_reservation_status: ReservationStatus | None = None
     my_reservation_id: int | None = None
     my_latest_quantity = 0
-    my_occupying_count = 0
-    if current_user is not None:
-        user_reservations = [
-            r for r in active_or_purchased if r.user_id == current_user.telegram_id
-        ]
-        my_reserved_qty = sum(r.quantity for r in user_reservations)
-        my_occupying_count = len(user_reservations)
-        if user_reservations:
-            my_res = user_reservations[-1]
-            my_reservation_status = my_res.status
-            my_reservation_id = my_res.id
-            my_latest_quantity = my_res.quantity
+    if user_reservations:
+        my_res = user_reservations[-1]
+        my_reservation_status = my_res.status
+        my_reservation_id = my_res.id
+        my_latest_quantity = my_res.quantity
     return WishItemGifterViewDTO(
         id=item.id,
         title=item.title,
@@ -259,7 +253,18 @@ class WishlistService:
         self,
         store: WishlistStore | None = None,
         default_invite_ttl: timedelta | None = None,
+        *,
+        _allow_in_memory: bool = False,
     ) -> None:
+        if store is None and not _allow_in_memory:
+            logger.error(
+                "WishlistService constructed without persistent store",
+                extra={"event": "wishlist_service_store_required"},
+            )
+            raise ValueError(
+                "WishlistService requires an explicit store (WishlistStore); "
+                "use WishlistService.in_memory() for isolated tests"
+            )
         self._store = store
         self._default_invite_ttl = default_invite_ttl or timedelta(days=7)
         self._wishlists: dict[int, Wishlist] = {}
@@ -282,6 +287,22 @@ class WishlistService:
         self._new_shared_item_events: list[SharedEvent] = []
         self._flushed_shared_events: list[tuple[str, int]] = []
         self._notice_settings: NoticeSettings = NoticeSettings()
+
+    @classmethod
+    def in_memory(
+        cls,
+        default_invite_ttl: timedelta | None = None,
+    ) -> WishlistService:
+        """Create an explicitly non-persistent service for isolated tests or store hydration."""
+        logger.debug(
+            "WishlistService in-memory instance created",
+            extra={"event": "wishlist_service_in_memory_created"},
+        )
+        return cls(
+            store=None,
+            default_invite_ttl=default_invite_ttl,
+            _allow_in_memory=True,
+        )
 
     # Reservation mutations affect only the actor's own reservation. Notifying another
     # giver would disclose that person's activity by timing; receipt notices have a
@@ -555,7 +576,30 @@ class WishlistService:
                 },
             )
             raise WishlistDeletedError(f"Wishlist {wl.id} has been deleted")
-        return await self.get_wishlist_view(wl.id, current_user)
+        view = await self.get_wishlist_view(wl.id, current_user)
+        has_gifter_view = any(isinstance(item, WishItemGifterViewDTO) for item in view.items) or (
+            not view.items and view.user_role is None
+        )
+        projection_mode = (
+            "anonymous_safe"
+            if current_user is None
+            else ("gifter" if has_gifter_view else "recipient_safe")
+        )
+        logger.info(
+            "Public wishlist resolved: wishlist_id=%s identified=%s projection_mode=%s",
+            wl.id,
+            current_user is not None,
+            projection_mode,
+            extra={
+                "event": "public_wishlist_resolved",
+                "wishlist_id": wl.id,
+                "identified": current_user is not None,
+                "user_id": current_user.telegram_id if current_user is not None else None,
+                "projection_mode": projection_mode,
+                "items_count": len(view.items),
+            },
+        )
+        return view
 
     async def get_wishlist_view(
         self,
@@ -3045,7 +3089,7 @@ class WishlistService:
 
 
 # Wrap every public async domain operation so callers of the configured service share
-# the same transaction boundary as HTTP. Plain WishlistService() remains available
+# the same transaction boundary as HTTP. WishlistService.in_memory() remains available
 # as an explicitly in-memory test implementation.
 for _method_name, _method in tuple(vars(WishlistService).items()):
     if not _method_name.startswith("_") and iscoroutinefunction(_method):

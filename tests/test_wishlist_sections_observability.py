@@ -324,7 +324,7 @@ async def test_domain_service_favorites_and_history_logging(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Validate WishlistService direct logging for all favorites and history events."""
-    service = WishlistService()
+    service = WishlistService.in_memory()
     owner = AuthenticatedUser(telegram_id=1001, first_name="Owner", auth_method="session_token")
     user = AuthenticatedUser(telegram_id=2002, first_name="User", auth_method="session_token")
 
@@ -352,7 +352,7 @@ async def test_domain_service_warnings_on_violations(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Validate WishlistService warnings on self-favoriting and deleted wishlist access."""
-    service = WishlistService()
+    service = WishlistService.in_memory()
     owner = AuthenticatedUser(telegram_id=1001, first_name="Owner", auth_method="session_token")
     user = AuthenticatedUser(telegram_id=2002, first_name="User", auth_method="session_token")
 
