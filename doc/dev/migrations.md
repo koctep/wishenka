@@ -60,11 +60,14 @@ Revision chain (linear):
     `bot_destinations.updated_at`, and `notice_receipt_keys.created_at` with their retention
     indexes, anonymizes legacy `deleted = 1` birthday rows, and backfills timestamps (see
     [notifications.md](notifications.md)).
-16. `add_user_fk_cascades` (head) - ensures `users` and `idx_users_telegram_id` exist, rebuilds
+16. `add_user_fk_cascades` - ensures `users` and `idx_users_telegram_id` exist, rebuilds
     `wl_members`, `wl_favorites`, and `wl_view_history` with
     `user_id INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE`, and removes
     orphaned rows whose `user_id` or `wishlist_id` has no matching parent row (see
     [wishlists.md](wishlists.md)).
+17. `add_bot_capture_order_retention` (head) - adds `updated_at INTEGER` and
+    `idx_bot_capture_order_updated_at` to `bot_capture_order`, and backfills existing rows (see
+    [bot-scenarios.md](bot-scenarios.md)).
 
 Details of revisions 5 and 6 are in [gift-receipt.md](gift-receipt.md), revisions 7 and 8 in
 [bot-scenarios.md](bot-scenarios.md), revisions 9 and 10 in [notifications.md](notifications.md),
@@ -204,8 +207,8 @@ Programmatically, `command.upgrade(_configured(url), "head", sql=True)` writes t
 without creating or opening a database file (`env.py` routes to `run_migrations_offline()` with
 `literal_binds=True`). Revisions that inspect live tables during online upgrades
 (`add_gift_receipts`, `add_notice_uncertain`, `add_user_locale`, `add_notice_retention_columns`,
-and `add_user_fk_cascades`) branch on `context.is_offline_mode()` so offline script generation
-completes cleanly.
+`add_user_fk_cascades`, and `add_bot_capture_order_retention`) branch on `context.is_offline_mode()`
+so offline script generation completes cleanly.
 
 ### Legacy-schema adoption rules
 
@@ -335,6 +338,7 @@ and drops all nine baseline tables in reverse dependency order.
 
 | Revision | `ROLLBACK_POLICY` | `downgrade()` behavior |
 | --- | --- | --- |
+| `add_bot_capture_order_retention` | `reversible` | Drops `idx_bot_capture_order_updated_at` and `bot_capture_order.updated_at` if present (discards capture watermark retention timestamps) |
 | `add_user_fk_cascades` | `reversible` | Rebuilds `wl_view_history`, `wl_favorites`, and `wl_members` in reverse order without `REFERENCES users(telegram_id) ON DELETE CASCADE` and recreates indexes (orphans cleaned during upgrade are not restored) |
 | `add_notice_retention_columns` | `reversible` | Drops `idx_notice_receipt_keys_created`, `notice_receipt_keys.created_at`, `idx_bot_destinations_active_updated`, `bot_destinations.updated_at`, `idx_birthday_entries_deleted_at`, and `birthday_entries.deleted_at` (discards retention timestamps) |
 | `add_deleted_session_revocations` | `reversible` | Drops `deleted_session_revocations` (discards session revocation records) |

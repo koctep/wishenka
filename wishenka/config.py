@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     bot_destination_retention_days: int = Field(default=30, ge=1)
     reminder_retention_days: int = Field(default=30, ge=1)
     receipt_dedup_retention_days: int = Field(default=30, ge=1)
+    bot_capture_order_retention_days: int = Field(default=30, ge=2)
     notice_global_per_second: int = Field(default=20, ge=1, le=30)
     notice_chat_interval_seconds: int = Field(default=1, ge=1)
     notice_reminder_lead_days: tuple[int, ...] = (7,)

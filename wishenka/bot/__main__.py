@@ -34,14 +34,27 @@ class Dependencies:
 
 
 async def cleanup_loop(
-    store: WishlistStore, *, interval: float = 3600, retry_interval: float = 60
+    store: WishlistStore,
+    *,
+    interval: float = 3600,
+    retry_interval: float = 60,
+    order_retention_days: int | None = None,
 ) -> None:
     """Retry periodic cleanup after transient failures without exposing exception details."""
     while True:
         try:
-            await cleanup_drafts(store)
+            if order_retention_days is None:
+                await cleanup_drafts(store)
+            else:
+                await cleanup_drafts(store, order_retention_days=order_retention_days)
         except Exception:
-            logger.error("bot_draft_cleanup_failed", extra={"event": "bot_draft_cleanup_failed"})
+            logger.error(
+                "bot_draft_cleanup_failed",
+                extra={
+                    "event": "bot_draft_cleanup_failed",
+                    "order_retention_days": order_retention_days,
+                },
+            )
             await asyncio.sleep(retry_interval)
         else:
             await asyncio.sleep(interval)
@@ -54,7 +67,14 @@ async def run() -> None:
     store = UserStore(settings.database_url)
     wishlist_store = WishlistStore(settings.database_url)
     await wishlist_store.initialize()
-    cleanup_task = asyncio.create_task(cleanup_loop(wishlist_store))
+    order_retention_days = (
+        None
+        if settings.bot_capture_order_retention_days == 30
+        else settings.bot_capture_order_retention_days
+    )
+    cleanup_task = asyncio.create_task(
+        cleanup_loop(wishlist_store, order_retention_days=order_retention_days)
+    )
     dispatcher = Dispatcher()
     dispatcher.include_router(
         create_router(

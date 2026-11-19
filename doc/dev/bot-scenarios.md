@@ -72,23 +72,25 @@ values across bounded Telegram messages, choose an eligible wishlist, and explic
 With one eligible list it is selected automatically; several lists use paginated inline buttons.
 When no list is available the menu offers Mini App navigation. Access is rechecked on save.
 
-The migrations `add_bot_drafts` and `add_bot_capture_order` create durable SQLite state. An active
-draft and message-order watermark are stored atomically before network preview. The owner and chat
-bind each callback; an expiry and revision reject stale actions. A newer message replaces the active
-draft, and a delayed preview cannot overwrite a newer message or edit. Preview enrichment increments
-the revision so previously displayed save buttons cannot submit unseen values. Redelivery can show
-the persisted manual draft after an interruption. The save transaction combines the domain write and
-receipt, allowing a repeated callback to return the previous result without creating another wish.
+The migrations `add_bot_drafts`, `add_bot_capture_order`, and `add_bot_capture_order_retention`
+create durable SQLite state. An active draft and message-order watermark (`bot_capture_order`) are
+stored atomically before network preview; `updated_at` (UNIX epoch seconds) is initialized on
+insert/backfill and refreshed on every draft edit, preview enrichment, save, or cancel. The owner
+and chat bind each callback; an expiry and revision reject stale actions. A newer message replaces
+the active draft, and a delayed preview cannot overwrite a newer message or edit. Preview
+enrichment increments the revision so previously displayed save buttons cannot submit unseen
+values. Redelivery can show the persisted manual draft after an interruption. The save transaction
+combines the domain write and receipt, allowing a repeated callback to return the previous result
+without creating another wish.
 
 Active drafts expire after 24 hours, pending birthday inputs after one hour, active support
 sessions after `WISHENKA_SUPPORT_SESSION_TTL_SECONDS` (one hour by default), and save receipts
-after seven days. The bot starts a cleanup
-loop immediately, then hourly; it removes up to 100 expired rows per pass across `bot_drafts`,
-`birthday_input`, `support_input`, and `support_tickets` (retaining ticket rate-limit metadata for
-30 days) and retries a failure in
-one minute. `bot_capture_order` retains owner, chat and message identifiers without an expiry; it
-is not removed by draft cleanup. [WISHENKA-178](https://pypost.atlassian.net/browse/WISHENKA-178)
-tracks a retention policy that preserves replay ordering, and
+after seven days. The bot starts a cleanup loop immediately, then hourly; it removes up to 100
+expired rows per pass across `bot_drafts`, `birthday_input`, `support_input`, `support_tickets`
+(retaining ticket rate-limit metadata for 30 days), and stale `bot_capture_order` watermarks
+(`updated_at IS NULL OR updated_at <= now - order_retention_days * 86400`, defaulting to
+`Settings.bot_capture_order_retention_days = 30`, minimum `2`) that have no active, unexpired
+`bot_drafts` row (`state = 'active' AND expires > now`). Cleanup retries a failure in one minute.
 [WISHENKA-35](https://pypost.atlassian.net/browse/WISHENKA-35) covers account deletion. Include
 the bot draft tables, support tables (`support_input`, `support_tickets`), and the
 notification/birthday tables (see
@@ -119,6 +121,9 @@ variables or `.env`:
   `WISHENKA_SUPPORT_MAX_MESSAGE_LENGTH`, `WISHENKA_SUPPORT_RATE_LIMIT_WINDOW_SECONDS`, and
   `WISHENKA_SUPPORT_RATE_LIMIT_MAX_TICKETS`: configure the support and feedback channel; see
   [Telegram bot support and feedback channel](bot-support.md#configuration).
+- `WISHENKA_BOT_CAPTURE_ORDER_RETENTION_DAYS`: retention window in days (`Settings.bot_capture_order_retention_days`,
+  default `30`, minimum `2`) before stale `bot_capture_order` watermarks are removed by
+  `cleanup_drafts`.
 
 Configure Telegram and the application's public HTTPS endpoint consistently. The bot process
 closes its Telegram session and database engine when polling stops. It is independent of the
@@ -131,7 +136,11 @@ The entry router emits `bot_start_handled` with a bounded outcome (`menu`, `publ
 `public_entry_viewed` and `public_entry_unavailable`. These events exclude payloads, link tokens,
 user identifiers and exception text. The bot error handler consumes exceptions to prevent aiogram
 from logging their contents. Capture emits `bot_capture_preview`, `bot_capture_draft_ready`,
-`bot_capture_save`, `bot_capture_action_error`, and `bot_draft_cleanup_failed`. Support emits
+`bot_capture_save`, `bot_capture_action_error`, `bot_draft_cleanup_completed` (`INFO` when
+`total_removed > 0`, `DEBUG` when `0`; includes `total_removed`, `bot_drafts_removed`,
+`birthday_input_removed`, `support_input_removed`, `support_tickets_removed`,
+`bot_capture_order_removed`, `order_retention_days`, and `duration_ms`), and
+`bot_draft_cleanup_failed` (includes `order_retention_days`). Support emits
 `bot_support_prompted`, `bot_support_cancelled`, `bot_support_rejected`, `bot_support_submitted`,
 and `bot_support_unavailable` on `wishenka.bot.support` (see
 [Telegram bot support and feedback channel](bot-support.md#observability)). These events omit
@@ -144,7 +153,7 @@ Run the focused tests with:
 
 ```bash
 make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_start_repro.py tests/test_bot_entry_repro.py'
-make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_capture_repro.py'
+make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_capture_repro.py tests/test_bot_capture_order_retention_repro.py tests/test_bot_capture_order_retention.py'
 make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_support_repro.py tests/test_bot_support.py'
 make test-serial PYTEST_ARGS='tests/test_bot_menu_miniapp_e2e_browser.py'
 ```
@@ -171,7 +180,10 @@ also check dispatcher error handling and actual Uvicorn access output. The full 
 - If capture cannot save, verify that the selected list remains accessible, required fields are
   valid, and links use HTTP(S). Expired or replaced drafts require a new message.
 - If `bot_draft_cleanup_failed` occurs, check database availability and storage capacity. The loop
-  retries automatically; avoid including draft content or links in diagnostic logs.
+  retries automatically; avoid including draft content or links in diagnostic logs. If
+  `bot_capture_order` rows accumulate or are pruned unexpectedly, verify
+  `WISHENKA_BOT_CAPTURE_ORDER_RETENTION_DAYS` (`>= 2`) and inspect `bot_draft_cleanup_completed`
+  (`bot_capture_order_removed`, `order_retention_days`).
 - For support and feedback channel issues (`bot_support_unavailable` or session expiry), see
   [Telegram bot support and feedback channel troubleshooting](bot-support.md#troubleshooting).
 - For receipt notice delivery failures, see

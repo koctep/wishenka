@@ -252,6 +252,16 @@ async def _row(conn: AsyncConnection, ident: str) -> Any:
     return result.mappings().one_or_none()
 
 
+async def _touch_capture_order(conn: AsyncConnection, owner: int, chat: int, now: datetime) -> None:
+    """Refresh the ordering watermark timestamp on active draft activity."""
+    await conn.execute(
+        text(
+            "UPDATE bot_capture_order SET updated_at=:updated_at WHERE owner=:owner AND chat=:chat"
+        ),
+        {"owner": owner, "chat": chat, "updated_at": int(now.timestamp())},
+    )
+
+
 def create_capture_router(deps: Any) -> Router:
     """Create handlers backed by the same SQLite transactions as wishlist operations."""
     router = Router()
@@ -336,7 +346,10 @@ def create_capture_router(deps: Any) -> Router:
                         "rev": editing["revision"],
                     },
                 )
-                return await _row(conn, editing["id"]) if result.rowcount else None
+                if not result.rowcount:
+                    return None
+                await _touch_capture_order(conn, actor.telegram_id, chat, now)
+                return await _row(conn, editing["id"])
 
             draft = await store.transaction(update)
             if draft is None:
@@ -378,12 +391,18 @@ def create_capture_router(deps: Any) -> Router:
             # Persist a usable manual draft with the watermark before network I/O.
             result = await conn.execute(
                 text(
-                    "INSERT INTO bot_capture_order (owner,chat,message_id) "
-                    "VALUES (:owner,:chat,:message_id) "
-                    "ON CONFLICT(owner,chat) DO UPDATE SET message_id=excluded.message_id "
+                    "INSERT INTO bot_capture_order (owner,chat,message_id,updated_at) "
+                    "VALUES (:owner,:chat,:message_id,:updated_at) "
+                    "ON CONFLICT(owner,chat) DO UPDATE SET "
+                    "message_id=excluded.message_id, updated_at=excluded.updated_at "
                     "WHERE excluded.message_id > bot_capture_order.message_id"
                 ),
-                {"owner": actor.telegram_id, "chat": chat, "message_id": message.message_id},
+                {
+                    "owner": actor.telegram_id,
+                    "chat": chat,
+                    "message_id": message.message_id,
+                    "updated_at": int(now.timestamp()),
+                },
             )
             if not result.rowcount:
                 current = await conn.execute(
@@ -557,6 +576,7 @@ def create_capture_router(deps: Any) -> Router:
                     ),
                     {"id": ident},
                 )
+                await _touch_capture_order(conn, actor.telegram_id, chat, now)
                 return "cancelled", None, []
             if command == "save":
                 wl = eligible.get(draft["list_id"])
@@ -588,6 +608,7 @@ def create_capture_router(deps: Any) -> Router:
                         "expires": (now + timedelta(days=7)).isoformat(),
                     },
                 )
+                await _touch_capture_order(conn, actor.telegram_id, chat, now)
                 return "saved:" + wl.title, draft, lists
             if command.startswith("p_"):
                 try:
@@ -613,6 +634,7 @@ def create_capture_router(deps: Any) -> Router:
                         "id": ident,
                     },
                 )
+                await _touch_capture_order(conn, actor.telegram_id, chat, now)
                 return "review", await _row(conn, ident), lists
             if command.startswith("e_") and command[2:] in _FIELDS:
                 await conn.execute(
@@ -626,6 +648,7 @@ def create_capture_router(deps: Any) -> Router:
                         "expires": (now + timedelta(hours=24)).isoformat(),
                     },
                 )
+                await _touch_capture_order(conn, actor.telegram_id, chat, now)
                 return "editing:" + command[2:], None, lists
             if command.startswith("l_"):
                 try:
@@ -645,6 +668,7 @@ def create_capture_router(deps: Any) -> Router:
                         "expires": (now + timedelta(hours=24)).isoformat(),
                     },
                 )
+                await _touch_capture_order(conn, actor.telegram_id, chat, now)
                 return "review", await _row(conn, ident), lists
             return "expired", None, []
 
@@ -713,10 +737,11 @@ def create_capture_router(deps: Any) -> Router:
     return router
 
 
-async def cleanup_drafts(store: WishlistStore) -> int:
-    """Remove a bounded batch of expired drafts and receipts."""
+async def cleanup_drafts(store: WishlistStore, *, order_retention_days: int = 30) -> int:
+    """Remove a bounded batch of expired drafts, receipts, and stale ordering watermarks."""
+    started = time.monotonic()
 
-    async def remove(conn: AsyncConnection) -> int:
+    async def remove(conn: AsyncConnection) -> tuple[int, int, int, int, int]:
         now_dt = datetime.now(UTC)
         now_ts = int(time.time())
         result = await conn.execute(
@@ -747,11 +772,53 @@ async def cleanup_drafts(store: WishlistStore) -> int:
             ),
             {"cutoff": now_ts - 30 * 86400},
         )
+        order = await conn.execute(
+            text(
+                "DELETE FROM bot_capture_order WHERE rowid IN ("
+                "SELECT o.rowid FROM bot_capture_order o "
+                "WHERE (o.updated_at IS NULL OR o.updated_at <= :cutoff) "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM bot_drafts d "
+                "WHERE d.owner = o.owner AND d.chat = o.chat "
+                "AND d.state = 'active' AND d.expires > :now"
+                ") LIMIT 100)"
+            ),
+            {
+                "cutoff": now_ts - order_retention_days * 86400,
+                "now": now_dt.isoformat(),
+            },
+        )
         return (
-            int(result.rowcount or 0)
-            + int(birthday.rowcount or 0)
-            + int(support.rowcount or 0)
-            + int(tickets.rowcount or 0)
+            int(result.rowcount or 0),
+            int(birthday.rowcount or 0),
+            int(support.rowcount or 0),
+            int(tickets.rowcount or 0),
+            int(order.rowcount or 0),
         )
 
-    return await store.transaction(remove)
+    (
+        drafts_removed,
+        birthday_removed,
+        support_removed,
+        tickets_removed,
+        order_removed,
+    ) = await store.transaction(remove)
+    total_removed = (
+        drafts_removed + birthday_removed + support_removed + tickets_removed + order_removed
+    )
+    extra = {
+        "event": "bot_draft_cleanup_completed",
+        "total_removed": total_removed,
+        "bot_drafts_removed": drafts_removed,
+        "birthday_input_removed": birthday_removed,
+        "support_input_removed": support_removed,
+        "support_tickets_removed": tickets_removed,
+        "bot_capture_order_removed": order_removed,
+        "order_retention_days": order_retention_days,
+        "duration_ms": round((time.monotonic() - started) * 1000, 2),
+    }
+    if total_removed > 0:
+        logger.info("Bot draft cleanup completed", extra=extra)
+    else:
+        logger.debug("Bot draft cleanup completed", extra=extra)
+    return total_removed
