@@ -32,6 +32,7 @@ from wishenka.items.schemas import CreateItemDTO
 from wishenka.notices.destinations import upsert_bot_destination
 from wishenka.users.models import UserRecord
 from wishenka.wishlists.policy import WishlistAccessPolicy
+from wishenka.wishlists.service import WishlistService
 from wishenka.wishlists.store import WishlistStore
 
 _preview_active: ContextVar[bool] = ContextVar("bot_private_preview", default=False)
@@ -547,11 +548,12 @@ def create_capture_router(deps: Any) -> Router:
         now = _now(deps)
         chat = callback.message.chat.id
 
-        async def mutate(conn: AsyncConnection) -> tuple[str, Any, list[Any]]:
+        async def mutate(
+            service: WishlistService, conn: AsyncConnection
+        ) -> tuple[str, Any, list[Any]]:
             draft = await _row(conn, ident)
             if not draft or draft["owner"] != actor.telegram_id or draft["chat"] != chat:
                 return "expired", None, []
-            service, snapshot = await store._read(conn)
             lists = _allowed(service, actor)
             eligible = {wl.id: wl for wl in lists}
             if (
@@ -594,7 +596,6 @@ def create_capture_router(deps: Any) -> Router:
                     item = await service.add_wish_item(wl.id, actor, **dto.model_dump())
                 except (ValidationError, ValueError):
                     return "invalid", draft, lists
-                await store._write(conn, service, snapshot)
                 await conn.execute(
                     text(
                         "UPDATE bot_drafts SET state='saved',data='{}',edit_field=NULL, "
@@ -675,7 +676,7 @@ def create_capture_router(deps: Any) -> Router:
         try:
             private_context = _preview_active.set(True)
             try:
-                status, draft, lists = await store.transaction(mutate)
+                status, draft, lists = await store.execute_with_connection(mutate)
             finally:
                 _preview_active.reset(private_context)
         except Exception:

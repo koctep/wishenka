@@ -1572,6 +1572,17 @@ class WishlistStore:
 
     async def execute(self, operation: Callable[[WishlistService], Awaitable[T]]) -> T:
         """Serialize reads and writes across workers and commit state atomically."""
+
+        async def adapter(service: WishlistService, _conn: AsyncConnection) -> T:
+            return await operation(service)
+
+        return await self.execute_with_connection(adapter)
+
+    async def execute_with_connection(
+        self,
+        operation: Callable[[WishlistService, AsyncConnection], Awaitable[T]],
+    ) -> T:
+        """Serialize domain reads/writes and caller-scoped SQL in one atomic transaction."""
         for attempt in range(5):
             try:
                 return await self._execute_once(operation)
@@ -1632,7 +1643,10 @@ class WishlistStore:
         """
         return await self._immediate(work)
 
-    async def _execute_once(self, operation: Callable[[WishlistService], Awaitable[T]]) -> T:
+    async def _execute_once(
+        self,
+        operation: Callable[[WishlistService, AsyncConnection], Awaitable[T]],
+    ) -> T:
         flushed: list[FlushedNotice] = []
         flushed_shared: list[tuple[str, int]] = []
         pending_commit_logs: list[PendingCommitLog] = []
@@ -1647,7 +1661,7 @@ class WishlistStore:
                     text("INSERT OR IGNORE INTO wl_invite_tokens VALUES (:token)"),
                     {"token": token},
                 )
-            result = await operation(service)
+            result = await operation(service, conn)
             for wl in service._wishlists.values():
                 if prior_invites.get(wl.id) != wl.invite_token:
                     matching_public = await conn.scalar(
