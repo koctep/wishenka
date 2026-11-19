@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from wishenka.auth.models import AuthenticatedUser
+from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
 from wishenka.web.app import create_app
@@ -403,6 +403,9 @@ def test_archived_list_blocks_existing_reservation_mutations(
 
     async def exercise() -> None:
         service = app.state.domain_service
+        await app.state.user_store.upsert_user(
+            TelegramUser(id=giver.telegram_id, first_name=giver.first_name)
+        )
         wishlist = await service.create_wishlist(owner=owner)
         item = await service.add_wish_item(wishlist.id, owner, title="Gift", quantity=4)
         reservation = await service.create_reservation(item.id, giver, 1)
@@ -439,6 +442,12 @@ async def test_storage_enforces_unique_membership(tmp_path: Path) -> None:
                 "INSERT INTO wl_lists "
                 "(id, owner_id, title, public_token, invite_token, created_at, updated_at) "
                 "VALUES (1, 1, 'L', 'pub', 'inv', '2026-01-01', '2026-01-01')"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO users (telegram_id, first_name, created_at, updated_at) "
+                "VALUES (7, 'User', '2026-01-01', '2026-01-01')"
             )
         )
         await conn.execute(
@@ -545,6 +554,9 @@ def test_archived_list_rejects_other_domain_mutations(tmp_path: Path, operation:
 
     async def exercise() -> None:
         service = app.state.domain_service
+        await app.state.user_store.upsert_user(
+            TelegramUser(id=member.telegram_id, first_name=member.first_name)
+        )
         wishlist = await service.create_wishlist(owner=owner)
         await service.add_member(wishlist.id, owner, member.telegram_id)
         await service.archive_wishlist(wishlist.id, owner)

@@ -16,7 +16,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from wishenka.auth.models import AuthenticatedUser
+from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
 from wishenka.web.app import create_app
@@ -41,7 +41,14 @@ def setup_app(tmp_path: Path) -> Iterator[Setup]:
     with TestClient(app) as client:
 
         async def seed() -> tuple[int, str, str, str]:
+            for uid, name in ((101, "Owner"), (202, "Admin"), (303, "Member"), (404, "Joiner")):
+                await app.state.user_store.upsert_user(TelegramUser(id=uid, first_name=name))
             service = app.state.domain_service
+            user_store = app.state.user_store
+            await user_store.upsert_user(TelegramUser(id=101, first_name="Owner"))
+            await user_store.upsert_user(TelegramUser(id=202, first_name="Admin"))
+            await user_store.upsert_user(TelegramUser(id=303, first_name="Member"))
+            await user_store.upsert_user(TelegramUser(id=404, first_name="Guest"))
             wishlist = await service.create_wishlist(owner, title="Party")
             await service.add_member(wishlist.id, owner, 202, WishlistRole.ADMIN)
             await service.add_member(wishlist.id, owner, 303, WishlistRole.MEMBER)

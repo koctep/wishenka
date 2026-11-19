@@ -142,6 +142,13 @@ async def test_wishlist_repo_mutation_structured_logging(
 
     with caplog.at_level(logging.INFO, logger="wishenka.wishlists.repository"):
         async with store.engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT OR IGNORE INTO users (telegram_id, first_name, created_at, updated_at) "
+                    "VALUES (3003, 'Viewer', :now, :now)"
+                ),
+                {"now": now},
+            )
             repo = WishlistRepository(conn)
 
             await repo.upsert_wishlist(sample_wl)

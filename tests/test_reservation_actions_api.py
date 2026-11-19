@@ -18,7 +18,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from wishenka.auth.models import AuthenticatedUser
+from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
 from wishenka.web.app import create_app
@@ -546,6 +546,15 @@ def test_deleted_list_refuses_every_action_and_keeps_the_cancellation(
     created = create_promise(client, wishlist_id, item_id, gifter_headers)
     reservation_id = int(created["reservation_id"])
     service: WishlistService = app.state.domain_service
+
+    asyncio.run(
+        app.state.user_store.upsert_user(TelegramUser(id=_OTHER_GIFTER_ID, first_name="Cara"))
+    )
+    asyncio.run(
+        app.state.user_store.upsert_user(
+            TelegramUser(id=_OTHER_GIFTER_ID, first_name="Cara", language_code="ru")
+        )
+    )
     asyncio.run(
         service.delete_wishlist(wishlist_id=wishlist_id, actor=make_user(_RECIPIENT_ID, "Alice"))
     )
@@ -658,6 +667,15 @@ def test_recipient_create_and_wish_reads_stay_silent(
         assert key not in own_wish
 
     service: WishlistService = app.state.domain_service
+
+    asyncio.run(
+        app.state.user_store.upsert_user(TelegramUser(id=_OTHER_GIFTER_ID, first_name="Cara"))
+    )
+    asyncio.run(
+        app.state.user_store.upsert_user(
+            TelegramUser(id=_OTHER_GIFTER_ID, first_name="Cara", language_code="ru")
+        )
+    )
     asyncio.run(
         service.add_member(
             wishlist_id=wishlist_id,

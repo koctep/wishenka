@@ -34,6 +34,7 @@ from tests.receipt_support import (
     item_received,
     open_store,
     outbox_rows,
+    seed_users,
     sql_exec,
 )
 from tests.test_bot_capture_repro import _action, _setup
@@ -101,6 +102,9 @@ async def test_scheduler_seam_invokes_present_implementation(
 
 
 async def _list_with_member(store: WishlistStore) -> int:
+    db_file = store.database_url.removeprefix("sqlite+aiosqlite:///")
+    seed_users(db_file, GIFTER_ID)
+
     async def setup(service: WishlistService) -> int:
         wishlist = await service.create_wishlist(owner=OWNER, title="Friends")
         await service.add_member(wishlist.id, OWNER, GIFTER_ID)
@@ -116,6 +120,7 @@ async def test_wish_creation_produces_durable_work_across_store_restart(
     db = tmp_path / "events.db"
     async with open_store(db) as store:
         wishlist_id = await _list_with_member(store)
+        seed_users(db, OTHER_GIFTER_ID)
         await _verify_start(monkeypatch, db, GIFTER_ID)
 
         async def add(service: WishlistService) -> Any:
@@ -155,6 +160,7 @@ async def test_changed_preference_is_rechecked_before_receipt_send(
     """Opting out after enqueue prevents delivery, without undoing the receipt."""
     db = tmp_path / "preferences.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
         env = _Env(store, db)
         await env.seed(2, ((GIFTER, 1),))
         await _verify_start(monkeypatch, db, GIFTER_ID)
@@ -176,6 +182,7 @@ async def test_uncertain_receipt_delivery_is_not_automatically_retried(
     """A timeout may mean Telegram accepted the message; do not automatically resend it."""
     db = tmp_path / "uncertain.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
         env = _Env(store, db)
         await env.seed(2, ((GIFTER, 1),))
         await _verify_start(monkeypatch, db, GIFTER_ID)
@@ -270,6 +277,7 @@ async def test_unstarted_bot_does_not_receive_receipt(tmp_path: Path) -> None:
     """A Telegram profile alone is not proof the user can receive bot messages."""
     db = tmp_path / "no-start.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
         env = _Env(store, db)
         await env.seed(2, ((GIFTER, 1),))
         await env.receive(1)
@@ -285,6 +293,7 @@ async def test_list_override_is_rechecked_after_receipt_was_queued(
     """The more specific post-enqueue list choice overrides the global setting."""
     db = tmp_path / "override.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
         env = _Env(store, db)
         await env.seed(2, ((GIFTER, 1),))
         await _verify_start(monkeypatch, db, GIFTER_ID)
@@ -303,6 +312,7 @@ async def test_rate_limit_does_not_undo_receipt_and_respects_retry_after(
     """A definite 429 retry remains delayed for the provider's requested period."""
     db = tmp_path / "retry-after.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
         env = _Env(store, db)
         await env.seed(2, ((GIFTER, 1),))
         await _verify_start(monkeypatch, db, GIFTER_ID)
@@ -324,6 +334,7 @@ async def test_revoked_access_suppresses_pending_shared_change(
     db = tmp_path / "revoked.db"
     async with open_store(db) as store:
         wishlist_id = await _list_with_member(store)
+        seed_users(db, OTHER_GIFTER_ID)
         await _verify_start(monkeypatch, db, GIFTER_ID)
         await _verify_start(monkeypatch, db, OTHER_GIFTER_ID)
 
@@ -357,6 +368,7 @@ async def test_stale_receipt_claim_is_uncertain_and_never_resent(
 ) -> None:
     db = tmp_path / "stale.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
         env = _Env(store, db)
         await env.seed(2, ((GIFTER, 1),))
         await _verify_start(monkeypatch, db, GIFTER_ID)
@@ -380,6 +392,7 @@ async def test_concurrent_workers_do_not_send_same_receipt(
 ) -> None:
     db = tmp_path / "claims.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
         env = _Env(store, db)
         await env.seed(2, ((GIFTER, 1),))
         await _verify_start(monkeypatch, db, GIFTER_ID)
@@ -411,6 +424,7 @@ async def test_permanent_rejection_does_not_block_another_recipient(
 ) -> None:
     db = tmp_path / "rejected.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
         env = _Env(store, db)
         await env.seed(3, ((GIFTER, 1), (OTHER_GIFTER, 1)))
         await _verify_start(monkeypatch, db, GIFTER_ID)
@@ -430,6 +444,7 @@ async def test_recipient_receives_no_receipt_even_if_also_a_giver(
 ) -> None:
     db = tmp_path / "overlap.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
         env = _Env(store, db)
         await env.seed(3, ((GIFTER, 1),))
         await _verify_start(monkeypatch, db, OWNER_ID)
@@ -599,6 +614,7 @@ async def test_recipient_giver_overlap_still_receives_safe_list_change(
 
     db = tmp_path / "safe-overlap.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
         env = _Env(store, db)
         await env.seed(3, ((GIFTER, 1),))
         await _verify_start(monkeypatch, db, OWNER_ID)
@@ -653,6 +669,7 @@ async def test_dated_list_reminder_survives_scheduler_restart_and_utc_boundary(
         assert sender.calls == [], "The reminder must not precede its seven-day UTC window"
 
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
         env = _Env(store, db)
         midnight = int(datetime(2030, 3, 1, tzinfo=UTC).timestamp())
         await _run_reminder_scan(store, env.settings, midnight)
@@ -736,6 +753,7 @@ async def test_recipient_who_is_also_giver_receives_neutral_event_reminder(
 
     db = tmp_path / "neutral-overlap.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
         env = _Env(store, db)
         await env.seed(3, ((GIFTER, 1),))
         await _verify_start(monkeypatch, db, OWNER_ID)
@@ -771,6 +789,7 @@ async def test_receipt_uses_language_and_safe_fallback(
 ) -> None:
     db = tmp_path / "language.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
         env = _Env(store, db)
         await env.seed(2, ((GIFTER, 1),), title="Safe item", list_title="Safe list")
         await _verify_start(monkeypatch, db, GIFTER_ID)
@@ -791,6 +810,7 @@ async def test_receipt_notice_text_links_and_logs_do_not_leak_private_data(
 ) -> None:
     db = tmp_path / "privacy.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
         env = _Env(store, db)
         await env.seed(3, ((GIFTER, 1), (OTHER_GIFTER, 1)), title="Tea", list_title="Party")
         await _verify_start(monkeypatch, db, GIFTER_ID)
@@ -823,6 +843,7 @@ async def test_one_receipt_produces_one_notice_per_giver_despite_multiple_reserv
 ) -> None:
     db = tmp_path / "receipt-dedupe.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
         env = _Env(store, db)
         await env.seed(5, ((GIFTER, 1), (GIFTER, 1), (OTHER_GIFTER, 1)))
         await _verify_start(monkeypatch, db, GIFTER_ID)

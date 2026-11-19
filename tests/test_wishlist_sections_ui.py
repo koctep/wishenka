@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient
 from websockets.sync.client import ClientConnection, connect
 
 from tests.browser_cdp import launch_chromium, read_debug_port, stop_chromium
-from wishenka.auth.models import AuthenticatedUser
+from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
 from wishenka.web.app import create_app
@@ -53,6 +53,12 @@ def test_app(tmp_path: Path) -> Iterator[tuple[TestClient, SessionTokenService, 
     app = create_app(settings)
     sessions = SessionTokenService(settings.secret_key)
     with TestClient(app) as client:
+
+        async def seed_users() -> None:
+            await app.state.user_store.upsert_user(TelegramUser(id=101, first_name="Alice"))
+            await app.state.user_store.upsert_user(TelegramUser(id=202, first_name="Bob"))
+
+        asyncio.run(seed_users())
         yield client, sessions, app
 
 
@@ -286,6 +292,9 @@ def test_home_sections_api_and_role_badge_precedence(
     alice_headers = bearer(sessions, 101)
 
     async def seed() -> tuple[int, int, int]:
+        from wishenka.auth.models import TelegramUser
+
+        await app.state.user_store.upsert_user(TelegramUser(id=101, first_name="Alice"))
         # 1. Alice is owner
         wl_owner = await service.create_wishlist(alice, title="Owned by Alice")
         # 2. Bob is owner, Alice is member

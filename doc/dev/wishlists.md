@@ -906,7 +906,7 @@ CREATE INDEX IF NOT EXISTS idx_wl_lists_status ON wl_lists(status);
 CREATE TABLE IF NOT EXISTS wl_members (
     id INTEGER PRIMARY KEY,
     wishlist_id INTEGER NOT NULL REFERENCES wl_lists(id) ON DELETE CASCADE,
-    user_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
     role TEXT NOT NULL DEFAULT 'member',
     joined_at TEXT NOT NULL
 );
@@ -956,7 +956,7 @@ CREATE INDEX IF NOT EXISTS idx_wl_reservations_status ON wl_reservations(status)
 
 -- 5. User Favorites
 CREATE TABLE IF NOT EXISTS wl_favorites (
-    user_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
     wishlist_id INTEGER NOT NULL REFERENCES wl_lists(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL,
     PRIMARY KEY (user_id, wishlist_id)
@@ -966,7 +966,7 @@ CREATE INDEX IF NOT EXISTS idx_wl_favorites_user ON wl_favorites(user_id);
 -- 6. User Viewing History
 CREATE TABLE IF NOT EXISTS wl_view_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
     wishlist_id INTEGER NOT NULL REFERENCES wl_lists(id) ON DELETE CASCADE,
     viewed_at TEXT NOT NULL
 );
@@ -997,6 +997,17 @@ CREATE TABLE IF NOT EXISTS wl_counters (
 
 #### Foreign Key Constraints & Cascading Deletion
 - Foreign key enforcement is enabled on every SQLite connection via `PRAGMA foreign_keys = ON`.
+- Deleting a user from `users` cascades (`ON DELETE CASCADE` on `user_id` → `users(telegram_id)`,
+  added in Alembic revision `add_user_fk_cascades`; see [migrations.md](migrations.md)) to:
+  - All collaborative memberships in `wl_members`.
+  - All user bookmark entries in `wl_favorites`.
+  - All user viewing history records in `wl_view_history`.
+  - Inserting rows into `wl_members`, `wl_favorites`, or `wl_view_history` with a `user_id` not
+    present in `users(telegram_id)` fails with `IntegrityError` when `PRAGMA foreign_keys = ON` is
+    active.
+  - `AccountDeletionService` (`wishenka/wishlists/deletion.py`) executes within `BEGIN IMMEDIATE`
+    and `PRAGMA foreign_keys = ON`, transferring/deleting owned lists and deleting the `users` row
+    so both explicit cleanup and `ON DELETE CASCADE` remove all user-linked records.
 - Deleting a wishlist from `wl_lists` cascades (`ON DELETE CASCADE`) to:
   - All associated members in `wl_members`.
   - All contained items in `wl_items` (and subsequently all reservations in `wl_reservations`).
@@ -1034,6 +1045,9 @@ Declarative models in
 to typed Python structures using SQLAlchemy 2.0 `Mapped` and `mapped_column` constructs:
 
 - **`Base`**: Subclass of `sqlalchemy.orm.DeclarativeBase`.
+- **`UserRefRow`**: Minimal declarative reference to the `users` table (`id`, `telegram_id`) used
+  so SQLAlchemy metadata resolves `ForeignKey("users.telegram_id", ondelete="CASCADE")` on
+  user-linked wishlist tables.
 - **`WishlistRow`**: Represents `wl_lists`. Configures bidirectional relationships with
   `cascade="all, delete-orphan"`:
   ```python
@@ -1044,8 +1058,9 @@ to typed Python structures using SQLAlchemy 2.0 `Mapped` and `mapped_column` con
       back_populates="wishlist", cascade="all, delete-orphan"
   )
   ```
-- **`WishlistMemberRow`**: Represents `wl_members`. References `wl_lists.id` via foreign key
-  `ForeignKey("wl_lists.id", ondelete="CASCADE")` and back-populates `members`.
+- **`WishlistMemberRow`**: Represents `wl_members`. References `wl_lists.id` via
+  `ForeignKey("wl_lists.id", ondelete="CASCADE")` and `users.telegram_id` via
+  `ForeignKey("users.telegram_id", ondelete="CASCADE")`, and back-populates `members`.
 - **`WishItemRow`**: Represents `wl_items`. References `wl_lists.id` and configures child cascade:
   ```python
   reservations: Mapped[list["ReservationRow"]] = relationship(
@@ -1053,8 +1068,12 @@ to typed Python structures using SQLAlchemy 2.0 `Mapped` and `mapped_column` con
   )
   ```
 - **`ReservationRow`**: Represents `wl_reservations` with `ForeignKey(..., ondelete="CASCADE")`.
-- **`WishlistFavoriteRow`**: Represents `wl_favorites` with composite key `(user_id, wishlist_id)`.
-- **`ViewHistoryRow`**: Represents `wl_view_history` with autoincrement integer primary key `id`.
+- **`WishlistFavoriteRow`**: Represents `wl_favorites` with composite key `(user_id, wishlist_id)`
+  and `ForeignKey("users.telegram_id", ondelete="CASCADE")` /
+  `ForeignKey("wl_lists.id", ondelete="CASCADE")`.
+- **`ViewHistoryRow`**: Represents `wl_view_history` with autoincrement integer primary key `id`,
+  `ForeignKey("users.telegram_id", ondelete="CASCADE")`, and
+  `ForeignKey("wl_lists.id", ondelete="CASCADE")`.
 - **`WishlistTokenRow`** & **`InviteTokenRow`**: Represent capability registries `wl_tokens` and
   `wl_invite_tokens`.
 - **`CounterRow`**: Represents `wl_counters` for monotonic sequence generation.

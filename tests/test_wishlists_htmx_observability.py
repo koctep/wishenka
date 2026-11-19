@@ -22,7 +22,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from wishenka.auth.models import AuthenticatedUser
+from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
 from wishenka.web.app import ShareTokenAccessFilter, create_app
@@ -70,6 +70,12 @@ def test_app(tmp_path: Path) -> Iterator[tuple[TestClient, SessionTokenService, 
     app = create_app(settings)
     sessions = SessionTokenService(settings.secret_key)
     with TestClient(app) as client:
+
+        async def _seed_users() -> None:
+            for uid, name in ((101, "Alice"), (202, "Bob"), (303, "Charlie")):
+                await app.state.user_store.upsert_user(TelegramUser(id=uid, first_name=name))
+
+        asyncio.run(_seed_users())
         yield client, sessions, app
 
 

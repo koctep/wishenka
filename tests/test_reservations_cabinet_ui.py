@@ -20,7 +20,7 @@ from bs4 import BeautifulSoup, Tag
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from wishenka.auth.models import AuthenticatedUser
+from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
 from wishenka.web.app import create_app
@@ -124,6 +124,14 @@ def test_app(tmp_path: Path) -> Iterator[tuple[TestClient, SessionTokenService, 
     app = create_app(settings)
     sessions = SessionTokenService(settings.secret_key)
     with TestClient(app) as client:
+
+        async def _seed_users() -> None:
+            for uid in (_OWNER_ID, _FRIEND_ID, _OTHER_ID, 404, 505):
+                await app.state.user_store.upsert_user(
+                    TelegramUser(id=uid, first_name=f"User{uid}", language_code="ru")
+                )
+
+        asyncio.run(_seed_users())
         yield client, sessions, app
 
 

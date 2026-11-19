@@ -197,6 +197,15 @@ async def test_purge_archived_wishlists_repo(tmp_path: Path) -> None:
             )
 
             # 4. Soft-deleted wishlist past retention threshold (MUST be purged)
+            for uid in (999, 777):
+                await conn.execute(
+                    text(
+                        "INSERT OR IGNORE INTO users "
+                        "(telegram_id, first_name, created_at, updated_at) "
+                        "VALUES (:uid, 'User', :now, :now)"
+                    ),
+                    {"uid": uid, "now": now_iso},
+                )
             await conn.execute(
                 text(
                     "INSERT INTO wl_lists (id, owner_id, title, status, public_token, "

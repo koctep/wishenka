@@ -16,7 +16,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from wishenka.auth.models import AuthenticatedUser
+from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
 from wishenka.web.app import create_app
@@ -133,6 +133,7 @@ def test_create_wish_item_with_collaborator_recipient(
     assert resp_wl.status_code == 201
     wl_id = resp_wl.json()["id"]
 
+    asyncio.run(app.state.user_store.upsert_user(TelegramUser(id=102, first_name="Bob")))
     asyncio.run(
         service.add_member(wishlist_id=wl_id, actor=owner, user_id=102, role=WishlistRole.MEMBER)
     )
@@ -486,6 +487,8 @@ def test_get_items_collaborative_addressing_surprise_invariant(
     wl_id = resp_wl.json()["id"]
 
     # Add Bob and Charlie as members
+    asyncio.run(app.state.user_store.upsert_user(TelegramUser(id=102, first_name="Bob")))
+    asyncio.run(app.state.user_store.upsert_user(TelegramUser(id=103, first_name="Charlie")))
     asyncio.run(
         service.add_member(wishlist_id=wl_id, actor=alice, user_id=102, role=WishlistRole.MEMBER)
     )

@@ -17,7 +17,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from wishenka.auth.models import AuthenticatedUser
+from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
 from wishenka.web.app import create_app
@@ -57,6 +57,7 @@ def test_favorites_lifecycle_observability(
     headers = bearer(sessions, 202)
 
     async def seed() -> int:
+        await app.state.user_store.upsert_user(TelegramUser(id=202, first_name="User"))
         wl = await service.create_wishlist(owner, title="Observability Wishlist")
         return wl.id
 
@@ -125,6 +126,7 @@ def test_view_history_lifecycle_observability(
     headers = bearer(sessions, 202)
 
     async def seed() -> int:
+        await app.state.user_store.upsert_user(TelegramUser(id=202, first_name="User"))
         wl = await service.create_wishlist(owner, title="History Obs Wishlist")
         return wl.id
 
@@ -290,6 +292,7 @@ def test_redaction_zero_leak_in_observability(
     gifter_headers = bearer(sessions, 202)
 
     async def seed() -> tuple[int, str, str]:
+        await app.state.user_store.upsert_user(TelegramUser(id=202, first_name="Gifter"))
         wl = await service.create_wishlist(owner, title="Secret Redaction Wishlist")
         item = await service.add_wish_item(
             wishlist_id=wl.id, actor=owner, title="Secret PlayStation 5", quantity=1

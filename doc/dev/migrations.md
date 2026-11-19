@@ -56,10 +56,15 @@ Revision chain (linear):
     `idx_wl_idempotency_expires_at` (see [idempotency.md](idempotency.md)).
 13. `add_user_locale` - adds `locale` and `locale_source` to `users` (see [i18n.md](i18n.md)).
 14. `add_deleted_session_revocations` - table `deleted_session_revocations` (see [users.md](users.md)).
-15. `add_notice_retention_columns` (head) - adds `birthday_entries.deleted_at`,
+15. `add_notice_retention_columns` - adds `birthday_entries.deleted_at`,
     `bot_destinations.updated_at`, and `notice_receipt_keys.created_at` with their retention
     indexes, anonymizes legacy `deleted = 1` birthday rows, and backfills timestamps (see
     [notifications.md](notifications.md)).
+16. `add_user_fk_cascades` (head) - ensures `users` and `idx_users_telegram_id` exist, rebuilds
+    `wl_members`, `wl_favorites`, and `wl_view_history` with
+    `user_id INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE`, and removes
+    orphaned rows whose `user_id` or `wishlist_id` has no matching parent row (see
+    [wishlists.md](wishlists.md)).
 
 Details of revisions 5 and 6 are in [gift-receipt.md](gift-receipt.md), revisions 7 and 8 in
 [bot-scenarios.md](bot-scenarios.md), revisions 9 and 10 in [notifications.md](notifications.md),
@@ -239,6 +244,11 @@ Database paths and URLs are never logged.
 | `wishlist_migration_legacy_schema_adopted` | INFO | `revision` | A recognized legacy database was stamped |
 | `wishlist_migration_completed` | INFO | `duration_ms` | Adoption, upgrade and WAL selection finished (message: `Wishlist database migration completed in N ms`) |
 | `wishlist_migration_failed` | ERROR (with traceback) | - | Any exception; it is re-raised after logging |
+| `user_fk_migration_orphans_cleaned` | WARNING | `table`, `rows_removed`, `rows_kept` | `add_user_fk_cascades` upgrade removed orphaned rows while rebuilding `table` |
+| `user_fk_migration_table_rebuilt` | INFO | `table`, `rows_kept` | `add_user_fk_cascades` upgrade rebuilt `table` with `user_id` cascade FK (0 orphans removed) |
+| `user_fk_migration_completed` | INFO | `tables`, `total_orphans_removed` | `add_user_fk_cascades` upgrade finished rebuilding all target tables |
+| `user_fk_downgrade_table_rebuilt` | INFO | `table`, `rows_kept` | `add_user_fk_cascades` downgrade rebuilt `table` without `user_id` FK |
+| `user_fk_downgrade_completed` | INFO | `tables` | `add_user_fk_cascades` downgrade finished |
 
 `duration_ms` covers the whole sequence including the lock wait. A normal start of an up-to-date
 database logs `started` and `completed` only. There is no alert threshold yet (WISHENKA-125).
@@ -278,6 +288,7 @@ Current state of the `downgrade()` functions:
 
 | Revision | `downgrade()` |
 | --- | --- |
+| `add_user_fk_cascades` | Works: rebuilds `wl_view_history`, `wl_favorites`, and `wl_members` in reverse order without `REFERENCES users(telegram_id) ON DELETE CASCADE` and recreates indexes (orphans cleaned during upgrade are not restored) |
 | `add_notice_retention_columns` | Works: drops `idx_notice_receipt_keys_created`, `notice_receipt_keys.created_at`, `idx_bot_destinations_active_updated`, `bot_destinations.updated_at`, `idx_birthday_entries_deleted_at`, and `birthday_entries.deleted_at` |
 | `add_support_channel` | Works: drops `idx_support_tickets_owner_time`, `support_tickets`, and `support_input` |
 | `add_notice_uncertain` | Works: drops `requires_membership` from `reminder_outbox`, drops `notice_receipt_keys`, and rebuilds `notification_outbox` (mapping `uncertain` rows to `failed`) |

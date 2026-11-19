@@ -20,7 +20,7 @@ from bs4 import BeautifulSoup, Tag
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from wishenka.auth.models import AuthenticatedUser
+from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
 from wishenka.web.app import create_app
@@ -166,13 +166,17 @@ def seed_personal(
     return asyncio.run(create())
 
 
-def seed_collaborative(service: WishlistService) -> CollaborativeWishes:
+def seed_collaborative(service: WishlistService, user_store: Any = None) -> CollaborativeWishes:
     """Create a collaborative list with three wishes for one caller."""
     owner = make_user(_OWNER_ID, "Alice")
 
     async def create() -> CollaborativeWishes:
         wishlist = await service.create_wishlist(owner=owner, title="Shared holiday")
         for member_id in (_FRIEND_ID, _OTHER_ID):
+            if user_store is not None:
+                await user_store.upsert_user(
+                    TelegramUser(id=member_id, first_name=f"User {member_id}", language_code="ru")
+                )
             await service.add_member(
                 wishlist_id=wishlist.id,
                 actor=owner,
@@ -586,7 +590,7 @@ def test_collaborative_list_decides_recipient_per_wish(
 ) -> None:
     """A display name does not make the caller the recipient of that wish."""
     client, sessions, app = test_app
-    seeded = seed_collaborative(app.state.domain_service)
+    seeded = seed_collaborative(app.state.domain_service, app.state.user_store)
     headers = auth_header(sessions, _FRIEND_ID, "Bob")
     html = list_html(client, seeded.wishlist_id, headers)
     silent = labels_in(visible_text(card_tag(html, seeded.for_caller)))

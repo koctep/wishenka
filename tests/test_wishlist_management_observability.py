@@ -8,7 +8,7 @@ from typing import cast
 import pytest
 from fastapi.testclient import TestClient
 
-from wishenka.auth.models import AuthenticatedUser
+from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
 from wishenka.logging import JsonFormatter
@@ -33,6 +33,19 @@ def setup_app(tmp_path: Path) -> Iterator[Setup]:
     owner = AuthenticatedUser(telegram_id=101, first_name="Owner", auth_method="session_token")
 
     with TestClient(app) as client:
+        import asyncio
+
+        async def _seed_users() -> None:
+            for uid, name in (
+                (101, "Owner"),
+                (202, "User202"),
+                (303, "User303"),
+                (505, "User505"),
+                (999, "User999"),
+            ):
+                await app.state.user_store.upsert_user(TelegramUser(id=uid, first_name=name))
+
+        asyncio.run(_seed_users())
         service = cast(WishlistService, getattr(app.state, "wishlist_service", None))
         if service is None:
             store = app.state.wishlist_store

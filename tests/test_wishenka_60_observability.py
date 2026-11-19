@@ -16,6 +16,7 @@ from tests.receipt_support import (
     OWNER,
     OWNER_ID,
     open_store,
+    seed_users,
     sql_exec,
 )
 from tests.test_notice_delivery_repro import _verify_start
@@ -71,7 +72,15 @@ async def test_shared_event_emission_logs_after_commit_and_not_on_rollback(
     """Shared event emission logs queued count after commit and emits nothing on rollback."""
     db = tmp_path / "shared-emit-obs.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
         await _verify_start(monkeypatch, db, GIFTER_ID)
+        for uid, fname in ((OWNER_ID, "Alice"), (GIFTER_ID, "Gifter")):
+            sql_exec(
+                db,
+                "INSERT OR IGNORE INTO users (telegram_id, first_name, created_at, updated_at) "
+                "VALUES (?, ?, '2026-01-01', '2026-01-01')",
+                (uid, fname),
+            )
 
         async def setup(service: WishlistService) -> int:
             wl = await service.create_wishlist(owner=OWNER, title="Secret Birthday Token123")
@@ -116,6 +125,13 @@ async def test_purge_finished_logs_receipt_and_reminder_counts(
     db = tmp_path / "purge-obs.db"
     async with open_store(db) as store:
         await _verify_start(monkeypatch, db, GIFTER_ID)
+        for uid, fname in ((OWNER_ID, "Alice"), (GIFTER_ID, "Gifter")):
+            sql_exec(
+                db,
+                "INSERT OR IGNORE INTO users (telegram_id, first_name, created_at, updated_at) "
+                "VALUES (?, ?, '2026-01-01', '2026-01-01')",
+                (uid, fname),
+            )
 
         async def setup(service: WishlistService) -> tuple[int, int]:
             wl = await service.create_wishlist(owner=OWNER, title="Private List")
@@ -165,6 +181,13 @@ async def test_recipient_exclusion_skip_logs_safe_event(
     db = tmp_path / "skip-obs.db"
     async with open_store(db) as store:
         await _verify_start(monkeypatch, db, GIFTER_ID)
+        for uid, fname in ((OWNER_ID, "Alice"), (GIFTER_ID, "Gifter")):
+            sql_exec(
+                db,
+                "INSERT OR IGNORE INTO users (telegram_id, first_name, created_at, updated_at) "
+                "VALUES (?, ?, '2026-01-01', '2026-01-01')",
+                (uid, fname),
+            )
 
         async def setup(service: WishlistService) -> int:
             wl = await service.create_wishlist(owner=OWNER, title="Collaborative Secret")
@@ -212,6 +235,13 @@ async def test_partial_receipt_archival_logs_sent_and_summary_without_leaks(
     db = tmp_path / "partial-archival-obs.db"
     async with open_store(db) as store:
         await _verify_start(monkeypatch, db, GIFTER_ID)
+        for uid, fname in ((OWNER_ID, "Alice"), (GIFTER_ID, "Gifter")):
+            sql_exec(
+                db,
+                "INSERT OR IGNORE INTO users (telegram_id, first_name, created_at, updated_at) "
+                "VALUES (?, ?, '2026-01-01', '2026-01-01')",
+                (uid, fname),
+            )
 
         async def setup(service: WishlistService) -> tuple[int, int]:
             wl = await service.create_wishlist(owner=OWNER, title="Secret List")

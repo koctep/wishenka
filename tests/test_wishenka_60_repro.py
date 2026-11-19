@@ -24,6 +24,7 @@ from tests.receipt_support import (
 )
 from tests.test_notice_delivery_repro import _verify_start
 from tests.test_receipt_notices import _Env
+from wishenka.auth.models import TelegramUser
 from wishenka.notices.store import NoticeStore
 from wishenka.wishlists.cleanup import run_cleanup_cycle
 from wishenka.wishlists.models import WishlistRole
@@ -80,6 +81,8 @@ async def test_wishlist_restore_and_update_notify_giver_with_open_reservation(
     db = tmp_path / db_name
 
     with app_env(tmp_path, db_name) as (client, sessions, _app):
+        await _app.state.user_store.upsert_user(TelegramUser(id=OWNER_ID, first_name="Alice"))
+        await _app.state.user_store.upsert_user(TelegramUser(id=GIFTER_ID, first_name="Gifter"))
         async with open_store(db) as store:
             await _verify_start(monkeypatch, db, GIFTER_ID)
 
@@ -127,6 +130,8 @@ async def test_member_role_patch_and_ownership_transfer_emit_membership_changed_
     db = tmp_path / db_name
 
     with app_env(tmp_path, db_name) as (client, sessions, _app):
+        await _app.state.user_store.upsert_user(TelegramUser(id=OWNER_ID, first_name="Alice"))
+        await _app.state.user_store.upsert_user(TelegramUser(id=GIFTER_ID, first_name="Gifter"))
         async with open_store(db) as store:
             await _verify_start(monkeypatch, db, GIFTER_ID)
 

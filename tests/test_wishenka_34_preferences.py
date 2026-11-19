@@ -15,6 +15,7 @@ from tests.receipt_support import (
     app_env,
     bearer,
     open_store,
+    seed_users,
     sql_exec,
 )
 from wishenka.auth.models import TelegramUser
@@ -89,6 +90,13 @@ async def test_preferences_store_validation_roles_and_isolation(tmp_path: Path) 
     """NotificationPreferencesStore validates inputs, tracks roles, and isolates wishlists."""
     db = tmp_path / "prefs-store.db"
     async with open_store(db) as wl_store:
+        seed_users(db, OWNER_ID)
+        sql_exec(
+            db,
+            "INSERT OR IGNORE INTO users (telegram_id, first_name, created_at, updated_at) "
+            "VALUES (?, 'Owner', '2026-01-01', '2026-01-01')",
+            (OWNER_ID,),
+        )
         wl_owner = await wl_store.execute(lambda svc: svc.create_wishlist(owner=OWNER, title="Own"))
         wl_other = await wl_store.execute(
             lambda svc: svc.create_wishlist(owner=GIFTER, title="Gifter List")

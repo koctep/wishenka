@@ -27,6 +27,7 @@ from tests.receipt_support import (
     open_store,
     receipt_rows,
     seed_wish,
+    sql_exec,
     sql_rows,
 )
 from wishenka.auth.models import AuthenticatedUser
@@ -45,6 +46,12 @@ _REFUSALS = ("NothingRemainingError", "QuantityAboveRemainingError")
 
 async def _seed(db: Path, quantity: int, promised: int = 0) -> int:
     async with open_store(db) as store:
+        sql_exec(
+            db,
+            "INSERT OR IGNORE INTO users (telegram_id, first_name, created_at, updated_at) "
+            "VALUES (?, ?, '2026-01-01', '2026-01-01')",
+            (CO_AUTHOR_ID, "Carl"),
+        )
 
         async def setup(service: WishlistService) -> int:
             wishlist_id, item_id = await seed_wish(service, quantity=quantity)

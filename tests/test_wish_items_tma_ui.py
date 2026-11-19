@@ -23,7 +23,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from wishenka.auth.models import AuthenticatedUser
+from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
 from wishenka.items.models import InputType
@@ -445,6 +445,7 @@ def test_collaborative_recipient_targeting_ui(
     alice_headers = auth_header(sessions, 101, "Alice") | {"HX-Request": "true"}
 
     async def seed() -> tuple[int, int, int]:
+        await app.state.user_store.upsert_user(TelegramUser(id=102, first_name="Bob"))
         personal_wl = await service.create_wishlist(owner=alice, title="Personal List")
         collab_wl = await service.create_wishlist(owner=alice, title="Family Holidays")
         await service.add_member(
@@ -675,6 +676,7 @@ def test_tma_ui_observability_events_and_attributes(
     owner_headers = auth_header(sessions, 101, "Alice") | {"HX-Request": "true"}
 
     async def seed() -> int:
+        await app.state.user_store.upsert_user(TelegramUser(id=102, first_name="Bob"))
         wl = await service.create_wishlist(owner=owner, title="Observability List")
         await service.add_member(
             wishlist_id=wl.id,

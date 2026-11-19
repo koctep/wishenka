@@ -26,7 +26,7 @@ from tests.receipt_support import (
     OWNER_ID,
     seed_wish,
 )
-from wishenka.auth.models import AuthenticatedUser
+from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.web.templates import templates
 from wishenka.wishlists.service import WishlistService
@@ -128,7 +128,17 @@ def seed_list(
 
     async def create() -> tuple[int, list[int]]:
         wishlist = await service.create_wishlist(owner=OWNER, title="Alice Birthday")
+        user_store = getattr(app.state, "user_store", None)
         for member in members:
+            if user_store is not None:
+                await user_store.upsert_user(
+                    TelegramUser(
+                        id=member.telegram_id,
+                        first_name=member.first_name,
+                        username=member.username,
+                        language_code="ru",
+                    )
+                )
             await service.add_member(wishlist.id, OWNER, member.telegram_id)
         ids: list[int] = []
         for wish in wishes:

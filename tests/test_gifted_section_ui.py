@@ -44,6 +44,7 @@ from tests.receipt_ui_support import (
     seed_list,
     text_of,
 )
+from wishenka.auth.models import TelegramUser
 from wishenka.wishlists.exceptions import PermissionDeniedError
 from wishenka.wishlists.models import WishlistRole
 from wishenka.wishlists.service import WishlistService
@@ -83,6 +84,16 @@ def _team(app: Any) -> tuple[int, list[int]]:
         members=(),
     )
     service = domain(app)
+    for user in (ADMIN, MEMBER):
+        run(
+            app.state.user_store.upsert_user(
+                TelegramUser(
+                    id=user.telegram_id,
+                    first_name=user.first_name,
+                    language_code="ru",
+                )
+            )
+        )
     run(service.add_member(wishlist_id, OWNER, ADMIN.telegram_id, WishlistRole.ADMIN))
     run(service.add_member(wishlist_id, OWNER, MEMBER.telegram_id, WishlistRole.MEMBER))
     receive(app, ids[0], 2)

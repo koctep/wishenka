@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -11,7 +12,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from wishenka.auth.models import AuthenticatedUser
+from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
 from wishenka.i18n.catalog import miniapp_catalog
@@ -63,6 +64,18 @@ def test_deleted_wishlist_restore_flow_permissions_tokens_and_reservations(
 
     app = create_app(settings)
     with TestClient(app) as client:
+
+        async def _seed_users() -> None:
+            for uid, name in (
+                (OWNER_ID, "Owner"),
+                (ADMIN_ID, "Admin"),
+                (MEMBER_ID, "Member"),
+                (GIFTER_ID, "Giver"),
+                (STRANGER_ID, "Stranger"),
+            ):
+                await app.state.user_store.upsert_user(TelegramUser(id=uid, first_name=name))
+
+        asyncio.run(_seed_users())
         # 1. Owner creates wishlist, adds wish item, invites admin & member
         created = client.post(
             "/api/wishlists",

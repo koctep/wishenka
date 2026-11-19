@@ -96,6 +96,15 @@ async def _seed_wishlist_with_items(
 ) -> tuple[int, list[int]]:
     """Create a wishlist with co-authors and initial active items."""
     service = WishlistService(store=store)
+    async with store.engine.begin() as conn:
+        for member, _ in co_authors:
+            await conn.execute(
+                text(
+                    "INSERT OR IGNORE INTO users (telegram_id, first_name, created_at, updated_at) "
+                    "VALUES (:uid, :name, '2026-01-01', '2026-01-01')"
+                ),
+                {"uid": member.telegram_id, "name": member.first_name},
+            )
     wishlist = await service.create_wishlist(owner=owner, title=title)
     for member, role in co_authors:
         await service.add_member(

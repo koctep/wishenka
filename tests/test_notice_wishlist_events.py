@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from tests.notice_support import FakeNoticeSender
-from tests.receipt_support import GIFTER_ID, OWNER, open_store
+from tests.receipt_support import GIFTER_ID, OWNER, open_store, seed_users
 from tests.test_notice_delivery_repro import _list_with_member, _verify_start
 from tests.test_receipt_notices import _Env
 from wishenka.notices.rate import reserve_permit
@@ -78,6 +78,7 @@ async def test_membership_and_list_archive_deliver_only_to_authorized_participan
 
     db = tmp_path / "membership.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
 
         async def create(service: WishlistService) -> int:
             return (await service.create_wishlist(owner=OWNER, title="Shared event")).id
@@ -199,6 +200,7 @@ async def test_invitation_acceptance_notifies_existing_owner(
 
     db = tmp_path / "invite-event.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
 
         async def create(service: WishlistService) -> str:
             return (await service.create_wishlist(owner=OWNER, title="Invite event")).invite_token
@@ -227,6 +229,7 @@ async def test_favorite_tracking_reminder_respects_current_favorite(
 
     db = tmp_path / "favorite.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
 
         async def setup(service: WishlistService) -> tuple[int, int]:
             wl = await service.create_wishlist(
@@ -270,6 +273,7 @@ async def test_receipt_is_not_sent_after_member_access_revoked(tmp_path: Path) -
 
     db = tmp_path / "receipt-revoked.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
         env = _Env(store, db, verify_destinations=True)
         await env.seed(3, ((GIFTER, 1),))
 
@@ -300,6 +304,7 @@ async def test_other_giver_reservation_activity_does_not_generate_notices(
 
     db = tmp_path / "reservation-events.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
         for user_id in (GIFTER_ID, OTHER_GIFTER_ID, OWNER_ID):
             await _verify_start(monkeypatch, db, user_id)
 
@@ -380,6 +385,7 @@ async def test_shared_change_does_not_fall_back_to_reservation_after_member_remo
 
     db = tmp_path / "removed-member.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
         await _verify_start(monkeypatch, db, GIFTER_ID)
 
         async def setup(service: WishlistService) -> tuple[int, int]:
@@ -546,6 +552,7 @@ async def test_list_owner_confirmation_uses_current_wish_recipient(
 
     db = tmp_path / "owner-confirmation.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
         await _verify_start(monkeypatch, db, OWNER_ID)
         with sqlite3.connect(db) as conn:
             conn.execute(
@@ -606,6 +613,7 @@ async def test_receipt_to_collaborative_owner_uses_current_wish_recipient(
 
     db = tmp_path / "owner-receipt.db"
     async with open_store(db) as store:
+        seed_users(db, GIFTER_ID)
         await _verify_start(monkeypatch, db, OWNER_ID)
 
         async def setup(service: WishlistService) -> tuple[int, int]:

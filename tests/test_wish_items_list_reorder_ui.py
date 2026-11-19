@@ -18,7 +18,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from wishenka.auth.models import AuthenticatedUser
+from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
 from wishenka.items.models import ItemPriority
@@ -81,6 +81,7 @@ def test_vertical_list_compact_and_inline_expanded_card_anatomy(
     alice_headers = auth_header(sessions, 101, "Alice") | {"HX-Request": "true"}
 
     async def seed() -> tuple[int, str, int, int]:
+        await app.state.user_store.upsert_user(TelegramUser(id=102, first_name="Bob"))
         wl = await service.create_wishlist(
             owner=alice,
             title='Holiday List <script>alert("title")</script>',
@@ -384,6 +385,9 @@ def test_archived_items_section_and_one_tap_restoration(
     member_headers = auth_header(sessions, 102, "CollaboratorBob") | {"HX-Request": "true"}
 
     async def seed() -> tuple[int, int, int]:
+        await app.state.user_store.upsert_user(
+            TelegramUser(id=member.telegram_id, first_name=member.first_name)
+        )
         wl = await service.create_wishlist(owner=owner, title="Archive Section Wishlist")
         await service.add_member(
             wishlist_id=wl.id,

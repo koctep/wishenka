@@ -137,6 +137,19 @@ def sql_exec(db: str | Path, sql: str, params: tuple[Any, ...] = ()) -> None:
         conn.execute(sql, params)
 
 
+def seed_users(db: str | Path, *user_ids: int) -> None:
+    """Ensure ``users`` rows exist for test user IDs when FK constraints are enforced."""
+    now = "2026-01-01T00:00:00+00:00"
+    with sqlite3.connect(db) as conn:
+        for user_id in user_ids:
+            conn.execute(
+                "INSERT OR IGNORE INTO users(telegram_id, first_name, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?)",
+                (user_id, f"User{user_id}", now, now),
+            )
+        conn.commit()
+
+
 def table_names(db: str | Path) -> set[str]:
     """Return the names of all tables."""
     rows = sql_rows(db, "SELECT name FROM sqlite_master WHERE type = 'table'")

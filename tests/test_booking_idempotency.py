@@ -261,6 +261,9 @@ def test_surprise_invariant_blocks_replay_when_actor_becomes_recipient(
     wishlist_id, item_id, _ = _seed_wishlist_and_item(app, quantity=2)
     service: WishlistService = app.state.domain_service
     owner = _make_user(_OWNER_ID, "Owner")
+    from wishenka.auth.models import TelegramUser
+
+    asyncio.run(app.state.user_store.upsert_user(TelegramUser(id=_GIFTER_ID, first_name="Gifter")))
     asyncio.run(
         service.add_member(
             wishlist_id=wishlist_id,

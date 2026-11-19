@@ -10,6 +10,15 @@ class Base(DeclarativeBase):
     """Base declarative class for wishlist database models."""
 
 
+class UserRefRow(Base):
+    """Minimal declarative reference to the users profile table for FK metadata."""
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telegram_id: Mapped[int] = mapped_column(Integer, nullable=False, unique=True)
+
+
 class WishlistRow(Base):
     """Relational row for the wishlist aggregate root."""
 
@@ -49,7 +58,9 @@ class WishlistMemberRow(Base):
     wishlist_id: Mapped[int] = mapped_column(
         ForeignKey("wl_lists.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True
+    )
     role: Mapped[str] = mapped_column(String, nullable=False, default="member")
     joined_at: Mapped[str] = mapped_column(String, nullable=False)
 
@@ -113,7 +124,9 @@ class WishlistFavoriteRow(Base):
 
     __tablename__ = "wl_favorites"
 
-    user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.telegram_id", ondelete="CASCADE"), primary_key=True
+    )
     wishlist_id: Mapped[int] = mapped_column(
         ForeignKey("wl_lists.id", ondelete="CASCADE"), primary_key=True
     )
@@ -127,7 +140,9 @@ class ViewHistoryRow(Base):
     __table_args__ = (UniqueConstraint("user_id", "wishlist_id", name="wl_view_history_user_wl"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True
+    )
     wishlist_id: Mapped[int] = mapped_column(
         ForeignKey("wl_lists.id", ondelete="CASCADE"), nullable=False
     )

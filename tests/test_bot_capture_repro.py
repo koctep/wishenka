@@ -17,7 +17,7 @@ from aiogram.methods import SendMessage
 from aiogram.types import InlineKeyboardMarkup, Message, Update
 from sqlalchemy import text
 
-from wishenka.auth.models import AuthenticatedUser
+from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.bot.entry import create_router
 from wishenka.items.schemas import ItemPreviewDTO
 from wishenka.items.service import ItemPreviewService
@@ -559,6 +559,7 @@ async def test_removed_member_cannot_save_previously_selected_list(
 ) -> None:
     harness, store, users, ids, _ = await _setup(tmp_path, monkeypatch)
     try:
+        await users.upsert_user(TelegramUser(id=202, first_name="Member"))
 
         async def add(service: Any) -> None:
             await service.add_member(ids[0], OWNER, 202, WishlistRole.MEMBER)
