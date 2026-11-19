@@ -314,7 +314,8 @@ XHR; проверки `assert_clean_console` упали бы под настоя
 
 Серверные тесты слоя страниц (без браузера): `tests/test_receipt_ui_routes.py`,
 `test_receipt_card_ui.py`, `test_gifted_section_ui.py`, `test_cabinet_received_marker.py`,
-`test_receipt_static_script.py`, `test_receipt_ui_observability.py`, помощник
+`test_receipt_static_script.py`, `test_receipt_ui_observability.py`,
+`test_receipt_undo_correction_repro.py`, `test_receipt_undo_correction_edge_cases.py`, помощник
 `tests/receipt_ui_support.py`; описание: `doc/dev/gift-receipt.md`, раздел «Mini App UI
 (WISHENKA-24)». Отсутствие встроенных `<script>` и `on*`-атрибутов в страницах и фрагментах
 (`base.html`, модалки и preview), а также раздача `/static/app.js` и `/static/settings.js` и

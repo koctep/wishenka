@@ -985,7 +985,11 @@ archive and restore, giver guard, stale reorder header), `test_gifted_section_ui
 `test_cabinet_received_marker.py`, `test_receipt_static_script.py` (script served and ordered,
 inline script hash, closed reason set, no inline handlers), `test_receipt_ui_observability.py`
 (full-flow log scan), `test_receipt_undo_correction_repro.py` (WISHENKA-153: service, notices,
-JSON `DELETE`/`PATCH`, and UI edit/cancel modals), and the browser modules
+JSON `DELETE`/`PATCH`, and UI edit/cancel modals), `test_receipt_undo_correction_edge_cases.py`
+(WISHENKA-217: idempotency replay/conflict on JSON `DELETE`/`PATCH` and UI `edit`/`cancel`,
+cross-item/cross-wishlist `receipt_id` isolation, no-op `PATCH`/UI `edit`, and
+`GET .../edit|cancel` refusals for missing receipts and archived wishlists), and the browser
+modules
 `test_receipt_modal_browser.py` and `test_receipt_accessibility_browser.py` (WISHENKA-161:
 `aria-modal`/background `inert`/Tab trap, focus return on partial/full/refusal,
 `gifted-items-details` open state, `remaining=500` stepper, 44 px mobile touch targets & quick-add
