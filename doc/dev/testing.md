@@ -801,6 +801,27 @@ Telegram Bot API и офлайн-проверки безопасности:
 .venv/bin/pytest tests/test_notice_worker_concurrency.py
 ```
 
+## Атомарная транзакционная граница захвата бота (WISHENKA-179)
+
+Модуль `tests/test_bot_capture_atomic_store_repro.py` (`pytestmark = pytest.mark.timeout(15)`)
+проверяет публичный интерфейс `WishlistStore.execute_with_connection` и миграцию
+`wishenka/bot/capture.py:mutate`:
+
+- `test_execute_with_connection_commits_service_and_sql_atomically` — совместный коммит доменного
+  вызова `WishlistService.add_wish_item` и SQL-обновления `bot_drafts` на одном `AsyncConnection`.
+- `test_execute_with_connection_rolls_back_service_and_sql_on_error` — одновременный откат
+  доменной записи и SQL-изменения при исключении внутри колбэка.
+- `test_bot_capture_save_uses_execute_with_connection_and_preserves_replay` — подтверждает вызов
+  `store.execute_with_connection` при сохранении черновика и идемпотентный повторный ответ.
+- `test_bot_capture_does_not_access_private_store_read_write` — AST-проверка того, что
+  `wishenka/bot/capture.py` не обращается к приватным атрибутам `_read` и `_write`.
+
+Запуск модуля:
+
+```bash
+make test PYTEST_JOBS=0 PYTEST_ARGS="tests/test_bot_capture_atomic_store_repro.py"
+```
+
 ## Известные ограничения
 
 Пункты отслежены в Jira (источники: `ai-tasks/WISHENKA-124/60-tech-debt.md` и `ai-tasks/WISHENKA-110/60-tech-debt.md`):

@@ -95,9 +95,10 @@ expired rows per pass across `bot_drafts`, `birthday_input`, `support_input`, `s
 the bot draft tables, support tables (`support_input`, `support_tickets`), and the
 notification/birthday tables (see
 [Service notifications and reminders](notifications.md)) when implementing that deletion. The
-atomic capture operation currently uses
-private wishlist store methods; [WISHENKA-179](https://pypost.atlassian.net/browse/WISHENKA-179)
-tracks a supported store interface.
+atomic capture mutation (`wishenka/bot/capture.py:mutate`) uses the public
+`WishlistStore.execute_with_connection` transactional boundary to combine `WishlistService` domain
+operations with caller-scoped SQL (`bot_drafts` and `bot_capture_order`) inside one
+`BEGIN IMMEDIATE` transaction without accessing private store methods.
 
 ## Running and configuration
 
@@ -153,7 +154,7 @@ Run the focused tests with:
 
 ```bash
 make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_start_repro.py tests/test_bot_entry_repro.py'
-make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_capture_repro.py tests/test_bot_capture_order_retention_repro.py tests/test_bot_capture_order_retention.py'
+make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_capture_repro.py tests/test_bot_capture_atomic_store_repro.py tests/test_bot_capture_order_retention_repro.py tests/test_bot_capture_order_retention.py'
 make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_support_repro.py tests/test_bot_support.py'
 make test-serial PYTEST_ARGS='tests/test_bot_menu_miniapp_e2e_browser.py'
 ```

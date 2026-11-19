@@ -1231,9 +1231,18 @@ relational architecture, `WishlistStore` coordinates atomic row-level persistenc
 - **Bounded Busy Timeout (`PRAGMA busy_timeout = 5000`)**: If SQLite encounters a transient write
   lock, it waits up to 5000 milliseconds before raising an operational error.
 - **Capability Collision Retry**: If a concurrent worker or token generation collides with an
-  existing capability token in `wl_tokens` or `wl_invite_tokens`, `WishlistStore.execute()`
-  catches `TokenCollision` / `IntegrityError` and retries up to 5 times with newly generated
-  cryptographic tokens.
+  existing capability token in `wl_tokens` or `wl_invite_tokens`, `WishlistStore.execute()` and
+  `WishlistStore.execute_with_connection()` catch `TokenCollision` / `IntegrityError` and retry up
+  to 5 times with newly generated cryptographic tokens.
+- **Public Hybrid Transaction Seam (`WishlistStore.execute_with_connection`)**:
+  `execute_with_connection(operation)` accepts `Callable[[WishlistService, AsyncConnection], Awaitable[T]]`
+  and runs both hydrated `WishlistService` domain operations and caller-scoped SQL on the same
+  `AsyncConnection` inside one `BEGIN IMMEDIATE` transaction (sharing `_read`/`_write` snapshot
+  diffing, token-collision retries, error mapping, and post-commit log flushing).
+  `WishlistStore.execute()` delegates to `execute_with_connection()`. Callers outside the
+  wishlist domain that need atomic cross-table writes alongside domain operations (such as
+  `wishenka.bot.capture:mutate` updating `bot_drafts` and `bot_capture_order` with
+  `add_wish_item`) use `execute_with_connection()` instead of private `_read`/`_write` hooks.
 
 ### 5. Observability & Security Guarantees
 
