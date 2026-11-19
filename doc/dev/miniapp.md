@@ -453,7 +453,14 @@ wish items without full-page reloads.
   - Loaded via `GET /web/wishlists/{wishlist_id}/items/new` (`get_new_item_modal`, new-modal route).
   - Prepopulates `title`, `link`, `price`, `currency`, and `image_url` from query parameters or
     classifies `raw_input` via `UniversalInputClassifier`.
-  - Submits to `POST /web/wishlists/{wishlist_id}/items/quick`.
+  - Submits to `POST /web/wishlists/{wishlist_id}/items/new` (`submit_new_item`), appending the
+    new card to `#items-list` (`hx-swap="beforeend"`) and returning `201 Created` with OOB resets
+    via `_render_created_item_response`.
+  - On `400 Bad Request` validation errors (form parsing/empty title or domain `ValueError`),
+    `_render_item_modal_error` (`is_edit=False`) re-renders `partials/item_edit_modal.html` with
+    `HX-Retarget: #item-modal-container` and `HX-Reswap: innerHTML`, preserving all submitted form
+    fields and collaborative recipient options/selection while displaying `[role="alert"]` inside
+    the modal.
 - **Edit Mode (`is_edit=True`)**:
   - Loaded via `GET /web/wishlists/{wishlist_id}/items/{item_id}/edit` (`get_edit_item_modal`).
   - Submits to `POST /web/wishlists/{wishlist_id}/items/{item_id}/edit` (`submit_edit_item`),
@@ -763,11 +770,13 @@ of inline JavaScript and inline `on*` event handlers from SSR templates so a str
     requests matching `reservationRequestPath(detail.elt)` (handled by `static/app.js`
     `htmx:afterRequest`), and non-HTML (e.g., JSON) responses are left untouched.
 - **Server Error Response Contracts (`wishenka/web/routes/items_ui.py`)**:
-  - **Recoverable edit-modal errors (`400` validation, `409` Reduction Lock, `503` Busy)**:
-    `_render_edit_modal_error` returns `partials/item_edit_modal.html` with
-    `HX-Retarget: #item-modal-container` and `HX-Reswap: innerHTML` headers, preserving
-    `submitted_form` values and displaying `[role="alert"]` inside the modal without touching
-    `#item-card-{item_id}`.
+  - **Recoverable create/edit-modal errors (`400` validation in `submit_new_item` with
+    `is_edit=False` and in `submit_edit_item` with `is_edit=True`, plus `409` Reduction Lock and
+    `503` Busy in `submit_edit_item`)**: `_render_item_modal_error` returns
+    `partials/item_edit_modal.html` with `HX-Retarget: #item-modal-container` and
+    `HX-Reswap: innerHTML` headers, preserving submitted form values (and collaborative recipient
+    options/selection) while displaying `[role="alert"]` inside the modal without touching
+    `#items-list` or `#item-card-{item_id}`.
   - **Unrecoverable modal/quick-add errors (`409` `WishlistArchivedError`, `404` missing/deleted/
     forbidden resource, quick-add `400` validation)**: `_modal_domain_error_response` /
     `_oob_modal_notice` return `text/html` `hx-swap-oob` fragments that clear
@@ -844,6 +853,7 @@ across three Jinja2 partials with privacy, performance, and CSP-safe broken-imag
 | `/web/wishlists/{wishlist_id}/items/preview` | `POST` | Yes | Yes | Classifies input & renders preview card. |
 | `/web/wishlists/{wishlist_id}/items/quick` | `POST` | Yes | Yes | Quick-adds item & returns card + OOB reset. |
 | `/web/wishlists/{wishlist_id}/items/new` | `GET` | Yes | No | Renders prepopulated item creation modal. |
+| `/web/wishlists/{wishlist_id}/items/new` | `POST` | Yes | Yes | Creates item from creation modal (`201`) or returns `400` modal with preserved state. |
 | `/web/wishlists/{wishlist_id}/items/{item_id}/edit` | `GET` | Yes | No | Renders item edit modal with Reduction Lock. |
 | `/web/wishlists/{wishlist_id}/items/{item_id}/edit` | `POST` | Yes | Yes | Saves item edits or returns 409 modal. |
 | `/web/wishlists/{wishlist_id}/items/{item_id}/archive` | `POST` | Yes | Yes | Archives item & removes card via OOB swap. |
@@ -867,7 +877,9 @@ The HTMX wish item UI router (`wishenka.web.items_ui`) emits structured telemetr
 | Event Name | Level | Context Attributes | Description |
 | :--- | :---: | :--- | :--- |
 | `ui_item_quick_add_preview` | `INFO` | `wishlist_id`, `actor_id`, `user_id`, `input_type`, `domain`, `store_name`, `is_fallback`, `duration_ms` | Universal input classified and preview or fallback rendered. |
-| `ui_item_quick_add_success` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `has_link`, `price`, `quantity` | Wish item created via Quick Add Bar or creation modal. |
+| `ui_item_quick_add_success` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `has_link`, `price`, `quantity` | Wish item created via Quick Add Bar. |
+| `ui_item_create_success` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `has_link`, `price`, `quantity` | Wish item created via detailed creation modal (`submit_new_item`). |
+| `ui_item_create_validation_error` | `WARNING` | `stage`, `status_code`, `wishlist_id`, `actor_id`, `user_id` | Creation modal form rejected with HTTP 400 (`stage="form"` or `"domain"`); user input omitted. |
 | `ui_item_edit_opened` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `mode`, `received_quantity` (edit only), `is_collaborative` | Item modal opened (`mode="create"` or `mode="edit"`). |
 | `ui_reduction_lock_rejected` | `WARNING` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `requested_quantity`, `received_quantity` | Edit rejected (HTTP 409) due to quantity below received units. |
 | `ui_item_edit_busy` | `WARNING` | `wishlist_id`, `item_id` | Edit modal returned HTTP 503 (`InventoryBusyError`); names no gifter. |

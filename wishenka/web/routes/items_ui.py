@@ -6,6 +6,7 @@ import html
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Annotated, Any, NoReturn, cast
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
@@ -168,7 +169,7 @@ def _modal_domain_error_response(
     )
 
 
-def _render_edit_modal_error(
+def _render_item_modal_error(
     request: Request,
     *,
     wishlist_id: int,
@@ -180,7 +181,7 @@ def _render_edit_modal_error(
     status_code: int,
     is_edit: bool = True,
 ) -> Response:
-    """Render the edit modal with an error banner and retarget to ``#item-modal-container``."""
+    """Render item create/edit modal with error banner and retarget to ``#item-modal-container``."""
     return templates.TemplateResponse(
         request=request,
         name="partials/item_edit_modal.html",
@@ -195,6 +196,135 @@ def _render_edit_modal_error(
         },
         status_code=status_code,
         headers=_RETARGET_MODAL_HEADERS,
+    )
+
+
+def _render_created_item_response(
+    request: Request,
+    *,
+    wishlist_id: int,
+    projected_item: WishItemRecipientViewDTO | WishItemGifterViewDTO,
+    locale: SupportedLocale,
+) -> HTMLResponse:
+    """Render newly created item card along with OOB resets for Quick Add and modal."""
+    card_html = templates.get_template("partials/item_card.html").render(
+        {
+            "request": request,
+            "item": projected_item,
+            "wishlist_id": wishlist_id,
+            "can_edit_wishlist": True,
+            "locale": locale,
+            **_editor_card_flags(),
+        }
+    )
+    placeholder = html.escape(t("web.item.quick_add_placeholder", locale), quote=True)
+    oob_html = (
+        f'<div id="quick-add-preview-target" hx-swap-oob="innerHTML"></div>\n'
+        f'<input type="text" id="quick-add-input" name="raw_input" value="" '
+        f'placeholder="{placeholder}" autocomplete="off" '
+        f'hx-post="/web/wishlists/{wishlist_id}/items/preview" '
+        f'hx-trigger="input changed delay:500ms, paste" '
+        f'hx-target="#quick-add-preview-target" hx-swap="innerHTML" '
+        f'hx-swap-oob="true" />\n'
+        f'<div id="empty-items-placeholder" hx-swap-oob="delete"></div>\n'
+        f'<div id="item-modal-container" hx-swap-oob="innerHTML"></div>'
+    )
+    return HTMLResponse(
+        content=f"{card_html}\n{oob_html}",
+        status_code=status.HTTP_201_CREATED,
+    )
+
+
+@dataclass(slots=True)
+class _ParsedItemModalForm:
+    """Normalized and validated form state for item create/edit modals."""
+
+    form_data: dict[str, Any]
+    clean_title: str
+    clean_link: str | None
+    clean_desc: str | None
+    clean_image: str | None
+    clean_cat: str | None
+    clean_recip_name: str | None
+    clean_currency: str
+    parsed_price: int | None
+    parsed_recipient_uid: int | None
+    parsed_priority: ItemPriority
+    validation_error: str | None
+
+
+def _parse_item_modal_form(
+    *,
+    item_id: int | None,
+    locale: SupportedLocale,
+    title: str,
+    link: str | None,
+    price: str | None,
+    currency: str,
+    quantity: int,
+    description: str | None,
+    image_url: str | None,
+    priority: str,
+    category: str | None,
+    recipient_user_id: str | None,
+    recipient_name: str | None,
+) -> _ParsedItemModalForm:
+    """Normalize raw modal form fields and run field-level validation."""
+    clean_title = title.strip()
+    clean_link = link.strip() if link is not None else None
+    clean_desc = description.strip() if description is not None else None
+    clean_image = image_url.strip() if image_url is not None else None
+    clean_cat = category.strip() if category is not None else None
+    clean_recip_name = recipient_name.strip() if recipient_name is not None else None
+    clean_currency = (currency or DEFAULT_CURRENCY).strip() or DEFAULT_CURRENCY
+
+    submitted_form: dict[str, Any] = {
+        "id": item_id,
+        "title": clean_title,
+        "description": clean_desc or "",
+        "link": clean_link or "",
+        "price": price.strip() if price and price.strip() else None,
+        "currency": clean_currency,
+        "quantity": quantity,
+        "priority": (priority or "medium").strip().lower() or "medium",
+        "category": clean_cat or "",
+        "image_url": clean_image or "",
+        "recipient_user_id": recipient_user_id.strip() if recipient_user_id else None,
+        "recipient_name": clean_recip_name or "",
+    }
+
+    validation_error: str | None = None
+    parsed_price: int | None = None
+    parsed_recipient_uid: int | None = None
+    parsed_priority = ItemPriority.MEDIUM
+    if not clean_title:
+        validation_error = t("web.item.empty_title", locale)
+    else:
+        try:
+            parsed_price = _parse_optional_int(price, locale)
+            parsed_recipient_uid = _parse_optional_int(recipient_user_id, locale)
+            parsed_priority = _parse_priority(priority, locale)
+        except ValueError as exc:
+            validation_error = str(exc)
+
+    if validation_error is None:
+        submitted_form["price"] = parsed_price
+        submitted_form["recipient_user_id"] = parsed_recipient_uid
+        submitted_form["priority"] = parsed_priority.value
+
+    return _ParsedItemModalForm(
+        form_data=submitted_form,
+        clean_title=clean_title,
+        clean_link=clean_link,
+        clean_desc=clean_desc,
+        clean_image=clean_image,
+        clean_cat=clean_cat,
+        clean_recip_name=clean_recip_name,
+        clean_currency=clean_currency,
+        parsed_price=parsed_price,
+        parsed_recipient_uid=parsed_recipient_uid,
+        parsed_priority=parsed_priority,
+        validation_error=validation_error,
     )
 
 
@@ -496,31 +626,11 @@ async def quick_add_item(
         },
     )
 
-    card_html = templates.get_template("partials/item_card.html").render(
-        {
-            "request": request,
-            "item": projected_item,
-            "wishlist_id": wishlist_id,
-            "can_edit_wishlist": True,
-            "locale": locale,
-            **_editor_card_flags(),
-        }
-    )
-    placeholder = html.escape(t("web.item.quick_add_placeholder", locale), quote=True)
-    oob_html = (
-        f'<div id="quick-add-preview-target" hx-swap-oob="innerHTML"></div>\n'
-        f'<input type="text" id="quick-add-input" name="raw_input" value="" '
-        f'placeholder="{placeholder}" autocomplete="off" '
-        f'hx-post="/web/wishlists/{wishlist_id}/items/preview" '
-        f'hx-trigger="input changed delay:500ms, paste" '
-        f'hx-target="#quick-add-preview-target" hx-swap="innerHTML" '
-        f'hx-swap-oob="true" />\n'
-        f'<div id="empty-items-placeholder" hx-swap-oob="delete"></div>\n'
-        f'<div id="item-modal-container" hx-swap-oob="innerHTML"></div>'
-    )
-    return HTMLResponse(
-        content=f"{card_html}\n{oob_html}",
-        status_code=status.HTTP_201_CREATED,
+    return _render_created_item_response(
+        request,
+        wishlist_id=wishlist_id,
+        projected_item=projected_item,
+        locale=locale,
     )
 
 
@@ -617,6 +727,163 @@ async def get_new_item_modal(
             "collaborative_members": collaborative_members,
             "error_message": None,
         },
+    )
+
+
+@router.post("/items/new", response_class=HTMLResponse)
+async def submit_new_item(
+    wishlist_id: int,
+    request: Request,
+    user: User,
+    locale: LocaleDep,
+    title: Annotated[str, Form()] = "",
+    link: Annotated[str | None, Form()] = None,
+    price: Annotated[str | None, Form()] = None,
+    currency: Annotated[str, Form()] = DEFAULT_CURRENCY,
+    quantity: Annotated[int, Form()] = 1,
+    description: Annotated[str | None, Form()] = None,
+    image_url: Annotated[str | None, Form()] = None,
+    priority: Annotated[str, Form()] = "medium",
+    category: Annotated[str | None, Form()] = None,
+    recipient_user_id: Annotated[str | None, Form()] = None,
+    recipient_name: Annotated[str | None, Form()] = None,
+) -> Response:
+    """Create a wish item from the detailed Create Item modal, preserving state on 400 errors."""
+    parsed = _parse_item_modal_form(
+        item_id=None,
+        locale=locale,
+        title=title,
+        link=link,
+        price=price,
+        currency=currency,
+        quantity=quantity,
+        description=description,
+        image_url=image_url,
+        priority=priority,
+        category=category,
+        recipient_user_id=recipient_user_id,
+        recipient_name=recipient_name,
+    )
+
+    is_collaborative_snapshot = False
+    collaborative_members_snapshot: list[dict[str, Any]] = []
+
+    async def action(
+        svc: WishlistService,
+    ) -> WishItemRecipientViewDTO | WishItemGifterViewDTO | None:
+        nonlocal is_collaborative_snapshot, collaborative_members_snapshot
+        wl = await svc.get_wishlist_by_id(wishlist_id)
+        _ensure_member_and_active(wl, user)
+        is_collaborative_snapshot = wl.is_collaborative
+        collaborative_members_snapshot = _collaborative_members(wl, locale)
+
+        if parsed.validation_error is not None:
+            return None
+
+        item = await svc.add_wish_item(
+            wishlist_id=wishlist_id,
+            actor=user,
+            title=parsed.clean_title,
+            description=parsed.clean_desc or None,
+            link=parsed.clean_link or None,
+            image_url=parsed.clean_image or None,
+            price=parsed.parsed_price,
+            currency=parsed.clean_currency,
+            quantity=quantity,
+            priority=parsed.parsed_priority,
+            category=parsed.clean_cat or None,
+            recipient_user_id=parsed.parsed_recipient_uid,
+            recipient_name=parsed.clean_recip_name or None,
+        )
+        return project_wish_item(item, user)
+
+    try:
+        projected_item = await _execute(request, action)
+    except (
+        WishlistNotFoundError,
+        WishlistDeletedError,
+        PermissionDeniedError,
+        WishlistArchivedError,
+    ) as exc:
+        return _modal_domain_error_response(
+            exc,
+            locale,
+            wishlist_id=wishlist_id,
+            actor_id=user.telegram_id,
+            operation="new_item",
+        )
+    except ValueError as exc:
+        logger.warning(
+            "Item creation validation failed (domain) in wishlist %s",
+            wishlist_id,
+            extra={
+                "event": "ui_item_create_validation_error",
+                "stage": "domain",
+                "status_code": status.HTTP_400_BAD_REQUEST,
+                "wishlist_id": wishlist_id,
+                "actor_id": user.telegram_id,
+                "user_id": user.telegram_id,
+            },
+        )
+        return _render_item_modal_error(
+            request,
+            wishlist_id=wishlist_id,
+            form_data=parsed.form_data,
+            min_quantity=1,
+            is_collaborative=is_collaborative_snapshot,
+            collaborative_members=collaborative_members_snapshot,
+            error_message=str(exc),
+            status_code=status.HTTP_400_BAD_REQUEST,
+            is_edit=False,
+        )
+
+    if projected_item is None:
+        logger.warning(
+            "Item creation validation failed (form) in wishlist %s",
+            wishlist_id,
+            extra={
+                "event": "ui_item_create_validation_error",
+                "stage": "form",
+                "status_code": status.HTTP_400_BAD_REQUEST,
+                "wishlist_id": wishlist_id,
+                "actor_id": user.telegram_id,
+                "user_id": user.telegram_id,
+            },
+        )
+        return _render_item_modal_error(
+            request,
+            wishlist_id=wishlist_id,
+            form_data=parsed.form_data,
+            min_quantity=1,
+            is_collaborative=is_collaborative_snapshot,
+            collaborative_members=collaborative_members_snapshot,
+            error_message=parsed.validation_error or t("web.item.empty_title", locale),
+            status_code=status.HTTP_400_BAD_REQUEST,
+            is_edit=False,
+        )
+
+    logger.info(
+        "Wish item %s created via modal in wishlist %s by actor %s",
+        projected_item.id,
+        wishlist_id,
+        user.telegram_id,
+        extra={
+            "event": "ui_item_create_success",
+            "wishlist_id": wishlist_id,
+            "item_id": projected_item.id,
+            "actor_id": user.telegram_id,
+            "user_id": user.telegram_id,
+            "has_link": bool(projected_item.link),
+            "price": projected_item.price,
+            "quantity": projected_item.quantity,
+        },
+    )
+
+    return _render_created_item_response(
+        request,
+        wishlist_id=wishlist_id,
+        projected_item=projected_item,
+        locale=locale,
     )
 
 
@@ -723,44 +990,23 @@ async def submit_edit_item(
     recipient_name: Annotated[str | None, Form()] = None,
 ) -> Response:
     """Save item edits or re-render modal with 409 Conflict if Reduction Lock is violated."""
-    clean_title = title.strip()
-    clean_link = link.strip() if link is not None else None
-    clean_desc = description.strip() if description is not None else None
-    clean_image = image_url.strip() if image_url is not None else None
-    clean_cat = category.strip() if category is not None else None
-    clean_recip_name = recipient_name.strip() if recipient_name is not None else None
-    clean_currency = (currency or DEFAULT_CURRENCY).strip() or DEFAULT_CURRENCY
+    parsed = _parse_item_modal_form(
+        item_id=item_id,
+        locale=locale,
+        title=title,
+        link=link,
+        price=price,
+        currency=currency,
+        quantity=quantity,
+        description=description,
+        image_url=image_url,
+        priority=priority,
+        category=category,
+        recipient_user_id=recipient_user_id,
+        recipient_name=recipient_name,
+    )
 
-    submitted_form: dict[str, Any] = {
-        "id": item_id,
-        "title": clean_title,
-        "description": clean_desc or "",
-        "link": clean_link or "",
-        "price": price.strip() if price and price.strip() else None,
-        "currency": clean_currency,
-        "quantity": quantity,
-        "priority": (priority or "medium").strip().lower() or "medium",
-        "category": clean_cat or "",
-        "image_url": clean_image or "",
-        "recipient_user_id": recipient_user_id.strip() if recipient_user_id else None,
-        "recipient_name": clean_recip_name or "",
-    }
-
-    validation_error: str | None = None
-    parsed_price: int | None = None
-    parsed_recipient_uid: int | None = None
-    parsed_priority = ItemPriority.MEDIUM
-    if not clean_title:
-        validation_error = t("web.item.empty_title", locale)
-    else:
-        try:
-            parsed_price = _parse_optional_int(price, locale)
-            parsed_recipient_uid = _parse_optional_int(recipient_user_id, locale)
-            parsed_priority = _parse_priority(priority, locale)
-        except ValueError as exc:
-            validation_error = str(exc)
-
-    if validation_error is not None:
+    if parsed.validation_error is not None:
         logger.warning(
             "Item edit validation failed (form) for item %s in wishlist %s",
             item_id,
@@ -775,20 +1021,16 @@ async def submit_edit_item(
                 "user_id": user.telegram_id,
             },
         )
-        return _render_edit_modal_error(
+        return _render_item_modal_error(
             request,
             wishlist_id=wishlist_id,
-            form_data=submitted_form,
+            form_data=parsed.form_data,
             min_quantity=1,
             is_collaborative=False,
             collaborative_members=[],
-            error_message=validation_error,
+            error_message=parsed.validation_error,
             status_code=status.HTTP_400_BAD_REQUEST,
         )
-
-    submitted_form["price"] = parsed_price
-    submitted_form["recipient_user_id"] = parsed_recipient_uid
-    submitted_form["priority"] = parsed_priority.value
 
     received_quantity_snapshot = 0
     is_collaborative_snapshot = False
@@ -811,17 +1053,17 @@ async def submit_edit_item(
         updated = await svc.update_wish_item(
             item_id=item_id,
             actor=user,
-            title=clean_title,
-            description=clean_desc,
-            link=clean_link,
-            image_url=clean_image,
-            price=parsed_price,
-            currency=(currency or DEFAULT_CURRENCY).strip() or DEFAULT_CURRENCY,
+            title=parsed.clean_title,
+            description=parsed.clean_desc,
+            link=parsed.clean_link,
+            image_url=parsed.clean_image,
+            price=parsed.parsed_price,
+            currency=parsed.clean_currency,
             quantity=quantity,
-            priority=parsed_priority,
-            category=clean_cat,
-            recipient_user_id=parsed_recipient_uid,
-            recipient_name=clean_recip_name,
+            priority=parsed.parsed_priority,
+            category=parsed.clean_cat,
+            recipient_user_id=parsed.parsed_recipient_uid,
+            recipient_name=parsed.clean_recip_name,
             wishlist_id=wishlist_id,
         )
         return project_wish_item(updated, user)
@@ -846,10 +1088,10 @@ async def submit_edit_item(
                 "item_id": item_id,
             },
         )
-        return _render_edit_modal_error(
+        return _render_item_modal_error(
             request,
             wishlist_id=wishlist_id,
-            form_data=submitted_form,
+            form_data=parsed.form_data,
             min_quantity=max(1, received_quantity_snapshot),
             is_collaborative=is_collaborative_snapshot,
             collaborative_members=collaborative_members_snapshot,
@@ -878,10 +1120,10 @@ async def submit_edit_item(
             locale,
             count=received_quantity_snapshot,
         )
-        return _render_edit_modal_error(
+        return _render_item_modal_error(
             request,
             wishlist_id=wishlist_id,
-            form_data=submitted_form,
+            form_data=parsed.form_data,
             min_quantity=max(1, received_quantity_snapshot),
             is_collaborative=is_collaborative_snapshot,
             collaborative_members=collaborative_members_snapshot,
@@ -912,10 +1154,10 @@ async def submit_edit_item(
                 "user_id": user.telegram_id,
             },
         )
-        return _render_edit_modal_error(
+        return _render_item_modal_error(
             request,
             wishlist_id=wishlist_id,
-            form_data=submitted_form,
+            form_data=parsed.form_data,
             min_quantity=max(1, received_quantity_snapshot),
             is_collaborative=is_collaborative_snapshot,
             collaborative_members=collaborative_members_snapshot,
@@ -923,7 +1165,7 @@ async def submit_edit_item(
             status_code=status.HTTP_400_BAD_REQUEST,
         )
 
-    has_recipient = bool(parsed_recipient_uid is not None or clean_recip_name)
+    has_recipient = bool(parsed.parsed_recipient_uid is not None or parsed.clean_recip_name)
     logger.info(
         "Item %s in wishlist %s updated via UI by actor %s",
         item_id,

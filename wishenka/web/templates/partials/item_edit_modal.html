@@ -26,7 +26,7 @@
               hx-target="#item-card-{{ form.id }}"
               hx-swap="outerHTML"
               {% else %}
-              hx-post="/web/wishlists/{{ wishlist_id }}/items/quick"
+              hx-post="/web/wishlists/{{ wishlist_id }}/items/new"
               hx-target="#items-list"
               hx-swap="beforeend"
               {% endif %}>
@@ -107,7 +107,7 @@
                 <select id="recipient-user-select" name="recipient_user_id">
                     <option value="">{{ t('web.item.recipient_shared', locale|default('en')) }}</option>
                     {% for member in collaborative_members %}
-                    <option value="{{ member.user_id }}" {% if form.recipient_user_id == member.user_id %}selected{% endif %}>
+                    <option value="{{ member.user_id }}" {% if form.recipient_user_id is not none and (form.recipient_user_id | string) == (member.user_id | string) %}selected{% endif %}>
                         {{ member.display_name }}
                     </option>
                     {% endfor %}
