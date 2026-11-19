@@ -870,6 +870,42 @@ make test PYTEST_JOBS=0 PYTEST_ARGS="tests/test_bot_capture_atomic_store_repro.p
 make test PYTEST_JOBS=0 PYTEST_ARGS="tests/test_notice_store_transaction_repro.py"
 ```
 
+## Пакетная очистка outbox и `reminder_outbox.updated_at` (WISHENKA-183)
+
+Два модуля (`pytestmark = pytest.mark.timeout(30)`) проверяют ограниченную по размеру пакета
+очистку `NoticeStore.purge_finished` и миграцию/проставление `reminder_outbox.updated_at`:
+
+### `tests/test_wishenka_183_repro.py`
+
+- `test_purge_finished_validates_non_positive_batch_size` — отклоняет `batch_size <= 0` (`0`, `-1`)
+  через `ValueError`.
+- `test_purge_finished_drains_both_outboxes_and_preserves_protected_rows` — проверяет поэтапное
+  удаление (`LIMIT :batch_size` в отдельных транзакциях) просроченных терминальных строк из
+  `notification_outbox` и `reminder_outbox` с сохранением нетерминальных (`pending`, `uncertain`),
+  свежих и активных по циклу (`event_date >= today_utc`) записей.
+- `test_reminder_outbox_has_updated_at_column_index_and_coalesce_retention` — проверяет наличие
+  колонки `reminder_outbox.updated_at`, индекса `idx_reminder_outbox_status_updated` и фильтрацию
+  хранения по `COALESCE(updated_at, next_attempt_at)`.
+
+### `tests/test_wishenka_183_updated_at.py`
+
+- `test_alembic_reminder_outbox_updated_at_upgrade_backfill_and_downgrade` — проверяет миграцию
+  `add_reminder_outbox_updated_at` (`upgrade` с backfill `COALESCE(claimed_at, next_attempt_at)` и
+  созданием `idx_reminder_outbox_status_updated`, а также обратимый `downgrade` к
+  `add_bot_capture_order_retention`).
+- `test_reminder_outbox_writers_stamp_updated_at` — проверяет проставление `updated_at` всеми
+  источниками записи в `reminder_outbox`: `ReminderScheduler`, `EventProducer`,
+  `NoticeWorker.run_once` (`settle_reminder`), восстановлением зависших захватов в `claim_reminder`
+  и операторским `resolve`.
+- `test_purge_finished_logs_batch_count_and_batch_size` — проверяет поля `batches` и `batch_size`
+  в событии `notice_outbox_purged`.
+
+Запуск модулей:
+
+```bash
+make test PYTEST_JOBS=0 PYTEST_ARGS="tests/test_wishenka_183_repro.py tests/test_wishenka_183_updated_at.py"
+```
+
 ## Известные ограничения
 
 Пункты отслежены в Jira (источники: `ai-tasks/WISHENKA-124/60-tech-debt.md` и `ai-tasks/WISHENKA-110/60-tech-debt.md`):

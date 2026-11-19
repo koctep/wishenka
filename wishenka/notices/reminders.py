@@ -179,10 +179,10 @@ async def claim_reminder(
         skipped.clear()
         await conn.execute(
             text(
-                "UPDATE reminder_outbox SET status='uncertain',claimed_at=NULL,claim_token=NULL "
-                "WHERE status='sending' AND claimed_at<=:stale"
+                "UPDATE reminder_outbox SET status='uncertain',claimed_at=NULL,claim_token=NULL,"
+                "updated_at=:now WHERE status='sending' AND claimed_at<=:stale"
             ),
-            {"stale": now - lease},
+            {"now": now, "stale": now - lease},
         )
         has_users = await conn.scalar(
             text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'")
@@ -209,8 +209,8 @@ async def claim_reminder(
             if not await _event_authorized(conn, row):
                 await conn.execute(
                     text(
-                        "UPDATE reminder_outbox SET status='skipped',next_attempt_at=:now "
-                        "WHERE id=:id"
+                        "UPDATE reminder_outbox SET status='skipped',next_attempt_at=:now,"
+                        "updated_at=:now WHERE id=:id"
                     ),
                     {"id": row["id"], "now": now},
                 )
@@ -331,8 +331,8 @@ async def claim_reminder(
             ):
                 await conn.execute(
                     text(
-                        "UPDATE reminder_outbox SET status='skipped',next_attempt_at=:now "
-                        "WHERE id=:id"
+                        "UPDATE reminder_outbox SET status='skipped',next_attempt_at=:now,"
+                        "updated_at=:now WHERE id=:id"
                     ),
                     {"id": row["id"], "now": now},
                 )
@@ -343,18 +343,18 @@ async def claim_reminder(
             ):
                 await conn.execute(
                     text(
-                        "UPDATE reminder_outbox SET next_attempt_at=:next "
+                        "UPDATE reminder_outbox SET next_attempt_at=:next,updated_at=:now "
                         "WHERE id=:id AND status='pending'"
                     ),
-                    {"next": now + 1, "id": row["id"]},
+                    {"next": now + 1, "now": now, "id": row["id"]},
                 )
                 continue
             token = secrets.token_urlsafe(18)
             await conn.execute(
                 text(
                     "UPDATE reminder_outbox SET "
-                    "status='sending',claimed_at=:now,claim_token=:token,attempts=attempts+1 "
-                    "WHERE id=:id AND status='pending'"
+                    "status='sending',claimed_at=:now,claim_token=:token,attempts=attempts+1,"
+                    "updated_at=:now WHERE id=:id AND status='pending'"
                 ),
                 {"now": now, "id": row["id"], "token": token},
             )
@@ -500,17 +500,25 @@ async def settle_reminder(
     next_attempt: int,
     error_class: str | None = None,
     throttle_until: int | None = None,
+    updated_at: int | None = None,
 ) -> bool:
     """Settle only the current fenced claim."""
+    effective_updated = next_attempt if updated_at is None else updated_at
 
     async def work(conn: AsyncConnection) -> bool:
         result = await conn.execute(
             text(
                 "UPDATE reminder_outbox SET status=:status,next_attempt_at=:next,"
-                "claimed_at=NULL,claim_token=NULL "
+                "claimed_at=NULL,claim_token=NULL,updated_at=:updated_at "
                 "WHERE id=:id AND status='sending' AND claim_token=:token"
             ),
-            {"status": status, "next": next_attempt, "id": claim.ident, "token": claim.claim_token},
+            {
+                "status": status,
+                "next": next_attempt,
+                "updated_at": effective_updated,
+                "id": claim.ident,
+                "token": claim.claim_token,
+            },
         )
         if result.rowcount and error_class in ("TelegramForbiddenError", "TelegramNotFound"):
             await deactivate_bot_destination(conn, claim.chat_id)

@@ -440,16 +440,18 @@ tests.
 
 ### Retention
 
-`NoticeStore.purge_finished(threshold)` deletes terminal (`sent`, `skipped`, and `failed`) rows in
-a single transaction from both `notification_outbox` (`updated_at <= threshold`) and
-`reminder_outbox` (`next_attempt_at <= threshold_epoch`), while preserving `notice_receipt_keys`
+`NoticeStore.purge_finished(threshold, *, now=None, reminder_threshold=None, batch_size=DEFAULT_PURGE_BATCH_SIZE)`
+deletes terminal (`sent`, `skipped`, and `failed`) rows in bounded per-transaction batches
+(`DEFAULT_PURGE_BATCH_SIZE = 500`, `LIMIT :batch_size`, `batch_size >= 1`) from both
+`notification_outbox` (`updated_at <= threshold`) and `reminder_outbox`
+(`COALESCE(updated_at, next_attempt_at) <= reminder_cutoff`), while preserving `notice_receipt_keys`
 and all `pending`, `sending`, and `uncertain` rows. It runs at the end of each cleanup cycle
 (`run_cleanup_cycle`, `_purge_notices`) with `threshold = now - receipt_notice_retention_days`.
 When rows are deleted, `NoticeStore.purge_finished` logs INFO `notice_outbox_purged`
-(`receipt_purged`, `reminder_purged`, `total_purged`) on `wishenka.wishlists.notices` and cleanup
-logs INFO `receipt_notice_rows_purged` (`rows`). A failure is a WARNING `receipt_notice_purge_failed`
-and never fails the cycle. It runs only while `background_cleanup_enabled` is true. See
-[WISHENKA-183](https://pypost.atlassian.net/browse/WISHENKA-183) for planned batched deletion.
+(`receipt_purged`, `reminder_purged`, `total_purged`, `batches`, `batch_size`) on
+`wishenka.wishlists.notices` and cleanup logs INFO `receipt_notice_rows_purged` (`rows`). A failure
+is a WARNING `receipt_notice_purge_failed` and never fails the cycle. It runs only while
+`background_cleanup_enabled` is true.
 
 ## Mini App UI (WISHENKA-24)
 

@@ -64,12 +64,16 @@ async def resolve(store: WishlistStore, queue: str, ident: int, action: str, now
     if queue not in _TABLES or action not in ("retry", "fail") or ident <= 0:
         raise ValueError("Invalid resolution")
     table = _TABLES[queue]
-    reset = ",ambiguous=0" if queue == "receipt" and action == "retry" else ""
+    extra = ""
+    if queue == "receipt" and action == "retry":
+        extra = ",ambiguous=0"
+    elif queue == "reminder":
+        extra = ",updated_at=:now"
 
     async def work(conn: AsyncConnection) -> bool:
         result = await conn.execute(
             text(
-                f"UPDATE {table} SET status=:status,next_attempt_at=:now{reset} "  # noqa: S608
+                f"UPDATE {table} SET status=:status,next_attempt_at=:now{extra} "  # noqa: S608
                 "WHERE id=:id AND status='uncertain'"
             ),
             {"status": "pending" if action == "retry" else "failed", "now": now, "id": ident},

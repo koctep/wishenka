@@ -35,6 +35,7 @@ logger = logging.getLogger("wishenka.wishlists.notices")
 locale_logger = logging.getLogger("wishenka.notices.store")
 
 CLAIM_BATCH_LIMIT = 50
+DEFAULT_PURGE_BATCH_SIZE = 500
 STALE_CLAIM_ERROR = "StaleClaim"
 _EVENT_MESSAGES = {
     "receipt_notice_retry_scheduled": "Notice queue row retry scheduled",
@@ -120,10 +121,17 @@ class NoticeStore:
         next_attempt: int,
         error_class: str | None = None,
         throttle_until: int | None = None,
+        updated_at: int | None = None,
     ) -> bool:
         """Settle a fenced reminder claim inside one ``BEGIN IMMEDIATE`` transaction."""
         return await reminders.settle_reminder(
-            self, claim, status, next_attempt, error_class, throttle_until
+            self,
+            claim,
+            status,
+            next_attempt,
+            error_class,
+            throttle_until,
+            updated_at=updated_at,
         )
 
     async def claim_next(self, now: int) -> ClaimedNotice | None:
@@ -315,45 +323,110 @@ class NoticeStore:
         *,
         now: datetime | None = None,
         reminder_threshold: datetime | None = None,
+        batch_size: int = DEFAULT_PURGE_BATCH_SIZE,
     ) -> int:
-        """Delete terminal outbox rows past retention while preserving active-cycle reminders."""
+        """Delete terminal outbox rows in bounded per-transaction batches."""
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
         effective_now = now or datetime.now(UTC)
         today_utc = effective_now.astimezone(UTC).date().isoformat()
+        threshold_iso = threshold.isoformat()
         reminder_cutoff = int((reminder_threshold or threshold).timestamp())
 
-        async def work(conn: AsyncConnection) -> tuple[int, int]:
-            receipt_result = await conn.execute(
-                text(
-                    "DELETE FROM notification_outbox WHERE updated_at <= :threshold "
-                    "AND status IN ('sent', 'skipped', 'failed')"
-                ),
-                {"threshold": threshold.isoformat()},
-            )
-            reminder_result = await conn.execute(
-                text(
-                    "DELETE FROM reminder_outbox WHERE next_attempt_at <= :threshold_epoch "
-                    "AND status IN ('sent', 'skipped', 'failed') "
-                    "AND (kind NOT IN ('list', 'birthday') OR event_date < :today_utc)"
-                ),
-                {"threshold_epoch": reminder_cutoff, "today_utc": today_utc},
-            )
-            return int(receipt_result.rowcount), int(reminder_result.rowcount)
+        receipt_drained = False
+        reminder_drained = False
+        receipt_purged = 0
+        reminder_purged = 0
+        batches = 0
 
-        receipt_purged, reminder_purged = await self._store.transaction(work)
+        while not (receipt_drained and reminder_drained):
+            r_batch, m_batch = await self._purge_batch(
+                threshold_iso=threshold_iso,
+                reminder_cutoff=reminder_cutoff,
+                today_utc=today_utc,
+                batch_size=batch_size,
+                purge_receipts=not receipt_drained,
+                purge_reminders=not reminder_drained,
+            )
+            batches += 1
+            receipt_purged += r_batch
+            reminder_purged += m_batch
+            if not receipt_drained and r_batch < batch_size:
+                receipt_drained = True
+            if not reminder_drained and m_batch < batch_size:
+                reminder_drained = True
+
         total = receipt_purged + reminder_purged
         if total:
             logger.info(
-                "Purged finished outbox rows: receipt_purged=%d reminder_purged=%d",
+                "Purged finished outbox rows: receipt_purged=%d reminder_purged=%d "
+                "batches=%d batch_size=%d",
                 receipt_purged,
                 reminder_purged,
+                batches,
+                batch_size,
                 extra={
                     "event": "notice_outbox_purged",
                     "receipt_purged": receipt_purged,
                     "reminder_purged": reminder_purged,
                     "total_purged": total,
+                    "batches": batches,
+                    "batch_size": batch_size,
                 },
             )
         return total
+
+    async def _purge_batch(
+        self,
+        *,
+        threshold_iso: str,
+        reminder_cutoff: int,
+        today_utc: str,
+        batch_size: int,
+        purge_receipts: bool,
+        purge_reminders: bool,
+    ) -> tuple[int, int]:
+        """Delete at most ``batch_size`` expired terminal rows per queue in one transaction."""
+
+        async def work(conn: AsyncConnection) -> tuple[int, int]:
+            r_deleted = 0
+            m_deleted = 0
+            if purge_receipts:
+                receipt_result = await conn.execute(
+                    text(
+                        "DELETE FROM notification_outbox "
+                        "WHERE id IN ("
+                        "SELECT id FROM notification_outbox "
+                        "WHERE updated_at <= :threshold "
+                        "AND status IN ('sent', 'skipped', 'failed') "
+                        "ORDER BY id LIMIT :batch_size"
+                        ")"
+                    ),
+                    {"threshold": threshold_iso, "batch_size": batch_size},
+                )
+                r_deleted = int(receipt_result.rowcount)
+            if purge_reminders:
+                reminder_result = await conn.execute(
+                    text(
+                        "DELETE FROM reminder_outbox "
+                        "WHERE id IN ("
+                        "SELECT id FROM reminder_outbox "
+                        "WHERE COALESCE(updated_at, next_attempt_at) <= :threshold_epoch "
+                        "AND status IN ('sent', 'skipped', 'failed') "
+                        "AND (kind NOT IN ('list', 'birthday') OR event_date < :today_utc) "
+                        "ORDER BY id LIMIT :batch_size"
+                        ")"
+                    ),
+                    {
+                        "threshold_epoch": reminder_cutoff,
+                        "today_utc": today_utc,
+                        "batch_size": batch_size,
+                    },
+                )
+                m_deleted = int(reminder_result.rowcount)
+            return r_deleted, m_deleted
+
+        return await self._store.transaction(work)
 
     async def purge_retention_records(
         self,
@@ -554,4 +627,10 @@ class NoticeStore:
         )
 
 
-__all__ = ["CLAIM_BATCH_LIMIT", "STALE_CLAIM_ERROR", "ClaimedNotice", "NoticeStore"]
+__all__ = [
+    "CLAIM_BATCH_LIMIT",
+    "DEFAULT_PURGE_BATCH_SIZE",
+    "STALE_CLAIM_ERROR",
+    "ClaimedNotice",
+    "NoticeStore",
+]

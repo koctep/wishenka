@@ -81,7 +81,7 @@ Private /birthdays -------- birthday_entries /
 
 ### Database Schema and Migrations
 
-Three Alembic revisions extend the wishlist database schema for notifications, reminders, and retention (see [`doc/dev/migrations.md`](migrations.md)):
+Four Alembic revisions extend the wishlist database schema for notifications, reminders, and retention (see [`doc/dev/migrations.md`](migrations.md)):
 
 1. **`add_birthday_reminders`** (down revision `add_bot_capture_order`):
    - `bot_destinations(user_id PRIMARY KEY, chat_id, active DEFAULT 1)`: records verified private
@@ -115,6 +115,14 @@ Three Alembic revisions extend the wishlist database schema for notifications, r
      `idx_notice_receipt_keys_created(created_at)` to `notice_receipt_keys`; backfills `created_at`
      from matching `notification_outbox.created_at` rows (or `now` if the outbox row was already
      purged).
+4. **`add_reminder_outbox_updated_at`** (down revision `add_bot_capture_order_retention`):
+   - Adds `updated_at INTEGER` and index
+     `idx_reminder_outbox_status_updated(status, updated_at)` to `reminder_outbox`, and backfills
+     existing rows with `COALESCE(claimed_at, next_attempt_at)` where `updated_at IS NULL`.
+   - All `reminder_outbox` writers (`wishenka/notices/scheduler.py`, `wishenka/notices/events.py`,
+     `wishenka/notices/reminders.py`, `wishenka/notices/store.py`, `wishenka/notices/worker.py`,
+     and `wishenka/notices/operator.py`) stamp `updated_at` on inserts and state transitions so
+     retention age is measured from the last update/settlement timestamp.
 
 ### Surprise Protection and Live Eligibility Rules
 
@@ -324,20 +332,24 @@ Implemented in `wishenka/bot/birthdays.py` (`create_birthday_router`), mounted b
 
 `run_cleanup_cycle` (`wishenka/wishlists/cleanup.py`) invokes two `NoticeStore` cleanup methods:
 
-1. **`NoticeStore.purge_finished(threshold, *, now=None, reminder_threshold=None)`** purges terminal
-   (`sent`, `skipped`, `failed`) rows from both outbox queues inside a single `BEGIN IMMEDIATE`
-   transaction:
+1. **`NoticeStore.purge_finished(threshold, *, now=None, reminder_threshold=None, batch_size=DEFAULT_PURGE_BATCH_SIZE)`**
+   purges terminal (`sent`, `skipped`, `failed`) rows from both outbox queues in bounded
+   per-transaction batches (`DEFAULT_PURGE_BATCH_SIZE = 500`, `batch_size >= 1`, raising
+   `ValueError` otherwise). Each `_purge_batch` call runs inside a single `BEGIN IMMEDIATE`
+   transaction deleting at most `batch_size` rows per queue (`ORDER BY id LIMIT :batch_size`) and
+   loops until both queues return fewer than `batch_size` rows:
    - **`notification_outbox`:** deletes terminal rows with `updated_at <= threshold`
      (`now - receipt_notice_retention_days * 86400`), while preserving `notice_receipt_keys` so
      purged receipts cannot be re-enqueued as duplicates.
-   - **`reminder_outbox`:** deletes terminal rows with `next_attempt_at <= reminder_cutoff`
+   - **`reminder_outbox`:** deletes terminal rows with
+     `COALESCE(updated_at, next_attempt_at) <= reminder_cutoff`
      (`now - reminder_retention_days * 86400`) that satisfy the **active-cycle guard**:
      `kind NOT IN ('list', 'birthday') OR event_date < today_utc`. Keeping terminal `list` and
      `birthday` reminders until `event_date < today_utc` preserves `occurrence_key` deduplication
-     (`INSERT OR IGNORE`) for the current/upcoming occasion cycle. Both `claim_reminder` (when
-     skipping) and `NoticeWorker.run_once` (on terminal settlements `sent`, `skipped`, and `failed`)
-     stamp `next_attempt_at = now` (`delay = 0`) so retention age is measured from the settlement
-     timestamp.
+     (`INSERT OR IGNORE`) for the current/upcoming occasion cycle. All `reminder_outbox` writers
+     (`scheduler.py`, `events.py`, `reminders.py`, `store.py`, `worker.py`, `operator.py`) stamp
+     `updated_at` on inserts and state transitions (`COALESCE` preserves compatibility with legacy
+     rows where `updated_at` is `NULL`).
    - **Preserved rows:** `pending`, `sending`, and `uncertain` rows in both tables are never purged.
 
 2. **`NoticeStore.purge_retention_records(*, birthday_threshold, destination_threshold, receipt_key_threshold)`**
@@ -484,7 +496,7 @@ labels or dates, wish/list titles, capability links, bot tokens, or raw exceptio
 | `receipt_notice_worker_disabled` | INFO | `wishenka.wishlists.notices` | `reason` |
 | `receipt_notice_window_summary` | INFO | `wishenka.wishlists.notices` | `window_seconds`, `sent`, `retried`, `failed_terminal`, `uncertain` |
 | `service_delivery_window_summary` | INFO | `wishenka.wishlists.notices` | `window_seconds`, `sent`, `retried`, `failed_terminal`, `uncertain`, `skipped` |
-| `notice_outbox_purged` | INFO | `wishenka.wishlists.notices` | `receipt_purged`, `reminder_purged`, `total_purged` (emitted only when rows are deleted) |
+| `notice_outbox_purged` | INFO | `wishenka.wishlists.notices` | `receipt_purged`, `reminder_purged`, `total_purged`, `batches`, `batch_size` (emitted only when rows are deleted) |
 | `notice_retention_records_purged` | INFO | `wishenka.wishlists.notices` | `birthdays_purged`, `destinations_purged`, `receipt_keys_purged` (emitted only when rows are deleted) |
 | `receipt_notice_enqueue_failed` | ERROR | `wishenka.wishlists.notices` | `error_class` (operator-only; emitted when `notification_outbox` / `notice_receipt_keys` enqueueing fails before rollback; no IDs) |
 | `receipt_notice_worker_error` | ERROR | `wishenka.wishlists.notices` | `error_class` (logged once per consecutive worker failure streak) |
@@ -557,7 +569,7 @@ the complete observability specifications.
 Run the focused notification, reminder, upgrade, operator, concurrency, and observability test suites with:
 
 ```bash
-make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_notice_delivery_repro.py tests/test_notice_wishlist_events.py tests/test_notice_upgrade.py tests/test_notice_operator.py tests/test_notice_worker_concurrency.py tests/test_telegram_notice_smoke.py tests/test_reminder_scan_paging.py tests/test_service_notice_observability.py tests/test_receipt_notices.py tests/test_receipt_observability.py tests/test_wishenka_60_repro.py tests/test_wishenka_60_observability.py tests/test_wishenka_34_repro.py tests/test_wishenka_34_preferences.py tests/test_wishenka_181_repro.py tests/test_notice_retention.py'
+make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_notice_delivery_repro.py tests/test_notice_wishlist_events.py tests/test_notice_upgrade.py tests/test_notice_operator.py tests/test_notice_worker_concurrency.py tests/test_telegram_notice_smoke.py tests/test_reminder_scan_paging.py tests/test_service_notice_observability.py tests/test_receipt_notices.py tests/test_receipt_observability.py tests/test_wishenka_60_repro.py tests/test_wishenka_60_observability.py tests/test_wishenka_34_repro.py tests/test_wishenka_34_preferences.py tests/test_wishenka_181_repro.py tests/test_wishenka_183_repro.py tests/test_wishenka_183_updated_at.py tests/test_notice_retention.py'
 ```
 
 ### Live Telegram Smoke Test & Manual Verification Checklist
@@ -622,9 +634,6 @@ WISHENKA_TELEGRAM_SMOKE_INVALID_CHAT_ID="-1" \
 
 ## Known Limitations and Follow-up Tasks
 
-- **[WISHENKA-183](https://pypost.atlassian.net/browse/WISHENKA-183):** Batch `NoticeStore.purge_finished`
-  deletions with a bounded `LIMIT` per pass and evaluate adding a dedicated `updated_at` column on
-  `reminder_outbox` if retention semantics diverge from `next_attempt_at`.
 - **[WISHENKA-184](https://pypost.atlassian.net/browse/WISHENKA-184):** Extract the duplicated
   live-eligibility SQL in `claim_reminder` and `refresh_reminder` into a shared helper, and move
   `update_wishlist` / `set_role` domain mutations from `wishenka/web/routes/wishlists.py` into

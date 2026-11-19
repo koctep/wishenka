@@ -217,12 +217,14 @@ class NoticeWorker:
                 if status == "pending"
                 else 0
             )
+            settled_at = self._time(now)
             settled = await self._store.settle_reminder(
                 reminder,
                 status,
-                self._time(now) + delay,
+                settled_at + delay,
                 result.error_class,
-                self._time(now) + math.ceil(result.retry_after) if result.retry_after else None,
+                settled_at + math.ceil(result.retry_after) if result.retry_after else None,
+                updated_at=settled_at,
             )
             if settled:
                 counter = {"pending": "retried", "failed": "failed_terminal"}.get(status, status)

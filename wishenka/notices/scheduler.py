@@ -87,8 +87,8 @@ class ReminderScheduler:
                                 text(
                                     "INSERT OR IGNORE INTO reminder_outbox "
                                     "(occurrence_key,kind,user_id,list_id,event_dat"
-                                    "e,next_attempt_at) "
-                                    "VALUES (:key,'list',:user,:list,:date,:now)"
+                                    "e,next_attempt_at,updated_at) "
+                                    "VALUES (:key,'list',:user,:list,:date,:now,:now)"
                                 ),
                                 {
                                     "key": key,
@@ -143,9 +143,9 @@ class ReminderScheduler:
                                 text(
                                     "INSERT OR IGNORE INTO reminder_outbox "
                                     "(occurrence_key,kind,user_id,birthday_id,revision,event_date,"
-                                    "next_attempt_at) VALUES "
+                                    "next_attempt_at,updated_at) VALUES "
                                     "(:key,'birthday',:user,:birthday,:revision,"
-                                    ":date,:now)"
+                                    ":date,:now,:now)"
                                 ),
                                 {
                                     "key": key,

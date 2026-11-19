@@ -77,8 +77,8 @@ class EventProducer:
                 text(
                     "INSERT OR IGNORE INTO reminder_outbox "
                     "(occurrence_key,kind,user_id,list_id,item_id,event_date,next_attempt_at,"
-                    "requires_membership) "
-                    "VALUES (:key,:kind,:user,:list,:item,'',:now,:member)"
+                    "updated_at,requires_membership) "
+                    "VALUES (:key,:kind,:user,:list,:item,'',:now,:now,:member)"
                 ),
                 {
                     "key": f"{event.event_id}:{user}",
