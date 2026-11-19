@@ -375,7 +375,7 @@ Provides transactional domain operations for item lifecycle, piece-by-piece inve
   - Sets `is_archived = True` and updates `updated_at`.
   - Preserves all active reservations in the database without modification.
   - Hides item from default listings and rejects new reservation or edit attempts.
-  - Emits structured event `item_archived` with `active_reservations_count`.
+  - Emits structured event `item_archived` (without reservation counts, preserving the no-presence-leak guarantee).
 - **Restoration Semantics ([`restore_wish_item`](file:///home/src/wishenka/wishlists/service.py#L1186))**:
   - Sets `is_archived = False`.
   - Re-inserts item at the end of the active list: `display_order = max(active_orders, default=-1) + 1`.
@@ -1096,7 +1096,7 @@ All events are logged via structured extra dictionaries under logger names `"wis
 | :--- | :---: | :--- | :--- |
 | `item_created` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `recipient_user_id`, `quantity`, `display_order`, `has_recipient` | Wish item successfully added to wishlist with auto-incremented `display_order`. |
 | `item_updated` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `updated_fields`, `quantity`, `quantity_delta` | Wish item properties updated within reduction limits. |
-| `item_archived` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `active_reservations_count` | Item safely soft-deleted while retaining all active reservations. |
+| `item_archived` | `INFO` | `wishlist_id`, `item_id`, `actor_id` | Item safely soft-deleted while retaining all active reservations. |
 | `item_restored` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `display_order`, `new_display_order` | Archived item restored and appended to the tail of the active list. |
 | `items_reordered` | `INFO` | `wishlist_id`, `actor_id`, `item_count`, `count`, `item_ids` | Active items display order atomically permuted. |
 | `item_quantity_reduction_rejected` | `WARNING` | `wishlist_id`, `item_id`, `actor_id`, `requested_quantity`, `locked_quantity`, `reason` | Invariant violation: attempt to reduce quantity below reserved + fulfilled units. |

@@ -169,6 +169,7 @@ async def test_run_loop_sends_until_stopped(tmp_path: Path) -> None:
 
 async def test_run_loop_logs_one_error_per_failure_streak(
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Design 7: an unreadable queue gives one ERROR with the class name and a backoff."""
 
@@ -185,16 +186,35 @@ async def test_run_loop_logs_one_error_per_failure_streak(
     worker = worker_class(broken, FakeNoticeSender(), settings)
     caplog.set_level(logging.DEBUG)
     stop = asyncio.Event()
+    delays: list[float] = []
+    real_wait_for = asyncio.wait_for
+
+    async def fake_wait_for(awaitable: Any, timeout: float | None = None) -> Any:
+        if timeout is not None and len(delays) < 4:
+            close = getattr(awaitable, "close", None)
+            if callable(close):
+                close()
+            delays.append(timeout)
+            if len(delays) == 4:
+                stop.set()
+            raise TimeoutError
+        return await real_wait_for(awaitable, timeout=timeout)
+
+    monkeypatch.setattr("wishenka.notices.worker.asyncio.wait_for", fake_wait_for)
     task = asyncio.create_task(worker.run(stop))
-    await asyncio.sleep(0.6)
-    stop.set()
-    await asyncio.wait_for(task, timeout=15)
+    await real_wait_for(task, timeout=15)
 
     errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert [getattr(r, "event", "") for r in errors] == ["receipt_notice_worker_error"]
     assert getattr(errors[0], "error_class", None) == "RuntimeError"
     assert "secret detail" not in str(errors[0].__dict__)
-    assert 2 <= broken.calls < 12, "the failing tick must back off"
+    assert broken.calls == 4
+    assert delays == [
+        pytest.approx(0.1),
+        pytest.approx(0.2),
+        pytest.approx(0.4),
+        pytest.approx(0.8),
+    ]
 
 
 async def test_window_summary_on_a_fixed_grid(

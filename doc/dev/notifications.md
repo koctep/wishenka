@@ -459,10 +459,13 @@ labels or dates, wish/list titles, capability links, bot tokens, or raw exceptio
 
 | Event | Level | Logger | Fields |
 | ----- | ----- | ------ | ------ |
+| `receipt_notice_worker_started`, `receipt_notice_worker_stopped` | INFO | `wishenka.wishlists.notices` | none (`receipt_notice_worker_stopped` is emitted on shutdown without summary counts; unfinished window counters are dropped) |
+| `receipt_notice_worker_disabled` | INFO | `wishenka.wishlists.notices` | `reason` |
 | `receipt_notice_window_summary` | INFO | `wishenka.wishlists.notices` | `window_seconds`, `sent`, `retried`, `failed_terminal`, `uncertain` |
 | `service_delivery_window_summary` | INFO | `wishenka.wishlists.notices` | `window_seconds`, `sent`, `retried`, `failed_terminal`, `uncertain`, `skipped` |
 | `notice_outbox_purged` | INFO | `wishenka.wishlists.notices` | `receipt_purged`, `reminder_purged`, `total_purged` (emitted only when rows are deleted) |
 | `notice_retention_records_purged` | INFO | `wishenka.wishlists.notices` | `birthdays_purged`, `destinations_purged`, `receipt_keys_purged` (emitted only when rows are deleted) |
+| `receipt_notice_enqueue_failed` | ERROR | `wishenka.wishlists.notices` | `error_class` (operator-only; emitted when `notification_outbox` / `notice_receipt_keys` enqueueing fails before rollback; no IDs) |
 | `receipt_notice_worker_error` | ERROR | `wishenka.wishlists.notices` | `error_class` (logged once per consecutive worker failure streak) |
 | `reminder_scheduler_error` | ERROR | `wishenka.wishlists.notices` | `error_class` (logged once per consecutive scheduler failure streak; does not block queue delivery) |
 | `reminder_scan_completed` | DEBUG | `wishenka.notices.scheduler` | `lists_scanned`, `birthdays_scanned`, `intents_created` (emitted only on non-empty scans) |
@@ -473,12 +476,21 @@ labels or dates, wish/list titles, capability links, bot tokens, or raw exceptio
 | `notification_global_invalid_request` | WARNING | `wishenka.web.profile` | `user_id`, `status_code` (`422`) |
 | `notification_wishlist_not_found` | WARNING | `wishenka.web.profile` | `user_id`, `wishlist_id`, `status_code` (`404`) |
 | `notification_wishlist_invalid_request` | WARNING | `wishenka.web.profile` | `user_id`, `wishlist_id`, `status_code` (`422`) |
+| `receipt_notice_retry_scheduled` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `attempt`, `max_attempts`, `error_class` (when present) |
 | `receipt_notice_skipped_ineligible` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `attempt` |
 | `receipt_notice_uncertain` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `attempt`, `error_class` (when a receipt send is ambiguous or lease expires) |
 
+### SQL Gauge Semantics (`notification_outbox`) and Domain Log Contracts
+
+- **`last_error_class` current-state gauge:** `NoticeStore.complete` clears `last_error_class = NULL` when a row transitions to `status = 'sent'`. Consequently, `SELECT last_error_class, count(*) FROM notification_outbox WHERE status IN ('pending', 'uncertain', 'failed') GROUP BY last_error_class` is a **current-state gauge** of unresolved/failed rows, not a historical failure counter.
+- **`ambiguous` gauge:** `ambiguous = 1` marks rows with an unconfirmed send outcome (`CHECK(ambiguous=0 OR status NOT IN ('pending','sending'))`). `operator.resolve(..., action="retry")` clears `ambiguous = 0` when re-queuing an `uncertain` row to `pending`, whereas `action="fail"` leaves `ambiguous = 1` on `failed`. Query `WHERE status = 'uncertain'` for active unresolved ambiguity awaiting operator action, and `WHERE ambiguous = 1 AND status IN ('sent', 'failed')` for historical ambiguity within the 30-day retention window.
+- **Post-commit `item_fulfilled`:** `WishlistStore` sets `_defer_commit_logs = True` on hydrated `WishlistService` instances and flushes `_pending_commit_logs` only after the SQLite transaction commits, so rolled-back receipts (including `receipt_notice_enqueue_failed`) never emit `item_fulfilled`.
+- **Owner-stream privacy on `item_archived`:** `item_archived` (`INFO`, `wishenka.wishlists`) emits `{"event": "item_archived", "item_id", "wishlist_id", "actor_id"}` without `active_reservations_count` so owner-stream logs never expose reservation presence.
+
 See [`ai-tasks/WISHENKA-29/50-observability.md`](../../ai-tasks/WISHENKA-29/50-observability.md),
-[`ai-tasks/WISHENKA-60/50-observability.md`](../../ai-tasks/WISHENKA-60/50-observability.md), and
-[`ai-tasks/WISHENKA-181/50-observability.md`](../../ai-tasks/WISHENKA-181/50-observability.md) for
+[`ai-tasks/WISHENKA-60/50-observability.md`](../../ai-tasks/WISHENKA-60/50-observability.md),
+[`ai-tasks/WISHENKA-181/50-observability.md`](../../ai-tasks/WISHENKA-181/50-observability.md), and
+[`ai-tasks/WISHENKA-157/50-observability.md`](../../ai-tasks/WISHENKA-157/50-observability.md) for
 the complete observability specifications.
 
 ## Troubleshooting

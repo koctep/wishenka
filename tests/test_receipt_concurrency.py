@@ -7,6 +7,7 @@ requested, the loser gets a closed refusal and the history equals the counter.
 from __future__ import annotations
 
 import asyncio
+import logging
 import multiprocessing
 import queue
 import time
@@ -22,6 +23,8 @@ from tests.receipt_support import (
     OTHER_GIFTER,
     OWNER,
     OWNER_ID,
+    app_env,
+    bearer,
     exc_class,
     item_received,
     open_store,
@@ -31,7 +34,7 @@ from tests.receipt_support import (
     sql_rows,
 )
 from wishenka.auth.models import AuthenticatedUser
-from wishenka.wishlists.exceptions import InsufficientQuantityError
+from wishenka.wishlists.exceptions import InsufficientQuantityError, InventoryBusyError
 from wishenka.wishlists.models import ReservationStatus, WishlistRole
 from wishenka.wishlists.service import WishlistService
 from wishenka.wishlists.store import WishlistStore
@@ -185,3 +188,58 @@ async def test_receipt_vs_promise_race(tmp_path: Path) -> None:
         [OTHER_GIFTER.telegram_id] if booking["status"] == "ok" else []
     )
     assert [row["user_id"] for row in open_rows] == expected
+
+
+def test_cc13_busy_503_bounded_and_identical_with_or_without_reservations(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CC-13: bounded 503 busy response and logs are identical with 0 or active reservations."""
+    with app_env(tmp_path) as (client, sessions, app):
+        service: WishlistService = app.state.domain_service
+        wl_empty, item_empty = asyncio.run(seed_wish(service, quantity=5))
+        wl_booked, item_booked = asyncio.run(seed_wish(service, quantity=5))
+        asyncio.run(service.create_reservation(item_id=item_booked, user=GIFTER, quantity=2))
+        owner = bearer(sessions, OWNER_ID)
+
+        async def busy(*_args: object, **_kwargs: object) -> None:
+            raise InventoryBusyError()
+
+        monkeypatch.setattr(app.state.wishlist_store, "execute_wish", busy)
+        caplog.set_level(logging.INFO)
+        resp_empty = client.post(
+            f"/api/wishlists/{wl_empty}/items/{item_empty}/receipts",
+            json={"quantity": 1},
+            headers=owner,
+        )
+        resp_booked = client.post(
+            f"/api/wishlists/{wl_booked}/items/{item_booked}/receipts",
+            json={"quantity": 1},
+            headers=owner,
+        )
+
+    assert resp_empty.status_code == 503
+    assert resp_booked.status_code == 503
+    assert resp_empty.json() == resp_booked.json()
+    assert resp_empty.headers["content-type"] == resp_booked.headers["content-type"]
+    assert "Greta" not in resp_booked.text
+    busy_logs = [r for r in caplog.records if getattr(r, "event", None) == "receipt_inventory_busy"]
+    assert len(busy_logs) == 2
+    assert [r.levelno for r in busy_logs] == [logging.WARNING, logging.WARNING]
+    standard = set(logging.LogRecord("n", 0, "p", 0, "m", (), None).__dict__) | {
+        "message",
+        "asctime",
+    }
+    for record, wid, iid in (
+        (busy_logs[0], wl_empty, item_empty),
+        (busy_logs[1], wl_booked, item_booked),
+    ):
+        extras = {k: v for k, v in record.__dict__.items() if k not in standard}
+        assert extras == {
+            "event": "receipt_inventory_busy",
+            "operation": "record_receipt",
+            "wishlist_id": wid,
+            "item_id": iid,
+            "actor_id": OWNER_ID,
+        }

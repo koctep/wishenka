@@ -6,6 +6,7 @@ import logging
 import math
 import secrets
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import wraps
 from inspect import iscoroutinefunction, signature
@@ -72,6 +73,23 @@ from wishenka.wishlists.schemas import (
 RESERVATION_QUANTITY_MIN_ERROR = "Reservation quantity must be at least 1"
 
 logger = logging.getLogger("wishenka.wishlists")
+
+
+@dataclass(frozen=True)
+class PendingCommitLog:
+    """Domain log record deferred until the enclosing store transaction commits."""
+
+    level: int
+    message: str
+    args: tuple[Any, ...]
+    extra: dict[str, Any]
+
+
+def flush_pending_commit_logs(logs: list[PendingCommitLog]) -> None:
+    """Emit domain log records that were deferred until transaction commit."""
+    for entry in logs:
+        logger.log(entry.level, entry.message, *entry.args, extra=entry.extra)
+
 
 _ITEM_INVENTORY_METHODS = frozenset(
     {
@@ -286,7 +304,23 @@ class WishlistService:
         self._new_notices: list[NoticeDraft] = []
         self._new_shared_item_events: list[SharedEvent] = []
         self._flushed_shared_events: list[tuple[str, int]] = []
+        self._defer_commit_logs: bool = False
+        self._pending_commit_logs: list[PendingCommitLog] = []
         self._notice_settings: NoticeSettings = NoticeSettings()
+
+    def _emit_or_defer_commit_log(
+        self,
+        level: int,
+        message: str,
+        *args: Any,
+        extra: dict[str, Any],
+    ) -> None:
+        if self._defer_commit_logs:
+            self._pending_commit_logs.append(
+                PendingCommitLog(level=level, message=message, args=args, extra=extra)
+            )
+        else:
+            logger.log(level, message, *args, extra=extra)
 
     @classmethod
     def in_memory(
@@ -1781,9 +1815,6 @@ class WishlistService:
                 "item_id": item.id,
                 "wishlist_id": wl.id,
                 "actor_id": actor.telegram_id,
-                "active_reservations_count": len(
-                    [r for r in item.reservations if r.status == ReservationStatus.ACTIVE]
-                ),
             },
         )
         self._log_partial_move("wish_archived_partial", "archived", wl.id, item, actor)
@@ -2565,7 +2596,8 @@ class WishlistService:
             self._new_receipts.append(receipt)
             self._draft_receipt_notices(item, receipt)
 
-        logger.info(
+        self._emit_or_defer_commit_log(
+            logging.INFO,
             "Item %s fulfillment recorded: %s units by user %s",
             item_id,
             received_quantity,

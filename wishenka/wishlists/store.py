@@ -54,7 +54,7 @@ from wishenka.wishlists.models import (
 )
 from wishenka.wishlists.repository import WishlistRepository
 from wishenka.wishlists.schemas import MyReservationItemDTO, UserReservationsSummaryDTO
-from wishenka.wishlists.service import WishlistService
+from wishenka.wishlists.service import PendingCommitLog, WishlistService, flush_pending_commit_logs
 
 T = TypeVar("T")
 
@@ -467,6 +467,7 @@ class WishlistStore:
 
     async def _read(self, conn: AsyncConnection) -> tuple[WishlistService, _StorageSnapshot]:
         service = WishlistService.in_memory()
+        service._defer_commit_logs = True
 
         l_stmt = text(
             "SELECT id, owner_id, owner_name, title, description, event_title, "
@@ -949,63 +950,73 @@ class WishlistStore:
             queued = await producer.record(conn, shared_event, int(now.timestamp()))
             if queued > 0:
                 service._flushed_shared_events.append((shared_event.kind, queued))
-        for draft in service._new_notices:
-            wishlist_id = service._items[draft.receipt.wish_item_id].wishlist_id
-            is_member = await conn.scalar(
-                text("SELECT 1 FROM wl_members WHERE wishlist_id=:list AND user_id=:user"),
-                {"list": wishlist_id, "user": draft.giver_user_id},
-            )
-            key = await conn.execute(
-                text(
-                    "INSERT OR IGNORE INTO notice_receipt_keys"
-                    "(event_type,receipt_id,giver_user_id,created_at) "
-                    "VALUES (:event,:receipt,:giver,:created_at)"
-                ),
-                {
-                    "event": EVENT_GIFT_RECEIVED,
-                    "receipt": draft.receipt.id,
-                    "giver": draft.giver_user_id,
-                    "created_at": int(now.timestamp()),
-                },
-            )
-            if not key.rowcount:
-                continue
-            result = await conn.execute(
-                text(
-                    "INSERT INTO notification_outbox (event_type, receipt_id, wishlist_id, "
-                    "wish_item_id, giver_user_id, status, skip_reason, next_attempt_at, "
-                    "created_at, updated_at, requires_membership) "
-                    "VALUES (:event_type, :receipt_id, :wishlist_id, "
-                    ":wish_item_id, :giver_user_id, :status, :skip_reason, :next_attempt_at, "
-                    ":now, :now, :requires_membership)"
-                ),
-                {
-                    "event_type": EVENT_GIFT_RECEIVED,
-                    "receipt_id": draft.receipt.id,
-                    "wishlist_id": wishlist_id,
-                    "wish_item_id": draft.receipt.wish_item_id,
-                    "giver_user_id": draft.giver_user_id,
-                    "status": draft.status,
-                    "skip_reason": draft.skip_reason,
-                    "next_attempt_at": int(now.timestamp()),
-                    "now": _format_dt(now),
-                    "requires_membership": int(bool(is_member)),
-                },
-            )
-            gate = (
-                None
-                if draft.skip_reason is None
-                else "list"
-                if draft.skip_reason == SKIP_SETTING_LIST
-                else "user"
-            )
-            flushed.append(
-                FlushedNotice(
-                    outbox_id=int(result.lastrowid),
-                    status=draft.status,
-                    gate=gate,
+        try:
+            for draft in service._new_notices:
+                wishlist_id = service._items[draft.receipt.wish_item_id].wishlist_id
+                is_member = await conn.scalar(
+                    text("SELECT 1 FROM wl_members WHERE wishlist_id=:list AND user_id=:user"),
+                    {"list": wishlist_id, "user": draft.giver_user_id},
                 )
+                key = await conn.execute(
+                    text(
+                        "INSERT OR IGNORE INTO notice_receipt_keys"
+                        "(event_type,receipt_id,giver_user_id,created_at) "
+                        "VALUES (:event,:receipt,:giver,:created_at)"
+                    ),
+                    {
+                        "event": EVENT_GIFT_RECEIVED,
+                        "receipt": draft.receipt.id,
+                        "giver": draft.giver_user_id,
+                        "created_at": int(now.timestamp()),
+                    },
+                )
+                if not key.rowcount:
+                    continue
+                result = await conn.execute(
+                    text(
+                        "INSERT INTO notification_outbox (event_type, receipt_id, wishlist_id, "
+                        "wish_item_id, giver_user_id, status, skip_reason, next_attempt_at, "
+                        "created_at, updated_at, requires_membership) "
+                        "VALUES (:event_type, :receipt_id, :wishlist_id, "
+                        ":wish_item_id, :giver_user_id, :status, :skip_reason, :next_attempt_at, "
+                        ":now, :now, :requires_membership)"
+                    ),
+                    {
+                        "event_type": EVENT_GIFT_RECEIVED,
+                        "receipt_id": draft.receipt.id,
+                        "wishlist_id": wishlist_id,
+                        "wish_item_id": draft.receipt.wish_item_id,
+                        "giver_user_id": draft.giver_user_id,
+                        "status": draft.status,
+                        "skip_reason": draft.skip_reason,
+                        "next_attempt_at": int(now.timestamp()),
+                        "now": _format_dt(now),
+                        "requires_membership": int(bool(is_member)),
+                    },
+                )
+                gate = (
+                    None
+                    if draft.skip_reason is None
+                    else "list"
+                    if draft.skip_reason == SKIP_SETTING_LIST
+                    else "user"
+                )
+                flushed.append(
+                    FlushedNotice(
+                        outbox_id=int(result.lastrowid),
+                        status=draft.status,
+                        gate=gate,
+                    )
+                )
+        except Exception as exc:
+            notice_logger.error(
+                "Receipt notice enqueue failed",
+                extra={
+                    "event": "receipt_notice_enqueue_failed",
+                    "error_class": type(exc).__name__,
+                },
             )
+            raise
         return flushed
 
     async def execute_wish(
@@ -1024,9 +1035,11 @@ class WishlistStore:
         reservations_written = 0
         flushed: list[FlushedNotice] = []
         flushed_shared: list[tuple[str, int]] = []
+        pending_commit_logs: list[PendingCommitLog] = []
 
         async def work(conn: AsyncConnection) -> T:
             nonlocal resolved_item_id, reservations_written, flushed, flushed_shared
+            nonlocal pending_commit_logs
             resolved_item_id = await self._resolve_wish_item_id(
                 conn,
                 item_id=item_id,
@@ -1036,6 +1049,7 @@ class WishlistStore:
             result = await operation(service)
             reservations_written, flushed = await self._persist_wish(conn, service, snapshot)
             flushed_shared = list(service._flushed_shared_events)
+            pending_commit_logs = list(service._pending_commit_logs)
             return result
 
         try:
@@ -1068,6 +1082,7 @@ class WishlistStore:
         )
         _log_flushed_notices(flushed)
         _log_flushed_shared_events(flushed_shared)
+        flush_pending_commit_logs(pending_commit_logs)
         return result
 
     async def _verify_idempotent_replay_access(
@@ -1128,9 +1143,11 @@ class WishlistStore:
         reservations_written = 0
         flushed: list[FlushedNotice] = []
         flushed_shared: list[tuple[str, int]] = []
+        pending_commit_logs: list[PendingCommitLog] = []
 
         async def work(conn: AsyncConnection) -> IdempotentResult:
             nonlocal resolved_item_id, reservations_written, flushed, flushed_shared
+            nonlocal pending_commit_logs
             resolved_item_id = await self._resolve_wish_item_id(
                 conn,
                 item_id=item_id,
@@ -1169,6 +1186,7 @@ class WishlistStore:
             resp_status, resp_content_type, resp_body = await operation(service)
             reservations_written, flushed = await self._persist_wish(conn, service, snapshot)
             flushed_shared = list(service._flushed_shared_events)
+            pending_commit_logs = list(service._pending_commit_logs)
 
             expires_at = effective_now + timedelta(hours=retention_hours)
             await conn.execute(
@@ -1243,6 +1261,7 @@ class WishlistStore:
             )
             _log_flushed_notices(flushed)
             _log_flushed_shared_events(flushed_shared)
+            flush_pending_commit_logs(pending_commit_logs)
         return outcome
 
     async def _resolve_wish_item_id(
@@ -1383,6 +1402,7 @@ class WishlistStore:
             )
         ).all()
         service = WishlistService.in_memory()
+        service._defer_commit_logs = True
         service._wishlists[wishlist.id] = wishlist
         service._items[item.id] = item
         for reservation_row in reservation_rows:
@@ -1615,9 +1635,10 @@ class WishlistStore:
     async def _execute_once(self, operation: Callable[[WishlistService], Awaitable[T]]) -> T:
         flushed: list[FlushedNotice] = []
         flushed_shared: list[tuple[str, int]] = []
+        pending_commit_logs: list[PendingCommitLog] = []
 
         async def work(conn: AsyncConnection) -> T:
-            nonlocal flushed, flushed_shared
+            nonlocal flushed, flushed_shared, pending_commit_logs
             service, snapshot = await self._read(conn)
             previous = {wl.id: wl.public_token for wl in service._wishlists.values()}
             prior_invites = {wl.id: wl.invite_token for wl in service._wishlists.values()}
@@ -1657,11 +1678,13 @@ class WishlistStore:
                     )
             flushed = await self._write(conn, service, snapshot)
             flushed_shared = list(service._flushed_shared_events)
+            pending_commit_logs = list(service._pending_commit_logs)
             return result
 
         result = await self._immediate(work)
         _log_flushed_notices(flushed)
         _log_flushed_shared_events(flushed_shared)
+        flush_pending_commit_logs(pending_commit_logs)
         return result
 
     async def cleanup_expired_tokens(self, now: datetime | None = None) -> int:

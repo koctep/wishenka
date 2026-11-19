@@ -306,6 +306,8 @@ class NoticeWorker:
             "outbox_id": claim.outbox_id,
             "attempt": claim.attempt,
         }
+        if event == "receipt_notice_retry_scheduled":
+            extra["max_attempts"] = self._max_attempts
         if result is not None:
             extra["error_class"] = result.error_class
         logger.debug(message, extra=extra)

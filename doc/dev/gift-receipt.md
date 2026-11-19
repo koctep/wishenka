@@ -832,6 +832,7 @@ Every record sets `extra={"event": ...}`. The notice path correlates by `outbox_
 | `receipt_notice_worker_started`, `receipt_notice_worker_stopped` | INFO | `wishenka.wishlists.notices` | none |
 | `receipt_notice_worker_disabled` | INFO | `wishenka.wishlists.notices` | `reason` |
 | `receipt_notice_worker_error` | ERROR | `wishenka.wishlists.notices` | `error_class` |
+| `receipt_notice_enqueue_failed` | ERROR | `wishenka.wishlists.notices` | `error_class` |
 | `receipt_notice_window_summary` | INFO | `wishenka.wishlists.notices` | `window_seconds`, `sent`, `retried`, `failed_terminal`, `uncertain` |
 | `service_delivery_window_summary` | INFO | `wishenka.wishlists.notices` | `window_seconds`, `sent`, `retried`, `failed_terminal`, `uncertain`, `skipped` |
 | `receipt_notice_rows_purged` | INFO | `wishenka.wishlists.cleanup` | `rows` |
@@ -839,7 +840,8 @@ Every record sets `extra={"event": ...}`. The notice path correlates by `outbox_
 | `receipt_notice_created` | DEBUG | `wishenka.wishlists.notices` | `outbox_id` |
 | `receipt_notice_skipped` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `gate` (`list` or `user`) |
 | `receipt_notice_sent` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `attempt` |
-| `receipt_notice_send_failed`, `receipt_notice_retry_scheduled`, `receipt_notice_failed_terminal`, `receipt_notice_uncertain` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `attempt`, `error_class` |
+| `receipt_notice_retry_scheduled` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `attempt`, `max_attempts`, `error_class` |
+| `receipt_notice_send_failed`, `receipt_notice_failed_terminal`, `receipt_notice_uncertain` | DEBUG | `wishenka.wishlists.notices` | `outbox_id`, `attempt`, `error_class` |
 | `receipt_notice_late_write_ignored` | DEBUG | `wishenka.wishlists.notices` | `outbox_id` |
 | `receipt_notice_batch_processed` | DEBUG | `wishenka.wishlists.notices` | `rows` |
 | `ui_receipt_form_opened`, `ui_receipt_entry_form_opened`, `ui_receipt_form_refused`, `ui_receipt_entry_form_refused`, `receipt_recorded_http`, `receipt_corrected_http`, `receipt_cancelled_http`, `receipt_refused`, `receipt_inventory_busy` | INFO or WARNING | `wishenka.web.receipts_ui` | ids only, see [Log events of the UI](#log-events-of-the-ui) |
@@ -860,17 +862,23 @@ Rules:
   the bot token and cookies. In `receipt_refused` the field `remaining_quantity` is logged only
   for `quantity_above_remaining` and `nothing_remaining`. The service event
   `fulfillment_quantity_exceeded` logs the same number as `remaining_unfulfilled`, and no other
-  event logs a remaining quantity. Failures log `error_class` (the class name) only. Event names
-  and fixed messages of the notice path contain none of `notification`, `outbox`, `push`.
+  event logs a remaining quantity. `item_archived` (`wishenka.wishlists`) likewise omits
+  `active_reservations_count` to avoid exposing reservation presence on the owner stream. Failures
+  log `error_class` (the class name) only. Event names and fixed messages of the notice path
+  contain none of `notification`, `outbox`, `push`.
 - **Operator-only logs requirement.** Debug logs and the window summary must stay in
   operator-only logs and never reach an owner or any user. On an otherwise idle system a summary
   with non-zero counts appears after a window that contained a receipt with an open promise, and
   `WISHENKA_LOG_LEVEL=DEBUG` (a normal setting) re-exposes presence: `receipt_notice_created`
   appears right after `item_fulfilled`. Do not forward these logs to a user-visible channel.
-- `item_fulfilled` is logged inside the unit of work, before the commit. A failed commit can leave
-  the record of an act that was rolled back (the store then logs `wishlist_inventory_rolled_back`).
-- An enqueue failure has no event of its own: the receipt rolls back like any storage failure,
-  which avoids a presence signal.
+- `item_fulfilled` is deferred via `WishlistService._pending_commit_logs` (when
+  `_defer_commit_logs=True` under `WishlistStore`) and flushed only after the SQLite transaction
+  commits. A rolled-back receipt (including an outbox enqueue failure) never emits
+  `item_fulfilled`.
+- An enqueue failure in `WishlistStore._flush_receipt_effects` emits an operator-only `ERROR`
+  `receipt_notice_enqueue_failed` on `wishenka.wishlists.notices` with `error_class` only (no
+  `wishlist_id`, `item_id`, `receipt_id`, `giver_user_id`, or `outbox_id`) before re-raising so
+  the receipt transaction rolls back atomically without leaking reservation presence.
 
 ### Metrics
 
@@ -884,17 +892,21 @@ metric uses a DEBUG event, and labels never use a user, wishlist, item or giver.
   `now - min(created_at)` over `pending` rows; terminal failures are the `failed` count.
 - Sent, retried, failed-terminal totals: the `receipt_notice_window_summary` counts, delayed by up
   to one window.
-- `ambiguous` / `uncertain` gauge: `SELECT count(*) FROM notification_outbox WHERE ambiguous = 1`.
-  Unconfirmed sends and expired `sending` leases transition to `status = 'uncertain'` with
-  `ambiguous = 1` (`CHECK(ambiguous=0 OR status NOT IN ('pending','sending'))`). Explicit operator
-  resolution via `operator.resolve(..., action="retry")` resets `ambiguous = 0` when re-queuing a
-  row as `pending`, whereas `action="fail"` moves the row to `status = 'failed'` with
-  `ambiguous = 1`. Query `WHERE status = 'uncertain'` for quarantined unconfirmed deliveries
-  awaiting operator action and `WHERE ambiguous = 1 AND status = 'failed'` for unconfirmed
-  deliveries resolved as failed.
+- `ambiguous` / `uncertain` gauge: `ambiguous = 1` marks rows with an unconfirmed send outcome
+  (`CHECK(ambiguous=0 OR status NOT IN ('pending','sending'))`). Explicit operator resolution via
+  `operator.resolve(..., action="retry")` resets `ambiguous = 0` when re-queuing a row as `pending`,
+  whereas `action="fail"` moves the row to `status = 'failed'` with `ambiguous = 1`. Because
+  `WHERE ambiguous = 1` includes both active and historically resolved rows, query
+  `WHERE status = 'uncertain'` for active unresolved ambiguity awaiting operator action, and
+  `WHERE ambiguous = 1 AND status IN ('sent', 'failed')` for historical ambiguity within the
+  30-day retention window.
 - Delay proxy: `updated_at - created_at` of `sent` rows (no `sent_at` column, second resolution).
-- Not derivable: totals of send failures by class (`last_error_class` describes the current state
-  of a row and is cleared by a later success); a duplicates counter (dropped by design).
+- `last_error_class` current-state gauge: `NoticeStore.complete` clears `last_error_class` to
+  `NULL` on `sent`, so `SELECT last_error_class, count(*) FROM notification_outbox WHERE status IN
+  ('pending', 'uncertain', 'failed') GROUP BY last_error_class` is a **current-state gauge** of
+  unresolved/failed rows, not a historical failure counter.
+- Not derivable: historical totals of send failures by class (because `last_error_class` is
+  cleared on a later success); a duplicates counter (dropped by design).
 
 ## Troubleshooting
 

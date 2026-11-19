@@ -989,7 +989,7 @@ def test_item_lifecycle_observability_events(
     assert getattr(rec_arch, "wishlist_id", None) == wl_id
     assert getattr(rec_arch, "item_id", None) == item1_id
     assert getattr(rec_arch, "actor_id", None) == 501
-    assert getattr(rec_arch, "active_reservations_count", None) == 0
+    assert not hasattr(rec_arch, "active_reservations_count")
 
     # 5. item_restored: wishlist_id, item_id, actor_id, display_order
     with caplog.at_level(logging.INFO, logger="wishenka.wishlists"):

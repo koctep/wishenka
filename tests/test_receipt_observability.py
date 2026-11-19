@@ -268,9 +268,19 @@ def test_refusal_and_busy_records_carry_closed_fields_only(
         assert extras["wishlist_id"] == wishlist_id
         assert extras["item_id"] == item_id
         assert extras["http_status"] in {400, 403, 409}
-        assert not set(extras) & {"quantity", "outbox_id", "reservation_id", "giver_user_id"}
         has_remaining = reason in {"quantity_above_remaining", "nothing_remaining"}
-        assert ("remaining_quantity" in extras) is has_remaining, reason
+        expected_keys = {
+            "event",
+            "operation",
+            "wishlist_id",
+            "item_id",
+            "actor_id",
+            "reason",
+            "http_status",
+        }
+        if has_remaining:
+            expected_keys.add("remaining_quantity")
+        assert set(extras) == expected_keys, (reason, extras)
     assert by_reason["quantity_above_remaining"].remaining_quantity == 5  # type: ignore[attr-defined]
     assert by_reason["nothing_remaining"].remaining_quantity == 0  # type: ignore[attr-defined]
     assert by_reason["forbidden"].actor_id == GIFTER_ID  # type: ignore[attr-defined]
@@ -279,7 +289,13 @@ def test_refusal_and_busy_records_carry_closed_fields_only(
     (busy_record,) = _events(route, "receipt_inventory_busy")
     assert busy_record.levelno == logging.WARNING
     assert (busy_record.wishlist_id, busy_record.item_id) == (wishlist_id, item_id)  # type: ignore[attr-defined]
-    assert not set(_extras(busy_record)) & {"quantity", "outbox_id", "giver_user_id"}
+    assert set(_extras(busy_record)) == {
+        "event",
+        "operation",
+        "wishlist_id",
+        "item_id",
+        "actor_id",
+    }
 
     accepted = _events(route, "receipt_recorded_http")
     assert [(r.levelno, _extras(r)["item_id"]) for r in accepted] == [(logging.INFO, item_id)]
@@ -350,3 +366,110 @@ def test_migration_events_are_info_with_counts_only(
         assert record.name == "wishenka.wishlists.migrations"
         assert record.levelno == logging.INFO
         assert _extras(record) == {"event": event, "rows": rows}
+
+
+async def test_retry_scheduled_includes_max_attempts(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``receipt_notice_retry_scheduled`` DEBUG record includes ``max_attempts``."""
+    async with _store_env(tmp_path) as env:
+        caplog.set_level(logging.DEBUG)
+        await _receipt_and_drain(
+            env,
+            FakeNoticeSender([send_result("retryable", error_class="TelegramNetworkError")]),
+            ((GIFTER, 37),),
+        )
+
+    (retry,) = _events(caplog.records, "receipt_notice_retry_scheduled")
+    assert retry.levelno == logging.DEBUG
+    assert _extras(retry) == {
+        "event": "receipt_notice_retry_scheduled",
+        "outbox_id": retry.outbox_id,  # type: ignore[attr-defined]
+        "attempt": 1,
+        "max_attempts": env.settings.receipt_notice_max_attempts,
+        "error_class": "TelegramNetworkError",
+    }
+
+
+async def test_item_archived_never_logs_active_reservations_count(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``item_archived`` on the owner stream must not leak ``active_reservations_count``."""
+    service = WishlistService.in_memory()
+    wishlist_id, item_id = await seed_wish(service, quantity=5)
+    await service.create_reservation(item_id=item_id, user=GIFTER, quantity=2)
+    caplog.set_level(logging.INFO)
+
+    await service.archive_wish_item(wishlist_id, item_id, OWNER)
+
+    (record,) = _events(caplog.records, "item_archived")
+    assert record.levelno == logging.INFO
+    assert _extras(record) == {
+        "event": "item_archived",
+        "item_id": item_id,
+        "wishlist_id": wishlist_id,
+        "actor_id": OWNER_ID,
+    }
+
+
+async def test_enqueue_failure_rolls_back_without_item_fulfilled_and_logs_operator_error(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Outbox enqueue failure rolls back, omits ``item_fulfilled``, and logs operator-only ERROR."""
+    from sqlalchemy.ext.asyncio import AsyncConnection
+
+    orig_execute = AsyncConnection.execute
+
+    async def fail_outbox(self: AsyncConnection, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        if "INSERT INTO notification_outbox" in str(statement):
+            raise RuntimeError("outbox down")
+        return await orig_execute(self, statement, *args, **kwargs)
+
+    async with _store_env(tmp_path) as env:
+        await env.seed(5, ((GIFTER, 2),))
+        monkeypatch.setattr(AsyncConnection, "execute", fail_outbox)
+        with (
+            caplog.at_level(logging.INFO),
+            pytest.raises(RuntimeError, match="outbox down"),
+        ):
+            await env.receive(1)
+
+    assert _events(caplog.records, "item_fulfilled") == []
+    (err,) = _events(caplog.records, "receipt_notice_enqueue_failed")
+    assert err.name == _NOTICE_LOGGER
+    assert err.levelno == logging.ERROR
+    assert _extras(err) == {
+        "event": "receipt_notice_enqueue_failed",
+        "error_class": "RuntimeError",
+    }
+    assert not set(_extras(err)) & _JOIN_KEYS
+
+
+def test_worker_stop_logs_info_without_summary_counts(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Stopping the worker emits ``receipt_notice_worker_stopped`` at INFO without summary."""
+    from fastapi.testclient import TestClient
+
+    from tests.receipt_support import TEST_BOT_TOKEN
+    from wishenka.config import Settings
+    from wishenka.web.app import create_app
+
+    settings = Settings(
+        database_url=f"sqlite+aiosqlite:///{tmp_path / 'stop.db'}",
+        secret_key="stop",
+        telegram_bot_token=TEST_BOT_TOKEN,
+        receipt_notice_enabled=True,
+    )
+    app = create_app(settings, notice_sender=FakeNoticeSender())
+    caplog.set_level(logging.INFO)
+    with TestClient(app):
+        pass
+
+    (stopped,) = _events(caplog.records, "receipt_notice_worker_stopped")
+    assert stopped.name == _NOTICE_LOGGER
+    assert stopped.levelno == logging.INFO
+    assert _extras(stopped) == {"event": "receipt_notice_worker_stopped"}
+    assert _events(caplog.records, "receipt_notice_window_summary") == []
