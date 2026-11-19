@@ -20,10 +20,14 @@ to `wishenka.bot.entry.create_router`. The router handles private
 chats only. It uses a stored language when available, otherwise the Telegram language code;
 `en*` language codes select English and all others select Russian. Both `/help` and the
 `How it works` (`entry:help`) callback respond in the selected language, explain
-`/reservation_confirmations on|off` and `/support`, and present the main navigation keyboard. When
-`user_store` is configured, a verified private `/start` or `/help` (`chat.id == from_user.id`)
-upserts the user, activates their private destination in `bot_destinations`, and clears any active
-support session (`clear_support_session`).
+`/reservation_confirmations on|off` and `/support`, and present the main navigation keyboard. When `user_store` is configured, verified private-chat interactions (`chat.id == from_user.id`)
+across `wishenka/bot/entry.py`, `wishenka/bot/support.py`, `wishenka/bot/birthdays.py`, and
+`wishenka/bot/capture.py` resolve the user through the shared
+`wishenka.bot.principal.ensure_private_bot_user(dependencies, user, chat_id, ...)` helper: it
+reads the existing `users` row first (preserving stored `language_code` without unnecessary writes),
+upserts via `upsert_from_bot` under `_private_bot_user` log suppression if absent, and activates
+their private destination in `bot_destinations`. Verified `/start` and `/help` commands also clear
+any active support session (`clear_support_session`).
 
 The Create wishlist, My wishlists and Open Mini App buttons use `WebAppInfo` URLs with the
 `startapp` values `create`, `collection` and `home`. The menu also includes `How it works`
@@ -61,8 +65,9 @@ consumes private messages first without creating wish drafts (see
 [Telegram bot support and feedback channel](bot-support.md)); otherwise, while a birthday label or
 date input session is active in `birthday_input`, the birthday router consumes the text message
 before wish capture. The
-polling process supplies both dependencies. When capture starts in a verified private chat, the
-user is upserted if needed and their `bot_destinations` entry is marked active.
+polling process supplies both dependencies. When capture starts in a verified private chat,
+`ensure_private_bot_user` resolves or creates the user and marks their `bot_destinations` entry
+active.
 
 The classifier extracts a URL and residual title. Supported links are sent to the existing preview
 service; partial or failed extraction leaves a manual draft and identifies missing fields. Other
@@ -155,7 +160,7 @@ Run the focused tests with:
 ```bash
 make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_start_repro.py tests/test_bot_entry_repro.py'
 make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_capture_repro.py tests/test_bot_capture_atomic_store_repro.py tests/test_bot_capture_order_retention_repro.py tests/test_bot_capture_order_retention.py'
-make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_support_repro.py tests/test_bot_support.py'
+make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_support_repro.py tests/test_bot_support.py tests/test_wishenka_182_repro.py'
 make test-serial PYTEST_ARGS='tests/test_bot_menu_miniapp_e2e_browser.py'
 ```
 

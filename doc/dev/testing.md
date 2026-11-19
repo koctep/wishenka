@@ -394,6 +394,35 @@ pytest.mark.browser]`, 12 параметризованных тестов) пр�
 make test-serial PYTEST_ARGS="tests/test_bot_menu_miniapp_e2e_browser.py"
 ```
 
+### Изолированная диагностика поддержки и единый principal приватного бота (WISHENKA-182)
+
+Модуль `tests/test_wishenka_182_repro.py` (`pytestmark = pytest.mark.timeout(30)`, 4 теста: 3 async, 1 sync)
+проверяет устранение полнотабличного сканирования токенов в поддержке, чтение без `BEGIN IMMEDIATE`
+и унификацию инициализации пользователя приватного бота:
+
+- **`test_support_diagnostic_context_avoids_full_table_scans_and_write_tx`:** проверяет через
+  SQLAlchemy `before_cursor_execute`, что `collect_diagnostic_context` и проверка rate-limit при
+  отправке `/support ...` выполняются через `WishlistStore.execute_read` (отложенный `BEGIN`,
+  без `BEGIN IMMEDIATE`), не сканируют чужие токены в `wl_lists` / `wl_tokens` / `wl_invite_tokens`
+  и при этом редактируют собственные capability-токены пользователя и любые regex-совпадения чужих
+  токенов (`[REDACTED]`).
+- **`test_principal_helper_exists_and_routers_delegate_without_duplication`:** проверяет наличие
+  `wishenka.bot.principal.ensure_private_bot_user` и делегирование инициализации из `entry.py`,
+  `support.py`, `birthdays.py` и `capture.py` без дублирующего вызова `upsert_from_bot`.
+- **`test_all_private_routers_preserve_stored_language_and_activate_destination`:** проверяет, что
+  обработчики `entry.py`, `support.py`, `birthdays.py` и `capture.py` через единый helper
+  `wishenka.bot.principal.ensure_private_bot_user` сохраняют уже заданный в `users.language_code`
+  язык пользователя и активируют `bot_destinations`.
+- **`test_ensure_private_bot_user_suppresses_user_identifier_logs`:** проверяет подавление
+  логирования `user_created` / `user_updated` с Telegram ID и именем профиля через фильтр
+  `_private_bot_user` при создании пользователя в `ensure_private_bot_user`.
+
+Запуск модуля:
+
+```bash
+.venv/bin/pytest tests/test_wishenka_182_repro.py -v
+```
+
 ### Диагностика при падении
 
 - В отчёт pytest падающего теста добавляется секция `Page N diagnostics` со снимком

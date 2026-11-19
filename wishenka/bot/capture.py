@@ -26,10 +26,10 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.bot.entry import _language, _url
+from wishenka.bot.principal import ensure_private_bot_user
 from wishenka.i18n import DEFAULT_LOCALE, SupportedLocale, t
 from wishenka.items.classifier import UniversalInputClassifier
 from wishenka.items.schemas import CreateItemDTO
-from wishenka.notices.destinations import upsert_bot_destination
 from wishenka.users.models import UserRecord
 from wishenka.wishlists.policy import WishlistAccessPolicy
 from wishenka.wishlists.service import WishlistService
@@ -284,19 +284,12 @@ def create_capture_router(deps: Any) -> Router:
             return
         actor = _actor(message.from_user.id)
         lang = await _language(message.from_user, deps, locale)
-        users = getattr(deps, "user_store", None)
-        if users is not None and message.chat.id == message.from_user.id:
-            record = user_record or await users.get_by_telegram_id(message.from_user.id)
-            if record is None:
-                private_context = _preview_active.set(True)
-                try:
-                    record = await users.upsert_from_bot(message.from_user)
-                finally:
-                    _preview_active.reset(private_context)
-            async with users.engine.begin() as conn:
-                await upsert_bot_destination(
-                    conn, int(record.id), message.chat.id, int(_now(deps).timestamp())
-                )
+        await ensure_private_bot_user(
+            deps,
+            message.from_user,
+            message.chat.id,
+            user_record=user_record,
+        )
         now = _now(deps)
         chat = message.chat.id
         raw = message.text.strip()

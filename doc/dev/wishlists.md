@@ -1243,6 +1243,13 @@ relational architecture, `WishlistStore` coordinates atomic row-level persistenc
   wishlist domain that need atomic cross-table writes alongside domain operations (such as
   `wishenka.bot.capture:mutate` updating `bot_drafts` and `bot_capture_order` with
   `add_wish_item`) use `execute_with_connection()` instead of private `_read`/`_write` hooks.
+- **Read-Only Deferred Transactions (`WishlistStore.execute_read`)**:
+  `execute_read(work)` accepts `Callable[[AsyncConnection], Awaitable[T]]`, binds
+  `execution_options(read_only=True)` on the connection, and runs `work(conn)` inside a deferred
+  `BEGIN` transaction (rolling back on exit). `_configure_immediate_transactions` checks
+  `conn.get_execution_options().get("read_only")` in the `begin` event listener and emits `BEGIN`
+  instead of `BEGIN IMMEDIATE`, allowing read-only paths (such as `wishenka.bot.support`
+  rate-limit checks and diagnostic collection) to read without acquiring a SQLite write lock.
 
 ### 5. Observability & Security Guarantees
 

@@ -55,6 +55,7 @@ wishenka.bot.entry.create_router (/start, /help, entry:help, /reservation_confir
 
 | Component | Path | Responsibility |
 | --------- | ---- | -------------- |
+| Private Bot Principal | `wishenka/bot/principal.py` | Provides `ensure_private_bot_user(...)` to resolve or create private-chat `users` records (under `_private_bot_user` log suppression) and activate `bot_destinations` |
 | Support Router & Service | `wishenka/bot/support.py` | Manages `support_input` sessions, `/support` and `/cancel` commands, `support:open` and `support:cancel` callbacks, validation, rate limiting, capability redaction, diagnostic context collection, and ticket forwarding |
 | Bot Entry Router | `wishenka/bot/entry.py` | Handles `/start`, `/help`, `entry:help`, and `/reservation_confirmations`; exposes the `support:open` button; clears active `support_input` sessions when superseded; mounts sub-routers in priority order |
 | Birthday Router | `wishenka/bot/birthdays.py` | Clears any active `support_input` session when `/birthdays` or `birthday:*` callbacks run; handles `/cancel` for `birthday_input` when support does not consume it |
@@ -113,10 +114,17 @@ Created by Alembic revision `add_support_channel` (`down_revision = "add_notice_
 
 - **Capability token redaction (`redact_capabilities`):** Before formatting a ticket, the user's
   message is scrubbed using regex patterns (`_STARTAPP_TOKEN_RE`, `_CAPABILITY_PATH_RE`,
-  `_CAPABILITY_TOKEN_RE`) and exact replacement against all non-empty tokens (`len >= 4`) loaded
-  from `wl_lists(public_token, invite_token)`, `wl_tokens(token)`, and `wl_invite_tokens(token)`.
-  Any `p_<token>`, `i_<token>`, `/share/<token>`, `/invite/<token>`, or
-  `/api/public/wishlists/<token>` secret is replaced with `[REDACTED]`.
+  `_CAPABILITY_TOKEN_RE`) and exact replacement against non-empty tokens (`len >= 4`) scoped to
+  the submitting user (`wl_lists(public_token, invite_token)` owned by or shared via `wl_members`
+  with `telegram_user_id`, plus matching `wl_tokens(token)` rows). Unrelated users' token tables
+  are never scanned; any other `p_<token>`, `i_<token>`, `/share/<token>`, `/invite/<token>`, or
+  `/api/public/wishlists/<token>` secret is scrubbed by regex-only matching and replaced with
+  `[REDACTED]`.
+- **Read-only diagnostic collection (`WishlistStore.execute_read`):** Both the `support_tickets`
+  sliding-window rate-limit check and `collect_diagnostic_context` execute inside
+  `store.execute_read(...)`, which uses `execution_options(read_only=True)` to run a deferred
+  `BEGIN` transaction rather than acquiring a `BEGIN IMMEDIATE` write lock. Recording a delivered
+  ticket in `support_tickets` runs separately in a write transaction after delivery succeeds.
 - **Metadata-only diagnostic context (`collect_diagnostic_context`):** Queries only `bot_destinations`
   (`active` boolean), `wl_lists` (counts of `active` and `archived` lists owned by
   `telegram_user_id`), `wl_members` (count of non-deleted collaborative memberships), and
@@ -125,11 +133,13 @@ Created by Alembic revision `add_support_channel` (`down_revision = "add_notice_
 - **Link preview suppression:** Outbound `send_message` calls to support destinations pass
   `link_preview_options=LinkPreviewOptions(is_disabled=True)` so Telegram does not generate webpage
   previews for user-supplied links.
-- **Private user log suppression:** User upserts in `principal()`, `/start`, and `/help` set the
-  `_private_bot_user` `ContextVar` filter on `wishenka.users`, preventing `user_created` and
-  `user_updated` logs from writing Telegram IDs or profile names during private bot interactions.
-  Moreover, `support.py` preserves an existing `users.language_code` when upserting so stored
-  language preferences are respected.
+- **Private user log suppression:** Private-chat user initialization across `entry.py`,
+  `support.py`, `birthdays.py`, and `capture.py` delegates to
+  `wishenka.bot.principal.ensure_private_bot_user(...)`, which looks up an existing user first (so
+  stored `users.language_code` and profile fields are preserved without unnecessary updates), sets
+  the `_private_bot_user` `ContextVar` filter on `wishenka.users` when calling `upsert_from_bot`
+  for new users (preventing `user_created` and `user_updated` logs from writing Telegram IDs or
+  profile names), and activates `bot_destinations`.
 
 ## API / Usage
 
@@ -242,16 +252,12 @@ Additional error boundaries:
 Run the support channel reproduction, unit, migration, and observability tests with:
 
 ```bash
-make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_support_repro.py tests/test_bot_support.py'
+make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_support_repro.py tests/test_bot_support.py tests/test_wishenka_182_repro.py'
 ```
 
 ## Known Limitations and Follow-up Tasks
 
 - **[WISHENKA-35](https://pypost.atlassian.net/browse/WISHENKA-35):** Account deletion and personal
   data cleanup must include `support_input` and `support_tickets`.
-- **[WISHENKA-182](https://pypost.atlassian.net/browse/WISHENKA-182):** Replace full-table token
-  scans in `collect_diagnostic_context` with scoped lookups or regex-only redaction outside the
-  write transaction, and unify the private-bot user upsert + `bot_destinations` helper across
-  `entry.py`, `support.py`, `birthdays.py`, and `capture.py`.
 - **[WISHENKA-156](https://pypost.atlassian.net/browse/WISHENKA-156):** Extend opt-in real Telegram
   Bot API smoke tests to cover support ticket delivery and `LinkPreviewOptions(is_disabled=True)`.

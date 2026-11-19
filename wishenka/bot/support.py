@@ -24,9 +24,8 @@ from aiogram.types import (
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from wishenka.bot.i18n import _private_bot_user
+from wishenka.bot.principal import ensure_private_bot_user
 from wishenka.i18n import DEFAULT_LOCALE, SupportedLocale, t
-from wishenka.notices.destinations import upsert_bot_destination
 from wishenka.users.models import UserRecord
 from wishenka.wishlists.store import WishlistStore
 
@@ -153,15 +152,46 @@ async def collect_diagnostic_context(
         {"tg": telegram_user_id, "now": now.isoformat()},
     )
     tokens: set[str] = set()
-    for row in (await conn.execute(text("SELECT public_token, invite_token FROM wl_lists"))).all():
+    owned_lists = (
+        await conn.execute(
+            text("SELECT public_token, invite_token FROM wl_lists WHERE owner_id=:tg"),
+            {"tg": telegram_user_id},
+        )
+    ).all()
+    collab_lists = (
+        await conn.execute(
+            text(
+                "SELECT l.public_token, l.invite_token "
+                "FROM wl_lists l JOIN wl_members m ON m.wishlist_id=l.id "
+                "WHERE m.user_id=:tg"
+            ),
+            {"tg": telegram_user_id},
+        )
+    ).all()
+    for row in (*owned_lists, *collab_lists):
         if row[0]:
             tokens.add(str(row[0]))
         if row[1]:
             tokens.add(str(row[1]))
-    for row in (await conn.execute(text("SELECT token FROM wl_tokens"))).all():
-        if row[0]:
-            tokens.add(str(row[0]))
-    for row in (await conn.execute(text("SELECT token FROM wl_invite_tokens"))).all():
+    owned_tokens = (
+        await conn.execute(
+            text(
+                "SELECT t.token FROM wl_tokens t "
+                "JOIN wl_lists l ON l.id=t.wishlist_id WHERE l.owner_id=:tg"
+            ),
+            {"tg": telegram_user_id},
+        )
+    ).all()
+    collab_tokens = (
+        await conn.execute(
+            text(
+                "SELECT t.token FROM wl_tokens t "
+                "JOIN wl_members m ON m.wishlist_id=t.wishlist_id WHERE m.user_id=:tg"
+            ),
+            {"tg": telegram_user_id},
+        )
+    ).all()
+    for row in (*owned_tokens, *collab_tokens):
         if row[0]:
             tokens.add(str(row[0]))
     ctx = DiagnosticContext(
@@ -277,7 +307,7 @@ async def _submit_support_message(
         record.language_code or ""
     )
 
-    async def _prepare(conn: AsyncConnection) -> tuple[str, str, int]:
+    async def _prepare_read(conn: AsyncConnection) -> tuple[str, str, int]:
         rows = (
             await conn.execute(
                 text(
@@ -288,10 +318,6 @@ async def _submit_support_message(
             )
         ).all()
         if len(rows) >= max_tickets:
-            await conn.execute(
-                text("DELETE FROM support_input WHERE owner_id=:owner AND chat_id=:chat"),
-                {"owner": int(record.id), "chat": message.chat.id},
-            )
             oldest = int(rows[0][0])
             wait_min = max(1, math.ceil((oldest + window_sec - now_ts) / 60))
             return "rate_limited", "", wait_min
@@ -309,8 +335,9 @@ async def _submit_support_message(
         sanitized = redact_capabilities(stripped, known_tokens)
         return "ready", format_support_ticket(ctx, sanitized), 0
 
-    status, payload, wait_minutes = await store.transaction(_prepare)
+    status, payload, wait_minutes = await store.execute_read(_prepare_read)
     if status == "rate_limited":
+        await clear_support_session(store, int(record.id), message.chat.id)
         await message.answer(t("bot.support.rate_limited", lang, minutes=wait_minutes))
         logger.info(
             "Support message rate limited",
@@ -399,21 +426,13 @@ def create_support_router(dependencies: Any) -> Router:
         user: Any,
         chat: int,
         user_record: UserRecord | None = None,
-    ) -> Any | None:
-        if user is None or chat != user.id or users is None:
-            return None
-        record = user_record
-        if record is None:
-            token = _private_bot_user.set(True)
-            try:
-                record = await users.upsert_from_bot(user)
-            finally:
-                _private_bot_user.reset(token)
-        async with users.engine.begin() as conn:
-            await upsert_bot_destination(
-                conn, int(record.id), chat, int(_now(dependencies).timestamp())
-            )
-        return record
+    ) -> UserRecord | None:
+        return await ensure_private_bot_user(
+            dependencies,
+            user,
+            chat,
+            user_record=user_record,
+        )
 
     async def has_active_session(owner_id: int, chat_id: int) -> bool:
         if store is None:

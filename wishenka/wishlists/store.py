@@ -83,7 +83,10 @@ def _configure_immediate_transactions(sync_engine: Engine) -> None:
         # busy_timeout is applied before BEGIN IMMEDIATE, while __in_begin
         # prevents SQLAlchemy from opening a second transaction for the pragma.
         conn.exec_driver_sql("PRAGMA busy_timeout=5000")
-        conn.exec_driver_sql("BEGIN IMMEDIATE")
+        if conn.get_execution_options().get("read_only"):
+            conn.exec_driver_sql("BEGIN")
+        else:
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
 
 
 def _sqlite_error_is_busy(exc: BaseException) -> bool:
@@ -1642,6 +1645,17 @@ class WishlistStore:
         must serialise with receipts and promises without a second locking scheme.
         """
         return await self._immediate(work)
+
+    async def execute_read(self, work: Callable[[AsyncConnection], Awaitable[T]]) -> T:
+        """Run ``work`` in a read-only deferred transaction without ``BEGIN IMMEDIATE``."""
+        async with self.engine.connect() as raw_conn:
+            conn = await raw_conn.execution_options(read_only=True)
+            try:
+                await conn.begin()
+                return await work(conn)
+            finally:
+                if conn.in_transaction():
+                    await conn.rollback()
 
     async def _execute_once(
         self,

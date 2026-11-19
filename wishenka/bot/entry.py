@@ -20,14 +20,14 @@ from aiogram.types import (
 )
 from sqlalchemy import text
 
-from wishenka.bot.i18n import LocaleMiddleware, _private_bot_user, sync_user_bot_commands
+from wishenka.bot.i18n import LocaleMiddleware, sync_user_bot_commands
+from wishenka.bot.principal import ensure_private_bot_user
 from wishenka.i18n import (
     DEFAULT_LOCALE,
     SupportedLocale,
     resolve_telegram_locale,
     t,
 )
-from wishenka.notices.destinations import upsert_bot_destination
 from wishenka.users.models import UserRecord
 from wishenka.users.store import UserStore
 
@@ -121,18 +121,14 @@ async def _ensure_private_destination(
     user_record: UserRecord | None,
 ) -> UserRecord | None:
     """Persist verified bot destination and clear superseded support input."""
-    users: UserStore | None = getattr(dependencies, "user_store", None)
-    if users is None or not message.from_user or message.chat.id != message.from_user.id:
-        return None
-    record = user_record
+    record = await ensure_private_bot_user(
+        dependencies,
+        message.from_user,
+        message.chat.id,
+        user_record=user_record,
+    )
     if record is None:
-        token = _private_bot_user.set(True)
-        try:
-            record = await users.upsert_from_bot(message.from_user)
-        finally:
-            _private_bot_user.reset(token)
-    async with users.engine.begin() as conn:
-        await upsert_bot_destination(conn, int(record.id), message.chat.id)
+        return None
     store = getattr(dependencies, "wishlist_store", None)
     if store is not None:
         from wishenka.bot.support import clear_support_session

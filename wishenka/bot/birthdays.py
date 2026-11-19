@@ -15,9 +15,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from wishenka.bot.entry import _language
-from wishenka.bot.i18n import _private_bot_user
+from wishenka.bot.principal import ensure_private_bot_user
 from wishenka.i18n import DEFAULT_LOCALE, SupportedLocale, t
-from wishenka.notices.destinations import upsert_bot_destination
 from wishenka.users.models import UserRecord
 
 logger = logging.getLogger("wishenka.bot.birthdays")
@@ -43,18 +42,13 @@ def create_birthday_router(dependencies: Any) -> Router:
         chat: int,
         user_record: UserRecord | None = None,
     ) -> int | None:
-        if user is None or chat != user.id:
-            return None
-        record = user_record
-        if record is None:
-            token = _private_bot_user.set(True)
-            try:
-                record = await users.upsert_from_bot(user)
-            finally:
-                _private_bot_user.reset(token)
-        async with users.engine.begin() as conn:
-            await upsert_bot_destination(conn, int(record.id), chat, _now_epoch(dependencies))
-        return int(record.id)
+        record = await ensure_private_bot_user(
+            dependencies,
+            user,
+            chat,
+            user_record=user_record,
+        )
+        return int(record.id) if record is not None else None
 
     async def listing(message: Message, owner: int, lang: SupportedLocale) -> None:
         async with store.engine.connect() as conn:
