@@ -99,11 +99,6 @@
                         +
                     </button>
                 </div>
-                {% if locked_quantity > 0 %}
-                <div class="alert alert-warning text-xs mt-2 text-amber-700 bg-amber-50 p-2 rounded">
-                    {{ t('web.item.locked_quantity_hint', locale|default('en'), count=locked_quantity) }}
-                </div>
-                {% endif %}
             </div>
 
             {% if is_collaborative %}

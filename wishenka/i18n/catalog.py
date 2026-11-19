@@ -219,6 +219,10 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
             "Receipt mark for wish ‘{wish}’ from ‘{wishlist}’ was cancelled or corrected. "
             "Check your reservation and keep or update it if needed."
         ),
+        "notices.item_quantity_overbooked": (
+            "Requested quantity for wish ‘{wish}’ from ‘{wishlist}’ was reduced. "
+            "Check your reservation and adjust or cancel it if needed."
+        ),
         "notices.reminder.occasion": "Upcoming occasion: {title} ({date}).",
         "notices.reminder.item_created": "Wish added: {subject}.",
         "notices.reminder.item_updated": "Wish updated: {subject}.",
@@ -379,7 +383,7 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "web.item.quick_add_placeholder": "Paste a link or wish title...",
         "web.item.empty_title": "Wish title cannot be empty",
         "web.item.quantity_below_reserved": (
-            "Cannot set quantity below the amount reserved by givers ({count} pcs.)."
+            "Cannot set quantity below the already received amount ({count} pcs.)."
         ),
         "web.item.edit_busy_error": (
             "The wish was busy, the edit was not saved, and it can be submitted again."
@@ -734,6 +738,10 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
             "была отменена или скорректирована.\n"
             "Проверьте свою бронь и при необходимости оставьте или измените её."
         ),
+        "notices.item_quantity_overbooked": (
+            "Требуемое количество для желания «{wish}» из списка «{wishlist}» уменьшилось.\n"
+            "Проверьте свою бронь и при необходимости измените или отмените её."
+        ),
         "notices.reminder.occasion": "Приближается событие: {title} ({date}).",
         "notices.reminder.item_created": "Желание добавлено: {subject}.",
         "notices.reminder.item_updated": "Желание изменено: {subject}.",
@@ -896,7 +904,7 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "web.item.quick_add_placeholder": "Вставьте ссылку или название желания...",
         "web.item.empty_title": "Название желания не может быть пустым",
         "web.item.quantity_below_reserved": (
-            "Нельзя указать количество меньше забронированного дарителями объема ({count} шт.)."
+            "Нельзя указать количество меньше уже полученного ({count} шт.)."
         ),
         "web.item.edit_busy_error": (
             "Желание было занято, изменения не сохранены — попробуйте отправить снова."

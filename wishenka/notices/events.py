@@ -11,6 +11,7 @@ SAFE_SHARED_EVENTS = frozenset(
     {
         "item_created",
         "item_updated",
+        "item_quantity_overbooked",
         "item_archived",
         "item_restored",
         "list_updated",

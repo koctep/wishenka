@@ -191,6 +191,9 @@ Four Alembic revisions extend the wishlist database schema for notifications, re
        `received_quantity` drops to `0`), the user must not be the wish recipient, the
        `gift_received` setting must be enabled, and the user must still hold an `ACTIVE` or
        `PURCHASED` reservation on the wish.
+     - For `item_quantity_overbooked`, the list must be active or archived, the giver must still
+       hold an active or purchased promise, must not be the recipient, and received plus occupied
+       units must still exceed requested quantity. The notice uses `wishlist_changes` preferences.
      - For `reservation_confirmation`, the list must be `active`, the user must still hold a
        reservation on the item, must not be the recipient, and `reservation_changes` must be
        explicitly `1`.
@@ -390,7 +393,15 @@ event = SharedEvent(
 await producer.record(conn, event, now=int(time.time()))
 ```
 
-- **`SAFE_SHARED_EVENTS`**: `"item_created"`, `"item_updated"`, `"item_archived"`,
+- A quantity reduction that leaves the wish over-booked queues `item_quantity_overbooked` for
+  distinct eligible open-promise givers, including the editor when eligible. Those givers do not
+  also receive the generic `item_updated` notice for that edit. The item change and outbox rows
+  commit together; later delivery failures do not roll back the edit. The localized notice omits
+  other givers and booking quantities. No new configuration is required; existing
+  `wishlist_changes` preferences apply.
+
+- **`SAFE_SHARED_EVENTS`**: `"item_created"`, `"item_updated"`, `"item_quantity_overbooked"`,
+  `"item_archived"`,
   `"item_restored"`, `"list_updated"`, `"list_archived"`, `"list_restored"`,
   `"membership_changed"`, `"reservation_confirmation"`, `"receipt_reverted"`,
   `"receipt_increased"`. Passing any other `kind` raises
@@ -537,6 +548,9 @@ the complete observability specifications.
      reactivate their destination.
   3. Check `wl_list_notification_settings` and `user_notification_settings` for the relevant
      category (`wishlist_changes`, `gift_received`, `reminders`, or `reservation_changes`).
+- **Over-booking notice is missing:** Check the `wishlist_changes` preferences and active bot
+  destination. The worker rechecks that the giver's promise is open, the giver is not the
+  recipient, and the wish is still over-booked; a stale or unauthorized notice is skipped.
 - **Actor does not receive reservation confirmations:**
   - `reservation_changes` defaults to disabled (`0`). The user must send
     `/reservation_confirmations on` in a private chat with the bot (and must not be the recipient

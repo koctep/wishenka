@@ -47,9 +47,7 @@ came.
 - **Gifted read is not the archive.** It lists wishes with `received_quantity > 0`, for members
   only, with receipt entries and no promise or giver field.
 - **Surprise.** Receipt results, refusals, the gifted read and the notice carry no promise,
-  giver, booked quantity or purchase fact. The one known exception in current code is the legacy
-  quantity-reduction lock in the edit form; `WISHENKA-154` settled the target rule (`FR-5` / Q12)
-  to remove it, and implementation is planned in `WISHENKA-218`.
+  giver, booked quantity or purchase fact. The edit-form minimum depends only on received units.
 
 ### Settled product decisions (WISHENKA-154)
 
@@ -80,11 +78,10 @@ shortcut E) are settled in `in-docs/spec.md` (`WISHENKA-154`):
   archive/restore, record/undo/correct receipt) under strict surprise protection (no booking,
   giver, or purchase data shown) and cannot act as a gifter on that wish (no self-booking). On
   other wishes in the same list where someone else is the recipient, they act as a normal gifter.
-- **Planned / target spec rules (not yet implemented in code):**
-  - **`FR-5` (Q12, planned in `WISHENKA-218`):** Tighten the edit-form quantity-reduction lock so
-    authors can reduce requested quantity down to `max(1, received_quantity)` without seeing or
-    being blocked by occupied promise units; if `received + occupied > new_requested`, the wish
-    enters the standard over-booked state and open-promise givers are notified.
+- **`FR-5` (Q12, implemented in `WISHENKA-218`):** Authors may reduce quantity to
+  `max(1, received_quantity)` without seeing or being blocked by occupied units. If received plus
+  occupied exceeds the new quantity, the wish is over-booked and eligible givers are notified.
+- **Planned / target spec rule (not yet implemented in code):**
   - **`FR-6` (Shortcut E, planned in `WISHENKA-219`):** Add an explicit «Завершено»
     («Завершить» / «Подарок вручён») completion action for **purchased** promises on fully
     received wishes, moving the promise to a closed state (freeing occupied units, excluding it
@@ -95,9 +92,8 @@ shortcut E) are settled in `in-docs/spec.md` (`WISHENKA-154`):
 
 - Notification settings screen (only tables and lookup exist): WISHENKA-34.
 - Metrics exporter: WISHENKA-84 (the metrics are derived from logs and SQL, see Logging).
-- Planned target rules from `WISHENKA-154`: edit-form quantity-reduction lock tightening (`FR-5` /
-  Q12) in `WISHENKA-218`, and «Завершено» state for purchased promises (`FR-6` / Shortcut E) in
-  `WISHENKA-219`.
+- Planned target rule from `WISHENKA-154`: «Завершено» state for purchased promises
+  (`FR-6` / Shortcut E) in `WISHENKA-219`.
 - Follow-up debt of the UI story: see [Follow-up tickets](#follow-up-tickets-of-the-ui).
 - Follow-up debt of the backend (all Low): WISHENKA-155 (one digit-free `quantity_invalid`
   message), 156 (opt-in real-Telegram smoke test, two-process worker race test), 157 (log-contract
@@ -962,8 +958,8 @@ metric uses a DEBUG event, and labels never use a user, wishlist, item or giver.
   element is empty when nothing was received. «Не удалось загрузить «Подаренные»» means
   `read_gifted_rows` got a domain error; reload the page.
 - **Not built yet** (see Overview): settings screen (WISHENKA-34), metrics
-  exporter (WISHENKA-84), target rules `FR-5` (`WISHENKA-218`) and `FR-6` (`WISHENKA-219`) from
-  `WISHENKA-154`, and the UI follow-ups WISHENKA-160 to 164.
+  exporter (WISHENKA-84), target rule `FR-6` (`WISHENKA-219`) from `WISHENKA-154`, and the UI
+  follow-ups WISHENKA-160 to 164.
 
 ## Tests
 

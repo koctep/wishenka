@@ -549,7 +549,7 @@ async def test_smaller_quantity_releases_units_once(tmp_path: Path) -> None:
 
 
 async def test_lower_requested_quantity_sees_other_process_booking(tmp_path: Path) -> None:
-    """A lower that would pass under occupied units keeps the previous quantity."""
+    """FR-5 / Q12: lowering requested quantity below occupied succeeds and preserves bookings."""
     db_path = tmp_path / "lower.db"
     _wishlist_id, item_ids = await _seed_wishlist(db_path, [2])
     item_id = item_ids[0]
@@ -558,12 +558,11 @@ async def test_lower_requested_quantity_sees_other_process_booking(tmp_path: Pat
     before = await _load(db_path, item_id)
 
     lowered = _run_copies(db_path, [_lower(item_id, _OWNER_ID, _OWNER_NAME, 1)])
-    assert lowered[0]["status"] == "error", lowered
-    assert lowered[0]["error_type"] == "CannotReduceQuantityBelowReservedError"
+    assert lowered[0]["status"] == "ok", lowered
 
     after = await _load(db_path, item_id)
-    assert after.quantity == before.quantity == 2
-    assert after.received == before.received
+    assert after.quantity == 1
+    assert after.received == before.received == 0
     assert after.occupied == before.occupied == 2
     assert after.reservations == before.reservations
     _assert_consistent(after)

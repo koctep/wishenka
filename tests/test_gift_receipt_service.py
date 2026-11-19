@@ -218,15 +218,15 @@ async def test_open_promise_on_fully_received_wish_stays_visible() -> None:
 
 
 async def test_reduction_lock_after_receipt() -> None:
-    """R-3.5, corner case 12: lowering below received plus occupied stays refused (guard)."""
+    """FR-5 / Q12: lowering below received stays refused, while lowering to received succeeds."""
     service, _wishlist_id, item_id = await _setup(5)
     await service.create_reservation(item_id=item_id, user=GIFTER, quantity=2)
-    await service.record_item_fulfillment(item_id, OWNER, 1)
+    await service.record_item_fulfillment(item_id, OWNER, 2)
 
     with pytest.raises(CannotReduceQuantityBelowReservedError):
-        await service.update_wish_item(item_id, OWNER, quantity=2)
-    await service.update_wish_item(item_id, OWNER, quantity=3)
-    assert item_of(service, item_id).quantity == 3
+        await service.update_wish_item(item_id, OWNER, quantity=1)
+    await service.update_wish_item(item_id, OWNER, quantity=2)
+    assert item_of(service, item_id).quantity == 2
 
 
 async def test_views_share_one_active_predicate() -> None:

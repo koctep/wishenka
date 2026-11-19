@@ -465,28 +465,15 @@ wish items without full-page reloads.
   `is_collaborative=True`), `description` (up to 4000 chars), `image_url` (with live thumbnail),
   `priority` (`low`, `medium`, `high`), and `category`.
 
-#### 9.6. Reduction Lock UI, HTTP 409 Recovery & Surprise Invariant
-- **Reduction Lock Calculation**:
-  $$\text{locked\_quantity} = \text{reserved\_quantity} + \text{received\_quantity}$$
-  $$\text{min\_quantity} = \max(1, \text{locked\_quantity})$$
-- **Client-Side Stepper & Banner**:
-  - `#item-quantity-input` sets `min="{{ min_quantity }}"` and the decrement button (`-`) stops at
-    `min_quantity`.
-  - When `locked_quantity > 0`, an amber informational banner is rendered:
-    `ℹ️ Забронировано дарителями: {locked_quantity} шт. Нельзя указать меньше забронированного объема.`
-- **Server-Side HTTP 409 Conflict Recovery**:
-  - If `POST /web/wishlists/{wishlist_id}/items/{item_id}/edit` catches
-    `CannotReduceQuantityBelowReservedError` (e.g., a gifter reserved units while the modal was
-    open, or the user manually typed a lower value), the server returns HTTP `409 Conflict` with
-    `partials/item_edit_modal.html`.
-  - The modal displays a `role="alert"` error message (`error_message`) and preserves all
-    user-submitted form values (`submitted_form`) without data loss.
-- **Surprise Invariant & XSS Protection**:
-  - Neither `get_edit_item_modal` nor `partials/item_card.html` ever exposes individual
-    `item.reservations` or gifter identities (`user_id`, `username`, `first_name`) to the
-    recipient; only the aggregate `locked_quantity` bound is surfaced.
-  - All templates rely on Jinja2 auto-escaping (`{{ item.title }}`, `{{ item.description }}`)
-    without `|safe` filters, preventing XSS injection from scraped or user-supplied strings.
+#### 9.6. Quantity Minimum, HTTP 409 Recovery & Surprise Invariant
+
+- The edit input and stepper use `min_quantity = max(1, received_quantity)`; the form does
+  not expose occupied units or a booking hint.
+- `POST /web/wishlists/{wishlist_id}/items/{item_id}/edit` returns HTTP 409 with the edit
+  modal when quantity is below the received count. It preserves submitted values and shows a
+  localized message referring only to received units.
+- The recipient sees neither booking details nor giver identities. Templates use Jinja2
+  auto-escaping for user-supplied fields.
 
 #### 9.7. Safe Item Archiving & Restoration via HTMX
 - **Archive**: `POST /web/wishlists/{wishlist_id}/items/{item_id}/archive` (`archive_item_ui`),
@@ -840,9 +827,8 @@ The HTMX wish item UI router (`wishenka.web.items_ui`) emits structured telemetr
 | :--- | :---: | :--- | :--- |
 | `ui_item_quick_add_preview` | `INFO` | `wishlist_id`, `actor_id`, `user_id`, `input_type`, `domain`, `store_name`, `is_fallback`, `duration_ms` | Universal input classified and preview or fallback rendered. |
 | `ui_item_quick_add_success` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `has_link`, `price`, `quantity` | Wish item created via Quick Add Bar or creation modal. |
-| `ui_item_edit_opened` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `mode`, `locked_quantity`, `is_collaborative` | Item modal opened (`mode="create"` or `mode="edit"`). |
-| `ui_reduction_lock_rendered` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `locked_quantity` | Edit modal rendered with active Reduction Lock (`locked_quantity > 0`). |
-| `ui_reduction_lock_rejected` | `WARNING` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `requested_quantity`, `locked_quantity` | Edit rejected (HTTP 409) due to quantity below locked reservations. |
+| `ui_item_edit_opened` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `mode`, `received_quantity` (edit only), `is_collaborative` | Item modal opened (`mode="create"` or `mode="edit"`). |
+| `ui_reduction_lock_rejected` | `WARNING` | `wishlist_id`, `item_id`, `actor_id`, `user_id`, `requested_quantity`, `received_quantity` | Edit rejected (HTTP 409) due to quantity below received units. |
 | `ui_item_edit_busy` | `WARNING` | `wishlist_id`, `item_id` | Edit modal returned HTTP 503 (`InventoryBusyError`); names no gifter. |
 | `ui_item_edit_validation_error` | `WARNING` | `stage`, `status_code`, `wishlist_id`, `item_id`, `actor_id`, `user_id` | Edit form rejected with HTTP 400 (`stage="form"` or `"domain"`); user input omitted. |
 | `ui_item_quick_add_validation_error` | `WARNING` | `reason`, `status_code`, `wishlist_id`, `actor_id`, `user_id` | Quick-add rejected with HTTP 400 (`empty_title`, `parse_error`, or `domain_validation`). |
@@ -864,8 +850,7 @@ entry-level events) and, for refusals, `reason`, `http_status` and (two reasons 
   `store_name` are recorded; full URLs, paths, and query parameters are never written to logs.
 - **Zero Secrets or Capability Tokens**: `public_token`, `invite_token`, and session tokens are
   never logged.
-- **Surprise Invariant in Logs**: UI logs record only aggregate `locked_quantity` and never log
-  gifter identities (`user_id`, `username`, or `first_name` of gifters).
+- **Surprise Invariant in Logs**: Edit UI logs omit occupied quantities and gifter identities.
 
 ---
 
@@ -921,11 +906,9 @@ The following settings configure the Mini App and web security layer:
   is valid and active.
 
 ### 8. `409 Conflict` When Saving Item Quantity in Edit Modal (`ui_reduction_lock_rejected`)
-- **Cause**: The requested `quantity` is lower than `reserved_quantity + received_quantity` (e.g., a
-  gifter booked additional units while the edit sheet was open).
-- **Solution**: The server re-renders `partials/item_edit_modal.html` with HTTP 409, preserving all
-  edited fields and updating `min_quantity` to the current `locked_quantity`. Set `quantity` to at
-  least `locked_quantity` and submit again.
+- **Cause**: The requested `quantity` is below the number of already received units.
+- **Solution**: The server preserves the fields in the HTTP 409 modal. Set `quantity` to at
+  least `max(1, received_quantity)` and submit again.
 
 ### 9. Quick Add Bar (`#quick-add-bar`) Not Displayed on Wishlist Page
 - **Cause**: The caller is viewing the wishlist as a guest/gifter (not an `OWNER`, `ADMIN`, or

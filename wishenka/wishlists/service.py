@@ -358,7 +358,13 @@ class WishlistService:
         )
 
     def _record_shared_event(
-        self, kind: str, wishlist: Wishlist, item: WishItem | None, actor_id: int
+        self,
+        kind: str,
+        wishlist: Wishlist,
+        item: WishItem | None,
+        actor_id: int,
+        *,
+        exclude_recipients: frozenset[int] = frozenset(),
     ) -> None:
         """Snapshot event-time candidates before later changes in the same transaction."""
         recipients = {wishlist.owner_id, *(member.user_id for member in wishlist.members)}
@@ -375,6 +381,9 @@ class WishlistService:
                 and not WishlistAccessPolicy.is_recipient_id(reservation.user_id, wish)
             )
         recipients.discard(actor_id)
+        recipients.difference_update(exclude_recipients)
+        if not recipients:
+            return
         self._new_shared_item_events.append(
             SharedEvent(
                 kind,
@@ -1460,24 +1469,24 @@ class WishlistService:
             quantity_delta = 0
             updated_fields: list[str] = []
             if quantity is not None:
-                active_locked = item.reserved_quantity + item.received_quantity
-                if quantity < active_locked:
+                min_allowed = max(1, item.received_quantity)
+                if quantity < min_allowed:
                     reason = (
                         f"Cannot reduce quantity to {quantity}: "
-                        f"{active_locked} units already locked"
+                        f"{item.received_quantity} units already received"
                     )
                     logger.warning(
-                        "Item %s quantity reduction rejected: requested %s, locked %s",
+                        "Item %s quantity reduction rejected: requested %s, received %s",
                         item.id,
                         quantity,
-                        active_locked,
+                        item.received_quantity,
                         extra={
                             "event": "item_quantity_reduction_rejected",
                             "item_id": item.id,
                             "wishlist_id": wl.id,
                             "actor_id": actor.telegram_id,
                             "requested_quantity": quantity,
-                            "locked_quantity": active_locked,
+                            "received_quantity": item.received_quantity,
                             "reason": reason,
                         },
                     )
@@ -1532,7 +1541,55 @@ class WishlistService:
                 item.recipient_name,
             )
             if before_update != after_update:
-                self._record_shared_event("item_updated", wl, item, actor.telegram_id)
+                overbooked_givers: frozenset[int] = frozenset()
+                if (
+                    quantity_delta < 0
+                    and item.received_quantity + item.reserved_quantity > item.quantity
+                ):
+                    givers = sorted(
+                        {
+                            reservation.user_id
+                            for reservation in item.reservations
+                            if reservation.status
+                            in (ReservationStatus.ACTIVE, ReservationStatus.PURCHASED)
+                            and not WishlistAccessPolicy.is_recipient_id(reservation.user_id, item)
+                        }
+                    )
+                    if givers:
+                        overbooked_givers = frozenset(givers)
+                        self._new_shared_item_events.append(
+                            SharedEvent(
+                                "item_quantity_overbooked",
+                                wl.id,
+                                item.id,
+                                secrets.token_hex(16),
+                                tuple(givers),
+                                frozenset(member.user_id for member in wl.members),
+                            )
+                        )
+                    logger.warning(
+                        "Item %s entered overbooked state (new_qty=%s, delta=%s, notices=%s)",
+                        item.id,
+                        item.quantity,
+                        quantity_delta,
+                        len(overbooked_givers),
+                        extra={
+                            "event": "item_quantity_overbooked",
+                            "item_id": item.id,
+                            "wishlist_id": wl.id,
+                            "actor_id": actor.telegram_id,
+                            "quantity": item.quantity,
+                            "quantity_delta": quantity_delta,
+                            "notified_givers_count": len(overbooked_givers),
+                        },
+                    )
+                self._record_shared_event(
+                    "item_updated",
+                    wl,
+                    item,
+                    actor.telegram_id,
+                    exclude_recipients=overbooked_givers,
+                )
             logger.info(
                 "Item %s updated by actor %s (delta=%s, new_qty=%s)",
                 item.id,

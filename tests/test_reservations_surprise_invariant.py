@@ -362,18 +362,23 @@ class TestItemReductionLockWithReservations:
         res2 = await service.create_reservation(item_id=item.id, user=gifter2, quantity=2)
         await service.mark_reservation_purchased(reservation_id=res2.id, user=gifter2)
 
-        # Total locked: 2 ACTIVE + 2 PURCHASED = 4 units
-        # Author reduces quantity to 5 -> allowed (5 >= 4)
+        # Total occupied: 2 ACTIVE + 2 PURCHASED = 4 units
+        # Author reduces quantity to 5 -> allowed
         updated_item = await service.update_wish_item(item_id=item.id, actor=owner, quantity=5)
         assert updated_item.quantity == 5
 
-        # Author reduces quantity to 4 -> allowed (4 >= 4)
+        # Author reduces quantity to 4 -> allowed
         updated_item = await service.update_wish_item(item_id=item.id, actor=owner, quantity=4)
         assert updated_item.quantity == 4
 
-        # Author attempts to reduce quantity to 3 -> blocked by locked reservations
-        with pytest.raises(CannotReduceQuantityBelowReservedError, match="units already locked"):
-            await service.update_wish_item(item_id=item.id, actor=owner, quantity=3)
+        # Author reduces quantity to 3 (below occupied 4, received=0) -> allowed (FR-5 / Q12)
+        updated_item = await service.update_wish_item(item_id=item.id, actor=owner, quantity=3)
+        assert updated_item.quantity == 3
+
+        # Once 2 units are received, reducing below received_quantity=2 is blocked
+        await service.record_item_fulfillment(item.id, owner, 2)
+        with pytest.raises(CannotReduceQuantityBelowReservedError, match="units already received"):
+            await service.update_wish_item(item_id=item.id, actor=owner, quantity=1)
 
 
 # ============================================================================

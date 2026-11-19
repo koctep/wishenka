@@ -53,8 +53,10 @@ card summary, compact and expanded. See
    call, so `ItemConcurrencyCoordinator` (`asyncio.Lock`) is not shared
    across requests or processes. That lock is not the cross-process
    mechanism.
-5. **Reduction Lock Invariant (current code; target rule planned in `WISHENKA-218`)**:
-   Prevents wishlist authors from reducing an item's desired quantity below the sum of active, purchased, and fulfilled units ($\text{desired} \ge \text{active} + \text{purchased} + \text{fulfilled}$). Per `WISHENKA-154` (`FR-5` / Q12), the target spec rule tightens this lock to $\max(1, \text{fulfilled})$ without exposing occupied units, entering the over-booked state when $\text{fulfilled} + \text{occupied} > \text{new\_desired}$.
+5. **Quantity reduction**:
+   Authors may reduce desired quantity to `max(1, received_quantity)` without disclosing
+   occupied units. If received plus occupied units exceed the new quantity, the wish becomes
+   over-booked; open promises remain unchanged and eligible givers are notified.
 6. **My reservations cabinet**:
    An identified caller sees the home card «Мои бронирования». The badge
    is `total_distinct_items`: distinct wishes with an occupying promise.
@@ -943,7 +945,7 @@ All reservation operations emit structured logs using `wishenka.wishlists` logge
 | `item_fulfilled` | INFO | `event`, `wishlist_id`, `item_id`, `user_id`, `actor_id`, `quantity`, `received_quantity`, `total_quantity`, `fully_received` | Emitted when an author records gift receipt and item fulfillment (post-commit under `WishlistStore`) |
 | `self_reservation_blocked` | WARNING | `event`, `wishlist_id`, `item_id`, `user_id`, `recipient_user_id` | Emitted when recipient attempts self-reservation (Surprise Invariant) |
 | `insufficient_quantity_blocked` | WARNING | `event`, `wishlist_id`, `item_id`, `user_id`, `requested_quantity`, `available_quantity` | Emitted when create or update reservation exceeds unallocated quantity |
-| `item_quantity_reduction_rejected`| WARNING | `event`, `item_id`, `wishlist_id`, `actor_id`, `requested_quantity`, `locked_quantity` | Emitted when author tries reducing desired quantity below locked reserve |
+| `item_quantity_reduction_rejected`| WARNING | `event`, `item_id`, `wishlist_id`, `actor_id`, `requested_quantity`, `received_quantity`, `reason` | Emitted when desired quantity is below received units |
 | `invalid_reservation_transition` | WARNING | `event`, `reservation_id`, `from_status`, `to_status` | Emitted on invalid status leap (e.g. from `CANCELLED` to `PURCHASED`) |
 | `reservation_already_cancelled` | WARNING | `event`, `reservation_id`, `user_id`, `actor_id` | Emitted when cancelling an already cancelled reservation |
 | `reservation_not_found` | WARNING | `event`, `reservation_id`, `actor_id` | Emitted when accessing non-existent reservation ID |
@@ -1051,11 +1053,11 @@ Key metrics derived from structured log events:
   and prompts a refresh after the shortage 409.
 
 ### 3. `CannotReduceQuantityBelowReservedError`
-- **Cause**: Wishlist author attempts to update `desired_quantity` below the units already promised or fulfilled:
-  $$\text{new\_quantity} < \text{reserved\_quantity} + \text{received\_quantity}$$
-- **Resolution**:
-  - The author cannot unilaterally invalidate existing reservations.
-  - The author must coordinate with gifters to cancel bookings or accept the existing minimum quantity threshold.
+
+- **Cause**: An item edit requests a quantity below `max(1, received_quantity)`.
+  The exception retains its legacy name, but the minimum depends only on received units.
+- **Resolution**: Enter at least one unit and no fewer than the number already received.
+  Existing promises do not set the minimum and remain intact after an edit.
 
 ### 4. `SelfReservationError`
 - **Cause**: The authenticated user is recognized as the recipient of the gift (either as the owner of a personal wishlist or designated `recipient_user_id` on a collaborative list) and attempted to reserve it.

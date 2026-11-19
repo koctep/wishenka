@@ -27,7 +27,6 @@ from tests.browser_cdp import CdpPage
 from tests.browser_helpers import Seeded, js_str, record_receipt, settle
 from tests.conftest import BrowserServer
 from tests.receipt_support import (
-    GIFTER,
     OWNER,
     OWNER_ID,
     AppEnv,
@@ -149,12 +148,12 @@ def test_submit_edit_item_409_and_503_include_hx_retarget_headers(
     """409 Reduction Lock and 503 Busy edit responses must retarget #item-modal-container."""
     client, sessions, app = test_app
 
-    async def seed_reserved() -> tuple[int, int]:
+    async def seed_received() -> tuple[int, int]:
         wl_id, it_id = await seed_wish(app.state.domain_service, quantity=3, title="Camera")
-        await app.state.domain_service.create_reservation(item_id=it_id, user=GIFTER, quantity=2)
+        await app.state.domain_service.record_item_fulfillment(it_id, OWNER, 2)
         return wl_id, it_id
 
-    wishlist_id, item_id = asyncio.run(seed_reserved())
+    wishlist_id, item_id = asyncio.run(seed_received())
     url = f"/web/wishlists/{wishlist_id}/items/{item_id}/edit"
 
     resp_409 = client.post(

@@ -52,6 +52,8 @@ def _render(kind: str, title: str, item: str | None, date: str, language: str | 
         return t("notices.receipt_reverted", locale, wish=(item or "")[:100], wishlist=safe)
     if kind == "receipt_increased":
         return t("notices.gift_received", locale, wish=(item or "")[:100], wishlist=safe)
+    if kind == "item_quantity_overbooked":
+        return t("notices.item_quantity_overbooked", locale, wish=(item or "")[:100], wishlist=safe)
     if kind not in ("list", "birthday"):
         subject = f"{item[:100]} — {safe}" if item else safe
         return t(f"notices.reminder.{kind}", locale, subject=subject)
@@ -106,6 +108,24 @@ async def _event_authorized(conn: AsyncConnection, row: Any) -> bool:
                 "WHERE i.id=:item AND l.id=:list AND l.status='active' "
                 "AND (i.recipient_user_id IS NULL OR i.recipient_user_id<>:user) "
                 "AND (l.is_collaborative=1 OR l.owner_id<>:user) LIMIT 1"
+            ),
+            {"user": data["user_id"], "item": data["item_id"], "list": data["list_id"]},
+        )
+        if not allowed:
+            return False
+    if data["kind"] == "item_quantity_overbooked":
+        allowed = await conn.scalar(
+            text(
+                "SELECT 1 FROM wl_items i JOIN wl_lists l ON l.id=i.wishlist_id "
+                "JOIN wl_reservations r ON r.wish_item_id=i.id AND r.user_id=:user "
+                "WHERE i.id=:item AND l.id=:list AND l.status IN ('active','archived') "
+                "AND r.status IN ('active','purchased') "
+                "AND (i.recipient_user_id IS NULL OR i.recipient_user_id<>:user) "
+                "AND (l.is_collaborative=1 OR l.owner_id<>:user) "
+                "AND (i.received_quantity + COALESCE("
+                "(SELECT SUM(r2.quantity) FROM wl_reservations r2 "
+                "WHERE r2.wish_item_id=i.id AND r2.status IN ('active','purchased')), 0)) "
+                "> i.quantity LIMIT 1"
             ),
             {"user": data["user_id"], "item": data["item_id"], "list": data["list_id"]},
         )

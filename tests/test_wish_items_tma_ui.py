@@ -309,7 +309,7 @@ def test_detailed_add_modal_get_prepopulated(
 def test_detailed_edit_modal_get_reduction_lock(
     test_app: tuple[TestClient, SessionTokenService, FastAPI],
 ) -> None:
-    """GET /web/wishlists/{id}/items/{item_id}/edit enforces min=locked_quantity and hides buyer."""
+    """GET /web/wishlists/{id}/items/{item_id}/edit enforces min=received and hides buyer."""
     client, sessions, app = test_app
     service: WishlistService = app.state.domain_service
     owner = make_user(101, "Alice")
@@ -325,6 +325,7 @@ def test_detailed_edit_modal_get_reduction_lock(
             quantity=5,
             price=6000,
         )
+        await service.record_item_fulfillment(item.id, owner, 2)
         await service.create_reservation(item_id=item.id, user=gifter, quantity=3)
         return wl.id, item.id
 
@@ -338,23 +339,24 @@ def test_detailed_edit_modal_get_reduction_lock(
     assert "text/html" in resp.headers["content-type"]
     html = resp.text
     assert "Хрустальные бокалы" in html
-    # Reduction lock sets minimum allowed quantity to 3
-    assert 'min="3"' in html
-    assert "Забронировано дарителями: 3 шт." in html or "3 шт." in html
+    # FR-5 / Q12: min reflects received_quantity (2), never received + reserved (5)
+    assert 'min="2"' in html
+    assert 'min="5"' not in html
+    assert "Забронировано дарителями" not in html
     # Surprise Invariant: Gifter's name and Telegram ID must NEVER appear in HTML
     assert "SecretGifterBob" not in html
     assert "202" not in html
 
 
 # ============================================================================
-# Scenario 7: Detailed Edit POST enforces Reduction Lock (409) & saves valid edits
+# Scenario 7: Detailed Edit POST enforces received-quantity floor (409) & saves valid edits
 # ============================================================================
 
 
 def test_detailed_edit_submit_reduction_lock_enforcement(
     test_app: tuple[TestClient, SessionTokenService, FastAPI],
 ) -> None:
-    """POST /web/wishlists/{id}/items/{item_id}/edit rejects quantity < locked with 409."""
+    """POST /web/wishlists/{id}/items/{item_id}/edit rejects quantity < received with 409."""
     client, sessions, app = test_app
     service: WishlistService = app.state.domain_service
     owner = make_user(101, "Alice")
@@ -370,12 +372,13 @@ def test_detailed_edit_submit_reduction_lock_enforcement(
             quantity=5,
             price=5000,
         )
+        await service.record_item_fulfillment(item.id, owner, 2)
         await service.create_reservation(item_id=item.id, user=gifter, quantity=3)
         return wl.id, item.id
 
     wl_id, item_id = asyncio.run(seed())
 
-    # 1. Attempt to reduce quantity to 2 (below locked_quantity=3) -> 409 Conflict
+    # 1. Attempt to reduce quantity to 1 (below received_quantity=2) -> 409 Conflict
     resp_conflict = client.post(
         f"/web/wishlists/{wl_id}/items/{item_id}/edit",
         data={
@@ -383,7 +386,7 @@ def test_detailed_edit_submit_reduction_lock_enforcement(
             "link": "https://ozon.ru/product/tea-set",
             "price": "5500",
             "currency": "RUB",
-            "quantity": "2",
+            "quantity": "1",
             "description": "Цвет: слоновая кость",
             "priority": "high",
         },
@@ -395,11 +398,10 @@ def test_detailed_edit_submit_reduction_lock_enforcement(
     # Preserves user-submitted fields so nothing is lost
     assert "Сервиз чайный фарфоровый" in conflict_html
     assert "Цвет: слоновая кость" in conflict_html
-    assert any(
-        word in conflict_html.lower() for word in ("забронирован", "нельзя", "меньше", "количеств")
-    )
+    assert "забронировано дарителями" not in conflict_html.lower()
+    assert "нельзя указать количество меньше уже полученного" in conflict_html.lower()
 
-    # 2. Valid update with quantity=4 (>= locked_quantity=3) -> 200 OK
+    # 2. Valid update with quantity=2 (== received_quantity=2, below occupied 5) -> 200 OK
     resp_ok = client.post(
         f"/web/wishlists/{wl_id}/items/{item_id}/edit",
         data={
@@ -407,7 +409,7 @@ def test_detailed_edit_submit_reduction_lock_enforcement(
             "link": "https://ozon.ru/product/tea-set",
             "price": "5500",
             "currency": "RUB",
-            "quantity": "4",
+            "quantity": "2",
             "description": "Цвет: слоновая кость",
             "priority": "high",
         },
@@ -426,7 +428,7 @@ def test_detailed_edit_submit_reduction_lock_enforcement(
         service.get_wish_item(wishlist_id=wl_id, item_id=item_id, actor=owner)
     )
     assert updated_item.title == "Сервиз чайный фарфоровый"
-    assert updated_item.quantity == 4
+    assert updated_item.quantity == 2
     assert updated_item.price == 5500
 
 
@@ -744,8 +746,9 @@ def test_tma_ui_observability_events_and_attributes(
         items = asyncio.run(service.list_wish_items(wishlist_id=wl_id, actor=owner))
         item_id = items[0].id
 
-        # Seed a reservation so Reduction Lock is active (locked_quantity = 2)
-        asyncio.run(service.create_reservation(item_id=item_id, user=gifter, quantity=2))
+        # Seed a reservation (1 unit) and received_quantity=2 (sum=3 <= item.quantity=3)
+        asyncio.run(service.create_reservation(item_id=item_id, user=gifter, quantity=1))
+        asyncio.run(service.record_item_fulfillment(item_id, owner, 2))
 
         # 4. Open new item modal (mode="create")
         assert (
@@ -848,20 +851,12 @@ def test_tma_ui_observability_events_and_attributes(
     assert create_open_rec.__dict__["item_id"] is None
     assert create_open_rec.__dict__["actor_id"] == 101
     assert create_open_rec.__dict__["mode"] == "create"
-    assert create_open_rec.__dict__["locked_quantity"] == 0
 
     assert edit_open_rec.__dict__["wishlist_id"] == wl_id
     assert edit_open_rec.__dict__["item_id"] == item_id
     assert edit_open_rec.__dict__["actor_id"] == 101
     assert edit_open_rec.__dict__["mode"] == "edit"
-    assert edit_open_rec.__dict__["locked_quantity"] == 2
-
-    # Verify ui_reduction_lock_rendered
-    lock_render_rec = by_event["ui_reduction_lock_rendered"][0]
-    assert lock_render_rec.__dict__["wishlist_id"] == wl_id
-    assert lock_render_rec.__dict__["item_id"] == item_id
-    assert lock_render_rec.__dict__["actor_id"] == 101
-    assert lock_render_rec.__dict__["locked_quantity"] == 2
+    assert edit_open_rec.__dict__["received_quantity"] == 2
 
     # Verify ui_reduction_lock_rejected
     lock_reject_rec = by_event["ui_reduction_lock_rejected"][0]
@@ -870,7 +865,7 @@ def test_tma_ui_observability_events_and_attributes(
     assert lock_reject_rec.__dict__["item_id"] == item_id
     assert lock_reject_rec.__dict__["actor_id"] == 101
     assert lock_reject_rec.__dict__["requested_quantity"] == 1
-    assert lock_reject_rec.__dict__["locked_quantity"] == 2
+    assert lock_reject_rec.__dict__["received_quantity"] == 2
 
     # Verify ui_item_edit_saved
     saved_rec = by_event["ui_item_edit_saved"][0]

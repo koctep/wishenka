@@ -173,7 +173,7 @@ def _render_edit_modal_error(
     *,
     wishlist_id: int,
     form_data: dict[str, Any],
-    locked_quantity: int,
+    min_quantity: int = 1,
     is_collaborative: bool,
     collaborative_members: list[dict[str, Any]],
     error_message: str,
@@ -188,8 +188,7 @@ def _render_edit_modal_error(
             "is_edit": is_edit,
             "wishlist_id": wishlist_id,
             "form": form_data,
-            "locked_quantity": locked_quantity,
-            "min_quantity": max(1, locked_quantity),
+            "min_quantity": max(1, min_quantity),
             "is_collaborative": is_collaborative,
             "collaborative_members": collaborative_members,
             "error_message": error_message,
@@ -602,7 +601,6 @@ async def get_new_item_modal(
             "actor_id": user.telegram_id,
             "user_id": user.telegram_id,
             "mode": "create",
-            "locked_quantity": 0,
             "is_collaborative": is_collaborative,
         },
     )
@@ -614,7 +612,6 @@ async def get_new_item_modal(
             "is_edit": False,
             "wishlist_id": wishlist_id,
             "form": form_data,
-            "locked_quantity": 0,
             "min_quantity": 1,
             "is_collaborative": is_collaborative,
             "collaborative_members": collaborative_members,
@@ -631,7 +628,7 @@ async def get_edit_item_modal(
     user: User,
     locale: LocaleDep,
 ) -> Response:
-    """Render detailed item edit modal enforcing Reduction Lock and Surprise Invariant."""
+    """Render detailed item edit modal enforcing received-quantity floor and Surprise Invariant."""
 
     async def action(
         svc: WishlistService,
@@ -641,8 +638,8 @@ async def get_edit_item_modal(
         item = svc._items.get(item_id)
         if item is None or item.wishlist_id != wishlist_id:
             raise ItemNotFoundError(f"Item {item_id} not found")
-        locked_qty = item.reserved_quantity + item.received_quantity
-        # Surprise Invariant: Never expose item.reservations or gifter identities
+        received_qty = item.received_quantity
+        # Surprise Invariant: Never expose item.reservations, reserved_quantity, or gifter info
         safe_form: dict[str, Any] = {
             "id": item.id,
             "title": item.title,
@@ -657,10 +654,10 @@ async def get_edit_item_modal(
             "recipient_user_id": item.recipient_user_id,
             "recipient_name": item.recipient_name or "",
         }
-        return safe_form, locked_qty, wl.is_collaborative, _collaborative_members(wl, locale)
+        return safe_form, received_qty, wl.is_collaborative, _collaborative_members(wl, locale)
 
     try:
-        form_data, locked_quantity, is_collaborative, collaborative_members = await _execute(
+        form_data, received_quantity, is_collaborative, collaborative_members = await _execute(
             request, action
         )
     except _DOMAIN_ERRORS as exc:
@@ -673,11 +670,12 @@ async def get_edit_item_modal(
             operation="edit_item_modal",
         )
 
+    min_quantity = max(1, received_quantity)
     logger.info(
-        "Item edit modal opened for item %s in wishlist %s (locked_quantity=%s)",
+        "Item edit modal opened for item %s in wishlist %s (received_quantity=%s)",
         item_id,
         wishlist_id,
-        locked_quantity,
+        received_quantity,
         extra={
             "event": "ui_item_edit_opened",
             "wishlist_id": wishlist_id,
@@ -685,25 +683,10 @@ async def get_edit_item_modal(
             "actor_id": user.telegram_id,
             "user_id": user.telegram_id,
             "mode": "edit",
-            "locked_quantity": locked_quantity,
+            "received_quantity": received_quantity,
             "is_collaborative": is_collaborative,
         },
     )
-    if locked_quantity > 0:
-        logger.info(
-            "Reduction Lock rendered for item %s in wishlist %s (locked_quantity=%s)",
-            item_id,
-            wishlist_id,
-            locked_quantity,
-            extra={
-                "event": "ui_reduction_lock_rendered",
-                "wishlist_id": wishlist_id,
-                "item_id": item_id,
-                "actor_id": user.telegram_id,
-                "user_id": user.telegram_id,
-                "locked_quantity": locked_quantity,
-            },
-        )
 
     return templates.TemplateResponse(
         request=request,
@@ -712,8 +695,7 @@ async def get_edit_item_modal(
             "is_edit": True,
             "wishlist_id": wishlist_id,
             "form": form_data,
-            "locked_quantity": locked_quantity,
-            "min_quantity": max(1, locked_quantity),
+            "min_quantity": min_quantity,
             "is_collaborative": is_collaborative,
             "collaborative_members": collaborative_members,
             "error_message": None,
@@ -797,7 +779,7 @@ async def submit_edit_item(
             request,
             wishlist_id=wishlist_id,
             form_data=submitted_form,
-            locked_quantity=0,
+            min_quantity=1,
             is_collaborative=False,
             collaborative_members=[],
             error_message=validation_error,
@@ -808,20 +790,21 @@ async def submit_edit_item(
     submitted_form["recipient_user_id"] = parsed_recipient_uid
     submitted_form["priority"] = parsed_priority.value
 
-    locked_quantity_snapshot = 0
+    received_quantity_snapshot = 0
     is_collaborative_snapshot = False
     collaborative_members_snapshot: list[dict[str, Any]] = []
 
     async def action(
         svc: WishlistService,
     ) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
-        nonlocal locked_quantity_snapshot, is_collaborative_snapshot, collaborative_members_snapshot
+        nonlocal received_quantity_snapshot, is_collaborative_snapshot
+        nonlocal collaborative_members_snapshot
         wl = await svc.get_wishlist_by_id(wishlist_id)
         _ensure_member_and_active(wl, user)
         existing = svc._items.get(item_id)
         if existing is None or existing.wishlist_id != wishlist_id:
             raise ItemNotFoundError(f"Item {item_id} not found")
-        locked_quantity_snapshot = existing.reserved_quantity + existing.received_quantity
+        received_quantity_snapshot = existing.received_quantity
         is_collaborative_snapshot = wl.is_collaborative
         collaborative_members_snapshot = _collaborative_members(wl, locale)
 
@@ -867,7 +850,7 @@ async def submit_edit_item(
             request,
             wishlist_id=wishlist_id,
             form_data=submitted_form,
-            locked_quantity=locked_quantity_snapshot,
+            min_quantity=max(1, received_quantity_snapshot),
             is_collaborative=is_collaborative_snapshot,
             collaborative_members=collaborative_members_snapshot,
             error_message=t("web.item.edit_busy_error", locale),
@@ -875,9 +858,9 @@ async def submit_edit_item(
         )
     except CannotReduceQuantityBelowReservedError:
         logger.warning(
-            "UI Reduction Lock rejected quantity=%s (locked=%s) for item %s in wishlist %s",
+            "UI quantity reduction rejected quantity=%s (received=%s) for item %s in wishlist %s",
             quantity,
-            locked_quantity_snapshot,
+            received_quantity_snapshot,
             item_id,
             wishlist_id,
             extra={
@@ -887,19 +870,19 @@ async def submit_edit_item(
                 "actor_id": user.telegram_id,
                 "user_id": user.telegram_id,
                 "requested_quantity": quantity,
-                "locked_quantity": locked_quantity_snapshot,
+                "received_quantity": received_quantity_snapshot,
             },
         )
         error_msg = t(
             "web.item.quantity_below_reserved",
             locale,
-            count=locked_quantity_snapshot,
+            count=received_quantity_snapshot,
         )
         return _render_edit_modal_error(
             request,
             wishlist_id=wishlist_id,
             form_data=submitted_form,
-            locked_quantity=locked_quantity_snapshot,
+            min_quantity=max(1, received_quantity_snapshot),
             is_collaborative=is_collaborative_snapshot,
             collaborative_members=collaborative_members_snapshot,
             error_message=error_msg,
@@ -933,7 +916,7 @@ async def submit_edit_item(
             request,
             wishlist_id=wishlist_id,
             form_data=submitted_form,
-            locked_quantity=locked_quantity_snapshot,
+            min_quantity=max(1, received_quantity_snapshot),
             is_collaborative=is_collaborative_snapshot,
             collaborative_members=collaborative_members_snapshot,
             error_message=str(exc),

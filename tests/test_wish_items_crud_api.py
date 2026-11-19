@@ -602,9 +602,7 @@ def test_update_wish_item_valid_fields(
 def test_update_wish_item_reduction_lock_violation(
     test_app: tuple[TestClient, SessionTokenService, FastAPI],
 ) -> None:
-    """Reduction Lock Invariant: Cannot reduce quantity below locked
-    (reserved + received) amount.
-    """
+    """FR-5 / Q12: Cannot reduce quantity below received_quantity, but can reduce below occupied."""
     client, sessions, app = test_app
     service: WishlistService = app.state.domain_service
     owner = make_user(101, "Alice")
@@ -624,25 +622,26 @@ def test_update_wish_item_reduction_lock_violation(
         )
     )
 
-    # Gifter reserves 3 units
+    # Record 2 received units and 3 reserved units
+    asyncio.run(service.record_item_fulfillment(item.id, owner, 2))
     asyncio.run(service.create_reservation(item_id=item.id, user=gifter, quantity=3))
 
-    # Owner attempts to reduce quantity to 2 (below 3 locked) -> 409 Conflict
+    # Owner attempts to reduce quantity to 1 (below 2 received) -> 409 Conflict
     resp_fail = client.patch(
         f"/api/wishlists/{wl_id}/items/{item.id}",
-        json={"quantity": 2},
+        json={"quantity": 1},
         headers=owner_headers,
     )
     assert resp_fail.status_code == 409
 
-    # Owner sets quantity to exactly 3 -> succeeds (200 OK)
+    # Owner sets quantity to 2 (== received_quantity, even though 2+3=5 > 2) -> succeeds (200 OK)
     resp_ok_boundary = client.patch(
         f"/api/wishlists/{wl_id}/items/{item.id}",
-        json={"quantity": 3},
+        json={"quantity": 2},
         headers=owner_headers,
     )
     assert resp_ok_boundary.status_code == 200
-    assert resp_ok_boundary.json()["quantity"] == 3
+    assert resp_ok_boundary.json()["quantity"] == 2
 
     # Owner increases quantity to 10 -> succeeds (200 OK)
     resp_ok_increase = client.patch(
@@ -1036,11 +1035,13 @@ def test_item_rejection_and_access_denied_observability_events(
     )
     item_id = resp_item.json()["id"]
 
-    # Lock 3 units via reservation
-    asyncio.run(service.create_reservation(item_id=item_id, user=gifter, quantity=3))
+    # Record 3 received units and 2 reserved units
+    owner = make_user(601, "Alice")
+    asyncio.run(service.record_item_fulfillment(item_id, owner, 3))
+    asyncio.run(service.create_reservation(item_id=item_id, user=gifter, quantity=2))
 
     # 1. item_quantity_reduction_rejected:
-    # wishlist_id, item_id, actor_id, requested_quantity, locked_quantity, reason
+    # wishlist_id, item_id, actor_id, requested_quantity, received_quantity, reason
     with caplog.at_level(logging.WARNING, logger="wishenka.wishlists"):
         caplog.clear()
         resp_red = client.patch(
@@ -1062,7 +1063,7 @@ def test_item_rejection_and_access_denied_observability_events(
     assert getattr(rec_red, "item_id", None) == item_id
     assert getattr(rec_red, "actor_id", None) == 601
     assert getattr(rec_red, "requested_quantity", None) == 2
-    assert getattr(rec_red, "locked_quantity", None) == 3
+    assert getattr(rec_red, "received_quantity", None) == 3
     assert getattr(rec_red, "reason", None) is not None
 
     # 2. item_reorder_invalid: wishlist_id, actor_id, reason

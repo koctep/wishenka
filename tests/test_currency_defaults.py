@@ -13,9 +13,7 @@ pytestmark = pytest.mark.timeout(10)
 def test_edit_form_currency_choices(currency: str | None, expected: str) -> None:
     """A missing currency selects RUB while an explicit selection is preserved."""
     template = templates.env.get_template("partials/item_edit_modal.html")
-    html = template.render(
-        form={"currency": currency}, wishlist_id=1, min_quantity=1, locked_quantity=0
-    )
+    html = template.render(form={"currency": currency}, wishlist_id=1, min_quantity=1)
     select = BeautifulSoup(html, "html.parser").select_one("#item-currency-select")
     assert select is not None
     options = select.select("option")

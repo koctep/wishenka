@@ -350,10 +350,11 @@ class TestItemObservability:
 
         caplog.clear()
 
-        # 3. Reserve 2 units
+        # 3. Record 2 received units and reserve 2 units
+        await service.record_item_fulfillment(item.id, owner, 2)
         await service.create_reservation(item_id=item.id, user=gifter, quantity=2)
 
-        # 4. Attempt to reduce desired quantity below locked (requested 1, locked 2)
+        # 4. Attempt to reduce desired quantity below received (requested 1, received 2)
         with (
             caplog.at_level(logging.WARNING, logger="wishenka.wishlists"),
             pytest.raises(CannotReduceQuantityBelowReservedError),
@@ -373,7 +374,39 @@ class TestItemObservability:
         assert rejected_rec.levelname == "WARNING"
         assert getattr(rejected_rec, "item_id", None) == item.id
         assert getattr(rejected_rec, "requested_quantity", None) == 1
-        assert getattr(rejected_rec, "locked_quantity", None) == 2
+        assert getattr(rejected_rec, "received_quantity", None) == 2
+        assert getattr(rejected_rec, "reserved_quantity", None) is None
+        assert getattr(rejected_rec, "locked_quantity", None) is None
+        assert "reserved" not in rejected_rec.getMessage().lower()
+        assert "2001" not in rejected_rec.getMessage()
+
+        caplog.clear()
+
+        # 4b. Reduce desired quantity to received_quantity (2), entering overbooked state
+        with caplog.at_level(logging.WARNING, logger="wishenka.wishlists"):
+            overbooked_item = await service.update_wish_item(
+                item_id=item.id,
+                actor=owner,
+                quantity=2,
+            )
+        assert overbooked_item.quantity == 2
+        overbooked_rec = next(
+            r
+            for r in caplog.records
+            if r.name == "wishenka.wishlists"
+            and getattr(r, "event", None) == "item_quantity_overbooked"
+        )
+        assert overbooked_rec.levelname == "WARNING"
+        assert getattr(overbooked_rec, "item_id", None) == item.id
+        assert getattr(overbooked_rec, "wishlist_id", None) == wl.id
+        assert getattr(overbooked_rec, "actor_id", None) == owner.telegram_id
+        assert getattr(overbooked_rec, "quantity", None) == 2
+        assert getattr(overbooked_rec, "quantity_delta", None) == -3
+        assert getattr(overbooked_rec, "notified_givers_count", None) == 1
+        assert getattr(overbooked_rec, "reserved_quantity", None) is None
+        assert getattr(overbooked_rec, "givers", None) is None
+        assert "Bob" not in overbooked_rec.getMessage()
+        assert "2001" not in overbooked_rec.getMessage()
 
         caplog.clear()
 
