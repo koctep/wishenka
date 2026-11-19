@@ -372,6 +372,28 @@ pytest.mark.browser]`) содержит офлайн smoke-тест `test_real_h
 make test-serial PYTEST_ARGS="tests/test_wishlist_htmx_smoke_browser.py tests/test_browser_prerequisites.py"
 ```
 
+### E2E-тесты переходов из меню бота в Mini App (WISHENKA-177)
+
+Модуль `tests/test_bot_menu_miniapp_e2e_browser.py` (`pytestmark = [pytest.mark.timeout(45),
+pytest.mark.browser]`, 12 параметризованных тестов) проверяет границу между главным меню Telegram-бота
+и экраном Mini App в headless Chromium (`tests/browser_cdp.py`):
+
+- **Переходы `create`, `collection`, `home` (`en` и `ru`, 6 тестов):** диспетчеризует `/start` через
+  `wishenka.bot.entry.create_router`, извлекает `WebAppInfo` query-параметры `startapp` и открывает
+  страницу Mini App с cookie-сессией `session_id`; проверяет локализованный заголовок домашнего
+  экрана, отображение существующего списка, фокус на кнопке создания вишлиста для `create` и
+  отсутствие неявного создания вишлистов.
+- **Восстановление при невалидном `startapp` (`en` и `ru`, 6 тестов):** для значений
+  `unknown_action`, `bad!param` и `x_not_a_token` проверяет отображение локализованного экрана
+  недоступности без утечки названий вишлиста и подарков, переход на главный экран по кнопке возврата
+  и неизменность числа вишлистов.
+
+Запуск модуля:
+
+```bash
+make test-serial PYTEST_ARGS="tests/test_bot_menu_miniapp_e2e_browser.py"
+```
+
 ### Диагностика при падении
 
 - В отчёт pytest падающего теста добавляется секция `Page N diagnostics` со снимком

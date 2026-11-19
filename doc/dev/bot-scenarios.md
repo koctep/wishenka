@@ -146,10 +146,16 @@ Run the focused tests with:
 make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_start_repro.py tests/test_bot_entry_repro.py'
 make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_capture_repro.py'
 make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_support_repro.py tests/test_bot_support.py'
+make test-serial PYTEST_ARGS='tests/test_bot_menu_miniapp_e2e_browser.py'
 ```
 
-They exercise a fake Telegram transport and Mini App browser behavior. Observability tests also
-check dispatcher error handling and actual Uvicorn access output. The full quality gate is
+They exercise a fake Telegram transport and Mini App browser behavior. In particular,
+`tests/test_bot_menu_miniapp_e2e_browser.py` dispatches `/start` through
+`wishenka.bot.entry.create_router`, opens the generated `startapp` targets (`create`,
+`collection`, `home`) in headless Chromium via `tests/browser_cdp.py` for both `en` and `ru`,
+verifies localized rendering, button focus on `create`, zero implicit wishlist creation, and safe
+recovery for invalid `startapp` values without leaking existing wishlist data. Observability tests
+also check dispatcher error handling and actual Uvicorn access output. The full quality gate is
 `make check PYTEST_JOBS=4`.
 
 ## Troubleshooting
