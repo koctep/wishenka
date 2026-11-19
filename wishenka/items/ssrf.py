@@ -4,8 +4,11 @@ import asyncio
 import ipaddress
 import logging
 import socket
+from collections.abc import Iterable
+from contextvars import ContextVar
 from typing import Any
 
+import httpcore
 import httpx
 
 from wishenka.items.exceptions import InvalidUrlSchemeError, SSRFBlockedError, SSRFError
@@ -206,15 +209,149 @@ async def resolve_and_validate_host(host: str, port: int = 80) -> list[str]:
     return resolved_ips
 
 
+_pinned_ips_var: ContextVar[dict[tuple[str, int], list[str]] | None] = ContextVar(
+    "wishenka_pinned_ips",
+    default=None,
+)
+
+
+class SSRFSafeNetworkBackend(httpcore.AsyncNetworkBackend):
+    """Network backend that connects strictly to validated pinned IP addresses."""
+
+    def __init__(self, inner: httpcore.AsyncNetworkBackend) -> None:
+        self._inner = inner
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[Any] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        """Open a TCP connection strictly using validated IP addresses without DNS re-lookup."""
+        clean_host = host.strip("[]")
+        pinned_map = _pinned_ips_var.get()
+        if pinned_map is not None and (clean_host, port) in pinned_map:
+            ips = pinned_map[(clean_host, port)]
+        else:
+            logger.debug(
+                "Pinned IP cache miss for '%s:%d'; resolving via defense-in-depth",
+                clean_host,
+                port,
+                extra={
+                    "event": "ssrf_pinned_cache_miss",
+                    "host": clean_host,
+                    "port": port,
+                },
+            )
+            ips = await resolve_and_validate_host(clean_host, port)
+
+        if not ips:
+            logger.warning(
+                "SSRF connect aborted: no validated IP addresses for '%s:%d'",
+                clean_host,
+                port,
+                extra={
+                    "event": "ssrf_no_validated_ips",
+                    "host": clean_host,
+                    "port": port,
+                },
+            )
+            raise httpcore.ConnectError(
+                f"No validated IP addresses available for '{clean_host}:{port}'"
+            )
+
+        unique_ips = list(dict.fromkeys(ips))
+        last_exc: Exception | None = None
+        for ip in unique_ips:
+            try:
+                return await self._inner.connect_tcp(
+                    host=ip,
+                    port=port,
+                    timeout=timeout,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+            except (httpcore.ConnectError, httpcore.ConnectTimeout, OSError) as exc:
+                last_exc = exc
+                logger.debug(
+                    "Pinned TCP connect failed for %s (%s:%d): %s",
+                    clean_host,
+                    ip,
+                    port,
+                    exc,
+                    extra={
+                        "event": "ssrf_pinned_connect_failed",
+                        "host": clean_host,
+                        "ip": ip,
+                        "port": port,
+                        "error": str(exc),
+                    },
+                )
+
+        assert last_exc is not None
+        logger.warning(
+            "All %d pinned IP connection attempts failed for '%s:%d': %s",
+            len(unique_ips),
+            clean_host,
+            port,
+            last_exc,
+            extra={
+                "event": "ssrf_all_pinned_connects_failed",
+                "host": clean_host,
+                "port": port,
+                "attempted_count": len(unique_ips),
+                "error": str(last_exc),
+            },
+        )
+        if isinstance(last_exc, (httpcore.ConnectError, httpcore.ConnectTimeout)):
+            raise last_exc
+        raise httpcore.ConnectError(str(last_exc)) from last_exc
+
+    async def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: Iterable[Any] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        """Block Unix domain socket connections."""
+        logger.warning(
+            "SSRF blocked: Unix domain socket connection attempted for '%s'",
+            path,
+            extra={
+                "event": "ssrf_blocked",
+                "path": path,
+                "reason": "uds",
+            },
+        )
+        raise SSRFBlockedError("Unix domain sockets are forbidden", reason="uds")
+
+    async def sleep(self, seconds: float) -> None:
+        """Delegate async sleep to the wrapped network backend."""
+        await self._inner.sleep(seconds)
+
+
 class SSRFSafeTransport(httpx.AsyncHTTPTransport):
     """Custom HTTPX transport enforcing SSRF validation on every request and redirect hop."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        if isinstance(self._pool, httpcore.AsyncConnectionPool):
+            self._pool._network_backend = SSRFSafeNetworkBackend(self._pool._network_backend)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Validate request URL scheme and destination IP before dispatching TCP connection."""
         if request.url.username or request.url.password or "authorization" in request.headers:
+            logger.warning(
+                "SSRF blocked: URL credentials or Authorization header forbidden for host '%s'",
+                request.url.host,
+                extra={
+                    "event": "ssrf_blocked",
+                    "host": request.url.host,
+                    "reason": "credentials",
+                },
+            )
             raise SSRFBlockedError("URL credentials are forbidden", reason="credentials")
         scheme = request.url.scheme.lower()
         if scheme not in ALLOWED_SCHEMES:
@@ -249,7 +386,11 @@ class SSRFSafeTransport(httpx.AsyncHTTPTransport):
             raise SSRFError(f"URL '{request.url}' has no valid host")
 
         port = request.url.port or (443 if scheme == "https" else 80)
-        await resolve_and_validate_host(host, port)
+        resolved_ips = await resolve_and_validate_host(host, port)
+        clean_host = host.strip("[]")
+        current_pinned = dict(_pinned_ips_var.get() or {})
+        current_pinned[(clean_host, port)] = resolved_ips
+        token = _pinned_ips_var.set(current_pinned)
 
         logger.debug(
             "SSRF check passed for %s; dispatching transport request",
@@ -259,14 +400,19 @@ class SSRFSafeTransport(httpx.AsyncHTTPTransport):
                 "url": str(request.url),
                 "host": host,
                 "scheme": scheme,
+                "pinned_ip_count": len(resolved_ips),
             },
         )
-        return await super().handle_async_request(request)
+        try:
+            return await super().handle_async_request(request)
+        finally:
+            _pinned_ips_var.reset(token)
 
 
 __all__ = [
     "ALLOWED_SCHEMES",
     "MAX_RESPONSE_BYTES",
+    "SSRFSafeNetworkBackend",
     "SSRFSafeTransport",
     "is_ip_safe",
     "resolve_and_validate_host",

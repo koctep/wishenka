@@ -30,7 +30,8 @@ The `wishenka.items` package and its integration with `wishenka.wishlists` imple
                                                     |  - Scheme Check (http / https only)            |
                                                     |  - Async DNS Resolution (getaddrinfo)          |
                                                     |  - SSRF IP Validation (is_ip_safe)             |
-                                                    |  - SSRFSafeTransport (Redirect Hops Check)     |
+                                                    |  - SSRFSafeTransport + SSRFSafeNetworkBackend  |
+                                                    |    (Pinned-IP & Redirect Hops Check)           |
                                                     +------------------------------------------------+
                                                               |                             |
                                                SSRF / Bad IP  |                             | Destination Safe
@@ -89,7 +90,7 @@ The `wishenka.items` package and its integration with `wishenka.wishlists` imple
      - Scheme whitelist: strictly `http` and `https` allowed; `file://`, `gopher://`, `ftp://`, etc. rejected early.
      - IP boundary enforcement: blocks IPv4/IPv6 private ranges (RFC 1918), loopbacks (`127.0.0.0/8`, `::1`), link-local (`169.254.0.0/16`, `fe80::/10`), cloud metadata endpoints (`169.254.169.254`), CGNAT (`100.64.0.0/10`), multicast, broadcast, and IPv6-mapped IPv4 representations (`::ffff:127.0.0.1`).
      - Non-blocking asynchronous DNS resolution via `asyncio.get_running_loop().getaddrinfo` with validation across all returned IP addresses.
-     - Custom transport [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L209) that inspects every outbound request and every intermediate redirect hop before socket connection.
+     - Custom transport [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L335) and [`SSRFSafeNetworkBackend`](file:///home/src/wishenka/items/ssrf.py#L218) that inspect every outbound request and every intermediate redirect hop, pin validated IPs in a task-scoped `ContextVar` (`_pinned_ips_var`), and connect directly to the pinned IP without re-querying DNS (eliminating DNS rebinding TOCTOU).
 4. **DoS & Payload Size Limiting (2 MB Hard Ceiling)**:
    - Enforces a strict 2 MB (`2,097,152` bytes) limit on all upstream responses:
      - Fast-fail early rejection on `Content-Length > 2 MB` before downloading response bytes.
@@ -180,19 +181,28 @@ Provides non-blocking IP validation, hostname resolution, and HTTPX transport-le
   - `MAX_RESPONSE_BYTES = 2 * 1024 * 1024` (2 MB).
   - `ALLOWED_SCHEMES = frozenset({"http", "https"})`.
   - `FORBIDDEN_NETWORKS`: tuple of 20 CIDR blocks covering private RFC 1918, CGNAT (`100.64.0.0/10`), loopback (`127.0.0.0/8`, `::1`), link-local (`169.254.0.0/16`, `fe80::/10`), cloud metadata (`169.254.169.254`), multicast (`224.0.0.0/4`, `ff00::/8`), broadcast (`255.255.255.255/32`), and IPv6 ULA (`fc00::/7`).
-- [`is_ip_safe(ip)`](file:///home/src/wishenka/items/ssrf.py#L45):
+- [`is_ip_safe(ip)`](file:///home/src/wishenka/items/ssrf.py#L48):
   - Validates `ipaddress.IPv4Address` or `ipaddress.IPv6Address`.
   - Automatically unmaps IPv6-mapped IPv4 addresses (e.g. `::ffff:127.0.0.1` unwraps to `127.0.0.1` and is recursively validated).
   - Checks standard flags: `ip.is_global`, `ip.is_private`, `ip.is_loopback`, `ip.is_link_local`, `ip.is_multicast`, `ip.is_reserved`, `ip.is_unspecified`.
   - Verifies address is not contained within any network in `FORBIDDEN_NETWORKS`.
-- [`resolve_and_validate_host(host, port)`](file:///home/src/wishenka/items/ssrf.py#L76):
+- [`resolve_and_validate_host(host, port)`](file:///home/src/wishenka/items/ssrf.py#L79):
   - Asynchronously resolves hostnames via `loop.getaddrinfo(clean_host, port, proto=socket.IPPROTO_TCP)` on the running event loop without blocking the async worker thread.
   - If `host` is a direct IP literal, validates it directly.
   - Verifies that **all** resolved IP addresses pass `is_ip_safe`. If any resolved address is restricted, immediately raises [`SSRFBlockedError`](file:///home/src/wishenka/items/exceptions.py#L26).
-- [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L209):
+- [`_pinned_ips_var`](file:///home/src/wishenka/items/ssrf.py#L212):
+  - `ContextVar[dict[tuple[str, int], list[str]] | None]` that isolates validated IP lists per async task keyed by `(clean_host, port)` across concurrent requests.
+- [`SSRFSafeNetworkBackend`](file:///home/src/wishenka/items/ssrf.py#L218):
+  - Subclass of `httpcore.AsyncNetworkBackend` wrapping the connection pool's inner network backend.
+  - `connect_tcp`: reads pinned IPs for `(host.strip("[]"), port)` from `_pinned_ips_var` (falling back to `resolve_and_validate_host` for defense-in-depth on cache miss), deduplicates them, and tries each numeric IP sequentially via `self._inner.connect_tcp(host=ip, ...)` without ever passing the raw hostname to the underlying socket backend. Raises `httpcore.ConnectError` if the validated IP list is empty or all pinned attempts fail.
+  - `connect_unix_socket`: blocks Unix domain socket connections with `SSRFBlockedError(..., reason="uds")`.
+  - `sleep`: delegates to `self._inner.sleep`.
+- [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L335):
   - Subclass of `httpx.AsyncHTTPTransport`.
-  - Overrides `handle_async_request(request)`. Intercepts the original request as well as every subsequent request initiated by HTTP redirect hops (`301`, `302`, `303`, `307`, `308`).
-  - Rejects disallowed schemes (`InvalidUrlSchemeError`), ensures host is present, and executes `resolve_and_validate_host` prior to forwarding the request to `super().handle_async_request(request)`.
+  - In `__init__`, wraps `self._pool._network_backend` with `SSRFSafeNetworkBackend` when `self._pool` is an `httpcore.AsyncConnectionPool`.
+  - Overrides `handle_async_request(request)` to intercept the initial request and every subsequent HTTP redirect hop (`301`, `302`, `303`, `307`, `308`).
+  - Rejects URL credentials and `Authorization` headers (`reason="credentials"`), disallowed schemes (`InvalidUrlSchemeError`), and missing hosts (`SSRFError`), resolves and validates the destination via `resolve_and_validate_host`, and pins the validated IPs in `_pinned_ips_var` inside a `try ... finally: _pinned_ips_var.reset(token)` block around `super().handle_async_request(request)` without rewriting `request.url` (preserving the `Host` header, TLS SNI `server_hostname`, relative redirect resolution, and `response.url`).
+  - Covered by `tests/test_ssrf_dns_rebinding.py` (pinned-IP connection, redirect-hop pinning, Host/TLS SNI preservation, IPv6 pinning, multi-IP failover, concurrent `ContextVar` isolation, defense-in-depth fallback, and UDS blocking).
 
 ### 4. Safe HTML Fetcher [`UrlMetadataService`](file:///home/src/wishenka/items/fetcher.py#L49)
 
@@ -318,10 +328,11 @@ accounts for origin age and expiry headers. Concurrent misses can still perform 
 
 Every cache hit revalidates the original and redirect destinations against current DNS and scheme
 rules. Outbound requests reject URL credentials and do not retain or send cookies; proxy transports
-are bypassed or rejected for injected clients. DNS is not cached by this feature. Validation and
-connection remain separate, so DNS rebinding is not prevented; the pinned-address follow-up is
-[WISHENKA-92](https://pypost.atlassian.net/browse/WISHENKA-92). The injected-client adapter uses
-private HTTPX/httpcore APIs, tracked in [WISHENKA-114](https://pypost.atlassian.net/browse/WISHENKA-114).
+are bypassed or rejected for injected clients. DNS is not cached across requests by this feature;
+outbound connections via [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L335) and
+[`SSRFSafeNetworkBackend`](file:///home/src/wishenka/items/ssrf.py#L218) pin validated IP addresses per
+request and redirect hop to prevent DNS rebinding (TOCTOU; [WISHENKA-92](https://pypost.atlassian.net/browse/WISHENKA-92)).
+The injected-client adapter uses private HTTPX/httpcore APIs, tracked in [WISHENKA-114](https://pypost.atlassian.net/browse/WISHENKA-114).
 
 `tests/test_preview_resource_reuse.py` covers cache eligibility and expiry, isolation, lifecycle,
 redirect validation, and connection reuse with a local HTTP server. Run it through the repository
@@ -823,7 +834,7 @@ except ResponseBodyTooLargeError as exc:
 
 ### 6. Direct IP and Hostname Validation
 
-Use [`is_ip_safe`](file:///home/src/wishenka/items/ssrf.py#L45) and [`resolve_and_validate_host`](file:///home/src/wishenka/items/ssrf.py#L76):
+Use [`is_ip_safe`](file:///home/src/wishenka/items/ssrf.py#L48) and [`resolve_and_validate_host`](file:///home/src/wishenka/items/ssrf.py#L79):
 
 ```python
 import ipaddress
@@ -1128,12 +1139,16 @@ All events are logged via structured extra dictionaries under logger names `"wis
 | `item_preview_http_error` | `WARNING` | `status_code`, `url_domain`, `duration_ms`, `fallback_reason="http_error"` | Upstream HTTP $\ge 400$ error handled safely. |
 | `item_preview_network_error` | `WARNING` | `url_domain`, `duration_ms`, `fallback_reason="http_error"` | Network transport error handled safely. |
 | `item_metadata_parsing_error` | `ERROR` | `url_domain`, `duration_ms`, `fallback_reason="http_error"` | Unexpected HTML parsing failure during extraction. |
-| `ssrf_blocked` | `WARNING` | `host`, `ip`, `reason` | Low-level SSRF rejection on outbound connection or redirect. |
+| `ssrf_blocked` | `WARNING` | `host`, `ip`, `reason` | Low-level SSRF rejection on outbound connection or redirect (includes `reason="credentials"` and `reason="uds"`). |
 | `payload_size_violation` | `WARNING` | `url`, `content_length`, `max_allowed`, `reason` | `Content-Length` or streaming chunks exceed 2 MB. |
 | `dns_resolution_start` | `DEBUG` | `host`, `clean_host`, `port` | Starting asynchronous DNS resolution. |
 | `dns_resolution_success` | `DEBUG` | `host`, `resolved_ips` | Successfully resolved hostname to safe IPs. |
 | `dns_resolution_failed` | `INFO` | `host`, `error` | Host failed to resolve (NXDOMAIN, gaierror). |
-| `ssrf_request_dispatch` | `DEBUG` | `url`, `host`, `scheme` | Outbound request verified and dispatched. |
+| `ssrf_pinned_cache_miss` | `DEBUG` | `host`, `port` | Defense-in-depth fallback resolution when `_pinned_ips_var` has no entry for `(host, port)`. |
+| `ssrf_no_validated_ips` | `WARNING` | `host`, `port` | `connect_tcp` aborted because no validated IP addresses are available. |
+| `ssrf_pinned_connect_failed` | `DEBUG` | `host`, `ip`, `port`, `error` | Single pinned IP TCP connection attempt failed; failing over to next pinned IP. |
+| `ssrf_all_pinned_connects_failed` | `WARNING` | `host`, `port`, `attempted_count`, `error` | All pinned IP TCP connection attempts failed for `host:port`. |
+| `ssrf_request_dispatch` | `DEBUG` | `url`, `host`, `scheme`, `pinned_ip_count` | Outbound request verified, IPs pinned, and request dispatched. |
 | `url_fetch_success` | `INFO` | `url`, `effective_url`, `bytes` | Successfully streamed and decoded response body. |
 
 #### 3. TMA HTMX Wish Item UI Events (`wishenka.web.items_ui`)
@@ -1184,7 +1199,7 @@ In accordance with security requirements:
 ### 1. SSRF Blocked Targets (`fallback_reason="ssrf_blocked"`)
 - **Symptom**: `ItemPreviewDTO` returns with `is_fallback=True` and `fallback_reason="ssrf_blocked"`.
 - **Cause**: The input URL points to an IP or domain resolving to localhost (`127.0.0.1`, `::1`), private networks (`10.x`, `172.16.x`, `192.168.x`), cloud metadata (`169.254.169.254`), or CGNAT (`100.64.x`).
-- **Resolution**: This is the intended security defense. Check the server logs under `event="ssrf_blocked"` or `event="item_preview_ssrf_blocked"` for the exact destination host, resolved IP, and restriction rule. If a legitimate public service was erroneously classified, verify whether its DNS records include private IPs.
+- **Resolution**: This is the intended security defense. Check the server logs under `event="ssrf_blocked"` or `event="item_preview_ssrf_blocked"` for the exact destination host, resolved IP, and restriction rule. If a legitimate public service was erroneously classified, verify whether its DNS records include private IPs. If a host fails DNS resolution or all pinned IPs fail to connect, inspect `dns_resolution_failed`, `ssrf_no_validated_ips`, and `ssrf_all_pinned_connects_failed` (in `DEBUG`, `ssrf_pinned_connect_failed` shows per-IP failover attempts).
 
 ### 2. Disallowed URL Schemes (`fallback_reason="ssrf_blocked"`)
 - **Symptom**: `fallback_reason="ssrf_blocked"` is returned for links using schemes like `ftp://`, `file://`, or `data:`.
