@@ -995,7 +995,8 @@ and `test_shared_inventory_multiprocess.py` (a receipt on a fully received wish 
 smoke test is WISHENKA-156.
 
 UI modules (WISHENKA-24), each with a module-level `pytest.mark.timeout`:
-`tests/test_receipt_ui_routes.py` (GET and POST routes, refusals by reason, busy, 401 and CSRF,
+`tests/test_receipt_ui_routes.py` (GET and POST routes, `RECEIPT_SELECT_MAX` 20 vs 21 boundary
+via `test_get_modal_select_max_boundary` in WISHENKA-222, refusals by reason, busy, 401 and CSRF,
 reason table, logging), `test_receipt_card_ui.py` (owner card, button, archive texts, stale
 archive and restore, giver guard, stale reorder header), `test_gifted_section_ui.py`,
 `test_cabinet_received_marker.py`, `test_receipt_static_script.py` (script served and ordered,
@@ -1006,11 +1007,13 @@ JSON `DELETE`/`PATCH`, and UI edit/cancel modals), `test_receipt_undo_correction
 cross-item/cross-wishlist `receipt_id` isolation, no-op `PATCH`/UI `edit`, and
 `GET .../edit|cancel` refusals for missing receipts and archived wishlists), and the browser
 modules
-`test_receipt_modal_browser.py` and `test_receipt_accessibility_browser.py` (7 tests; WISHENKA-161:
+`test_receipt_modal_browser.py` and `test_receipt_accessibility_browser.py` (8 tests; WISHENKA-161:
 `aria-modal`/background `inert`/Tab trap, focus return on partial/full/refusal,
 `gifted-items-details` open state, `remaining=500` stepper, 44 px mobile touch targets & quick-add
 overlay at `390x844`; WISHENKA-221: `test_edit_modal_touch_targets_and_stepper` for
 `receipt_edit_modal.html` `.quantity-control` 44 px targets and stepper clamping, and
 `test_edit_and_cancel_modal_accessibility_and_focus_restoration` for edit/cancel modal `aria-modal`,
-`inert`, `Tab` trap, dismissal, and `#gifted-items-section` OOB focus restoration); helper
+`inert`, `Tab` trap, dismissal, and `#gifted-items-section` OOB focus restoration; WISHENKA-222:
+`test_large_quantity_out_of_range_validation_and_clamping` for out-of-range numeric `submit`
+validation without POST and clamping via `change` and stepper); helper
 `tests/receipt_ui_support.py`. See [testing.md](testing.md).

@@ -251,6 +251,37 @@ def test_get_modal_large_quantity_renders_stepper_not_large_select(env: AppEnv) 
     assert on_attributes(soup) == []
 
 
+@pytest.mark.parametrize(("remaining", "expect_select"), [(20, True), (21, False)])
+def test_get_modal_select_max_boundary(env: AppEnv, remaining: int, expect_select: bool) -> None:
+    """WISHENKA-222: RECEIPT_SELECT_MAX=20 renders select at 20 and numeric stepper at 21."""
+    _client, _sessions, app = env
+    wishlist_id, (item_id, *_rest) = seed_list(app, [Wish("Tiles", remaining)])
+
+    response = _get(env, wishlist_id, item_id)
+
+    assert response.status_code == 200, response.text
+    soup = parse(response.text)
+    select = soup.select_one('form select[name="quantity"][data-receipt-quantity]')
+    qty_input = soup.select_one('form input[type="number"][name="quantity"][data-receipt-quantity]')
+    steps = soup.select("form [data-receipt-step]")
+    if expect_select:
+        assert select is not None
+        assert select.get("data-remaining") == str(remaining)
+        options = select.select("option")
+        assert [o.get("value") for o in options] == [str(i) for i in range(1, remaining + 1)]
+        assert qty_input is None
+        assert steps == []
+    else:
+        assert select is None
+        assert len(soup.select("option")) == 0
+        assert qty_input is not None
+        assert qty_input.get("min") == "1"
+        assert qty_input.get("max") == str(remaining)
+        assert qty_input.get("data-remaining") == str(remaining)
+        assert [s.get("data-receipt-step") for s in steps] == ["-1", "1"]
+    assert on_attributes(soup) == []
+
+
 def test_get_modal_has_no_booking_data(env: AppEnv) -> None:
     """U-20, N-1: promises, giver names and ids never reach the dialog."""
     _client, _sessions, app = env

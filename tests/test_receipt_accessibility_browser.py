@@ -307,6 +307,62 @@ def test_large_quantity_stepper_updates_summary_and_submits(
     assert_clean_console(page)
 
 
+def test_large_quantity_out_of_range_validation_and_clamping(
+    seed_wishlist: SeedFactory, wishlist_page: PageFactory
+) -> None:
+    """WISHENKA-222: out-of-range inputs fail validity, block submit, and clamp on change."""
+    seeded, page = _mobile_owner_page(seed_wishlist, wishlist_page, ["Tiles"], [500])
+    item = seeded.item_ids[0]
+    open_receipt_dialog(page, seeded, item)
+
+    cases = [
+        ("0", "rangeUnderflow", "1"),
+        ("501", "rangeOverflow", "500"),
+    ]
+    for bad_value, validity_flag, clamped_value in cases:
+        page.evaluate(
+            f"(() => {{ const inp = document.querySelector({js_str(QTY)});"
+            f" inp.value = {js_str(bad_value)};"
+            " inp.dispatchEvent(new Event('input', {bubbles: true})); })()"
+        )
+        validity = page.evaluate(
+            f"(() => {{ const inp = document.querySelector({js_str(QTY)});"
+            " return {"
+            " valid: inp.checkValidity(),"
+            f" flag: Boolean(inp.validity.{validity_flag})"
+            " }; })()"
+        )
+        assert validity == {"valid": False, "flag": True}, (
+            f"expected invalid {validity_flag} for {bad_value!r}, got {validity}"
+        )
+
+        # Click confirm without focusing/blurring the input so change does not clamp first.
+        page.evaluate(f"document.querySelector({js_str(CONFIRM)}).click()")
+        settle(page)
+        assert posts_to(page, "/receipt") == [], (
+            f"out-of-range value {bad_value!r} must not submit a receipt"
+        )
+        assert page.evaluate(f"document.querySelector({js_str(DIALOG)}) !== null") is True
+
+        page.evaluate(
+            f"(() => {{ const inp = document.querySelector({js_str(QTY)});"
+            " inp.dispatchEvent(new Event('change', {bubbles: true})); })()"
+        )
+        page.wait_for(
+            f"summary clamps {bad_value} to {clamped_value}",
+            f"document.querySelector({js_str(SUMMARY)}).textContent.trim()"
+            f" === 'Будет отмечено получено: {clamped_value} шт. из 500 оставшихся'",
+        )
+        after_clamp = page.evaluate(
+            f"(() => {{ const inp = document.querySelector({js_str(QTY)});"
+            " return { value: inp.value, valid: inp.checkValidity() }; })()"
+        )
+        assert after_clamp == {"value": clamped_value, "valid": True}
+
+    _no_external(page)
+    assert_clean_console(page)
+
+
 def test_mobile_touch_targets_and_quick_add_overlay(
     seed_wishlist: SeedFactory, wishlist_page: PageFactory
 ) -> None:
