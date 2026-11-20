@@ -140,6 +140,16 @@ def _isolated_default_database(
     yield
 
 
+@pytest.fixture(autouse=True)
+def _clear_dns_cache() -> Iterator[None]:
+    """Ensure the process-local DNS cache never leaks across tests."""
+    from wishenka.items.ssrf import clear_dns_cache
+
+    clear_dns_cache()
+    yield
+    clear_dns_cache()
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(
     item: pytest.Item, call: pytest.CallInfo[None]

@@ -4,9 +4,13 @@ import asyncio
 import ipaddress
 import logging
 import socket
-from collections.abc import Iterable
+import time
+from collections import OrderedDict
+from collections.abc import Iterable, Sequence
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
+from weakref import WeakKeyDictionary
 
 import httpcore
 import httpx
@@ -17,6 +21,8 @@ logger = logging.getLogger("wishenka.items")
 
 MAX_RESPONSE_BYTES: int = 2 * 1024 * 1024  # 2 MB (2,097,152 bytes)
 ALLOWED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
+DEFAULT_DNS_CACHE_TTL_SECONDS: float = 60.0
+DEFAULT_DNS_CACHE_CAPACITY: int = 512
 
 FORBIDDEN_NETWORKS: tuple[
     ipaddress.IPv4Network | ipaddress.IPv6Network,
@@ -76,51 +82,99 @@ def is_ip_safe(ip: str | ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return all(not (ip.version == net.version and ip in net) for net in FORBIDDEN_NETWORKS)
 
 
-async def resolve_and_validate_host(host: str, port: int = 80) -> list[str]:
-    """Resolve hostname to IP addresses asynchronously and verify none are forbidden.
+@dataclass(frozen=True, slots=True)
+class DNSCacheEntry:
+    """Cached, SSRF-validated IP addresses for a hostname and port."""
 
-    Raises:
-        SSRFBlockedError: If destination resolves to a private or forbidden IP.
-        SSRFError: If host is empty or resolution encounters an unhandled error.
-    """
-    if not host:
-        raise SSRFError("Host cannot be empty")
+    ips: tuple[str, ...]
+    expires_at: float
 
-    clean_host = host.strip("[]")
 
-    try:
-        ip_obj = ipaddress.ip_address(clean_host)
-        if not is_ip_safe(ip_obj):
-            logger.warning(
-                "SSRF blocked: host '%s' is restricted IP address '%s'",
-                host,
-                str(ip_obj),
+def _normalize_dns_key(host: str, port: int) -> tuple[str, int]:
+    """Normalize a hostname/port pair for DNS cache and single-flight lookup."""
+    return (host.strip("[]").lower().rstrip("."), port)
+
+
+class DNSCache:
+    """Bounded in-memory TTL and LRU cache for SSRF-validated DNS resolutions."""
+
+    def __init__(
+        self,
+        capacity: int = DEFAULT_DNS_CACHE_CAPACITY,
+        ttl: float = DEFAULT_DNS_CACHE_TTL_SECONDS,
+    ) -> None:
+        self.capacity = capacity
+        self.ttl = ttl
+        self._entries: OrderedDict[tuple[str, int], DNSCacheEntry] = OrderedDict()
+
+    def get(self, host: str, port: int) -> list[str] | None:
+        """Return a fresh copy of cached IPs if present and unexpired, else None."""
+        key = _normalize_dns_key(host, port)
+        entry = self._entries.get(key)
+        if entry is None:
+            return None
+        if entry.expires_at <= time.monotonic():
+            del self._entries[key]
+            logger.debug(
+                "DNS cache entry expired for host '%s' on port %d",
+                key[0],
+                key[1],
                 extra={
-                    "event": "ssrf_blocked",
-                    "host": host,
-                    "ip": str(ip_obj),
-                    "reason": "forbidden_ip",
+                    "event": "dns_cache_expired",
+                    "host": key[0],
+                    "port": key[1],
                 },
             )
-            raise SSRFBlockedError(
-                f"Destination IP '{clean_host}' is private or forbidden",
-                ip_address=str(ip_obj),
-                host=host,
-                reason="forbidden_ip",
-            )
-        logger.debug(
-            "Direct IP '%s' validated as safe",
-            clean_host,
-            extra={
-                "event": "dns_resolution_success",
-                "host": host,
-                "resolved_ips": [str(ip_obj)],
-            },
-        )
-        return [str(ip_obj)]
-    except ValueError:
-        pass
+            return None
+        self._entries.move_to_end(key)
+        return list(entry.ips)
 
+    def put(self, host: str, port: int, ips: Sequence[str]) -> None:
+        """Store a non-empty validated IP list, evicting LRU entries beyond capacity."""
+        if not ips or self.capacity <= 0 or self.ttl <= 0:
+            return
+        key = _normalize_dns_key(host, port)
+        self._entries[key] = DNSCacheEntry(
+            ips=tuple(ips),
+            expires_at=time.monotonic() + self.ttl,
+        )
+        self._entries.move_to_end(key)
+        while len(self._entries) > self.capacity:
+            evicted_key, _ = self._entries.popitem(last=False)
+            logger.debug(
+                "DNS cache LRU entry evicted for host '%s' on port %d",
+                evicted_key[0],
+                evicted_key[1],
+                extra={
+                    "event": "dns_cache_evicted",
+                    "evicted_host": evicted_key[0],
+                    "evicted_port": evicted_key[1],
+                    "capacity": self.capacity,
+                },
+            )
+
+    def clear(self) -> None:
+        """Remove all cached DNS entries."""
+        self._entries.clear()
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+
+_dns_cache = DNSCache()
+_in_flight_resolutions: WeakKeyDictionary[
+    asyncio.AbstractEventLoop,
+    dict[tuple[str, int], asyncio.Future[list[str]]],
+] = WeakKeyDictionary()
+
+
+def clear_dns_cache() -> None:
+    """Clear the process-local DNS cache (intended for tests and lifecycle resets)."""
+    _dns_cache.clear()
+
+
+async def _resolve_and_validate_uncached(host: str, clean_host: str, port: int) -> list[str]:
+    """Perform uncached async DNS resolution and SSRF validation for all returned IPs."""
     logger.debug(
         "Resolving host '%s' on port %d for SSRF validation",
         clean_host,
@@ -207,6 +261,117 @@ async def resolve_and_validate_host(host: str, port: int = 80) -> list[str]:
         },
     )
     return resolved_ips
+
+
+async def resolve_and_validate_host(host: str, port: int = 80) -> list[str]:
+    """Resolve hostname to IP addresses asynchronously and verify none are forbidden.
+
+    Raises:
+        SSRFBlockedError: If destination resolves to a private or forbidden IP.
+        SSRFError: If host is empty or resolution encounters an unhandled error.
+    """
+    if not host:
+        raise SSRFError("Host cannot be empty")
+
+    clean_host = host.strip("[]")
+
+    try:
+        ip_obj = ipaddress.ip_address(clean_host)
+        if not is_ip_safe(ip_obj):
+            logger.warning(
+                "SSRF blocked: host '%s' is restricted IP address '%s'",
+                host,
+                str(ip_obj),
+                extra={
+                    "event": "ssrf_blocked",
+                    "host": host,
+                    "ip": str(ip_obj),
+                    "reason": "forbidden_ip",
+                },
+            )
+            raise SSRFBlockedError(
+                f"Destination IP '{clean_host}' is private or forbidden",
+                ip_address=str(ip_obj),
+                host=host,
+                reason="forbidden_ip",
+            )
+        logger.debug(
+            "Direct IP '%s' validated as safe",
+            clean_host,
+            extra={
+                "event": "dns_resolution_success",
+                "host": host,
+                "resolved_ips": [str(ip_obj)],
+            },
+        )
+        return [str(ip_obj)]
+    except ValueError:
+        pass
+
+    cached_ips = _dns_cache.get(clean_host, port)
+    if cached_ips is not None:
+        logger.debug(
+            "DNS cache hit for host '%s' on port %d",
+            clean_host,
+            port,
+            extra={
+                "event": "dns_cache_hit",
+                "host": clean_host,
+                "port": port,
+                "ip_count": len(cached_ips),
+            },
+        )
+        return cached_ips
+
+    loop = asyncio.get_running_loop()
+    key = _normalize_dns_key(clean_host, port)
+    loop_in_flight = _in_flight_resolutions.setdefault(loop, {})
+    existing_future = loop_in_flight.get(key)
+    if existing_future is not None:
+        logger.debug(
+            "DNS resolution coalesced onto in-flight lookup for host '%s' on port %d",
+            clean_host,
+            port,
+            extra={
+                "event": "dns_single_flight_coalesced",
+                "host": clean_host,
+                "port": port,
+            },
+        )
+        return list(await asyncio.shield(existing_future))
+
+    logger.debug(
+        "DNS cache miss for host '%s' on port %d",
+        clean_host,
+        port,
+        extra={
+            "event": "dns_cache_miss",
+            "host": clean_host,
+            "port": port,
+        },
+    )
+    future: asyncio.Future[list[str]] = loop.create_future()
+    loop_in_flight[key] = future
+    try:
+        resolved_ips = await _resolve_and_validate_uncached(host, clean_host, port)
+    except Exception as exc:
+        if not future.done():
+            future.set_exception(exc)
+            future.exception()
+        raise
+    except BaseException:
+        if not future.done():
+            future.cancel()
+        raise
+    else:
+        if resolved_ips:
+            _dns_cache.put(clean_host, port, resolved_ips)
+        if not future.done():
+            future.set_result(resolved_ips)
+        return list(resolved_ips)
+    finally:
+        if loop_in_flight.get(key) is future:
+            loop_in_flight.pop(key, None)
 
 
 _pinned_ips_var: ContextVar[dict[tuple[str, int], list[str]] | None] = ContextVar(
@@ -411,9 +576,14 @@ class SSRFSafeTransport(httpx.AsyncHTTPTransport):
 
 __all__ = [
     "ALLOWED_SCHEMES",
+    "DEFAULT_DNS_CACHE_CAPACITY",
+    "DEFAULT_DNS_CACHE_TTL_SECONDS",
+    "DNSCache",
+    "DNSCacheEntry",
     "MAX_RESPONSE_BYTES",
     "SSRFSafeNetworkBackend",
     "SSRFSafeTransport",
+    "clear_dns_cache",
     "is_ip_safe",
     "resolve_and_validate_host",
 ]

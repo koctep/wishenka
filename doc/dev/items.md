@@ -89,8 +89,8 @@ The `wishenka.items` package and its integration with `wishenka.wishlists` imple
    - Multi-layered defense-in-depth preventing outbound calls to internal infrastructure, local loops, cloud metadata services, and unroutable addresses:
      - Scheme whitelist: strictly `http` and `https` allowed; `file://`, `gopher://`, `ftp://`, etc. rejected early.
      - IP boundary enforcement: blocks IPv4/IPv6 private ranges (RFC 1918), loopbacks (`127.0.0.0/8`, `::1`), link-local (`169.254.0.0/16`, `fe80::/10`), cloud metadata endpoints (`169.254.169.254`), CGNAT (`100.64.0.0/10`), multicast, broadcast, and IPv6-mapped IPv4 representations (`::ffff:127.0.0.1`).
-     - Non-blocking asynchronous DNS resolution via `asyncio.get_running_loop().getaddrinfo` with validation across all returned IP addresses.
-     - Custom transport [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L335) and [`SSRFSafeNetworkBackend`](file:///home/src/wishenka/items/ssrf.py#L218) that inspect every outbound request and every intermediate redirect hop, pin validated IPs in a task-scoped `ContextVar` (`_pinned_ips_var`), and connect directly to the pinned IP without re-querying DNS (eliminating DNS rebinding TOCTOU).
+     - Non-blocking asynchronous DNS resolution via `asyncio.get_running_loop().getaddrinfo` with validation across all returned IP addresses, backed by a bounded in-memory TTL/LRU DNS cache ([`DNSCache`](file:///home/src/wishenka/items/ssrf.py#L98), default 60s TTL / 512 entries) and per-event-loop single-flight coalescing (`WISHENKA-94`).
+     - Custom transport [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L500) and [`SSRFSafeNetworkBackend`](file:///home/src/wishenka/items/ssrf.py#L383) that inspect every outbound request and every intermediate redirect hop, pin validated IPs in a task-scoped `ContextVar` (`_pinned_ips_var`), and connect directly to the pinned IP without re-querying DNS (eliminating DNS rebinding TOCTOU).
 4. **DoS & Payload Size Limiting (2 MB Hard Ceiling)**:
    - Enforces a strict 2 MB (`2,097,152` bytes) limit on all upstream responses:
      - Fast-fail early rejection on `Content-Length > 2 MB` before downloading response bytes.
@@ -180,28 +180,41 @@ Handles marketplace-specific store identification, URL cleaning, and affiliate t
 
 Located in [`wishenka/items/ssrf.py`](file:///home/src/wishenka/items/ssrf.py).
 
-Provides non-blocking IP validation, hostname resolution, and HTTPX transport-level request interception:
+Provides non-blocking IP validation, cached hostname resolution with single-flight coalescing, and HTTPX transport-level request interception:
 - **Constants**:
   - `MAX_RESPONSE_BYTES = 2 * 1024 * 1024` (2 MB).
   - `ALLOWED_SCHEMES = frozenset({"http", "https"})`.
+  - `DEFAULT_DNS_CACHE_TTL_SECONDS = 60.0` (60 seconds).
+  - `DEFAULT_DNS_CACHE_CAPACITY = 512` (512 normalized `(host, port)` entries).
   - `FORBIDDEN_NETWORKS`: tuple of 20 CIDR blocks covering private RFC 1918, CGNAT (`100.64.0.0/10`), loopback (`127.0.0.0/8`, `::1`), link-local (`169.254.0.0/16`, `fe80::/10`), cloud metadata (`169.254.169.254`), multicast (`224.0.0.0/4`, `ff00::/8`), broadcast (`255.255.255.255/32`), and IPv6 ULA (`fc00::/7`).
-- [`is_ip_safe(ip)`](file:///home/src/wishenka/items/ssrf.py#L48):
+- [`is_ip_safe(ip)`](file:///home/src/wishenka/items/ssrf.py#L54):
   - Validates `ipaddress.IPv4Address` or `ipaddress.IPv6Address`.
   - Automatically unmaps IPv6-mapped IPv4 addresses (e.g. `::ffff:127.0.0.1` unwraps to `127.0.0.1` and is recursively validated).
   - Checks standard flags: `ip.is_global`, `ip.is_private`, `ip.is_loopback`, `ip.is_link_local`, `ip.is_multicast`, `ip.is_reserved`, `ip.is_unspecified`.
   - Verifies address is not contained within any network in `FORBIDDEN_NETWORKS`.
-- [`resolve_and_validate_host(host, port)`](file:///home/src/wishenka/items/ssrf.py#L79):
-  - Asynchronously resolves hostnames via `loop.getaddrinfo(clean_host, port, proto=socket.IPPROTO_TCP)` on the running event loop without blocking the async worker thread.
-  - If `host` is a direct IP literal, validates it directly.
-  - Verifies that **all** resolved IP addresses pass `is_ip_safe`. If any resolved address is restricted, immediately raises [`SSRFBlockedError`](file:///home/src/wishenka/items/exceptions.py#L26).
-- [`_pinned_ips_var`](file:///home/src/wishenka/items/ssrf.py#L212):
+- [`DNSCacheEntry`](file:///home/src/wishenka/items/ssrf.py#L85), [`DNSCache`](file:///home/src/wishenka/items/ssrf.py#L98), and [`clear_dns_cache()`](file:///home/src/wishenka/items/ssrf.py#L171) (`WISHENKA-94`):
+  - `DNSCacheEntry(ips: tuple[str, ...], expires_at: float)` is an immutable (`frozen=True, slots=True`) dataclass storing SSRF-validated IP strings and a `time.monotonic()` expiration timestamp.
+  - `DNSCache(capacity=DEFAULT_DNS_CACHE_CAPACITY, ttl=DEFAULT_DNS_CACHE_TTL_SECONDS)` is a bounded in-memory TTL and LRU cache backed by `OrderedDict[tuple[str, int], DNSCacheEntry]`.
+  - Keys are normalized via `_normalize_dns_key(host, port)` to `(host.strip("[]").lower().rstrip("."), port)`.
+  - `get(host, port)` checks whether an entry exists and `expires_at > time.monotonic()`. Expired entries are lazily removed (emitting `dns_cache_expired` at `DEBUG`); valid hits refresh LRU ordering via `move_to_end` and return a fresh `list(entry.ips)` copy so caller mutations cannot corrupt cached state.
+  - `put(host, port, ips)` stores non-empty validated IP tuples when `capacity > 0` and `ttl > 0`, refreshes LRU position, and evicts the least-recently-used entries (`popitem(last=False)`) when `len(_entries) > capacity` (emitting `dns_cache_evicted` at `DEBUG`).
+  - `clear_dns_cache()` resets the process-local `_dns_cache` singleton (invoked automatically before and after every pytest test by the `autouse` `_clear_dns_cache` fixture in [`tests/conftest.py`](file:///home/src/tests/conftest.py)).
+- [`resolve_and_validate_host(host, port)`](file:///home/src/wishenka/items/ssrf.py#L266) & Single-Flight Coalescing (`_in_flight_resolutions`):
+  - If `host` is a direct IP literal, validates it directly via `is_ip_safe` without touching `_dns_cache`.
+  - For domain names, checks `_dns_cache.get(clean_host, port)` first; on hit, logs `dns_cache_hit` (`DEBUG`) and returns the cached safe IP list immediately.
+  - On cache miss, coordinates concurrent lookups on the same event loop via `_in_flight_resolutions` (`WeakKeyDictionary[asyncio.AbstractEventLoop, dict[tuple[str, int], asyncio.Future[list[str]]]]`):
+    - If an in-flight `Future` already exists for `(loop, key)`, follower coroutines log `dns_single_flight_coalesced` (`DEBUG`) and await `asyncio.shield(existing_future)`, returning a fresh `list(...)` copy without spawning duplicate `loop.getaddrinfo` threadpool calls.
+    - Otherwise, the leader coroutine logs `dns_cache_miss` (`DEBUG`), registers a new `Future`, calls `_resolve_and_validate_uncached(host, clean_host, port)` (`await loop.getaddrinfo(clean_host, port, proto=socket.IPPROTO_TCP)`), and verifies that **all** resolved IP addresses pass `is_ip_safe`. If any resolved address is restricted, immediately raises [`SSRFBlockedError`](file:///home/src/wishenka/items/exceptions.py#L26).
+  - **No Negative Caching**: `SSRFBlockedError`, `socket.gaierror`, `OSError`, and empty resolution results (`[]`) are **never** stored in `_dns_cache`. Only non-empty IP lists where every address passed `is_ip_safe` are cached.
+  - Covered by [`tests/test_dns_cache.py`](file:///home/src/tests/test_dns_cache.py).
+- [`_pinned_ips_var`](file:///home/src/wishenka/items/ssrf.py#L377):
   - `ContextVar[dict[tuple[str, int], list[str]] | None]` that isolates validated IP lists per async task keyed by `(clean_host, port)` across concurrent requests.
-- [`SSRFSafeNetworkBackend`](file:///home/src/wishenka/items/ssrf.py#L218):
+- [`SSRFSafeNetworkBackend`](file:///home/src/wishenka/items/ssrf.py#L383):
   - Subclass of `httpcore.AsyncNetworkBackend` wrapping the connection pool's inner network backend.
   - `connect_tcp`: reads pinned IPs for `(host.strip("[]"), port)` from `_pinned_ips_var` (falling back to `resolve_and_validate_host` for defense-in-depth on cache miss), deduplicates them, and tries each numeric IP sequentially via `self._inner.connect_tcp(host=ip, ...)` without ever passing the raw hostname to the underlying socket backend. Raises `httpcore.ConnectError` if the validated IP list is empty or all pinned attempts fail.
   - `connect_unix_socket`: blocks Unix domain socket connections with `SSRFBlockedError(..., reason="uds")`.
   - `sleep`: delegates to `self._inner.sleep`.
-- [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L335):
+- [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L500):
   - Subclass of `httpx.AsyncHTTPTransport`.
   - In `__init__`, wraps `self._pool._network_backend` with `SSRFSafeNetworkBackend` when `self._pool` is an `httpcore.AsyncConnectionPool`.
   - Overrides `handle_async_request(request)` to intercept the initial request and every subsequent HTTP redirect hop (`301`, `302`, `303`, `307`, `308`).
@@ -332,9 +345,13 @@ accounts for origin age and expiry headers. Concurrent misses can still perform 
 
 Every cache hit revalidates the original and redirect destinations against current DNS and scheme
 rules. Outbound requests reject URL credentials and do not retain or send cookies; proxy transports
-are bypassed or rejected for injected clients. DNS is not cached across requests by this feature;
-outbound connections via [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L335) and
-[`SSRFSafeNetworkBackend`](file:///home/src/wishenka/items/ssrf.py#L218) pin validated IP addresses per
+are bypassed or rejected for injected clients. DNS resolutions performed by
+[`resolve_and_validate_host`](file:///home/src/wishenka/items/ssrf.py#L266) are cached in-memory via
+[`DNSCache`](file:///home/src/wishenka/items/ssrf.py#L98) (`DEFAULT_DNS_CACHE_TTL_SECONDS = 60.0`,
+`DEFAULT_DNS_CACHE_CAPACITY = 512`) with per-event-loop single-flight coalescing
+([WISHENKA-94](https://pypost.atlassian.net/browse/WISHENKA-94)), while outbound connections via
+[`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L500) and
+[`SSRFSafeNetworkBackend`](file:///home/src/wishenka/items/ssrf.py#L383) pin validated IP addresses per
 request and redirect hop to prevent DNS rebinding (TOCTOU; [WISHENKA-92](https://pypost.atlassian.net/browse/WISHENKA-92)).
 The injected-client adapter uses private HTTPX/httpcore APIs, tracked in [WISHENKA-114](https://pypost.atlassian.net/browse/WISHENKA-114).
 
@@ -847,14 +864,21 @@ except ResponseBodyTooLargeError as exc:
     print(f"Payload exceeded {exc.max_allowed} bytes (actual: {exc.content_length})")
 ```
 
-### 6. Direct IP and Hostname Validation
+### 6. Direct IP, Hostname Validation, and DNS Cache Management
 
-Use [`is_ip_safe`](file:///home/src/wishenka/items/ssrf.py#L48) and [`resolve_and_validate_host`](file:///home/src/wishenka/items/ssrf.py#L79):
+Use [`is_ip_safe`](file:///home/src/wishenka/items/ssrf.py#L54), [`resolve_and_validate_host`](file:///home/src/wishenka/items/ssrf.py#L266), [`DNSCache`](file:///home/src/wishenka/items/ssrf.py#L98), and [`clear_dns_cache`](file:///home/src/wishenka/items/ssrf.py#L171):
 
 ```python
 import ipaddress
 from wishenka.items.exceptions import SSRFBlockedError
-from wishenka.items.ssrf import is_ip_safe, resolve_and_validate_host
+from wishenka.items.ssrf import (
+    DEFAULT_DNS_CACHE_CAPACITY,
+    DEFAULT_DNS_CACHE_TTL_SECONDS,
+    DNSCache,
+    clear_dns_cache,
+    is_ip_safe,
+    resolve_and_validate_host,
+)
 
 # Direct IP checks
 assert is_ip_safe("93.184.216.34") is True  # Public IP (example.com)
@@ -864,9 +888,21 @@ assert is_ip_safe("169.254.169.254") is False  # Cloud metadata / Link-local
 assert is_ip_safe("100.64.0.1") is False  # CGNAT
 assert is_ip_safe("::ffff:127.0.0.1") is False  # IPv6-mapped IPv4 loopback
 
-# Asynchronous DNS resolution check
+# Asynchronous DNS resolution check (caches validated public IPs for 60s TTL;
+# concurrent cold misses for the same (host, port) coalesce into a single lookup)
 resolved_ips = await resolve_and_validate_host("example.com", port=443)
 assert len(resolved_ips) > 0
+
+# Clear the process-local DNS cache when needed (e.g. lifecycle resets or isolated tests)
+clear_dns_cache()
+
+# Standalone DNSCache instance with custom capacity and TTL
+custom_cache = DNSCache(
+    capacity=DEFAULT_DNS_CACHE_CAPACITY,
+    ttl=DEFAULT_DNS_CACHE_TTL_SECONDS,
+)
+custom_cache.put("Shop.Example.COM.", 443, ["93.184.216.34"])
+assert custom_cache.get("shop.example.com", 443) == ["93.184.216.34"]
 
 try:
     await resolve_and_validate_host("localhost", port=80)
@@ -1076,6 +1112,8 @@ Defined in [`wishenka/items/ssrf.py`](file:///home/src/wishenka/items/ssrf.py), 
 | --- | --- | --- |
 | `MAX_RESPONSE_BYTES` | `2 * 1024 * 1024` (2 MB) | Maximum permitted response size before abortion. |
 | `ALLOWED_SCHEMES` | `frozenset({"http", "https"})` | Whitelisted URL schemes. |
+| `DEFAULT_DNS_CACHE_TTL_SECONDS` | `60.0` (60 seconds) | Monotonic TTL for cached SSRF-validated DNS resolutions in `DNSCache`. |
+| `DEFAULT_DNS_CACHE_CAPACITY` | `512` | Maximum normalized `(host, port)` entries in `DNSCache` before LRU eviction. |
 | `DEFAULT_TIMEOUT` | `httpx.Timeout(4.0, connect=2.0)` | Total budget `4.0s`, connection budget `2.0s`. |
 | `DEFAULT_HEADERS` | iOS Safari Mobile UA, Ru/En Accept | Standard headers maximizing storefront compatibility. |
 | Preview cache | 256 entries, 300 seconds maximum TTL | Per application instance; LRU eviction and shorter origin freshness apply. |
@@ -1163,6 +1201,11 @@ All events are logged via structured extra dictionaries under logger names `"wis
 | `item_metadata_parsing_error` | `ERROR` | `url_domain`, `duration_ms`, `fallback_reason="http_error"` | Unexpected HTML parsing failure during extraction. |
 | `ssrf_blocked` | `WARNING` | `host`, `ip`, `reason` | Low-level SSRF rejection on outbound connection or redirect (includes `reason="credentials"` and `reason="uds"`). |
 | `payload_size_violation` | `WARNING` | `url`, `content_length`, `max_allowed`, `reason` | `Content-Length` or streaming chunks exceed 2 MB. |
+| `dns_cache_hit` | `DEBUG` | `host`, `port`, `ip_count` | Unexpired SSRF-validated IP list returned from `DNSCache`. |
+| `dns_cache_miss` | `DEBUG` | `host`, `port` | Cold or expired hostname initiated an uncached DNS resolution leader task. |
+| `dns_single_flight_coalesced` | `DEBUG` | `host`, `port` | Concurrent request joined an already in-flight DNS resolution on the same event loop. |
+| `dns_cache_expired` | `DEBUG` | `host`, `port` | Cached DNS entry's monotonic TTL elapsed and was lazily removed on lookup. |
+| `dns_cache_evicted` | `DEBUG` | `evicted_host`, `evicted_port`, `capacity` | Least-recently-used DNS cache entry evicted to stay within `capacity`. |
 | `dns_resolution_start` | `DEBUG` | `host`, `clean_host`, `port` | Starting asynchronous DNS resolution. |
 | `dns_resolution_success` | `DEBUG` | `host`, `resolved_ips` | Successfully resolved hostname to safe IPs. |
 | `dns_resolution_failed` | `INFO` | `host`, `error` | Host failed to resolve (NXDOMAIN, gaierror). |
@@ -1220,7 +1263,7 @@ In accordance with security requirements:
 ### 1. SSRF Blocked Targets (`fallback_reason="ssrf_blocked"`)
 - **Symptom**: `ItemPreviewDTO` returns with `is_fallback=True` and `fallback_reason="ssrf_blocked"`.
 - **Cause**: The input URL points to an IP or domain resolving to localhost (`127.0.0.1`, `::1`), private networks (`10.x`, `172.16.x`, `192.168.x`), cloud metadata (`169.254.169.254`), or CGNAT (`100.64.x`).
-- **Resolution**: This is the intended security defense. Check the server logs under `event="ssrf_blocked"` or `event="item_preview_ssrf_blocked"` for the exact destination host, resolved IP, and restriction rule. If a legitimate public service was erroneously classified, verify whether its DNS records include private IPs. If a host fails DNS resolution or all pinned IPs fail to connect, inspect `dns_resolution_failed`, `ssrf_no_validated_ips`, and `ssrf_all_pinned_connects_failed` (in `DEBUG`, `ssrf_pinned_connect_failed` shows per-IP failover attempts).
+- **Resolution**: This is the intended security defense. Check the server logs under `event="ssrf_blocked"` or `event="item_preview_ssrf_blocked"` for the exact destination host, resolved IP, and restriction rule. If a legitimate public service was erroneously classified, verify whether its DNS records include private IPs. Note that `DNSCache` never caches negative results (`SSRFBlockedError`, `socket.gaierror`, or empty IP lists), so fixing an upstream DNS record takes effect immediately on the next request (or after at most `DEFAULT_DNS_CACHE_TTL_SECONDS = 60.0` seconds if a previous public IP entry was cached; call `clear_dns_cache()` in tests or interactive sessions to flush immediately). If a host fails DNS resolution or all pinned IPs fail to connect, inspect `dns_resolution_failed`, `ssrf_no_validated_ips`, and `ssrf_all_pinned_connects_failed` (in `DEBUG`, `dns_cache_hit`, `dns_cache_miss`, `dns_single_flight_coalesced`, `dns_cache_expired`, `dns_cache_evicted`, and `ssrf_pinned_connect_failed` trace DNS caching and per-IP failover attempts).
 
 ### 2. Disallowed URL Schemes (`fallback_reason="ssrf_blocked"`)
 - **Symptom**: `fallback_reason="ssrf_blocked"` is returned for links using schemes like `ftp://`, `file://`, or `data:`.
