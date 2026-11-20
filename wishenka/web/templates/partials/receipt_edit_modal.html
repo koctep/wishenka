@@ -11,7 +11,31 @@
         <form data-receipt-form method="post"
               action="/web/wishlists/{{ wishlist_id }}/items/{{ item_id }}/receipts/{{ receipt_id }}/edit">
             <label for="receipt-edit-quantity">{{ t('web.receipt.edit_quantity_label', locale|default('en')) }}</label>
-            <input id="receipt-edit-quantity" type="number" name="quantity" min="1" max="{{ max_allowed }}" value="{{ current_quantity }}" required>
+            <div class="quantity-control">
+                <button type="button"
+                        class="btn-step btn-decrement"
+                        data-receipt-step="-1"
+                        aria-label="{{ t('web.item.decrease_qty', locale|default('en')) }}">
+                    -
+                </button>
+                <input id="receipt-edit-quantity"
+                       type="number"
+                       name="quantity"
+                       data-receipt-quantity
+                       data-remaining="{{ max_allowed }}"
+                       min="1"
+                       max="{{ max_allowed }}"
+                       step="1"
+                       inputmode="numeric"
+                       value="{{ current_quantity }}"
+                       required>
+                <button type="button"
+                        class="btn-step btn-increment"
+                        data-receipt-step="1"
+                        aria-label="{{ t('web.item.increase_qty', locale|default('en')) }}">
+                    +
+                </button>
+            </div>
             <p class="receipt-final">{{ t('web.receipt.edit_date_note', locale|default('en')) }}</p>
             <button type="submit" class="btn-receipt-confirm">{{ t('web.receipt.edit_confirm_btn', locale|default('en')) }}</button>
             <button type="button" class="btn-modal-close" data-modal-close>{{ t('web.common.cancel', locale|default('en')) }}</button>

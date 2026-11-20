@@ -10,11 +10,13 @@
 
   const MODAL_SELECTOR = '#item-receipt-modal';
   const CONTAINER_ID = 'item-modal-container';
-  const OPENER_SELECTOR = '.btn-receipt-item';
+  const OPENER_SELECTOR = '.btn-receipt-item, .btn-receipt-edit, .btn-receipt-cancel';
   const CARD_SELECTOR = '.item-card';
   const CARD_SUMMARY_SELECTOR = '.item-card-summary';
+  const GIFTED_ITEM_SELECTOR = '.gifted-item';
   const LIST_NOTICE_SELECTOR = '#list-notice';
   const GIFTED_DETAILS_SELECTOR = '#gifted-items-section details.gifted-items-details';
+  const GIFTED_SUMMARY_SELECTOR = `${GIFTED_DETAILS_SELECTOR} > summary`;
   const FEEDBACK_ID = 'receipt-feedback';
   const REFUSAL_HEADER = 'X-Receipt-Refusal';
   const INERT_MARKER = 'data-receipt-inert';
@@ -50,6 +52,8 @@
 
   /** Id of the card whose «Получено» button opened the dialog, or an empty string. */
   let openerCardId = '';
+  /** Id of the `.gifted-item` whose edit/cancel button opened the dialog, or an empty string. */
+  let openerGiftedItemId = '';
   /** Element that opened the dialog when no item card owns it (e.g. gifted list actions). */
   let openerElement = null;
 
@@ -136,20 +140,27 @@
   };
 
   /**
-   * Return focus to the originating wish card, opener control, or list notice.
+   * Return focus to the originating wish card, gifted item/summary, opener control, or list notice.
    * @returns {void}
    */
   const restoreFocusToPage = () => {
     const card = openerCardId ? document.getElementById(openerCardId) : null;
-    const summary = card ? card.querySelector(CARD_SUMMARY_SELECTOR) : null;
+    const cardSummary = card ? card.querySelector(CARD_SUMMARY_SELECTOR) : null;
     const fallbackOpener = openerElement && openerElement.isConnected ? openerElement : null;
+    const giftedItem = openerGiftedItemId ? document.getElementById(openerGiftedItemId) : null;
+    const giftedSummary = openerGiftedItemId
+      ? document.querySelector(GIFTED_SUMMARY_SELECTOR)
+      : null;
     const notice = document.querySelector(LIST_NOTICE_SELECTOR);
-    const target = summary || fallbackOpener || notice;
+    const target = openerGiftedItemId
+      ? fallbackOpener || giftedItem || giftedSummary || notice
+      : cardSummary || fallbackOpener || notice;
     openerCardId = '';
+    openerGiftedItemId = '';
     openerElement = null;
     if (target && typeof target.focus === 'function') {
-      if (target === notice && !notice.hasAttribute('tabindex')) {
-        notice.setAttribute('tabindex', '-1');
+      if ((target === notice || target === giftedItem) && !target.hasAttribute('tabindex')) {
+        target.setAttribute('tabindex', '-1');
       }
       target.focus();
     }
@@ -169,7 +180,7 @@
   };
 
   /**
-   * Show the chosen quantity in the summary line of the dialog.
+   * Clamp quantity when requested and update the summary line if present in the dialog.
    * @param {HTMLSelectElement | HTMLInputElement} field The `[data-receipt-quantity]` control.
    * @param {boolean} clampValue Whether to clamp out-of-range values back into the field.
    * @returns {void}
@@ -177,9 +188,7 @@
   const updateSummary = (field, clampValue) => {
     const remaining = Number.parseInt(field.getAttribute('data-remaining') || '', 10);
     const chosen = Number.parseInt(field.value, 10);
-    const modal = closest(field, MODAL_SELECTOR);
-    const line = modal ? modal.querySelector('[data-receipt-summary]') : null;
-    if (!line || !Number.isInteger(remaining) || !Number.isInteger(chosen)) {
+    if (!Number.isInteger(remaining) || remaining < 1 || !Number.isInteger(chosen)) {
       return;
     }
     if (!clampValue && (chosen < 1 || chosen > remaining)) {
@@ -189,11 +198,38 @@
     if (clampValue) {
       field.value = String(quantity);
     }
+    const modal = closest(field, MODAL_SELECTOR);
+    const line = modal ? modal.querySelector('[data-receipt-summary]') : null;
+    if (!line) {
+      return;
+    }
     const tpl = (document.body && document.body.getAttribute('data-i18n-receipt-summary'))
       || DEFAULT_SUMMARY_TEMPLATE;
     line.textContent = tpl
       .replace('{chosen}', String(quantity))
       .replace('{remaining}', String(remaining));
+  };
+
+  /**
+   * Increment or decrement `[data-receipt-quantity]` within `[1, remaining]` on stepper click.
+   * @param {Element} stepBtn The clicked `[data-receipt-step]` button.
+   * @returns {void}
+   */
+  const handleStepClick = (stepBtn) => {
+    const modal = closest(stepBtn, MODAL_SELECTOR);
+    const field = modal ? modal.querySelector('[data-receipt-quantity]') : null;
+    if (!field) {
+      return;
+    }
+    const delta = Number.parseInt(stepBtn.getAttribute('data-receipt-step') || '0', 10);
+    const remaining = Number.parseInt(field.getAttribute('data-remaining') || '', 10);
+    const current = Number.parseInt(field.value || '1', 10);
+    if (Number.isInteger(remaining) && remaining > 0) {
+      const base = Number.isInteger(current) ? current : 1;
+      const next = Math.min(Math.max(base + delta, 1), remaining);
+      field.value = String(next);
+      updateSummary(field, true);
+    }
   };
 
   document.addEventListener('input', (event) => {
@@ -214,25 +250,15 @@
     const opener = closest(event.target, OPENER_SELECTOR);
     if (opener) {
       const card = closest(opener, CARD_SELECTOR);
+      const giftedItem = closest(opener, GIFTED_ITEM_SELECTOR);
       openerCardId = card ? card.id : '';
+      openerGiftedItemId = giftedItem ? giftedItem.id : '';
       openerElement = opener;
       return;
     }
     const stepBtn = closest(event.target, '[data-receipt-step]');
     if (stepBtn) {
-      const modal = closest(stepBtn, MODAL_SELECTOR);
-      const field = modal ? modal.querySelector('[data-receipt-quantity]') : null;
-      if (field) {
-        const delta = Number.parseInt(stepBtn.getAttribute('data-receipt-step') || '0', 10);
-        const remaining = Number.parseInt(field.getAttribute('data-remaining') || '', 10);
-        const current = Number.parseInt(field.value || '1', 10);
-        if (Number.isInteger(remaining) && remaining > 0) {
-          const base = Number.isInteger(current) ? current : 1;
-          const next = Math.min(Math.max(base + delta, 1), remaining);
-          field.value = String(next);
-          updateSummary(field, true);
-        }
-      }
+      handleStepClick(stepBtn);
       return;
     }
     const modal = closest(event.target, MODAL_SELECTOR);

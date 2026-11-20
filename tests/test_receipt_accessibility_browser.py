@@ -27,6 +27,7 @@ from tests.conftest import BrowserServer
 from tests.receipt_support import attr_of
 from tests.receipt_ui_support import SENTENCES, ui_module
 from wishenka.wishlists.exceptions import InventoryBusyError
+from wishenka.wishlists.service import WishlistService
 
 pytestmark = [pytest.mark.timeout(45), pytest.mark.browser]
 
@@ -336,5 +337,304 @@ def test_mobile_touch_targets_and_quick_add_overlay(
     for box in boxes:
         assert box["w"] >= 44 and box["h"] >= 44, f"touch target < 44px: {box}"
         assert box["hitInSelf"] is True, f"control obscured by overlay/quick-add-bar: {box}"
+    _no_external(page)
+    assert_clean_console(page)
+
+
+def _open_gifted_modal(page: CdpPage, button_selector: str) -> None:
+    """Click a gifted-section edit/cancel button and load its modal via htmx.ajax."""
+    scroll_to(page, button_selector)
+    url = page.evaluate(f"document.querySelector({js_str(button_selector)}).getAttribute('hx-get')")
+    assert isinstance(url, str) and url, f"missing hx-get on {button_selector}"
+    page.click(button_selector)
+    page.evaluate(
+        f"void window.htmx.ajax('GET', {js_str(url)},"
+        " {target: '#item-modal-container', swap: 'innerHTML'})"
+    )
+    settle(page)
+    page.wait_for("receipt dialog opened", f"!!document.querySelector({js_str(DIALOG)})")
+
+
+def _assert_modal_isolation_and_trap(page: CdpPage) -> None:
+    """Assert aria-modal, background inert/aria-hidden, Tab trap, and Shift+Tab wrap."""
+    assert (
+        page.evaluate(f"document.querySelector({js_str(DIALOG)}).getAttribute('aria-modal')")
+        == "true"
+    )
+    isolated = page.evaluate(
+        "['#items-list', '#quick-add-bar', 'nav.top-nav'].map((sel) => {"
+        "  const el = document.querySelector(sel);"
+        "  return el ? {sel, inert: el.inert, hidden: el.getAttribute('aria-hidden')} : null;"
+        "})"
+    )
+    assert isolated == [
+        {"sel": "#items-list", "inert": True, "hidden": "true"},
+        {"sel": "#quick-add-bar", "inert": True, "hidden": "true"},
+        {"sel": "nav.top-nav", "inert": True, "hidden": "true"},
+    ], f"background elements must be isolated while dialog is open: {isolated}"
+
+    first_sel = f"{DIALOG} button, {DIALOG} input"
+    focus(page, first_sel)
+    for _ in range(4):
+        page.press_key("Tab")
+        active = page.evaluate(
+            f"(() => {{ const a = document.activeElement;"
+            f" const d = document.querySelector({js_str(DIALOG)});"
+            " return {inDialog: !!d && d.contains(a),"
+            " cls: a ? a.className : '', tag: a ? a.tagName : ''}; })()"
+        )
+        assert active["inDialog"] is True, f"Tab escaped dialog: {active}"
+
+    focus(page, first_sel)
+    page.press_key("Shift+Tab")
+    wrapped_back = page.evaluate(
+        f"(() => {{ const a = document.activeElement;"
+        f" const d = document.querySelector({js_str(DIALOG)});"
+        " return {inDialog: !!d && d.contains(a),"
+        " isClose: !!a && a.classList.contains('btn-modal-close')}; })()"
+    )
+    assert wrapped_back == {"inDialog": True, "isClose": True}, (
+        f"Shift+Tab from first control must wrap to last dialog control: {wrapped_back}"
+    )
+
+
+def test_edit_modal_touch_targets_and_stepper(
+    wishlist_server: BrowserServer,
+    seed_wishlist: SeedFactory,
+    wishlist_page: PageFactory,
+) -> None:
+    """WISHENKA-221: edit modal has .quantity-control steppers, >= 44px targets, and submits."""
+    seeded = seed_wishlist(["Tiles"], quantities=[10])
+    item = seeded.item_ids[0]
+    record_receipt(wishlist_server.base_url, seeded, item, 3)
+
+    page = wishlist_page(seeded, accept_language="ru", viewport=MOBILE_VIEWPORT)
+    served = {r.path: r.status for r in page.requests}
+    assert served.get("/static/receipt.js") == 200, f"receipt.js not loaded; requests: {served}"
+
+    _click(page, "#gifted-items-section details.gifted-items-details > summary")
+    _open_gifted_modal(page, f"#gifted-item-{item} .btn-receipt-edit")
+
+    structure = page.evaluate(
+        f"(() => {{ const d = document.querySelector({js_str(DIALOG)});"
+        " const qc = d ? d.querySelector('.quantity-control') : null;"
+        " return {"
+        "   hasControl: !!qc,"
+        "   hasDec: !!(qc && qc.querySelector('.btn-decrement[data-receipt-step=\"-1\"]')),"
+        "   hasInput: !!(qc && qc.querySelector('#receipt-edit-quantity[data-receipt-quantity]')),"
+        "   hasInc: !!(qc && qc.querySelector('.btn-increment[data-receipt-step=\"1\"]'))"
+        " }; })()"
+    )
+    assert structure == {
+        "hasControl": True,
+        "hasDec": True,
+        "hasInput": True,
+        "hasInc": True,
+    }, (
+        "edit modal must use .quantity-control with steppers and [data-receipt-quantity]: "
+        f"{structure}"
+    )
+
+    boxes = page.evaluate(
+        f"Array.from(document.querySelectorAll({js_str(DIALOG)} + ' [data-receipt-quantity], '"
+        f" + {js_str(DIALOG)} + ' .btn-step, '"
+        f" + {js_str(DIALOG)} + ' .btn-receipt-confirm, '"
+        f" + {js_str(DIALOG)} + ' .btn-modal-close')).map((el) => {{"
+        "  const r = el.getBoundingClientRect();"
+        "  const cx = r.left + r.width / 2;"
+        "  const cy = r.top + r.height / 2;"
+        "  const hit = document.elementFromPoint(cx, cy);"
+        "  return {"
+        "    cls: el.className || el.tagName,"
+        "    w: r.width,"
+        "    h: r.height,"
+        "    hitInSelf: !!hit && (el === hit || el.contains(hit))"
+        "  };"
+        "})"
+    )
+    assert len(boxes) >= 5, f"expected stepper + input + confirm + cancel controls: {boxes}"
+    for box in boxes:
+        assert box["w"] >= 44 and box["h"] >= 44, f"touch target < 44px: {box}"
+        assert box["hitInSelf"] is True, f"control obscured by overlay/quick-add-bar: {box}"
+
+    _click(page, f"{DIALOG} [data-receipt-step='1']")
+    page.wait_for(
+        "edit quantity incremented to 4",
+        f"document.querySelector({js_str(QTY)}).value === '4'",
+    )
+    _click(page, f"{DIALOG} [data-receipt-step='-1']")
+    page.wait_for(
+        "edit quantity decremented to 3",
+        f"document.querySelector({js_str(QTY)}).value === '3'",
+    )
+    _click(page, f"{DIALOG} [data-receipt-step='1']")
+    _click(page, CONFIRM)
+    page.wait_for("dialog closed", f"!document.querySelector({js_str(DIALOG)})")
+    settle(page)
+    assert [p.post_data for p in posts_to(page, "/edit")] == ["quantity=4"]
+    _no_external(page)
+    assert_clean_console(page)
+
+
+def test_edit_and_cancel_modal_accessibility_and_focus_restoration(
+    wishlist_server: BrowserServer,
+    seed_wishlist: SeedFactory,
+    wishlist_page: PageFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WISHENKA-221: edit/cancel modal isolation, trap, refusal focus, and gifted focus return."""
+    seeded = seed_wishlist(["Kettle", "Mug"], quantities=[5, 2])
+    kettle, mug = seeded.item_ids
+    record_receipt(wishlist_server.base_url, seeded, kettle, 1)
+    record_receipt(wishlist_server.base_url, seeded, mug, 2)
+
+    page = wishlist_page(seeded, accept_language="ru", viewport=MOBILE_VIEWPORT)
+    served = {r.path: r.status for r in page.requests}
+    assert served.get("/static/receipt.js") == 200, f"receipt.js not loaded; requests: {served}"
+
+    _click(page, "#gifted-items-section details.gifted-items-details > summary")
+
+    # 1. Edit modal: aria-modal, background isolation, Tab/Shift+Tab, Escape focus return
+    edit_btn = f"#gifted-item-{kettle} .btn-receipt-edit"
+    _open_gifted_modal(page, edit_btn)
+    _assert_modal_isolation_and_trap(page)
+    page.press_key("Escape")
+    page.wait_for("edit dialog closed", f"!document.querySelector({js_str(DIALOG)})")
+    page.wait_for(
+        "focus returns to triggering edit button on Escape",
+        f"document.activeElement === document.querySelector({js_str(edit_btn)})",
+    )
+
+    # 2. Edit modal: 409 refusal keeps focus on #receipt-feedback; valid submit focuses #gifted-item
+    _open_gifted_modal(page, edit_btn)
+    record_receipt(wishlist_server.base_url, seeded, kettle, 3)
+    page.evaluate(
+        "(() => { const inp = document.querySelector('#receipt-edit-quantity'); inp.value = '4';"
+        " inp.dispatchEvent(new Event('change', {bubbles: true})); })()"
+    )
+    _click(page, CONFIRM)
+    expected_race = SENTENCES["quantity_above_remaining"].format(n=2)
+    page.wait_for(
+        "edit race refusal shown",
+        f"document.querySelector({js_str(FEEDBACK)}).textContent.trim()"
+        f" === {js_str(expected_race)}",
+    )
+    page.wait_for(
+        "focus stays inside edit dialog on #receipt-feedback after 409 refusal",
+        f"document.activeElement === document.querySelector({js_str(FEEDBACK)})",
+    )
+    page.evaluate(
+        "(() => { const inp = document.querySelector('#receipt-edit-quantity'); inp.value = '2';"
+        " inp.dispatchEvent(new Event('change', {bubbles: true})); })()"
+    )
+    _click(page, CONFIRM)
+    page.wait_for("edit dialog closed after submit", f"!document.querySelector({js_str(DIALOG)})")
+    settle(page)
+    assert (
+        page.evaluate(
+            "document.querySelector('#gifted-items-section details.gifted-items-details').open"
+        )
+        is True
+    )
+    page.wait_for(
+        "focus returns to #gifted-item after edit OOB replacement",
+        f"document.activeElement === document.querySelector('#gifted-item-{kettle}')",
+    )
+
+    # 3. Cancel modal: aria-modal, isolation, Tab/Shift+Tab, Escape focus return, refusal feedback
+    cancel_btn = f"#gifted-item-{kettle} .btn-receipt-cancel"
+    _open_gifted_modal(page, cancel_btn)
+    _assert_modal_isolation_and_trap(page)
+    page.press_key("Escape")
+    page.wait_for("cancel dialog closed", f"!document.querySelector({js_str(DIALOG)})")
+    page.wait_for(
+        "focus returns to triggering cancel button on Escape",
+        f"document.activeElement === document.querySelector({js_str(cancel_btn)})",
+    )
+
+    original_cancel = WishlistService.cancel_item_receipt
+    busy_state = {"fail": True}
+
+    async def flaky_cancel(
+        self: WishlistService,
+        item_id: int,
+        receipt_id: int,
+        user: object,
+        *,
+        wishlist_id: int | None = None,
+    ) -> object:
+        if busy_state["fail"]:
+            busy_state["fail"] = False
+            raise InventoryBusyError()
+        return await original_cancel(
+            self,
+            item_id,
+            receipt_id,
+            user,  # type: ignore[arg-type]
+            wishlist_id=wishlist_id,
+        )
+
+    monkeypatch.setattr(WishlistService, "cancel_item_receipt", flaky_cancel)
+    _open_gifted_modal(page, cancel_btn)
+    _click(page, CONFIRM)
+    page.wait_for(
+        "cancel busy refusal shown",
+        f"document.querySelector({js_str(FEEDBACK)}).textContent.trim()"
+        f" === {js_str(SENTENCES['busy'])}",
+    )
+    page.wait_for(
+        "focus stays inside cancel dialog on #receipt-feedback after 503 refusal",
+        f"document.activeElement === document.querySelector({js_str(FEEDBACK)})",
+    )
+
+    # 4. Partial cancel (Kettle still has 2nd receipt) -> focus returns to #gifted-item-{kettle}
+    _click(page, CONFIRM)
+    page.wait_for(
+        "cancel dialog closed after partial cancel", f"!document.querySelector({js_str(DIALOG)})"
+    )
+    settle(page)
+    assert (
+        page.evaluate(
+            "document.querySelector('#gifted-items-section details.gifted-items-details').open"
+        )
+        is True
+    )
+    page.wait_for(
+        "focus returns to #gifted-item after partial cancel OOB replacement",
+        f"document.activeElement === document.querySelector('#gifted-item-{kettle}')",
+    )
+
+    # 5. Full cancel of Kettle (Mug remains) -> focus returns to details > summary, stays open
+    _open_gifted_modal(page, f"#gifted-item-{kettle} .btn-receipt-cancel")
+    _click(page, CONFIRM)
+    page.wait_for(
+        "kettle removed from gifted section",
+        f"!document.querySelector('#gifted-item-{kettle}')",
+    )
+    settle(page)
+    assert (
+        page.evaluate(
+            "document.querySelector('#gifted-items-section details.gifted-items-details').open"
+        )
+        is True
+    )
+    page.wait_for(
+        "focus returns to gifted section summary when item is removed",
+        "document.activeElement === document.querySelector("
+        "'#gifted-items-section details.gifted-items-details > summary')",
+    )
+
+    # 6. Full cancel of last gifted item (Mug) -> focus returns to #list-notice
+    _open_gifted_modal(page, f"#gifted-item-{mug} .btn-receipt-cancel")
+    _click(page, CONFIRM)
+    page.wait_for(
+        "mug removed from gifted section",
+        f"!document.querySelector('#gifted-item-{mug}')",
+    )
+    settle(page)
+    page.wait_for(
+        "focus returns to #list-notice when last gifted item is cancelled",
+        "document.activeElement === document.querySelector('#list-notice')",
+    )
     _no_external(page)
     assert_clean_console(page)

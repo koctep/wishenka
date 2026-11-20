@@ -508,12 +508,15 @@ wish items without full-page reloads.
   and «Количество». The button `.btn-receipt-item` («Получено», in `.item-actions`, while
   `remaining_quantity > 0`) opens the receipt dialog with `hx-get` into `#item-modal-container`.
   In «Подаренные» (`partials/gifted_items_section.html`), when `can_edit_wishlist` is true
-  (active list + member), each receipt act with `receipt_id > 0` renders edit and cancel buttons
-  opening `partials/receipt_edit_modal.html` and `partials/receipt_cancel_modal.html`. A giver
-  card of a fully received wish has no promise controls. The flow, routes, refusals, accessibility
-  (`aria-modal`, background `inert`, Tab trap, focus return, `gifted-items-details` open state,
-  `RECEIPT_SELECT_MAX = 20` stepper), and invariants are in
-  [gift-receipt.md](gift-receipt.md#mini-app-ui-wishenka-24).
+  (active list + member), each receipt act with `receipt_id > 0` renders `.btn-receipt-edit` and
+  `.btn-receipt-cancel` buttons opening `partials/receipt_edit_modal.html` (with `.quantity-control`
+  and `44px` `--touch-target` `-`/`+` `.btn-step` buttons, WISHENKA-221) and
+  `partials/receipt_cancel_modal.html`. `receipt.js` tracks `.btn-receipt-edit` and
+  `.btn-receipt-cancel` openers via `openerGiftedItemId` to restore focus across
+  `#gifted-items-section` OOB replacements. A giver card of a fully received wish has no promise
+  controls. The flow, routes, refusals, accessibility (`aria-modal`, background `inert`, Tab trap,
+  focus return, `gifted-items-details` open state, `RECEIPT_SELECT_MAX = 20` stepper), and
+  invariants are in [gift-receipt.md](gift-receipt.md#mini-app-ui-wishenka-24).
 - **Compact/expanded**: `.item-card-summary` is the compact row (`aria-expanded` starts `false`).
   `.item-card-details` is rendered with `hidden`. The delegated toggle in
   [`wishlist.js`](../../wishenka/web/static/wishlist.js) clears `hidden` to expand and sets it to
@@ -664,8 +667,9 @@ no globals (`toggleWishCard` is no longer a global function).
   per-test server and database: `tests/test_wishlist_cards_browser.py` (card toggle),
   `tests/test_wishlist_mouse_reorder_browser.py` (mouse drag-and-drop) and
   `tests/test_wishlist_touch_reorder_browser.py` (touch reorder and its cancel paths), 53 tests in
-  all, plus the nine tests of `tests/test_receipt_modal_browser.py` (WISHENKA-24). Their design,
-  fixtures, fidelity limits, diagnostics and mutation proof are in
+  all, plus the nine tests of `tests/test_receipt_modal_browser.py` (WISHENKA-24) and the seven
+  tests of `tests/test_receipt_accessibility_browser.py` (WISHENKA-161, WISHENKA-221). Their
+  design, fixtures, fidelity limits, diagnostics and mutation proof are in
   [testing.md](testing.md). The htmx used there is an offline stub and touch is synthesized, so
   neither the real htmx wiring nor a real touch stack is covered. The string and CSS guards that
   were kept are weak by design (a comment can satisfy them): `tests/test_wishlist_static_script.py`

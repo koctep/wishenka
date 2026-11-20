@@ -530,10 +530,18 @@ every non-GET htmx request in `htmx:configRequest` once the token is fetched.
      (`data-receipt-step="-1"` / `"1"`) and `<input id="receipt-quantity" type="number"
      name="quantity" data-receipt-quantity data-remaining="..." min="1" max="..." step="1"
      inputmode="numeric" required>`.
-   Both interactive modes render a live summary (`[data-receipt-summary]`, `aria-live="polite"`)
-   and state that the act cannot be undone. `#receipt-feedback` has `role="alert"` and
+   Both interactive modes in `item_receipt_modal.html` render a live summary
+   (`[data-receipt-summary]`, `aria-live="polite"`) and state that the act cannot be undone.
+   `receipt_edit_modal.html` (WISHENKA-221) also wraps `#receipt-edit-quantity` in
+   `.quantity-control` with `-`/`+` `.btn-step` buttons (`data-receipt-step="-1"` / `"1"`),
+   `data-receipt-quantity`, `data-remaining="{{ max_allowed }}"`, `step="1"`, and
+   `inputmode="numeric"`, matching the `44px` `--touch-target` minimum on `.receipt-sheet .btn-step`
+   and `.receipt-sheet .quantity-control input`. `#receipt-feedback` has `role="alert"` and
    `tabindex="-1"`.
-3. **Modal isolation, focus trap, and lifecycle (`receipt.js`, WISHENKA-161)**:
+3. **Modal isolation, focus trap, and lifecycle (`receipt.js`, WISHENKA-161, WISHENKA-221)**:
+   - `receipt.js` tracks openers matching `.btn-receipt-item, .btn-receipt-edit, .btn-receipt-cancel`:
+     card openers set `openerCardId`, while gifted-section edit/cancel openers set
+     `openerGiftedItemId` (the closest `#gifted-item-{id}` element).
    - On `htmx:afterSwap` into `#item-modal-container`, `setBackgroundInert(true)` walks from
      `#item-modal-container` up to `document.body` and sets `inert` and `aria-hidden="true"` on
      non-ancestor element siblings (skipping `<script>`, `<style>`, `<template>`), keeping the
@@ -543,10 +551,14 @@ every non-GET htmx request in `htmx:configRequest` once the token is fetched.
      visible, enabled descendants.
    - `closeDialog()` (Cancel, Escape, or backdrop click) clears `#item-modal-container`, calls
      `setBackgroundInert(false)` (restoring only elements marked by `receipt.js`), and restores
-     focus (`restoreFocusToPage`) to `#${openerCardId} .item-card-summary`, else `openerElement`,
-     else `#list-notice` (`tabindex="-1"`).
-   - `receipt.js` updates `[data-receipt-summary]` on `change`, `input`, and `[data-receipt-step]`
-     clicks (clamping to `[1, remaining]`).
+     focus (`restoreFocusToPage`): for card openers, to `#${openerCardId} .item-card-summary`,
+     else `openerElement`, else `#list-notice`; for gifted-section openers (`openerGiftedItemId`),
+     to `openerElement` (if connected), else `#${openerGiftedItemId}` (`tabindex="-1"` if needed),
+     else `details.gifted-items-details > summary`, else `#list-notice` (`tabindex="-1"`).
+   - `receipt.js` handles `[data-receipt-step]` clicks via `handleStepClick(stepBtn)` and calls
+     `updateSummary(field, clampValue)` on `change`, `input`, and stepper clicks. `updateSummary`
+     clamps `[data-receipt-quantity]` to `[1, remaining]` even when `[data-receipt-summary]` is
+     absent (as in `receipt_edit_modal.html`).
 4. On `submit` of `form[data-receipt-form]`, if `field` is an `<input type="number">` and
    `!field.checkValidity()`, `receipt.js` calls `field.reportValidity()` and aborts submission.
    Otherwise it prevents the browser submit, captures whether
@@ -563,9 +575,12 @@ every non-GET htmx request in `htmx:configRequest` once the token is fetched.
      `quantity_above_remaining` OOB replacement, or network failure): keeps background `inert`,
      clears busy state if `form` is connected, shows «Не удалось сохранить отметку. Повторите
      попытку.» if feedback is empty, and focuses `#receipt-feedback` (or primary control);
-   - if `#item-receipt-modal` left `document` (receipt succeeded): removes background `inert`,
-     focuses `#${openerCardId} .item-card-summary` (partial receipt) or `#list-notice`
-     (`tabindex="-1"`, full receipt), and clears `openerCardId`.
+   - if `#item-receipt-modal` left `document` (receipt/edit/cancel succeeded): removes background
+     `inert`, calls `restoreFocusToPage()` — focusing `#${openerCardId} .item-card-summary`
+     (partial receipt), `#${openerGiftedItemId}` / `details.gifted-items-details > summary` (after
+     `#gifted-items-section` OOB replacement on edit or cancel), or `#list-notice` (`tabindex="-1"`,
+     full receipt or empty gifted section) — and clears `openerCardId`, `openerGiftedItemId`, and
+     `openerElement`.
 
 ### Refusals and the marker header
 
@@ -991,7 +1006,11 @@ JSON `DELETE`/`PATCH`, and UI edit/cancel modals), `test_receipt_undo_correction
 cross-item/cross-wishlist `receipt_id` isolation, no-op `PATCH`/UI `edit`, and
 `GET .../edit|cancel` refusals for missing receipts and archived wishlists), and the browser
 modules
-`test_receipt_modal_browser.py` and `test_receipt_accessibility_browser.py` (WISHENKA-161:
+`test_receipt_modal_browser.py` and `test_receipt_accessibility_browser.py` (7 tests; WISHENKA-161:
 `aria-modal`/background `inert`/Tab trap, focus return on partial/full/refusal,
 `gifted-items-details` open state, `remaining=500` stepper, 44 px mobile touch targets & quick-add
-overlay at `390x844`); helper `tests/receipt_ui_support.py`. See [testing.md](testing.md).
+overlay at `390x844`; WISHENKA-221: `test_edit_modal_touch_targets_and_stepper` for
+`receipt_edit_modal.html` `.quantity-control` 44 px targets and stepper clamping, and
+`test_edit_and_cancel_modal_accessibility_and_focus_restoration` for edit/cancel modal `aria-modal`,
+`inert`, `Tab` trap, dismissal, and `#gifted-items-section` OOB focus restoration); helper
+`tests/receipt_ui_support.py`. See [testing.md](testing.md).
