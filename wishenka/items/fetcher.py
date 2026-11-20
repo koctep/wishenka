@@ -13,6 +13,7 @@ import httpx
 
 from wishenka.items.encoding import decode_html
 from wishenka.items.exceptions import (
+    CassetteError,
     InvalidUrlSchemeError,
     ResponseBodyTooLargeError,
 )
@@ -386,6 +387,8 @@ class UrlMetadataService:
             return await asyncio.to_thread(
                 HtmlMetadataExtractor.extract, html_text, base_url=final_url
             )
+        except CassetteError:
+            raise
         except Exception as exc:
             logger.warning(
                 "UrlMetadataService fetch_and_extract failed for %s: %s; returning fallback",

@@ -1,0 +1,63 @@
+version: 1
+marketplace: megamarket
+scenario: product
+interactions:
+  - recorded_at: "2026-11-20T00:00:00Z"
+    request:
+      method: GET
+      uri: https://megamarket.ru/catalog/details/robot-pylesos-roborock-s8-pro-ultra-600012345678/
+      headers:
+        accept:
+          - text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+        accept-language:
+          - ru-RU,ru;q=0.9,en;q=0.8
+        user-agent:
+          - Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1
+      body: null
+    response:
+      status:
+        code: 200
+        message: OK
+      http_version: HTTP/1.1
+      headers:
+        content-type:
+          - text/html; charset=utf-8
+      body:
+        string: |
+          <!DOCTYPE html>
+          <html lang="ru">
+          <head>
+            <meta charset="utf-8">
+            <title>Робот-пылесос Roborock S8 Pro Ultra — купить по выгодной цене на Мегамаркет</title>
+            <link rel="icon" href="https://megamarket.ru/favicon.ico">
+            <meta property="og:site_name" content="Мегамаркет">
+            <meta property="og:title" content="Робот-пылесос Roborock S8 Pro Ultra — Мегамаркет">
+            <meta property="og:description" content="Мощный робот-пылесос со станцией самоочистки и влажной уборкой VibraRise 2.0.">
+            <meta property="og:image" content="https://main-cdn.sbermegamarket.ru/big2/hlr-system/roborock-s8.jpg">
+            <script type="application/ld+json">
+            {
+              "@context": "https://schema.org",
+              "@graph": [
+                {
+                  "@type": "Product",
+                  "name": "Робот-пылесос Roborock S8 Pro Ultra — купить на Мегамаркет",
+                  "description": "Мощный робот-пылесос со станцией самоочистки и влажной уборкой VibraRise 2.0.",
+                  "image": {
+                    "@type": "ImageObject",
+                    "url": "https://main-cdn.sbermegamarket.ru/big2/hlr-system/roborock-s8.jpg"
+                  },
+                  "offers": {
+                    "@type": "AggregateOffer",
+                    "lowPrice": "89990",
+                    "highPrice": "94990",
+                    "priceCurrency": "RUB"
+                  }
+                }
+              ]
+            }
+            </script>
+          </head>
+          <body>
+            <h1>Робот-пылесос Roborock S8 Pro Ultra</h1>
+          </body>
+          </html>

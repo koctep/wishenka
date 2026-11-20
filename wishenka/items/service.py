@@ -8,6 +8,7 @@ import httpx
 
 from wishenka.items.classifier import UniversalInputClassifier
 from wishenka.items.exceptions import (
+    CassetteError,
     InvalidUrlSchemeError,
     ResponseBodyTooLargeError,
     SSRFBlockedError,
@@ -40,6 +41,17 @@ CHALLENGE_SIGNATURES = [
     "qrator",
     "qrator_jsid",
     "qrator-js",
+    "доступ ограничен",
+    "доступ временно ограничен",
+    "почти готово",
+    "проверка браузера",
+    "подтвердите, что запросы отправляли вы, а не робот",
+    "smartcaptcha",
+    "showcaptcha",
+    "firewall-container",
+    "antibot-challenge",
+    "ozon-captcha",
+    "fab_chlg",
 ]
 
 
@@ -299,6 +311,8 @@ class ItemPreviewService:
                     is_fallback=True,
                     fallback_reason="http_error",
                 )
+        except CassetteError:
+            raise
         except (httpx.HTTPError, Exception) as exc:
             duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
             logger.warning(
@@ -332,6 +346,7 @@ class ItemPreviewService:
                 response_domain,
                 extra={
                     "event": "item_preview_anti_bot",
+                    "status_code": 200,
                     "url_domain": response_domain,
                     "input_type": classification.input_type.value,
                     "duration_ms": duration_ms,
@@ -343,6 +358,7 @@ class ItemPreviewService:
                 response_domain,
                 extra={
                     "event": "anti_bot_challenge_detected",
+                    "status_code": 200,
                     "url_domain": response_domain,
                     "input_type": classification.input_type.value,
                     "duration_ms": duration_ms,

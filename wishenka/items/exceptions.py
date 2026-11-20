@@ -68,8 +68,31 @@ class ResponseBodyTooLargeError(ItemParsingError):
         self.max_allowed = max_allowed
 
 
+class CassetteError(ItemError):
+    """Base exception for web cassette recording and replay errors."""
+
+
+class CassetteMissError(CassetteError):
+    """Raised when a requested HTTP interaction is missing from the cassette in REPLAY mode."""
+
+    def __init__(
+        self,
+        message: str = "No matching HTTP interaction found in cassette during offline replay",
+        *,
+        method: str | None = None,
+        uri: str | None = None,
+        cassette_path: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.method = method
+        self.uri = uri
+        self.cassette_path = cassette_path
+
+
 __all__ = [
     "CannotReduceQuantityBelowReservedError",
+    "CassetteError",
+    "CassetteMissError",
     "InsufficientQuantityError",
     "InvalidItemDataError",
     "InvalidUrlSchemeError",

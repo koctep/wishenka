@@ -180,7 +180,7 @@ CRUD настроек `user_notification_settings` / `wl_list_notification_setti
   wish-scoped транзакция SQLite, а не `asyncio.Lock` (плюс `delivery_lock` для координации
   завершения с отправкой уведомлений о получении).
 - [`doc/dev/migrations.md`](migrations.md) — Миграции БД вишлистов (Alembic): ревизии, усыновление legacy-схемы, межпроцессная блокировка, выбор WAL, журналирование, диагностика и ограничения (WISHENKA-111).
-- [`doc/dev/items.md`](items.md) — Домен элементов желаний: универсальный ввод (текст, ссылки, шеринг), каскадный парсинг метаданных (JSON-LD, OpenGraph, Microdata), защита от SSRF и DNS rebinding с in-memory TTL/LRU кэшированием DNS (`DNSCache`, single-flight coalescing), graceful fallback при антибот-защите, штучный учет и wish-scoped запись инвентаря.
+- [`doc/dev/items.md`](items.md) — Домен элементов желаний: универсальный ввод (текст, ссылки, шеринг), каскадный парсинг метаданных (JSON-LD, OpenGraph, Microdata), защита от SSRF и DNS rebinding с in-memory TTL/LRU кэшированием DNS (`DNSCache`, single-flight coalescing), graceful fallback при антибот-защите (включая русскоязычные заглушки Яндекс SmartCaptcha, Авито, Ozon, Wildberries, Мегамаркет), VCR-совместимый стенд сетевых кассет маркетплейсов (`wishenka.items.cassettes`, `tests/cassettes/marketplaces/`, CLI `python -m wishenka.items.cassettes`), штучный учет и wish-scoped запись инвентаря.
 - [`doc/dev/auth.md`](auth.md) — Аутентификация Telegram Mini App, валидация initData и
   сессионные токены.
 - [`doc/dev/miniapp.md`](miniapp.md) — Telegram Mini App (TMA): интерфейс управления вишлистами,

@@ -1,0 +1,65 @@
+version: 1
+marketplace: ozon
+scenario: product
+interactions:
+  - recorded_at: "2026-11-20T00:00:00Z"
+    request:
+      method: GET
+      uri: https://ozon.ru/product/besprovodnye-naushniki-sony-wh-1000xm5-123456789/
+      headers:
+        accept:
+          - text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+        accept-language:
+          - ru-RU,ru;q=0.9,en;q=0.8
+        user-agent:
+          - Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1
+      body: null
+    response:
+      status:
+        code: 200
+        message: OK
+      http_version: HTTP/1.1
+      headers:
+        content-type:
+          - text/html; charset=utf-8
+      body:
+        string: |
+          <!DOCTYPE html>
+          <html lang="ru">
+          <head>
+            <meta charset="utf-8">
+            <title>Беспроводные наушники Sony WH-1000XM5 — купить в интернет-магазине OZON</title>
+            <link rel="icon" href="https://ozon.ru/favicon.ico">
+            <meta property="og:site_name" content="Ozon">
+            <meta property="og:title" content="Беспроводные наушники Sony WH-1000XM5 — купить на Ozon">
+            <meta property="og:description" content="Флагманские наушники с активным шумоподавлением и автономностью до 30 часов.">
+            <meta property="og:image" content="https://ir.ozone.ru/s3/multimedia-1/wc1000/6789012345.jpg">
+            <script type="application/ld+json">
+            {
+              "@context": "https://schema.org/",
+              "@type": "Product",
+              "name": "Беспроводные наушники Sony WH-1000XM5 — купить в интернет-магазине OZON",
+              "description": "Флагманские наушники с активным шумоподавлением и автономностью до 30 часов.",
+              "image": [
+                "https://ir.ozone.ru/s3/multimedia-1/wc1000/6789012345.jpg"
+              ],
+              "brand": {
+                "@type": "Brand",
+                "name": "Sony"
+              },
+              "offers": {
+                "@type": "Offer",
+                "url": "https://ozon.ru/product/besprovodnye-naushniki-sony-wh-1000xm5-123456789/",
+                "priceCurrency": "RUB",
+                "price": "29990",
+                "availability": "https://schema.org/InStock"
+              }
+            }
+            </script>
+          </head>
+          <body>
+            <main>
+              <h1>Беспроводные наушники Sony WH-1000XM5</h1>
+            </main>
+          </body>
+          </html>

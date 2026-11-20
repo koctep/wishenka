@@ -1,0 +1,43 @@
+version: 1
+marketplace: yandex_market
+scenario: antibot
+interactions:
+  - recorded_at: "2026-11-20T00:00:00Z"
+    request:
+      method: GET
+      uri: https://market.yandex.ru/product--umnye-chasy-apple-watch-series-9/987654321
+      headers:
+        accept:
+          - text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+        accept-language:
+          - ru-RU,ru;q=0.9,en;q=0.8
+        user-agent:
+          - Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1
+      body: null
+    response:
+      status:
+        code: 200
+        message: OK
+      http_version: HTTP/1.1
+      headers:
+        content-type:
+          - text/html; charset=utf-8
+      body:
+        string: |
+          <!DOCTYPE html>
+          <html lang="ru">
+          <head>
+            <meta charset="utf-8">
+            <title>Почти готово...</title>
+            <meta name="description" content="Подтвердите, что запросы отправляли вы, а не робот">
+          </head>
+          <body>
+            <div class="CheckboxCaptcha" data-sitekey="smartcaptcha-yandex-market">
+              <h1>Подтвердите, что запросы отправляли вы, а не робот</h1>
+              <p>Нам очень жаль, но запросы с вашего устройства похожи на автоматические.</p>
+              <form action="/showcaptcha" method="post">
+                <input type="submit" value="Я не робот">
+              </form>
+            </div>
+          </body>
+          </html>

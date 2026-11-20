@@ -1,0 +1,43 @@
+version: 1
+marketplace: ozon
+scenario: antibot
+interactions:
+  - recorded_at: "2026-11-20T00:00:00Z"
+    request:
+      method: GET
+      uri: https://ozon.ru/product/besprovodnye-naushniki-sony-wh-1000xm5-123456789/
+      headers:
+        accept:
+          - text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+        accept-language:
+          - ru-RU,ru;q=0.9,en;q=0.8
+        user-agent:
+          - Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1
+      body: null
+    response:
+      status:
+        code: 403
+        message: Forbidden
+      http_version: HTTP/1.1
+      headers:
+        content-type:
+          - text/html; charset=utf-8
+        cf-mitigated:
+          - challenge
+      body:
+        string: |
+          <!DOCTYPE html>
+          <html lang="ru">
+          <head>
+            <meta charset="utf-8">
+            <title>Доступ ограничен</title>
+            <meta name="description" content="Проверка браузера перед переходом на Ozon">
+          </head>
+          <body>
+            <div id="ozon-captcha" class="antibot-challenge">
+              <h1>Доступ ограничен</h1>
+              <p>Пожалуйста, подождите, идет проверка браузера. Подтвердите, что запросы отправляли вы, а не робот.</p>
+            </div>
+            <script>window._cf_chl_opt = {cvId: "2", cZone: "ozon.ru"};</script>
+          </body>
+          </html>

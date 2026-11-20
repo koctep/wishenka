@@ -1,0 +1,40 @@
+version: 1
+marketplace: avito
+scenario: antibot
+interactions:
+  - recorded_at: "2026-11-20T00:00:00Z"
+    request:
+      method: GET
+      uri: https://www.avito.ru/moskva/audio_i_video/igrovaya_konsol_playstation_5_slim_3456789012
+      headers:
+        accept:
+          - text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+        accept-language:
+          - ru-RU,ru;q=0.9,en;q=0.8
+        user-agent:
+          - Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1
+      body: null
+    response:
+      status:
+        code: 200
+        message: OK
+      http_version: HTTP/1.1
+      headers:
+        content-type:
+          - text/html; charset=utf-8
+      body:
+        string: |
+          <!DOCTYPE html>
+          <html lang="ru">
+          <head>
+            <meta charset="utf-8">
+            <title>Доступ ограничен: проблема с IP</title>
+            <meta name="description" content="Доступ временно ограничен. Попробуйте обновить страницу.">
+          </head>
+          <body>
+            <div class="firewall-container">
+              <h1 class="firewall-title">Доступ ограничен: проблема с IP</h1>
+              <p>Мы обнаружили подозрительную активность с вашего IP-адреса. Доступ временно ограничен.</p>
+            </div>
+          </body>
+          </html>

@@ -103,8 +103,8 @@ The `wishenka.items` package and its integration with `wishenka.wishlists` imple
    - Cleans store advertising noise and marketing slogans from titles using regex patterns (e.g. stripping `— купить в интернет-магазине Ozon`, `в наличии на маркетплейсе`).
    - Normalizes currency symbols (`₽`, `руб`, `₸`, `Br`, `$`, `€`, `£`, `¥`) to standard ISO 4217 uppercase codes.
 6. **Anti-Bot & Threat Graceful Fallback**:
-   - Zero-crash degradation on SSRF blocks, oversized payloads, anti-bot gates (Cloudflare Turnstile, Qrator, DDoS-GUARD, WAF signatures, HTTP 403 Forbidden, HTTP 429 Too Many Requests, HTTP 503 Service Unavailable), and network timeouts (4.0s total, 2.0s connect).
-   - Rather than returning 500 server errors, emits a valid fallback [`ItemPreviewDTO`](file:///home/src/wishenka/items/schemas.py#L11-L24) populated with the clean sanitized URL, recognized store name, and extracted residual title for seamless manual entry.
+   - Zero-crash degradation on SSRF blocks, oversized payloads, anti-bot gates (Cloudflare Turnstile, Qrator, DDoS-GUARD, WAF signatures, Russian marketplace anti-bot screens such as Yandex SmartCaptcha, Avito IP firewall, Ozon/Wildberries/Megamarket browser verification pages, HTTP 403 Forbidden, HTTP 429 Too Many Requests, HTTP 503 Service Unavailable), and network timeouts (4.0s total, 2.0s connect).
+   - Rather than returning 500 server errors, emits a valid fallback [`ItemPreviewDTO`](file:///home/src/wishenka/items/schemas.py#L11-L24) populated with the clean sanitized URL, recognized store name, and extracted residual title for seamless manual entry (never leaking anti-bot challenge `<title>` text such as `"Почти готово..."` or `"Доступ ограничен: проблема с IP"` into the wish title).
 7. **Piece Accounting & Multi-Quantity Invariants**:
    - Desired quantity boundary: $1 \le \text{desired} \le 1000$.
    - Occupied units are the sum of reservation `quantity` in `ACTIVE` or `PURCHASED`. The free remainder a promise may take is $\max(0, \text{requested} - \text{received} - \text{occupied})$.
@@ -128,12 +128,15 @@ The `wishenka.items` package and its integration with `wishenka.wishlists` imple
     - Restoring reactivates the item (`is_archived = False`) and safely appends it to the tail of the active display order (`display_order = max(active_orders) + 1`).
 11. **Telegram Mini App (TMA) HTMX Wish Item UI & BottomSheet Modals**:
     - Server-rendered Jinja2 + HTMX interface mounted at `/web/wishlists/{wishlist_id}` ([`wishenka/web/routes/items_ui.py`](file:///home/src/wishenka/web/routes/items_ui.py)) providing a fixed bottom Universal Quick Add Bar (`partials/item_quick_add.html`), debounced live URL preview card (`partials/item_preview_card.html`), Out-of-Band (`hx-swap-oob`) DOM updates, and a detailed creation/editing bottom-sheet modal (`partials/item_edit_modal.html`) with visual Reduction Lock enforcement, HTTP 409 quantity recovery, and HTTP 503 when the wish is busy.
+12. **VCR-Compatible Marketplace Web Cassette Testbench (`wishenka.items.cassettes`, `WISHENKA-97`)**:
+    - Offline-first recording, sanitization, and deterministic replay engine built on [`CassetteTransport(httpx.AsyncBaseTransport)`](file:///home/src/wishenka/items/cassettes.py#L498) and VCR-compatible YAML cassettes (`tests/cassettes/marketplaces/*.yaml`).
+    - Supports three execution modes via [`CassetteMode`](file:///home/src/wishenka/items/cassettes.py#L88) (`REPLAY`, `RECORD`, `REFRESH` or `WISHENKA_CASSETTE_MODE`), fail-closed offline verification raising [`CassetteMissError`](file:///home/src/wishenka/items/exceptions.py#L75) on unrecorded requests, automatic stripping of sensitive headers/cookies/query tokens (`sanitize_headers`, `sanitize_uri`, `sanitize_interaction`), and a CLI audit tool (`python -m wishenka.items.cassettes --verify` / `--mode record|refresh`).
 
 ---
 
 ## Architecture & Components
 
-The items subsystem consists of ten core architectural building blocks:
+The items subsystem consists of eleven core architectural building blocks:
 
 ### 1. [`UniversalInputClassifier`](file:///home/src/wishenka/items/classifier.py#L24-L105)
 
@@ -242,6 +245,7 @@ Dedicated network service responsible for pulling HTML bodies under strict secur
 - **Safe Fallback Wrapper `fetch_and_extract(url, client=None)`**:
   - High-level interface that calls `_fetch_html` and feeds the result to `HtmlMetadataExtractor.extract`.
   - Catches network, security, and parsing exceptions, logging a warning and returning a safe fallback [`ExtractedMetadata`](file:///home/src/wishenka/items/models.py#L34-L46) populated with `store_name=derive_store_name(url)`.
+  - Explicitly re-raises [`CassetteError`](file:///home/src/wishenka/items/exceptions.py#L71) (including [`CassetteMissError`](file:///home/src/wishenka/items/exceptions.py#L75)) before the generic exception handler so missing cassette interactions fail closed during offline test replay.
 
 #### Extraction execution and responsiveness
 
@@ -315,15 +319,17 @@ Asynchronous facade orchestrating input classification, URL cleaning, secure fet
   - For `EXPLICIT_URL`, `IMPLICIT_URL`, and `COMPOSITE_SHARE`, sanitizes the target link via `clean_url` and dispatches safe preview fetching.
 - **Anti-Bot Challenge & WAF Detection**:
   - Inspects upstream HTTP status codes: HTTP 403 Forbidden, HTTP 429 Too Many Requests, and HTTP 503 Service Unavailable.
-  - Scans HTML bodies against `CHALLENGE_SIGNATURES`:
+  - Scans HTML bodies (including `200 OK` responses) against [`CHALLENGE_SIGNATURES`](file:///home/src/wishenka/items/service.py#L31-L55):
     - Cloudflare challenges: `_cf_chl_opt`, `challenge-running`, `just a moment...`, `cf-mitigated`, `turnstile`, `checking your browser`.
     - Generic WAFs: `access denied`, `waf`, `ddos-guard`.
     - Qrator anti-bot shield: `qrator`, `qrator_jsid`, `qrator-js`.
-  - Intercepts challenges and emits `item_preview_anti_bot` and `anti_bot_challenge_detected` logs, returning an `ItemPreviewDTO` with `is_fallback=True` and `fallback_reason="anti_bot_challenge"`.
+    - Russian marketplace anti-bot and CAPTCHA screens (`WISHENKA-97`): `доступ ограничен`, `доступ временно ограничен`, `почти готово`, `проверка браузера`, `подтвердите, что запросы отправляли вы, а не робот`, `smartcaptcha`, `showcaptcha` (Yandex SmartCaptcha), `firewall-container` (Avito IP firewall), `antibot-challenge`, `ozon-captcha`, `fab_chlg` (Ozon / Wildberries / Megamarket).
+  - Intercepts challenges (both on `403`/`429`/`503` and `200 OK` HTML challenge pages) and emits `item_preview_anti_bot` and `anti_bot_challenge_detected` logs (including `status_code=200` for `200 OK` challenges), returning an `ItemPreviewDTO` with `is_fallback=True`, `fallback_reason="anti_bot_challenge"`, `store_name`, and `title=classification.residual_text` (preventing challenge page `<title>` text from leaking into wish titles).
 - **Comprehensive Exception Trap**:
   - SSRF violations: `fallback_reason="ssrf_blocked"`.
   - Payload overflow (>2 MB): `fallback_reason="response_too_large"`.
   - Upstream timeout (>4.0s): `fallback_reason="timeout"`.
+  - Web cassette testbench errors ([`CassetteError`](file:///home/src/wishenka/items/exceptions.py#L71) / [`CassetteMissError`](file:///home/src/wishenka/items/exceptions.py#L75)): explicitly re-raised (`except CassetteError: raise`) so unrecorded requests in offline `REPLAY` mode fail immediately instead of being masked as `fallback_reason="http_error"`.
   - Other network / HTTP errors: `fallback_reason="http_error"`.
 - Prevents unhandled 500 errors and ensures Telegram Mini App users always retain access to a functional manual wish entry form with extracted residual title and clean URL.
 
@@ -513,6 +519,42 @@ Provides server-rendered HTML views and HTMX partials mounted at `/web/wishlists
   - Enforces **Surprise Invariant & XSS Safety**: never exposes `item.reservations` or gifter identities (`user_id`, `username`, `first_name`), and relies on Jinja2 auto-escaping across all templates (`partials/item_card.html`, `partials/item_edit_modal.html`, `partials/item_preview_card.html`).
   - Supports **Safe Archiving & Restoration**: [`archive_item_ui`](file:///home/src/wishenka/web/routes/items_ui.py#L717) (`POST /web/wishlists/{wishlist_id}/items/{item_id}/archive`) archives the item while keeping reservations and emits `hx-swap-oob="delete"` for `#item-card-{item_id}` plus `hx-swap-oob="innerHTML"` for `#item-modal-container`. [`restore_item_ui`](file:///home/src/wishenka/web/routes/items_ui.py#L776) (`POST /web/wishlists/{wishlist_id}/items/{item_id}/restore`) restores the item and returns the rendered `partials/item_card.html`.
 
+### 11. VCR-Compatible Marketplace Web Cassette Testbench ([`wishenka.items.cassettes`](file:///home/src/wishenka/items/cassettes.py))
+
+Located in [`wishenka/items/cassettes.py`](file:///home/src/wishenka/items/cassettes.py) with versioned reference YAML cassettes in [`tests/cassettes/marketplaces/`](file:///home/src/tests/cassettes/marketplaces) and regression coverage in [`tests/test_marketplace_cassettes.py`](file:///home/src/tests/test_marketplace_cassettes.py) (`WISHENKA-97`).
+
+Provides an offline-first, VCR-compatible YAML HTTP recording, sanitization, and replay engine built on `httpx.AsyncBaseTransport` and `PyYAML` without external network access during regular test runs:
+
+- **Execution Modes ([`CassetteMode`](file:///home/src/wishenka/items/cassettes.py#L88), [`resolve_cassette_mode`](file:///home/src/wishenka/items/cassettes.py#L96))**:
+  - `CassetteMode.REPLAY` (`"replay"`, default): Strictly offline playback from the loaded YAML cassette. Pre-populates `_dns_cache` for recorded hosts with `SAFE_REPLAY_PUBLIC_IP = "93.184.216.34"` so `resolve_and_validate_host` completes offline without live `getaddrinfo` DNS lookups while preserving SSRF checks for forbidden IP literals. Any unrecorded `(method, normalized_uri)` request logs `cassette_miss` (`WARNING`) and raises [`CassetteMissError`](file:///home/src/wishenka/items/exceptions.py#L75).
+  - `CassetteMode.RECORD` (`"record"`): Replays existing interactions on hit; on miss, dispatches the request through `inner_transport` (defaulting to [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L500)), sanitizes the interaction, appends it to the cassette, and saves the YAML file.
+  - `CassetteMode.REFRESH` (`"refresh"`): Always fetches fresh responses through `inner_transport`, sanitizes request and response data, replaces matching interactions in the cassette, and saves the YAML file.
+  - Mode resolution checks the explicit `mode` parameter first and falls back to the `WISHENKA_CASSETTE_MODE` environment variable (defaulting to `"replay"`).
+- **Data Models & VCR YAML Schema**:
+  - [`CassetteRequest(method, uri, headers, body)`](file:///home/src/wishenka/items/cassettes.py#L175): Immutable dataclass (`frozen=True, slots=True`) representing a sanitized HTTP request.
+  - [`CassetteResponse(status_code, reason_phrase, headers, body, http_version)`](file:///home/src/wishenka/items/cassettes.py#L209): Immutable dataclass storing decoded response body (`body.string` in YAML), status code/message, and sanitized headers.
+  - [`CassetteInteraction(request, response, marketplace, scenario, recorded_at)`](file:///home/src/wishenka/items/cassettes.py#L261): Single request/response interaction pair.
+  - [`Cassette(version=1, marketplace, scenario, interactions)`](file:///home/src/wishenka/items/cassettes.py#L332): Loads (`Cassette.load(path)`), saves (`cassette.save(path)`), matches (`cassette.find_interaction(method, uri)`), and updates (`cassette.add_interaction(interaction, replace=...)`) YAML files.
+  - [`load_marketplace_cassette(marketplace, scenario, cassettes_dir=...)`](file:///home/src/wishenka/items/cassettes.py#L486): Loads `<marketplace>_<scenario>.yaml` from [`DEFAULT_CASSETTES_DIR`](file:///home/src/wishenka/items/cassettes.py#L29) (`tests/cassettes/marketplaces/`).
+- **Mandatory Header, Cookie, and URI Sanitization**:
+  - [`sanitize_headers(headers)`](file:///home/src/wishenka/items/cassettes.py#L116): Case-insensitively strips all headers in [`SENSITIVE_HEADER_NAMES`](file:///home/src/wishenka/items/cassettes.py#L35) (`authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `set-cookie2`, `x-api-key`, `x-auth-token`, `x-csrf-token`, `x-xsrf-token`, `cf-connecting-ip`, `x-forwarded-for`, `x-real-ip`, `x-client-ip`, `x-device-id`, `x-session-id`) and any header name containing [`SENSITIVE_HEADER_SUBSTRINGS`](file:///home/src/wishenka/items/cassettes.py#L55) (`cookie`, `token`, `secret`, `auth`, `session`, `api-key`, `apikey`).
+  - [`sanitize_uri(uri)`](file:///home/src/wishenka/items/cassettes.py#L142): Normalizes URLs via [`clean_url`](file:///home/src/wishenka/items/marketplaces.py#L29) (stripping `utm_*`, `from=share*`, `clid`, `targetUrl`, `promo`, etc.), removes `user:pass@` netloc credentials, and strips query parameters matching [`SENSITIVE_QUERY_KEYS`](file:///home/src/wishenka/items/cassettes.py#L65) (`token`, `access_token`, `refresh_token`, `id_token`, `api_key`, `apikey`, `session`, `session_id`, `sessionid`, `auth`, `auth_token`, `key`, `secret`, `password`, `passwd`, `signature`, `sig`) or containing sensitive substrings.
+  - [`sanitize_interaction(interaction)`](file:///home/src/wishenka/items/cassettes.py#L300): Applied automatically on `Cassette` initialization, `add_interaction`, `from_dict`, and `to_dict`/`save` so secrets can never be written to disk.
+- **Transport & Client Context Manager**:
+  - [`CassetteTransport`](file:///home/src/wishenka/items/cassettes.py#L498): Implements `httpx.AsyncBaseTransport.handle_async_request(request)`. Matches requests by `(method.upper(), sanitize_uri(uri))`, `clean_url(uri)`, or exact URI, and builds streaming-compatible `httpx.Response` objects (`content-length` recalculated for UTF-8 bytes while stripping `transfer-encoding` / `content-encoding`) so the full `ItemPreviewService.fetch_preview` $\rightarrow$ `UrlMetadataService._fetch_html` $\rightarrow$ `_BorrowedTransport` $\rightarrow$ `_stream_and_read` $\rightarrow$ `decode_html` $\rightarrow$ `HtmlMetadataExtractor.extract` pipeline executes without internal mocks.
+  - [`cassette_client(cassette_path, mode=..., inner_transport=..., marketplace=..., scenario=...)`](file:///home/src/wishenka/items/cassettes.py#L689): Async context manager yielding an `httpx.AsyncClient(transport=CassetteTransport(...), follow_redirects=True, trust_env=False)` ready to pass into `ItemPreviewService.fetch_preview(raw_input, client=client)`.
+- **Reference Marketplace Cassette Catalog (`tests/cassettes/marketplaces/`)**:
+  - Contains 10 sanitized reference YAML cassettes covering the top-5 Russian marketplaces across two scenarios (`product` and `antibot`):
+    - **Ozon**: `ozon_product.yaml` (`200 OK` JSON-LD `Product` + OpenGraph), `ozon_antibot.yaml` (`403 Forbidden` Cloudflare / «Доступ ограничен»).
+    - **Wildberries**: `wildberries_product.yaml` (`200 OK` JSON-LD `@graph` + `AggregateOffer`), `wildberries_antibot.yaml` (`403 Forbidden` Qrator / `qrator_jsid` / «Проверка браузера»).
+    - **Yandex Market**: `yandex_market_product.yaml` (`200 OK` OpenGraph + JSON-LD), `yandex_market_antibot.yaml` (`200 OK` Yandex SmartCaptcha `<title>Почти готово...</title>` / `smartcaptcha`).
+    - **Avito**: `avito_product.yaml` (`200 OK` Microdata + OpenGraph), `avito_antibot.yaml` (`200 OK` Avito IP firewall `<title>Доступ ограничен: проблема с IP</title>` / `firewall-container`).
+    - **Megamarket**: `megamarket_product.yaml` (`200 OK` JSON-LD `@graph` + `AggregateOffer`), `megamarket_antibot.yaml` (`503 Service Unavailable` DDoS-Guard / «Проверка браузера»).
+- **CLI Audit & Recording Utility (`python -m wishenka.items.cassettes`)**:
+  - `--verify` (or `--mode replay`): Verifies all `*.yaml` cassettes in `--cassettes-dir` offline through `ItemPreviewService.fetch_preview`, asserting that `product` cassettes resolve with `is_fallback=False` and `antibot` cassettes degrade gracefully with `is_fallback=True`.
+  - `--mode record|refresh --url <url> --output <path> [--marketplace <slug>] [--scenario <product|antibot>]`: Records or refreshes a single cassette through `ItemPreviewService.fetch_preview` with automatic sanitization.
+  - `--mode record|refresh [--cassettes-dir <dir>]`: Batch-refreshes all existing YAML cassettes in the target directory.
+
 ---
 
 ## Domain Exceptions & Hierarchy
@@ -523,6 +565,8 @@ Located in [`wishenka/items/exceptions.py`](file:///home/src/wishenka/items/exce
 WishlistError
   ├── ItemError
   │     ├── InvalidItemDataError
+  │     ├── CassetteError
+  │     │     └── CassetteMissError
   │     └── ItemParsingError
   │           ├── ResponseBodyTooLargeError
   │           └── SSRFError
@@ -548,6 +592,8 @@ WishlistError
 | --- | --- | --- | :---: | --- |
 | [`ItemError`](file:///home/src/wishenka/items/exceptions.py#L10) | `WishlistError` | None | `400` | Base exception for all item domain errors. |
 | [`InvalidItemDataError`](file:///home/src/wishenka/items/exceptions.py#L14) | `ItemError` | None | `400` | Validation failures in item payloads (e.g. quantity $< 1$ or $> 1000$). |
+| [`CassetteError`](file:///home/src/wishenka/items/exceptions.py#L71) | `ItemError` | None | N/A | Base exception for web cassette loading, structure, or mode errors; explicitly re-raised by `ItemPreviewService` and `UrlMetadataService`. |
+| [`CassetteMissError`](file:///home/src/wishenka/items/exceptions.py#L75) | `CassetteError` | `method`, `uri`, `cassette_path` | N/A | Requested `(method, sanitized_uri)` interaction is missing from the loaded cassette in offline `CassetteMode.REPLAY`. |
 | [`ItemParsingError`](file:///home/src/wishenka/items/exceptions.py#L18) | `ItemError` | None | `400` | Base exception for parsing, URL extraction, and network fetch limits. |
 | [`SSRFError`](file:///home/src/wishenka/items/exceptions.py#L22) | `ItemParsingError` | None | `400` | Base exception for SSRF blocks and URL security violations. |
 | [`SSRFBlockedError`](file:///home/src/wishenka/items/exceptions.py#L26) | `SSRFError` | `ip_address`, `host`, `reason` | `400` | Host or IP resolves to private, loopback, link-local, cloud metadata, or reserved range. |
@@ -578,6 +624,12 @@ WishlistError
 | [`ExtractedMetadata`](file:///home/src/wishenka/items/models.py#L34-L46) | `wishenka.items.models` | Raw parsed fields: `title`, `description`, `image_url`, `price`, `currency`, `store_name`, `store_icon_url`, `raw_html_title`. |
 | [`ItemPreviewDTO`](file:///home/src/wishenka/items/schemas.py#L11-L24) | `wishenka.items.schemas` | Pydantic DTO for client preview rendering, including `is_fallback` and `fallback_reason`. |
 | [`MarketplaceRule`](file:///home/src/wishenka/items/marketplaces.py#L83-L97) | `wishenka.items.marketplaces` | Runtime-checkable Protocol for marketplace URL cleaning and store resolution. |
+| [`CassetteMode`](file:///home/src/wishenka/items/cassettes.py#L88-L93) | `wishenka.items.cassettes` | `StrEnum` for web cassette execution mode: `replay` (default), `record`, `refresh`. |
+| [`CassetteRequest`](file:///home/src/wishenka/items/cassettes.py#L175-L205) | `wishenka.items.cassettes` | Frozen dataclass representing a sanitized HTTP request (`method`, `uri`, `headers`, `body`). |
+| [`CassetteResponse`](file:///home/src/wishenka/items/cassettes.py#L209-L257) | `wishenka.items.cassettes` | Frozen dataclass representing a sanitized HTTP response (`status_code`, `reason_phrase`, `headers`, `body`, `http_version`). |
+| [`CassetteInteraction`](file:///home/src/wishenka/items/cassettes.py#L261-L297) | `wishenka.items.cassettes` | Frozen dataclass pairing `CassetteRequest` and `CassetteResponse` with `marketplace`, `scenario`, and `recorded_at`. |
+| [`Cassette`](file:///home/src/wishenka/items/cassettes.py#L332-L483) | `wishenka.items.cassettes` | In-memory VCR-compatible YAML cassette container with `load`, `save`, `find_interaction`, and `add_interaction`. |
+| [`CassetteTransport`](file:///home/src/wishenka/items/cassettes.py#L498-L685) | `wishenka.items.cassettes` | `httpx.AsyncBaseTransport` implementing offline replay, fail-closed `CassetteMissError`, and sanitized recording/refresh. |
 | [`CreateItemDTO`](file:///home/src/wishenka/items/schemas.py#L26-L49) | `wishenka.items.schemas` | Pydantic DTO for creating items: non-whitespace title, $1 \le \text{quantity} \le 1000$, optional `recipient_user_id` and `recipient_name`. |
 | [`UpdateItemDTO`](file:///home/src/wishenka/items/schemas.py#L51-L74) | `wishenka.items.schemas` | Pydantic DTO for updating items: non-whitespace title, $1 \le \text{quantity} \le 1000$, optional recipient overrides. |
 | [`ReorderItemsDTO`](file:///home/src/wishenka/items/schemas.py#L76-L82) | `wishenka.items.schemas` | Pydantic DTO for atomic reordering containing `item_ids: list[int]`. |
@@ -1089,6 +1141,96 @@ async with httpx.AsyncClient(base_url="https://api.wishenka.app") as client:
     assert res.json()["is_archived"] is False
 ```
 
+### 9. Offline Replay, Recording, and CLI Audit with Marketplace Web Cassettes
+
+Use [`cassette_client`](file:///home/src/wishenka/items/cassettes.py#L689), [`CassetteMode`](file:///home/src/wishenka/items/cassettes.py#L88), [`load_marketplace_cassette`](file:///home/src/wishenka/items/cassettes.py#L486), and [`CassetteMissError`](file:///home/src/wishenka/items/exceptions.py#L75) to test the full `ItemPreviewService.fetch_preview` pipeline against recorded marketplace responses without opening external sockets:
+
+```python
+from pathlib import Path
+import pytest
+
+from wishenka.items.cassettes import (
+    DEFAULT_CASSETTES_DIR,
+    CassetteMode,
+    cassette_client,
+    load_marketplace_cassette,
+    sanitize_headers,
+    sanitize_uri,
+)
+from wishenka.items.exceptions import CassetteMissError
+from wishenka.items.service import ItemPreviewService
+
+service = ItemPreviewService()
+
+# 1. Offline REPLAY of a recorded product card (even when input contains tracking query params)
+ozon_cassette_path = DEFAULT_CASSETTES_DIR / "ozon_product.yaml"
+async with cassette_client(ozon_cassette_path, mode=CassetteMode.REPLAY) as client:
+    preview = await service.fetch_preview(
+        "Посмотри наушники https://ozon.ru/product/besprovodnye-naushniki-sony-wh-1000xm5-123456789/"
+        "?utm_source=telegram&from=share_ios",
+        client=client,
+    )
+assert preview.is_fallback is False
+assert preview.store_name == "Ozon"
+assert preview.price == 29990
+assert preview.currency == "RUB"
+
+# 2. Offline REPLAY of a 200 OK Russian anti-bot challenge page (e.g. Yandex SmartCaptcha)
+yandex_antibot_path = DEFAULT_CASSETTES_DIR / "yandex_market_antibot.yaml"
+yandex_cassette = load_marketplace_cassette("yandex_market", "antibot")
+target_url = yandex_cassette.interactions[0].request.uri
+
+async with cassette_client(yandex_antibot_path, mode=CassetteMode.REPLAY) as client:
+    bot_preview = await service.fetch_preview(target_url, client=client)
+assert bot_preview.is_fallback is True
+assert bot_preview.fallback_reason == "anti_bot_challenge"
+assert bot_preview.store_name == "Яндекс Маркет"
+assert bot_preview.title is None  # Challenge <title> "Почти готово..." never leaks
+
+# 3. Fail-closed CassetteMissError when requesting an unrecorded URL in REPLAY mode
+async with cassette_client(ozon_cassette_path, mode=CassetteMode.REPLAY) as client:
+    with pytest.raises(CassetteMissError) as exc_info:
+        await service.fetch_preview("https://ozon.ru/product/unrecorded-999/", client=client)
+assert exc_info.value.method == "GET"
+
+# 4. Header and URI sanitization helpers
+clean_hdrs = sanitize_headers(
+    {
+        "Accept": "text/html",
+        "Cookie": "session_id=secret",
+        "Authorization": "Bearer token",
+        "Set-Cookie": "uid=123",
+    }
+)
+assert "cookie" not in clean_hdrs
+assert "authorization" not in clean_hdrs
+assert "set-cookie" not in clean_hdrs
+assert clean_hdrs["accept"] == ["text/html"]
+
+clean_link = sanitize_uri(
+    "https://user:pass@ozon.ru/product/123/?utm_source=tg&access_token=secret&sku=42"
+)
+assert clean_link == "https://ozon.ru/product/123/?sku=42"
+```
+
+CLI commands for offline cassette verification and controlled recording/refresh:
+
+```bash
+# Verify all 10 reference marketplace cassettes offline (product + antibot for top-5 stores)
+python -m wishenka.items.cassettes --verify
+
+# Record or refresh a single marketplace cassette with automatic header/cookie/URI sanitization
+python -m wishenka.items.cassettes \
+  --mode refresh \
+  --url "https://ozon.ru/product/besprovodnye-naushniki-sony-wh-1000xm5-123456789/" \
+  --output tests/cassettes/marketplaces/ozon_product.yaml \
+  --marketplace ozon \
+  --scenario product
+
+# Refresh all existing YAML cassettes in tests/cassettes/marketplaces/
+python -m wishenka.items.cassettes --mode refresh
+```
+
 ---
 
 ## Configuration & Security Constants
@@ -1106,9 +1248,9 @@ Set on the wishlist engine in [`_configure_immediate_transactions`](file:///home
 
 ### Network & Security Settings
 
-Defined in [`wishenka/items/ssrf.py`](file:///home/src/wishenka/items/ssrf.py), [`wishenka/items/fetcher.py`](file:///home/src/wishenka/items/fetcher.py), and [`wishenka/items/marketplaces.py`](file:///home/src/wishenka/items/marketplaces.py):
+Defined in [`wishenka/items/ssrf.py`](file:///home/src/wishenka/items/ssrf.py), [`wishenka/items/fetcher.py`](file:///home/src/wishenka/items/fetcher.py), [`wishenka/items/marketplaces.py`](file:///home/src/wishenka/items/marketplaces.py), [`wishenka/items/service.py`](file:///home/src/wishenka/items/service.py), and [`wishenka/items/cassettes.py`](file:///home/src/wishenka/items/cassettes.py):
 
-| Constant | Value | Description |
+| Constant / Env Var | Value | Description |
 | --- | --- | --- |
 | `MAX_RESPONSE_BYTES` | `2 * 1024 * 1024` (2 MB) | Maximum permitted response size before abortion. |
 | `ALLOWED_SCHEMES` | `frozenset({"http", "https"})` | Whitelisted URL schemes. |
@@ -1120,6 +1262,12 @@ Defined in [`wishenka/items/ssrf.py`](file:///home/src/wishenka/items/ssrf.py), 
 | Preview connection pool | 20 connections, 10 keep-alive, 5 seconds idle expiry | Lifespan-owned outbound transport; per application instance. |
 | `TRACKING_QUERY_PREFIXES` | `("utm_",)` | Prefixes stripped from URL queries. |
 | `TRACKING_QUERY_KEYS` | Set of 14 ad click / affiliate keys | Query keys stripped (`clid`, `targeturl`, `src`, `promo`, `track`, `ref`, `fbclid`, `gclid`, `yclid`, etc.). |
+| `CHALLENGE_SIGNATURES` | List of 23 anti-bot / WAF markers | Substrings scanned case-insensitively in HTML responses (Cloudflare, Qrator, DDoS-Guard, Yandex SmartCaptcha, Avito IP firewall, Ozon/WB/Megamarket challenges). |
+| `WISHENKA_CASSETTE_MODE` | `"replay"` (default), `"record"`, `"refresh"` | Environment variable controlling `resolve_cassette_mode` when no explicit `mode` argument is supplied. |
+| `DEFAULT_CASSETTES_DIR` | `tests/cassettes/marketplaces` | Default directory containing versioned marketplace YAML cassettes. |
+| `SAFE_REPLAY_PUBLIC_IP` | `"93.184.216.34"` | Public IP seeded into `_dns_cache` for recorded cassette hosts during offline `REPLAY`. |
+| `SENSITIVE_HEADER_NAMES` / `SENSITIVE_HEADER_SUBSTRINGS` | Set of 16 names + 7 substrings | Headers stripped by `sanitize_headers` before persisting cassettes (`Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, `X-Csrf-Token`, client IP headers, etc.). |
+| `SENSITIVE_QUERY_KEYS` | Set of 18 query parameter names | Query keys stripped by `sanitize_uri` (`token`, `access_token`, `api_key`, `session_id`, `password`, `signature`, etc.). |
 
 ### Forbidden Network CIDRs (`FORBIDDEN_NETWORKS`)
 
@@ -1187,8 +1335,14 @@ All events are logged via structured extra dictionaries under logger names `"wis
 | `metadata_extraction_started` | `DEBUG` | `url_domain`, `parser_stage="start"` | Commenced HTML parsing and metadata extraction. |
 | `metadata_stage_resolved` | `DEBUG` | `url_domain`, `parser_stage` (`json_ld`, `opengraph`) | Intermediate parsing stage successfully resolved fields. |
 | `metadata_extraction_completed` | `INFO` | `url_domain`, `duration_ms`, `has_title`, `has_price`, `has_image` | HTML extraction completed; fields resolved. |
-| `item_preview_anti_bot` | `WARNING` | `status_code`, `url_domain`, `duration_ms`, `fallback_reason` | Intercepted anti-bot gate (403, 429, 503, Turnstile, Qrator). |
-| `anti_bot_challenge_detected` | `INFO` | `status_code`, `url_domain`, `duration_ms`, `fallback_reason` | Telemetry signal for anti-bot degradation monitoring. |
+| `item_preview_anti_bot` | `WARNING` | `status_code`, `url_domain`, `input_type`, `duration_ms`, `fallback_reason` | Intercepted anti-bot gate (`403`, `429`, `503`, or `200 OK` HTML matching `CHALLENGE_SIGNATURES` including Russian marketplace anti-bot screens). |
+| `anti_bot_challenge_detected` | `INFO` | `status_code`, `url_domain`, `input_type`, `duration_ms`, `fallback_reason` | Telemetry signal for anti-bot degradation monitoring (`status_code=200` on `200 OK` HTML challenges). |
+| `cassette_loaded` | `DEBUG` | `cassette_path`, `marketplace`, `scenario`, `interactions_count` | YAML cassette file loaded and parsed from disk. |
+| `cassette_saved` | `DEBUG` | `cassette_path`, `marketplace`, `scenario`, `interactions_count` | Sanitized YAML cassette persisted to disk. |
+| `cassette_replay_hit` | `DEBUG` | `method`, `uri`, `status_code`, `mode`, `marketplace`, `scenario` | Incoming request matched a recorded interaction in `REPLAY` or `RECORD` mode. |
+| `cassette_miss` | `WARNING` | `method`, `uri`, `cassette_path`, `marketplace`, `scenario` | Unrecorded request encountered in offline `REPLAY` mode before raising `CassetteMissError` (`uri` is sanitized via `sanitize_uri`). |
+| `cassette_recorded` | `INFO` | `method`, `uri`, `status_code`, `mode`, `marketplace`, `scenario`, `cassette_path` | New interaction fetched, sanitized, and recorded in `RECORD` mode. |
+| `cassette_refreshed` | `INFO` | `method`, `uri`, `status_code`, `mode`, `marketplace`, `scenario`, `cassette_path` | Existing interaction re-fetched, sanitized, and overwritten in `REFRESH` mode. |
 | `item_preview_plain_text` | `DEBUG` | `input_type`, `duration_ms` | Non-URL text input processed without network calls. |
 | `preview_cache_lookup` | `DEBUG` | `cache_outcome` (`hit`, `miss`) | Cache lookup without logging its URL or key. |
 | `item_preview_success` | `INFO` | `url_domain`, `duration_ms`, `input_type`, `is_fallback=False` | Successful link preview retrieval (HTTP 200). |
@@ -1275,10 +1429,15 @@ In accordance with security requirements:
 - **Cause**: The target URL serves a response body larger than 2,097,152 bytes (e.g. a high-resolution media file, firmware archive, or bloated uncompressed HTML document).
 - **Resolution**: Check the server logs for `event="payload_size_violation"`. The log indicates whether it was rejected early via `content_length_exceeded` or stopped during streaming (`stream_chunk_overflow`). The preview degrades gracefully to manual entry, protecting the worker from OOM failures.
 
-### 4. Anti-Bot Challenge Fallbacks (Cloudflare / Qrator / WAF / Turnstile / 403 / 503)
+### 4. Anti-Bot Challenge Fallbacks (Cloudflare / Qrator / WAF / Turnstile / SmartCaptcha / Avito Firewall / 200 OK & 403 / 503)
 - **Symptom**: `ItemPreviewDTO` returns with `is_fallback=True` and `fallback_reason="anti_bot_challenge"`.
-- **Cause**: The remote store (e.g. Ozon, Wildberries, Avito) uses anti-scraping mitigation returning HTTP 403, 429, 503, or JavaScript challenge pages (`_cf_chl_opt`, `turnstile`, `qrator`, `ddos-guard`).
-- **Resolution**: This is the expected design behavior. The frontend receives the fallback preview populated with the sanitized URL, the recognized store name, and the user's residual text, prompting the user to confirm or edit title and price manually. Dedicated official store APIs or headless rendering sidecars can be attached via [WISHENKA-55](https://pypost.atlassian.net/browse/WISHENKA-55).
+- **Cause**: The remote store (e.g. Ozon, Wildberries, Yandex Market, Avito, Megamarket) uses anti-scraping mitigation returning HTTP 403, 429, 503, or `200 OK` HTML/JavaScript challenge pages (`_cf_chl_opt`, `turnstile`, `qrator`, `ddos-guard`, `smartcaptcha`, `showcaptcha`, `firewall-container`, `доступ ограничен`, `почти готово`, `проверка браузера`).
+- **Resolution**: This is the expected design behavior. The frontend receives the fallback preview populated with the sanitized URL, the recognized store name, and the user's residual text (never leaking challenge page titles like `"Почти готово..."` or `"Доступ ограничен: проблема с IP"`), prompting the user to confirm or edit title and price manually. Dedicated official store APIs or headless rendering sidecars can be attached via [WISHENKA-55](https://pypost.atlassian.net/browse/WISHENKA-55).
+
+### Cassette Miss During Offline Replay (`CassetteMissError`)
+- **Symptom**: Running marketplace cassette tests (`pytest tests/test_marketplace_cassettes.py` or `python -m wishenka.items.cassettes --verify`) raises `CassetteMissError: No recorded interaction for GET <uri> in cassette <path>` and logs `event="cassette_miss"`.
+- **Cause**: The request URL (after `sanitize_uri` / `clean_url` normalization) or HTTP method does not match any `request.uri` recorded in the loaded YAML cassette, or URL normalization rules in `clean_url` changed. In `CassetteMode.REPLAY`, `CassetteTransport` is fail-closed and `ItemPreviewService.fetch_preview` / `UrlMetadataService.fetch_and_extract` explicitly re-raise `CassetteError` rather than converting it to `fallback_reason="http_error"`.
+- **Resolution**: Inspect the `uri` and `cassette_path` attributes on `CassetteMissError` (or the `cassette_miss` warning log). Verify that new query parameters were either added to `TRACKING_QUERY_KEYS` / `SENSITIVE_QUERY_KEYS` if they are tracking/secret tokens, or refresh the cassette intentionally in an environment with network access using `python -m wishenka.items.cassettes --mode refresh --url "<url>" --output <cassette.yaml>` and inspect `git diff` to confirm no cookies or sensitive headers were persisted.
 
 ### 5. Tracking Parameters and Affiliate Link Cleaning
 - **Symptom**: User pastes a link containing heavy tracking tokens (`utm_source`, `from=share_android`, `clid`), and the resulting item preview URL has those removed.
