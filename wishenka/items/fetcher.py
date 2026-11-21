@@ -3,17 +3,21 @@
 import asyncio
 import contextlib
 import logging
+import weakref
+from collections.abc import Mapping
 from contextvars import ContextVar
+from dataclasses import dataclass
 from http.cookiejar import CookieJar, DefaultCookiePolicy
+from types import MappingProxyType
 from typing import Any
-from unittest.mock import AsyncMock, sentinel
+from uuid import uuid4
 
-import httpcore
 import httpx
 
 from wishenka.items.encoding import decode_html
 from wishenka.items.exceptions import (
     CassetteError,
+    CassetteMissError,
     InvalidUrlSchemeError,
     ResponseBodyTooLargeError,
 )
@@ -80,39 +84,159 @@ async def _validate_request(request: httpx.Request) -> None:
     await validate_url(str(request.url))
 
 
-class _BorrowedTransport(httpx.AsyncBaseTransport):
-    """Use the injected client's direct transport without sharing request state or ownership."""
+class _ReplayTransport(httpx.AsyncBaseTransport):
+    """Replay immutable response fixtures without a network delegate."""
 
-    def __init__(self, client: httpx.AsyncClient) -> None:
-        self.client = client
+    def __init__(
+        self,
+        responses: Mapping[str, tuple[int, Mapping[str, str], bytes]],
+        marketplace: str | None = None,
+        scenario: str | None = None,
+    ) -> None:
+        self._marketplace = marketplace
+        self._scenario = scenario
+        self._responses = MappingProxyType(
+            {
+                url: (status, dict(headers), bytes(body))
+                for url, (status, headers, body) in responses.items()
+            }
+        )
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        transport = self.client._transport_for_url(request.url)
-        pool = getattr(transport, "_pool", None)
-        if isinstance(pool, (httpcore.AsyncHTTPProxy, httpcore.AsyncSOCKSProxy)):
-            # Ignore proxy mounts (including environment configuration) while preserving
-            # explicit direct transports mounted by the client owner.
-            transport = self.client._transport
-            pool = getattr(transport, "_pool", None)
-        if isinstance(pool, (httpcore.AsyncHTTPProxy, httpcore.AsyncSOCKSProxy)):
-            from wishenka.items.exceptions import SSRFBlockedError
+        item = self._responses.get(str(request.url))
+        if item is None:
+            from wishenka.items.cassettes import sanitize_uri
 
-            raise SSRFBlockedError("Proxy transports are forbidden", reason="proxy")
-        # A direct transport still has the pre-existing DNS rebinding limitation.
-        return await transport.handle_async_request(request)
+            target = sanitize_uri(str(request.url))
+            item = next(
+                (
+                    response
+                    for url, response in self._responses.items()
+                    if sanitize_uri(url) == target
+                ),
+                None,
+            )
+        if item is None:
+            from wishenka.items.cassettes import sanitize_uri
+
+            uri = sanitize_uri(str(request.url))
+            logger.warning(
+                "Cassette miss in offline replay for %s %s",
+                request.method,
+                uri,
+                extra={"event": "cassette_miss", "method": request.method, "uri": uri},
+            )
+            raise CassetteMissError(method=request.method, uri=uri)
+        status, headers, body = item
+        logger.debug(
+            "Cassette replay hit for %s (status=%d)",
+            request.method,
+            status,
+            extra={
+                "event": "cassette_replay_hit",
+                "method": request.method,
+                "status_code": status,
+                "mode": "replay",
+                "marketplace": self._marketplace,
+                "scenario": self._scenario,
+            },
+        )
+        return httpx.Response(status, headers=headers, content=body, request=request)
 
 
-def _is_mock_get_configured(client: httpx.AsyncClient) -> bool:
-    """Detect if client is an AsyncMock with specifically configured get method."""
-    if not isinstance(client, AsyncMock):
-        return False
-    get_mock = getattr(client, "get", None)
-    if get_mock is None or not isinstance(get_mock, AsyncMock):
-        return False
-    has_side_effect = getattr(get_mock, "_mock_side_effect", None) is not None
-    return_val = getattr(get_mock, "_mock_return_value", sentinel.DEFAULT)
-    has_return_value = return_val is not sentinel.DEFAULT and return_val is not None
-    return has_side_effect or has_return_value
+class _DenyTransport(httpx.AsyncBaseTransport):
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        from wishenka.items.exceptions import SSRFBlockedError
+
+        raise SSRFBlockedError("Preview route denied", reason="route_denied")
+
+
+@dataclass(frozen=True)
+class PreviewRoute:
+    """A route created by a controlled factory, not an arbitrary HTTPX transport."""
+
+    transport: httpx.AsyncBaseTransport
+    _token: object
+
+
+_ROUTE_TOKEN = object()
+_ISSUED_ROUTES: dict[int, tuple[weakref.ReferenceType[PreviewRoute], httpx.AsyncBaseTransport]] = {}
+
+
+def _issue_route(transport: httpx.AsyncBaseTransport) -> PreviewRoute:
+    """Bind a factory-created route to its original transport by identity."""
+    route = PreviewRoute(transport, _ROUTE_TOKEN)
+    key = id(route)
+    _ISSUED_ROUTES[key] = (
+        weakref.ref(route, lambda _ref: _ISSUED_ROUTES.pop(key, None)),
+        transport,
+    )
+    return route
+
+
+def offline_replay_route(
+    responses: Mapping[str, tuple[int, Mapping[str, str], bytes]],
+    *,
+    marketplace: str | None = None,
+    scenario: str | None = None,
+) -> PreviewRoute:
+    """Construct a fixture-only route that never performs network I/O."""
+    return _issue_route(_ReplayTransport(responses, marketplace, scenario))
+
+
+def deny_route() -> PreviewRoute:
+    """Construct an explicit fail-closed route."""
+    return _issue_route(_DenyTransport())
+
+
+def safe_direct_route(*, limits: httpx.Limits | None = None) -> PreviewRoute:
+    """Construct an owned pinned-IP direct route without proxy configuration."""
+    return _issue_route(SSRFSafeTransport(**({"limits": limits} if limits is not None else {})))
+
+
+@dataclass(frozen=True, init=False)
+class PreviewTransportConfig:
+    """Immutable route snapshot; route transports remain owned by their creator."""
+
+    default: PreviewRoute
+    mounts: Mapping[str, PreviewRoute]
+    cache_identity: str
+
+    def __init__(self, default: PreviewRoute, mounts: Mapping[str, PreviewRoute]) -> None:
+        snapshot = dict(mounts)
+        for pattern, route in snapshot.items():
+            httpx.URL(pattern)
+            if not pattern or not isinstance(pattern, str):
+                raise ValueError("Invalid preview mount pattern")
+            self._validate_route(route)
+        self._validate_route(default)
+        object.__setattr__(self, "cache_identity", uuid4().hex)
+        object.__setattr__(self, "default", default)
+        object.__setattr__(self, "mounts", MappingProxyType(snapshot))
+
+    @staticmethod
+    def _validate_route(route: PreviewRoute) -> None:
+        issued = _ISSUED_ROUTES.get(id(route))
+        if (
+            type(route) is not PreviewRoute
+            or route._token is not _ROUTE_TOKEN
+            or issued is None
+            or issued[0]() is not route
+            or issued[1] is not route.transport
+            or type(route.transport) not in (SSRFSafeTransport, _ReplayTransport, _DenyTransport)
+        ):
+            raise ValueError("Unapproved preview route")
+
+
+class _BorrowedTransport(httpx.AsyncBaseTransport):
+    """Delegate through the public transport interface without taking ownership."""
+
+    def __init__(self, route: PreviewRoute) -> None:
+        self.route = route
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        PreviewTransportConfig._validate_route(self.route)
+        return await self.route.transport.handle_async_request(request)
 
 
 class UrlMetadataService:
@@ -130,6 +254,7 @@ class UrlMetadataService:
         self,
         url: str,
         client: httpx.AsyncClient | None = None,
+        routes: PreviewTransportConfig | None = None,
     ) -> tuple[str, str]:
         """Fetch HTML document body up to max_bytes with SSRF protection.
 
@@ -165,119 +290,34 @@ class UrlMetadataService:
                 scheme=scheme,
             )
 
+        if client is not None:
+            from wishenka.items.exceptions import SSRFBlockedError
+
+            raise SSRFBlockedError("Opaque preview client is unsupported", reason="unknown_route")
+
         host = parsed.host
         port = parsed.port or (443 if scheme == "https" else 80)
         await resolve_and_validate_host(host, port)
 
-        if client is None:
-            transport = SSRFSafeTransport()
+        owned_route = safe_direct_route() if routes is None else None
+        if routes is None:
+            assert owned_route is not None
+            selected = PreviewTransportConfig(default=owned_route, mounts={})
+        else:
+            selected = routes
+        try:
             async with httpx.AsyncClient(
-                transport=transport,
+                transport=_BorrowedTransport(selected.default),
+                mounts={key: _BorrowedTransport(route) for key, route in selected.mounts.items()},
                 timeout=self.timeout,
-                follow_redirects=True,
                 cookies=CookieJar(policy=RejectCookies()),
+                event_hooks={"request": [_validate_request]},
                 trust_env=False,
-            ) as local_client:
-                if isinstance(httpx.AsyncClient.get, AsyncMock):
-                    return await self._fetch_via_get(local_client, url)
-
-                return await self._stream_and_read(local_client, url)
-
-        # Custom or injected client
-        if _is_mock_get_configured(client):
-            return await self._fetch_via_get(client, url)
-
-        if isinstance(client, AsyncMock):
-            return await self._stream_and_read(client, url)
-
-        if getattr(client, "_wishenka_safe_transport", False):
-            return await self._stream_and_read(client, url)
-
-        # Keep credentials, cookies, hooks and redirect state separate from the owner.
-        # The wrapper does not close the borrowed client's connection pool.
-        async with httpx.AsyncClient(
-            transport=_BorrowedTransport(client),
-            timeout=self.timeout,
-            cookies=CookieJar(policy=RejectCookies()),
-            event_hooks={"request": [_validate_request]},
-            trust_env=False,
-        ) as preview_client:
-            return await self._stream_and_read(preview_client, url)
-
-    async def _fetch_via_get(
-        self,
-        client: httpx.AsyncClient,
-        url: str,
-    ) -> tuple[str, str]:
-        """Fetch response via client.get for legacy mock compatibility."""
-        response = await client.get(
-            url,
-            headers=DEFAULT_HEADERS,
-            follow_redirects=True,
-        )
-        cl_header = response.headers.get("Content-Length")
-        if cl_header is not None:
-            with contextlib.suppress(ValueError, TypeError):
-                cl_val = int(cl_header)
-                if cl_val > self.max_bytes:
-                    logger.warning(
-                        "Payload size violation: "
-                        "Content-Length %d exceeds limit of %d bytes for %s",
-                        cl_val,
-                        self.max_bytes,
-                        url,
-                        extra={
-                            "event": "payload_size_violation",
-                            "url": url,
-                            "content_length": cl_val,
-                            "max_allowed": self.max_bytes,
-                            "reason": "content_length_exceeded",
-                        },
-                    )
-                    raise ResponseBodyTooLargeError(
-                        f"Content-Length {cl_header} exceeds limit of {self.max_bytes} bytes",
-                        content_length=cl_val,
-                        max_allowed=self.max_bytes,
-                    )
-
-        if (
-            hasattr(response, "content")
-            and isinstance(response.content, bytes)
-            and len(response.content) > self.max_bytes
-        ):
-            body_len = len(response.content)
-            logger.warning(
-                "Payload size violation: body %d bytes exceeds limit of %d bytes for %s",
-                body_len,
-                self.max_bytes,
-                url,
-                extra={
-                    "event": "payload_size_violation",
-                    "url": url,
-                    "content_length": body_len,
-                    "max_allowed": self.max_bytes,
-                    "reason": "response_body_exceeded",
-                },
-            )
-            raise ResponseBodyTooLargeError(
-                f"Response body exceeded limit of {self.max_bytes} bytes",
-                content_length=body_len,
-                max_allowed=self.max_bytes,
-            )
-
-        if response.status_code >= 400:
-            raise httpx.HTTPStatusError(
-                f"HTTP error {response.status_code} for url {response.url}",
-                request=response.request,
-                response=response,
-            )
-        content = response.content
-        html = (
-            decode_html(content, response.headers.get("content-type", ""))
-            if isinstance(content, bytes)
-            else response.text
-        )
-        return html, str(response.url) if response.url else url
+            ) as preview_client:
+                return await self._stream_and_read(preview_client, url)
+        finally:
+            if owned_route is not None:
+                await owned_route.transport.aclose()
 
     async def _stream_and_read(
         self,
@@ -345,7 +385,19 @@ class UrlMetadataService:
             raw_bytes = b"".join(chunks)
 
             if response.status_code >= 400:
-                response._content = raw_bytes
+                # aiter_bytes() has already decoded content encodings. Retaining those
+                # headers would cause HTTPX to decode the reconstructed body again.
+                headers = httpx.Headers(response.headers)
+                headers.pop("content-encoding", None)
+                headers.pop("content-length", None)
+                headers.pop("transfer-encoding", None)
+                response = httpx.Response(
+                    response.status_code,
+                    headers=headers,
+                    content=raw_bytes,
+                    request=response.request,
+                    history=response.history,
+                )
                 raise httpx.HTTPStatusError(
                     f"HTTP error {response.status_code} for url {response.url}",
                     request=response.request,
@@ -380,10 +432,12 @@ class UrlMetadataService:
         self,
         url: str,
         client: httpx.AsyncClient | None = None,
+        *,
+        routes: PreviewTransportConfig | None = None,
     ) -> ExtractedMetadata:
         """Fetch HTML document body and extract rich metadata, falling back safely on errors."""
         try:
-            html_text, final_url = await self._fetch_html(url, client=client)
+            html_text, final_url = await self._fetch_html(url, client=client, routes=routes)
             return await asyncio.to_thread(
                 HtmlMetadataExtractor.extract, html_text, base_url=final_url
             )

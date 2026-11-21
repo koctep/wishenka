@@ -439,22 +439,17 @@ def test_residual_text_is_not_shared_between_callers(
 def test_lifespan_closes_single_outbound_client(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The application owns and closes exactly one outbound client at shutdown."""
-    created: list[httpx.AsyncClient] = []
-    closed: list[httpx.AsyncClient] = []
-    original_init = httpx.AsyncClient.__init__
-    original_close = httpx.AsyncClient.aclose
+    """The application owns and closes its direct transport exactly once."""
+    from wishenka.items.ssrf import SSRFSafeTransport
 
-    def init(client: httpx.AsyncClient, *args: object, **kwargs: object) -> None:
-        original_init(client, *args, **kwargs)  # type: ignore[arg-type]
-        created.append(client)
+    closed: list[SSRFSafeTransport] = []
+    original_close = SSRFSafeTransport.aclose
 
-    async def close(client: httpx.AsyncClient) -> None:
-        closed.append(client)
-        await original_close(client)
+    async def close(transport: SSRFSafeTransport) -> None:
+        closed.append(transport)
+        await original_close(transport)
 
-    monkeypatch.setattr(httpx.AsyncClient, "__init__", init)
-    monkeypatch.setattr(httpx.AsyncClient, "aclose", close)
+    monkeypatch.setattr(SSRFSafeTransport, "aclose", close)
     app = create_app(
         Settings(
             database_url=f"sqlite+aiosqlite:///{tmp_path / 'lifecycle.db'}",
@@ -463,23 +458,24 @@ def test_lifespan_closes_single_outbound_client(
         )
     )
     with TestClient(app):
-        assert len(created) == 1
+        route = app.state.item_preview_service.routes.default
         assert not closed
-    assert closed == created
-    assert created[0].is_closed
+    assert closed == [route.transport]
 
 
 def test_lifespan_closes_outbound_client_on_exception(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    created: list[httpx.AsyncClient] = []
-    original_init = httpx.AsyncClient.__init__
+    from wishenka.items.ssrf import SSRFSafeTransport
 
-    def init(client: httpx.AsyncClient, *args: object, **kwargs: object) -> None:
-        original_init(client, *args, **kwargs)  # type: ignore[arg-type]
-        created.append(client)
+    closed: list[SSRFSafeTransport] = []
+    original_close = SSRFSafeTransport.aclose
 
-    monkeypatch.setattr(httpx.AsyncClient, "__init__", init)
+    async def close(transport: SSRFSafeTransport) -> None:
+        closed.append(transport)
+        await original_close(transport)
+
+    monkeypatch.setattr(SSRFSafeTransport, "aclose", close)
     app = create_app(
         Settings(
             database_url=f"sqlite+aiosqlite:///{tmp_path / 'exception.db'}",
@@ -488,48 +484,54 @@ def test_lifespan_closes_outbound_client_on_exception(
         )
     )
     with pytest.raises(RuntimeError, match="test failure"), TestClient(app):
+        route = app.state.item_preview_service.routes.default
         raise RuntimeError("test failure")
-    assert len(created) == 1
-    assert created[0].is_closed
+    assert closed == [route.transport]
 
 
 def test_application_instances_do_not_share_resources(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    created: list[httpx.AsyncClient] = []
-    original_init = httpx.AsyncClient.__init__
+    from wishenka.items.ssrf import SSRFSafeTransport
 
-    def init(client: httpx.AsyncClient, *args: object, **kwargs: object) -> None:
-        original_init(client, *args, **kwargs)  # type: ignore[arg-type]
-        created.append(client)
+    closed: list[SSRFSafeTransport] = []
+    original_close = SSRFSafeTransport.aclose
 
-    monkeypatch.setattr(httpx.AsyncClient, "__init__", init)
+    async def close(transport: SSRFSafeTransport) -> None:
+        closed.append(transport)
+        await original_close(transport)
+
+    monkeypatch.setattr(SSRFSafeTransport, "aclose", close)
     settings = Settings(
         database_url=f"sqlite+aiosqlite:///{tmp_path / 'instances.db'}",
         secret_key="preview-resource-test-secret",
         background_cleanup_enabled=False,
     )
-    with TestClient(create_app(settings)), TestClient(create_app(settings)):
-        assert len(created) == 2
-        assert created[0] is not created[1]
-        assert all(not client.is_closed for client in created)
-    assert all(client.is_closed for client in created)
+    app1, app2 = create_app(settings), create_app(settings)
+    with TestClient(app1), TestClient(app2):
+        first = app1.state.item_preview_service.routes.default.transport
+        second = app2.state.item_preview_service.routes.default.transport
+        assert first is not second
+        assert not closed
+    assert len(closed) == 2 and set(closed) == {first, second}
 
 
 def test_failed_startup_closes_any_created_outbound_client(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    created: list[httpx.AsyncClient] = []
-    original_init = httpx.AsyncClient.__init__
+    from wishenka.items.ssrf import SSRFSafeTransport
 
-    def init(client: httpx.AsyncClient, *args: object, **kwargs: object) -> None:
-        original_init(client, *args, **kwargs)  # type: ignore[arg-type]
-        created.append(client)
+    closed: list[SSRFSafeTransport] = []
+    original_close = SSRFSafeTransport.aclose
+
+    async def close(transport: SSRFSafeTransport) -> None:
+        closed.append(transport)
+        await original_close(transport)
 
     async def fail_startup() -> None:
         raise RuntimeError("startup failed")
 
-    monkeypatch.setattr(httpx.AsyncClient, "__init__", init)
+    monkeypatch.setattr(SSRFSafeTransport, "aclose", close)
     app = create_app(
         Settings(
             database_url=f"sqlite+aiosqlite:///{tmp_path / 'startup.db'}",
@@ -540,8 +542,37 @@ def test_failed_startup_closes_any_created_outbound_client(
     monkeypatch.setattr(app.state.wishlist_store, "initialize", fail_startup)
     with pytest.raises(RuntimeError, match="startup failed"), TestClient(app):
         pass
-    assert len(created) == 1
-    assert all(client.is_closed for client in created)
+    assert len(closed) == 1
+
+
+def test_cache_construction_failure_closes_owned_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failure immediately after transport creation still releases that transport."""
+    from wishenka.items.ssrf import SSRFSafeTransport
+
+    closed: list[SSRFSafeTransport] = []
+    original_close = SSRFSafeTransport.aclose
+
+    async def close(transport: SSRFSafeTransport) -> None:
+        closed.append(transport)
+        await original_close(transport)
+
+    def fail_cache() -> None:
+        raise RuntimeError("cache initialization failed")
+
+    monkeypatch.setattr(SSRFSafeTransport, "aclose", close)
+    monkeypatch.setattr("wishenka.web.app.PreviewCache", fail_cache)
+    app = create_app(
+        Settings(
+            database_url=f"sqlite+aiosqlite:///{tmp_path / 'startup-cache.db'}",
+            secret_key="preview-resource-test-secret",
+            background_cleanup_enabled=False,
+        )
+    )
+    with pytest.raises(RuntimeError, match="cache initialization failed"), TestClient(app):
+        pass
+    assert len(closed) == 1
 
 
 @pytest.mark.parametrize("failure", ["http", "timeout", "oversized", "challenge"])
@@ -756,7 +787,9 @@ def test_cache_honors_fresh_origin_dates(monkeypatch: pytest.MonkeyPatch) -> Non
 async def test_injected_client_remains_unchanged_after_preview(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Preview requests neither use nor alter the caller's credentials and cookies."""
+    """An ambiguous client and routes fail closed; route-only calls remain supported."""
+    from wishenka.items.fetcher import PreviewTransportConfig, offline_replay_route
+
     requests: list[httpx.Request] = []
 
     async def resolve(host: str, port: int = 80) -> list[str]:
@@ -764,61 +797,53 @@ async def test_injected_client_remains_unchanged_after_preview(
 
     def respond(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return httpx.Response(
-            200,
-            headers={"Set-Cookie": "preview=secret; Path=/"},
-            text="<html><title>Product</title></html>",
-        )
+        return httpx.Response(200, text="Owner", request=request)
 
     monkeypatch.setattr("wishenka.items.fetcher.resolve_and_validate_host", resolve)
+    url = "https://shop.example.com/product"
+    route = offline_replay_route(
+        {url: (200, {"set-cookie": "preview=secret"}, b"<title>Product</title>")}
+    )
+    config = PreviewTransportConfig(default=route, mounts={})
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(respond),
         headers={"Authorization": "Bearer owner"},
         cookies={"owner": "cookie"},
     ) as client:
         initial_hooks = list(client.event_hooks["request"])
-        preview = await ItemPreviewService().fetch_preview(
-            "https://shop.example.com/product", client=client
-        )
-        assert not preview.is_fallback
-        assert "authorization" not in requests[0].headers
-        assert "cookie" not in requests[0].headers
+        preview = await ItemPreviewService().fetch_preview(url, client=client, routes=config)
+        assert preview.is_fallback and preview.fallback_reason == "ssrf_blocked"
+        safe_preview = await ItemPreviewService().fetch_preview(url, routes=config)
+        assert not safe_preview.is_fallback and safe_preview.title == "Product"
+        assert requests == []
         assert list(client.event_hooks["request"]) == initial_hooks
         assert client.cookies.get("preview") is None
-        response = await client.get("https://shop.example.com/owner")
-        assert response.status_code == 200
-        assert requests[1].headers["authorization"] == "Bearer owner"
-        assert "owner=cookie" in requests[1].headers["cookie"]
+        assert (await client.get("https://shop.example.com/owner")).status_code == 200
+        assert requests[0].headers["authorization"] == "Bearer owner"
+        assert "owner=cookie" in requests[0].headers["cookie"]
 
 
 async def test_preview_ignores_injected_client_proxy_mount(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An injected client's proxy is not used for preview or changed for its owner."""
-    direct: list[str] = []
+    """Unverified proxy clients fail closed and the owner's route remains usable."""
     proxied: list[str] = []
 
     async def resolve(host: str, port: int = 80) -> list[str]:
         return ["8.8.8.8"]
-
-    async def send_direct(request: httpx.Request) -> httpx.Response:
-        direct.append(str(request.url))
-        return httpx.Response(200, text="<html><title>Product</title></html>", request=request)
 
     async def send_proxy(request: httpx.Request) -> httpx.Response:
         proxied.append(str(request.url))
         return httpx.Response(200, text="Owner", request=request)
 
     monkeypatch.setattr("wishenka.items.fetcher.resolve_and_validate_host", resolve)
-    async with httpx.AsyncClient(proxy="http://localhost:12345", trust_env=False) as client:
-        proxy = client._transport_for_url(httpx.URL("https://shop.example.com/product"))
-        monkeypatch.setattr(client._transport, "handle_async_request", send_direct)
-        monkeypatch.setattr(proxy, "handle_async_request", send_proxy)
+    proxy = httpx.AsyncHTTPTransport(proxy="http://localhost:12345")
+    monkeypatch.setattr(proxy, "handle_async_request", send_proxy)
+    async with httpx.AsyncClient(transport=proxy, trust_env=False) as client:
         preview = await ItemPreviewService().fetch_preview(
             "https://shop.example.com/product", client=client
         )
-        assert not preview.is_fallback
-        assert direct == ["https://shop.example.com/product"]
+        assert preview.is_fallback
         assert not proxied
         assert (await client.get("https://shop.example.com/owner")).text == "Owner"
         assert proxied == ["https://shop.example.com/owner"]
@@ -841,28 +866,18 @@ async def test_preview_rejects_injected_direct_proxy_transport(
 
 
 async def test_preview_uses_injected_safe_mount(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An explicit non-proxy mount is used for preview instead of the network transport."""
-    calls: list[str] = []
+    """An explicit fixture mount is selected instead of a denied default route."""
+    from wishenka.items.fetcher import PreviewTransportConfig, deny_route, offline_replay_route
 
     async def resolve(host: str, port: int = 80) -> list[str]:
         return ["8.8.8.8"]
 
-    def respond(request: httpx.Request) -> httpx.Response:
-        calls.append(str(request.url))
-        return httpx.Response(200, text="<html><title>Mounted</title></html>")
-
-    async def reject_direct(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("The default transport must not be used")
-
     monkeypatch.setattr("wishenka.items.fetcher.resolve_and_validate_host", resolve)
-    mounted = httpx.MockTransport(respond)
-    async with httpx.AsyncClient(
-        mounts={"https://shop.example.com": mounted}, trust_env=False
-    ) as client:
-        monkeypatch.setattr(client._transport, "handle_async_request", reject_direct)
-        result = await ItemPreviewService().fetch_preview(
-            "https://shop.example.com/product", client=client
-        )
-        assert not result.is_fallback
-        assert result.title == "Mounted"
-        assert calls == ["https://shop.example.com/product"]
+    url = "https://shop.example.com/product"
+    mounted = offline_replay_route({url: (200, {}, b"<title>Mounted</title>")})
+    routes = PreviewTransportConfig(
+        default=deny_route(), mounts={"https://shop.example.com": mounted}
+    )
+    result = await ItemPreviewService(routes=routes).fetch_preview(url)
+    assert not result.is_fallback
+    assert result.title == "Mounted"

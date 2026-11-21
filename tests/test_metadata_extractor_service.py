@@ -564,7 +564,7 @@ class TestAntiBotChallengeDetectionAndFallback:
 
         # Ensure fetcher was called with cleaned URL, not dirty tracking URL
         mock_fetcher._fetch_html.assert_called_once_with(
-            "https://ozon.ru/product/123/", client=None
+            "https://ozon.ru/product/123/", client=None, routes=None
         )
         assert preview.url == "https://ozon.ru/product/123/"
 

@@ -19,9 +19,35 @@ import pytest
 from wishenka.items.exceptions import SSRFBlockedError
 from wishenka.items.fetcher import UrlMetadataService
 from wishenka.items.models import ExtractedMetadata
-from wishenka.items.ssrf import SSRFSafeTransport, _pinned_ips_var
+from wishenka.items.ssrf import SSRFSafeNetworkBackend, SSRFSafeTransport, _pinned_ips_var
 
 pytestmark = pytest.mark.timeout(30)
+
+
+def test_transport_rejects_unexpected_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unsupported HTTPX pool must never produce an unpinned transport."""
+
+    def init_with_unknown_pool(self: httpx.AsyncHTTPTransport, *args: Any, **kwargs: Any) -> None:
+        self._pool = object()  # type: ignore[assignment]
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "__init__", init_with_unknown_pool)
+    with pytest.raises(RuntimeError, match="SSRF-safe"):
+        SSRFSafeTransport()
+
+
+@pytest.mark.asyncio
+async def test_transport_rejects_replaced_backend_before_dispatch() -> None:
+    """Removing the installed backend after construction fails closed."""
+    transport = SSRFSafeTransport()
+    original_backend = transport._pool._network_backend
+    assert isinstance(original_backend, SSRFSafeNetworkBackend)
+    try:
+        transport._pool._network_backend = original_backend._inner
+        with pytest.raises(SSRFBlockedError, match="backend unavailable"):
+            await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    finally:
+        transport._pool._network_backend = original_backend
+        await transport.aclose()
 
 
 def _make_addrinfo(ip: str, port: int) -> list[tuple[Any, ...]]:

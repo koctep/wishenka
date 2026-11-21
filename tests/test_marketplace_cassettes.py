@@ -34,6 +34,17 @@ from wishenka.items.ssrf import _dns_cache, clear_dns_cache
 
 pytestmark = pytest.mark.timeout(15)
 
+
+@pytest.fixture(autouse=True)
+def _offline_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep preview validation local to each test without seeding the global DNS cache."""
+
+    async def resolve(host: str, port: int = 80) -> list[str]:
+        return ["8.8.8.8"]
+
+    monkeypatch.setattr("wishenka.items.fetcher.resolve_and_validate_host", resolve)
+
+
 CASSETTES_DIR = Path(__file__).resolve().parent / "cassettes" / "marketplaces"
 
 MARKETPLACES: tuple[str, ...] = (
@@ -45,6 +56,151 @@ MARKETPLACES: tuple[str, ...] = (
 )
 
 SCENARIOS: tuple[str, ...] = ("product", "antibot")
+
+
+def test_cli_verify_never_uses_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Offline verification consumes fixtures without network or global DNS cache writes."""
+    import socket
+
+    from wishenka.items.cassettes import main
+
+    def forbid_dns(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("Offline verification must not perform DNS queries")
+
+    monkeypatch.setattr(socket, "getaddrinfo", forbid_dns)
+    monkeypatch.setattr("wishenka.items.fetcher.resolve_and_validate_host", forbid_dns)
+    assert main(["--verify", "--cassettes-dir", str(CASSETTES_DIR)]) == 0
+
+
+@pytest.mark.asyncio
+async def test_replay_matches_sanitized_query_without_exposing_secret() -> None:
+    """Recorded safe URLs still match requests carrying disposable credentials."""
+    from wishenka.items.cassettes import cassette_replay_routes, load_marketplace_cassette
+
+    cassette = load_marketplace_cassette("ozon", "product", cassettes_dir=CASSETTES_DIR)
+    recorded = cassette.interactions[0].request.uri
+    separator = "&" if "?" in recorded else "?"
+    async with httpx.AsyncClient(transport=cassette_replay_routes(cassette).default.transport) as c:
+        response = await c.get(f"{recorded}{separator}token=top_secret")
+    assert response.status_code == cassette.interactions[0].response.status_code
+    assert "top_secret" not in str(cassette.to_dict())
+
+
+def test_cli_verify_follows_offline_redirect_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verification runs the preview pipeline across fixture-only redirects."""
+    import socket
+
+    from wishenka.items.cassettes import (
+        Cassette,
+        CassetteInteraction,
+        CassetteRequest,
+        CassetteResponse,
+        main,
+    )
+
+    def forbid_dns(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("Offline verification must not resolve DNS")
+
+    monkeypatch.setattr(socket, "getaddrinfo", forbid_dns)
+    monkeypatch.setattr("wishenka.items.fetcher.resolve_and_validate_host", forbid_dns)
+    cassette = Cassette(marketplace="shop", scenario="product")
+    cassette.add_interaction(
+        CassetteInteraction(
+            CassetteRequest(method="GET", uri="https://shop.example/start"),
+            CassetteResponse(302, "Found", {"Location": ["https://shop.example/final"]}),
+        )
+    )
+    cassette.add_interaction(
+        CassetteInteraction(
+            CassetteRequest(method="GET", uri="https://shop.example/final"),
+            CassetteResponse(200, "OK", body="<html><title>Product</title></html>"),
+        )
+    )
+    cassette.save(tmp_path / "shop_product.yaml")
+    assert main(["--verify", "--cassettes-dir", str(tmp_path)]) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [403, 429, 503])
+async def test_record_antibot_response_succeeds(
+    status: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An error response is recorded even when preview would degrade to fallback."""
+    from wishenka.items.cassettes import Cassette, CassetteMode, _record_or_refresh_cassette
+    from wishenka.items.ssrf import SSRFSafeTransport
+
+    async def fake_request(transport: Any, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, request=request, text="Access denied")
+
+    monkeypatch.setattr(SSRFSafeTransport, "handle_async_request", fake_request)
+    output = tmp_path / "antibot.yaml"
+    await _record_or_refresh_cassette(
+        mode=CassetteMode.RECORD,
+        url="https://shop.example/item",
+        output_path=output,
+        scenario="antibot",
+    )
+    assert Cassette.load(output).interactions[0].response.status_code == status
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [403, 429, 503])
+async def test_compressed_antibot_response_preview_and_record(
+    status: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Decoded HTTP errors remain readable for preview fallback and recording."""
+    import gzip
+
+    from wishenka.items.cassettes import Cassette, CassetteMode, _record_or_refresh_cassette
+    from wishenka.items.fetcher import PreviewTransportConfig, offline_replay_route
+    from wishenka.items.ssrf import SSRFSafeTransport
+
+    url = "https://shop.example/item"
+    payload = gzip.compress(b"Access denied")
+    headers = {"content-encoding": "gzip", "content-length": str(len(payload))}
+    route = offline_replay_route({url: (status, headers, payload)})
+    preview = await ItemPreviewService(
+        routes=PreviewTransportConfig(default=route, mounts={})
+    ).fetch_preview(url)
+    assert preview.is_fallback
+    assert preview.fallback_reason == "anti_bot_challenge"
+
+    async def fake_request(transport: Any, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, request=request, headers=headers, content=payload)
+
+    monkeypatch.setattr(SSRFSafeTransport, "handle_async_request", fake_request)
+    output = tmp_path / "compressed-antibot.yaml"
+    await _record_or_refresh_cassette(
+        mode=CassetteMode.RECORD, url=url, output_path=output, scenario="antibot"
+    )
+    interaction = Cassette.load(output).interactions[0]
+    assert interaction.response.status_code == status
+    assert interaction.response.body == "Access denied"
+
+
+@pytest.mark.asyncio
+async def test_record_rejects_untrusted_transport_before_dispatch(tmp_path: Path) -> None:
+    """An injected recording transport cannot bypass pinned direct connections."""
+    from wishenka.items.cassettes import CassetteError, CassetteMode, _record_or_refresh_cassette
+
+    dispatched: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        dispatched.append(request)
+        return httpx.Response(200, request=request)
+
+    with pytest.raises(CassetteError, match="Custom recording transports"):
+        await _record_or_refresh_cassette(
+            mode=CassetteMode.RECORD,
+            url="https://shop.example/item",
+            output_path=tmp_path / "record.yaml",
+            inner_transport=httpx.MockTransport(handler),
+        )
+    assert not dispatched
+    assert not (tmp_path / "record.yaml").exists()
+
 
 FORBIDDEN_HEADER_NAMES: frozenset[str] = frozenset(
     {
@@ -189,23 +345,14 @@ async def test_russian_marketplace_antibot_pages_trigger_anti_bot_fallback_witho
     status_code = interaction["response"]["status"]["code"]
     body_text = interaction["response"]["body"]["string"]
 
-    parsed = httpx.URL(target_uri)
-    _dns_cache.put(parsed.host, 443, ["93.184.216.34"])
+    from wishenka.items.fetcher import PreviewTransportConfig, offline_replay_route
 
-    def _handler(
-        request: httpx.Request,
-        code: int = status_code,
-        text: str = body_text,
-    ) -> httpx.Response:
-        return httpx.Response(
-            status_code=code,
-            headers={"content-type": "text/html; charset=utf-8"},
-            text=text,
-            request=request,
-        )
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
-        preview = await service.fetch_preview(target_uri, client=client)
+    route = offline_replay_route(
+        {target_uri: (status_code, {"content-type": "text/html"}, body_text.encode())}
+    )
+    preview = await service.fetch_preview(
+        target_uri, routes=PreviewTransportConfig(default=route, mounts={})
+    )
 
     assert preview.is_fallback is True, (
         f"{filename}: expected is_fallback=True for anti-bot challenge page, "
@@ -285,11 +432,8 @@ async def test_replay_product_cassettes_extract_metadata_offline(
     cassette_path = CASSETTES_DIR / f"{marketplace}_product.yaml"
     service = ItemPreviewService()
 
-    async with cassettes.cassette_client(
-        cassette_path,
-        mode=cassettes.CassetteMode.REPLAY,
-    ) as client:
-        preview = await service.fetch_preview(dirty_url, client=client)
+    routes = cassettes.cassette_replay_routes(cassettes.Cassette.load(cassette_path))
+    preview = await service.fetch_preview(dirty_url, routes=routes)
 
     assert preview.is_fallback is False
     assert preview.fallback_reason is None
@@ -337,11 +481,8 @@ async def test_replay_antibot_cassettes_trigger_graceful_fallback_without_title_
     cassette_path = CASSETTES_DIR / f"{marketplace}_antibot.yaml"
     service = ItemPreviewService()
 
-    async with cassettes.cassette_client(
-        cassette_path,
-        mode=cassettes.CassetteMode.REPLAY,
-    ) as client:
-        preview = await service.fetch_preview(dirty_url, client=client)
+    routes = cassettes.cassette_replay_routes(cassettes.Cassette.load(cassette_path))
+    preview = await service.fetch_preview(dirty_url, routes=routes)
 
     assert preview.is_fallback is True
     assert preview.fallback_reason == "anti_bot_challenge"
@@ -367,11 +508,8 @@ async def test_replay_antibot_composite_share_preserves_residual_title_without_l
         "https://market.yandex.ru/product--umnye-chasy-apple-watch-series-9/987654321?utm_source=share"
     )
 
-    async with cassettes.cassette_client(
-        cassette_path,
-        mode=cassettes.CassetteMode.REPLAY,
-    ) as client:
-        preview = await service.fetch_preview(composite_input, client=client)
+    routes = cassettes.cassette_replay_routes(cassettes.Cassette.load(cassette_path))
+    preview = await service.fetch_preview(composite_input, routes=routes)
 
     assert preview.is_fallback is True
     assert preview.fallback_reason == "anti_bot_challenge"
@@ -394,18 +532,15 @@ async def test_replay_missing_interaction_raises_cassette_miss_error_and_blocks_
     service = ItemPreviewService()
     unrecorded_url = "https://ozon.ru/product/unrecorded-product-999999999/?utm_source=share"
 
-    async with cassettes.cassette_client(
-        cassette_path,
-        mode=cassettes.CassetteMode.REPLAY,
-    ) as client:
-        with pytest.raises(cassettes.CassetteMissError) as exc_info:
-            await service.fetch_preview(unrecorded_url, client=client)
+    routes = cassettes.cassette_replay_routes(cassettes.Cassette.load(cassette_path))
+    with pytest.raises(cassettes.CassetteMissError) as exc_info:
+        await service.fetch_preview(unrecorded_url, routes=routes)
 
-        assert exc_info.value.method == "GET"
-        assert "unrecorded-product-999999999" in exc_info.value.uri
+    assert exc_info.value.method == "GET"
+    assert "unrecorded-product-999999999" in exc_info.value.uri
 
-        with pytest.raises(cassettes.CassetteMissError):
-            await service.url_metadata_service.fetch_and_extract(unrecorded_url, client=client)
+    with pytest.raises(cassettes.CassetteMissError):
+        await service.url_metadata_service.fetch_and_extract(unrecorded_url, routes=routes)
 
 
 @pytest.mark.asyncio
@@ -497,14 +632,10 @@ async def test_record_and_refresh_modes_sanitize_headers_cookies_and_tracking_pa
 
     # 2. REPLAY mode uses the recorded cassette offline without calling inner_transport
     service = ItemPreviewService()
-    async with cassettes.cassette_client(
-        cassette_file,
-        mode=cassettes.CassetteMode.REPLAY,
-    ) as replay_client:
-        preview = await service.fetch_preview(
-            "https://ozon.ru/product/testovaya-kolonka-555/?sku=42&utm_medium=cpc",
-            client=replay_client,
-        )
+    routes = cassettes.cassette_replay_routes(cassettes.Cassette.load(cassette_file))
+    preview = await service.fetch_preview(
+        "https://ozon.ru/product/testovaya-kolonka-555/?sku=42&utm_medium=cpc", routes=routes
+    )
 
     assert call_count == 1
     assert preview.is_fallback is False
@@ -516,21 +647,22 @@ async def test_record_and_refresh_modes_sanitize_headers_cookies_and_tracking_pa
     # 3. REFRESH mode re-fetches and updates the cassette on disk
     current_price = "17490"
     async with cassettes.cassette_client(
-        cassette_file,
-        mode=cassettes.CassetteMode.REFRESH,
-        inner_transport=mock_origin,
+        cassette_file, mode=cassettes.CassetteMode.REFRESH, inner_transport=mock_origin
     ) as refresh_client:
-        refreshed_preview = await service.fetch_preview(
-            "https://ozon.ru/product/testovaya-kolonka-555/?sku=42",
-            client=refresh_client,
-        )
+        await refresh_client.get("https://ozon.ru/product/testovaya-kolonka-555/?sku=42")
+    routes = cassettes.cassette_replay_routes(cassettes.Cassette.load(cassette_file))
+    refreshed_preview = await service.fetch_preview(
+        "https://ozon.ru/product/testovaya-kolonka-555/?sku=42", routes=routes
+    )
 
     assert call_count == 2
     assert refreshed_preview.is_fallback is False
     assert refreshed_preview.price == 17490
 
 
-def test_cli_record_refresh_and_verify_entrypoint(tmp_path: Path) -> None:
+def test_cli_record_refresh_and_verify_entrypoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """CLI must support --mode record|refresh (--url/--output or directory) and --verify."""
     cassettes = _load_cassettes_module()
     clear_dns_cache()
@@ -565,7 +697,12 @@ def test_cli_record_refresh_and_verify_entrypoint(tmp_path: Path) -> None:
             request=request,
         )
 
-    mock_origin = httpx.MockTransport(_origin_handler)
+    from wishenka.items.ssrf import SSRFSafeTransport
+
+    async def safe_test_request(transport: Any, request: httpx.Request) -> httpx.Response:
+        return _origin_handler(request)
+
+    monkeypatch.setattr(SSRFSafeTransport, "handle_async_request", safe_test_request)
 
     # 1. CLI --mode record --url <url> --output <path>
     rc_record = cassettes.main(
@@ -581,7 +718,6 @@ def test_cli_record_refresh_and_verify_entrypoint(tmp_path: Path) -> None:
             "--scenario",
             "product",
         ],
-        inner_transport=mock_origin,
     )
     assert rc_record == 0
     assert call_count == 1
@@ -602,7 +738,6 @@ def test_cli_record_refresh_and_verify_entrypoint(tmp_path: Path) -> None:
             "--cassettes-dir",
             str(tmp_path),
         ],
-        inner_transport=mock_origin,
     )
     assert rc_refresh == 0
     assert call_count == 2
@@ -636,14 +771,11 @@ async def test_cassette_and_antibot_structured_logging_observability(
     # 1. Replay hit + 200 OK Russian anti-bot challenge detection (Yandex SmartCaptcha)
     yandex_antibot_path = CASSETTES_DIR / "yandex_market_antibot.yaml"
     with caplog.at_level(logging.DEBUG, logger="wishenka.items"):
-        async with cassettes.cassette_client(
-            yandex_antibot_path,
-            mode=cassettes.CassetteMode.REPLAY,
-        ) as client:
-            preview = await service.fetch_preview(
-                "https://market.yandex.ru/product--umnye-chasy-apple-watch-series-9/987654321?clid=900",
-                client=client,
-            )
+        routes = cassettes.cassette_replay_routes(cassettes.Cassette.load(yandex_antibot_path))
+        preview = await service.fetch_preview(
+            "https://market.yandex.ru/product--umnye-chasy-apple-watch-series-9/987654321?clid=900",
+            routes=routes,
+        )
 
     assert preview.is_fallback is True
     assert preview.fallback_reason == "anti_bot_challenge"
@@ -685,15 +817,14 @@ async def test_cassette_and_antibot_structured_logging_observability(
     # 2. Replay miss logs sanitized WARNING without leaking secret query tokens
     caplog.clear()
     with caplog.at_level(logging.DEBUG, logger="wishenka.items"):
-        async with cassettes.cassette_client(
-            CASSETTES_DIR / "ozon_product.yaml",
-            mode=cassettes.CassetteMode.REPLAY,
-        ) as client:
-            with pytest.raises(cassettes.CassetteMissError):
-                await service.fetch_preview(
-                    "https://ozon.ru/product/missing-item-777/?token=super_secret_miss_token&utm_source=tg",
-                    client=client,
-                )
+        routes = cassettes.cassette_replay_routes(
+            cassettes.Cassette.load(CASSETTES_DIR / "ozon_product.yaml")
+        )
+        with pytest.raises(cassettes.CassetteMissError):
+            await service.fetch_preview(
+                "https://ozon.ru/product/missing-item-777/?token=super_secret_miss_token&utm_source=tg",
+                routes=routes,
+            )
 
     miss_records = [r for r in caplog.records if getattr(r, "event", None) == "cassette_miss"]
     assert len(miss_records) == 1
@@ -740,9 +871,8 @@ async def test_cassette_and_antibot_structured_logging_observability(
             marketplace="avito",
             scenario="product",
         ) as record_client:
-            recorded_dto = await service.fetch_preview(
-                "https://www.avito.ru/moskva/velosipedy/gornyy_111?token=secret_q_token&src=sharing",
-                client=record_client,
+            await record_client.get(
+                "https://www.avito.ru/moskva/velosipedy/gornyy_111?token=secret_q_token&src=sharing"
             )
 
         async with cassettes.cassette_client(
@@ -750,13 +880,7 @@ async def test_cassette_and_antibot_structured_logging_observability(
             mode=cassettes.CassetteMode.REFRESH,
             inner_transport=mock_origin,
         ) as refresh_client:
-            refreshed_dto = await service.fetch_preview(
-                "https://www.avito.ru/moskva/velosipedy/gornyy_111",
-                client=refresh_client,
-            )
-
-    assert recorded_dto.is_fallback is False
-    assert refreshed_dto.is_fallback is False
+            await refresh_client.get("https://www.avito.ru/moskva/velosipedy/gornyy_111")
 
     recorded_records = [
         r for r in caplog.records if getattr(r, "event", None) == "cassette_recorded"

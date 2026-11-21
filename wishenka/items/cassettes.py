@@ -7,7 +7,7 @@ import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -21,8 +21,9 @@ import yaml  # type: ignore[import-untyped]
 
 from wishenka.items.encoding import decode_html
 from wishenka.items.exceptions import CassetteError, CassetteMissError
+from wishenka.items.fetcher import PreviewTransportConfig, offline_replay_route
 from wishenka.items.marketplaces import clean_url
-from wishenka.items.ssrf import SSRFSafeTransport, _dns_cache
+from wishenka.items.ssrf import SSRFSafeTransport
 
 logger = logging.getLogger("wishenka.items")
 
@@ -30,7 +31,6 @@ DEFAULT_CASSETTES_DIR: Path = (
     Path(__file__).resolve().parents[2] / "tests" / "cassettes" / "marketplaces"
 )
 
-SAFE_REPLAY_PUBLIC_IP: str = "93.184.216.34"
 
 SENSITIVE_HEADER_NAMES: frozenset[str] = frozenset(
     {
@@ -512,17 +512,6 @@ class CassetteTransport(httpx.AsyncBaseTransport):
         self.inner_transport = inner_transport
         self._owns_inner_transport = False
 
-        if self.mode == CassetteMode.REPLAY or self.inner_transport is not None:
-            self._seed_dns_cache_for_recorded_hosts()
-
-    def _seed_dns_cache_for_recorded_hosts(self) -> None:
-        """Pre-populate DNSCache with a safe public IP for all hosts in the cassette."""
-        for interaction in self.cassette.interactions:
-            parsed = httpx.URL(interaction.request.uri)
-            if parsed.host:
-                port = parsed.port or (443 if parsed.scheme == "https" else 80)
-                _dns_cache.put(parsed.host, port, [SAFE_REPLAY_PUBLIC_IP])
-
     def _get_or_create_inner_transport(self) -> httpx.AsyncBaseTransport:
         """Obtain the origin transport for RECORD or REFRESH mode."""
         if self.inner_transport is not None:
@@ -624,11 +613,6 @@ class CassetteTransport(httpx.AsyncBaseTransport):
         if self.cassette_path is not None:
             self.cassette.save(self.cassette_path)
 
-        parsed = httpx.URL(recorded_interaction.request.uri)
-        if parsed.host:
-            port = parsed.port or (443 if parsed.scheme == "https" else 80)
-            _dns_cache.put(parsed.host, port, [SAFE_REPLAY_PUBLIC_IP])
-
         event_name = (
             "cassette_refreshed" if self.mode == CassetteMode.REFRESH else "cassette_recorded"
         )
@@ -719,11 +703,54 @@ async def cassette_client(
         yield client
 
 
+def cassette_replay_routes(cassette: Cassette) -> PreviewTransportConfig:
+    """Copy a cassette to a fixture-only preview route with no recording delegate."""
+    responses: dict[str, tuple[int, dict[str, str], bytes]] = {}
+    for interaction in cassette.interactions:
+        if interaction.request.method.upper() != "GET":
+            continue
+        response = interaction.response
+        headers = {
+            key: ", ".join(values)
+            for key, values in response.headers.items()
+            if key.lower() not in {"content-length", "transfer-encoding", "content-encoding"}
+        }
+        responses[interaction.request.uri] = (
+            response.status_code,
+            headers,
+            response.body.encode("utf-8"),
+        )
+    route = offline_replay_route(
+        responses, marketplace=cassette.marketplace, scenario=cassette.scenario
+    )
+    return PreviewTransportConfig(default=route, mounts={})
+
+
 async def _verify_all_reference_cassettes(cassettes_dir: Path) -> int:
-    """Verify all reference marketplace cassettes offline through ItemPreviewService."""
+    """Verify fixtures through the non-network replay transport without consulting DNS."""
+    from http.cookiejar import CookieJar
+
+    from wishenka.items.fetcher import RejectCookies, UrlMetadataService
     from wishenka.items.service import ItemPreviewService
 
-    service = ItemPreviewService()
+    class OfflineMetadataService(UrlMetadataService):
+        """Use only a freshly created, fixture-backed transport for offline verification."""
+
+        async def _fetch_html(
+            self,
+            url: str,
+            client: httpx.AsyncClient | None = None,
+            routes: PreviewTransportConfig | None = None,
+        ) -> tuple[str, str]:
+            if client is not None or routes is None or routes.mounts:
+                raise CassetteError("Offline verification requires its fixture-only route")
+            async with httpx.AsyncClient(
+                transport=routes.default.transport,
+                cookies=CookieJar(policy=RejectCookies()),
+                trust_env=False,
+            ) as replay_client:
+                return await self._stream_and_read(replay_client, url)
+
     yaml_files = sorted(cassettes_dir.glob("*.yaml"))
     if not yaml_files:
         raise CassetteError(f"No cassette files found in {cassettes_dir}")
@@ -733,14 +760,16 @@ async def _verify_all_reference_cassettes(cassettes_dir: Path) -> int:
         if not cassette.interactions:
             raise CassetteError(f"Cassette {yaml_path} has no interactions")
         target_uri = cassette.interactions[0].request.uri
-        async with cassette_client(yaml_path, mode=CassetteMode.REPLAY) as client:
-            preview = await service.fetch_preview(target_uri, client=client)
-            if cassette.scenario == "antibot" and not preview.is_fallback:
-                raise CassetteError(f"Antibot cassette {yaml_path.name} did not trigger fallback")
-            if cassette.scenario == "product" and preview.is_fallback:
-                raise CassetteError(
-                    f"Product cassette {yaml_path.name} unexpectedly degraded to fallback"
-                )
+        routes = cassette_replay_routes(cassette)
+        preview = await ItemPreviewService(
+            url_metadata_service=OfflineMetadataService(), routes=routes
+        ).fetch_preview(target_uri)
+        if cassette.scenario == "antibot" and not preview.is_fallback:
+            raise CassetteError(f"Antibot cassette {yaml_path.name} did not trigger fallback")
+        if cassette.scenario == "product" and (preview.is_fallback or not preview.title):
+            raise CassetteError(
+                f"Product cassette {yaml_path.name} unexpectedly degraded to fallback"
+            )
     return len(yaml_files)
 
 
@@ -754,23 +783,31 @@ async def _record_or_refresh_cassette(
     inner_transport: httpx.AsyncBaseTransport | None = None,
 ) -> None:
     """Record or refresh a single marketplace cassette via ItemPreviewService."""
-    from wishenka.items.service import ItemPreviewService
+    from http.cookiejar import CookieJar
+
+    from wishenka.items.fetcher import DEFAULT_TIMEOUT, RejectCookies, UrlMetadataService
+    from wishenka.items.fetcher import _validate_request as validate_request
 
     if inner_transport is not None:
-        parsed = httpx.URL(url)
-        if parsed.host:
-            port = parsed.port or (443 if parsed.scheme == "https" else 80)
-            _dns_cache.put(parsed.host, port, [SAFE_REPLAY_PUBLIC_IP])
-
-    service = ItemPreviewService()
-    async with cassette_client(
-        output_path,
-        mode=mode,
-        inner_transport=inner_transport,
-        marketplace=marketplace,
-        scenario=scenario,
+        raise CassetteError(
+            "Custom recording transports are not supported by safe preview recording"
+        )
+    cassette = (
+        Cassette.load(output_path)
+        if output_path.is_file()
+        else Cassette(marketplace=marketplace, scenario=scenario)
+    )
+    transport = CassetteTransport(cassette, mode=mode, cassette_path=output_path)
+    async with httpx.AsyncClient(
+        transport=transport,
+        timeout=DEFAULT_TIMEOUT,
+        cookies=CookieJar(policy=RejectCookies()),
+        event_hooks={"request": [validate_request]},
+        trust_env=False,
     ) as client:
-        await service.fetch_preview(url, client=client)
+        # The response is already recorded; preview treats HTTP errors as fallback.
+        with suppress(httpx.HTTPStatusError):
+            await UrlMetadataService()._stream_and_read(client, clean_url(url))
 
 
 async def _refresh_all_cassettes(

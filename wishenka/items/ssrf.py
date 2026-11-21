@@ -502,11 +502,26 @@ class SSRFSafeTransport(httpx.AsyncHTTPTransport):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        if isinstance(self._pool, httpcore.AsyncConnectionPool):
-            self._pool._network_backend = SSRFSafeNetworkBackend(self._pool._network_backend)
+        pool = self._pool
+        if type(pool) is not httpcore.AsyncConnectionPool:
+            raise RuntimeError("Cannot install SSRF-safe network backend")
+        backend = getattr(pool, "_network_backend", None)
+        if not isinstance(backend, httpcore.AsyncNetworkBackend):
+            raise RuntimeError("Cannot install SSRF-safe network backend")
+        safe_backend = SSRFSafeNetworkBackend(backend)
+        pool._network_backend = safe_backend
+        if pool._network_backend is not safe_backend:
+            raise RuntimeError("Cannot install SSRF-safe network backend")
+        self._safe_pool = pool
+        self._safe_backend = safe_backend
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Validate request URL scheme and destination IP before dispatching TCP connection."""
+        if (
+            self._pool is not self._safe_pool
+            or self._pool._network_backend is not self._safe_backend
+        ):
+            raise SSRFBlockedError("SSRF-safe network backend unavailable", reason="unsafe_backend")
         if request.url.username or request.url.password or "authorization" in request.headers:
             logger.warning(
                 "SSRF blocked: URL credentials or Authorization header forbidden for host '%s'",

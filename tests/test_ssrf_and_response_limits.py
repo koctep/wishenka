@@ -83,6 +83,22 @@ except ModuleNotFoundError:
 pytestmark = pytest.mark.timeout(30)
 
 
+@pytest.fixture
+def preview_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolve test public names without external DNS and retain literal-IP checks."""
+
+    async def resolve(host: str, port: int = 80) -> list[str]:
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return ["8.8.8.8"]
+        if not is_ip_safe(address):
+            raise item_exceptions.SSRFBlockedError(reason="forbidden_ip", ip_address=host)
+        return [host]
+
+    monkeypatch.setattr("wishenka.items.fetcher.resolve_and_validate_host", resolve)
+
+
 class ChunkedStream(httpx.AsyncByteStream):
     """Helper stream yielding discrete chunks for testing response size limits."""
 
@@ -300,7 +316,7 @@ class TestUrlMetadataService:
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_client.stream.return_value.__aenter__.return_value = mock_response
         with pytest.raises(ResponseBodyTooLargeError):
-            await service._fetch_html("https://example.com/huge.html", client=mock_client)
+            await service._stream_and_read(mock_client, "https://example.com/huge.html")
 
     @pytest.mark.asyncio
     async def test_streaming_body_cutoff_at_2mb(self) -> None:
@@ -319,7 +335,7 @@ class TestUrlMetadataService:
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_client.stream.return_value.__aenter__.return_value = mock_response
         with pytest.raises(ResponseBodyTooLargeError):
-            await service._fetch_html("https://example.com/stream.html", client=mock_client)
+            await service._stream_and_read(mock_client, "https://example.com/stream.html")
 
     @pytest.mark.asyncio
     async def test_allow_valid_public_url_under_2mb(self) -> None:
@@ -339,8 +355,8 @@ class TestUrlMetadataService:
         )
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_client.stream.return_value.__aenter__.return_value = mock_response
-        html, final_url = await service._fetch_html(
-            "https://example.com/product/1", client=mock_client
+        html, final_url = await service._stream_and_read(
+            mock_client, "https://example.com/product/1"
         )
         assert "<title>Awesome Product</title>" in html
         assert str(final_url) == "https://example.com/product/1"
@@ -420,42 +436,27 @@ class TestItemPreviewServiceGracefulFallback:
         assert preview.fallback_reason == "ssrf_blocked"
 
     @pytest.mark.asyncio
-    async def test_redirect_to_private_ip_is_blocked(self) -> None:
-        """When a public URL redirects to private IP, preview safely falls back to ssrf_blocked."""
-        service = ItemPreviewService()
+    async def test_redirect_to_private_ip_is_blocked(self, preview_dns: None) -> None:
+        """A redirect into a forbidden network is rejected before dispatch."""
+        from wishenka.items.fetcher import PreviewTransportConfig, offline_replay_route
 
-        def redirect_mock(request: httpx.Request) -> httpx.Response:
-            if "shop.example.com" in str(request.url):
-                return httpx.Response(
-                    302,
-                    headers={"Location": "http://192.168.1.1/router-settings"},
-                )
-            return httpx.Response(200, text="<html><title>Router Admin</title></html>")
-
-        mock_client = httpx.AsyncClient(transport=httpx.MockTransport(redirect_mock))
-        preview = await service.fetch_preview("https://shop.example.com/item/1", client=mock_client)
-        assert isinstance(preview, ItemPreviewDTO)
+        url = "https://shop.example.com/item/1"
+        route = offline_replay_route({url: (302, {"Location": "http://192.168.1.1/router"}, b"")})
+        routes = PreviewTransportConfig(default=route, mounts={})
+        preview = await ItemPreviewService().fetch_preview(url, routes=routes)
         assert preview.is_fallback is True
         assert preview.fallback_reason == "ssrf_blocked"
 
     @pytest.mark.asyncio
-    async def test_oversized_response_returns_fallback_dto(self) -> None:
-        """Responses with body > 2MB must trigger graceful degradation with response_too_large."""
-        service = ItemPreviewService()
-        huge_body = "<html><title>Huge Page</title>" + ("A" * (5 * 1024 * 1024)) + "</html>"
-        mock_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(
-                lambda req: httpx.Response(
-                    200,
-                    headers={"Content-Length": str(len(huge_body))},
-                    text=huge_body,
-                )
-            )
+    async def test_oversized_response_returns_fallback_dto(self, preview_dns: None) -> None:
+        """Responses exceeding the size limit trigger the documented fallback."""
+        from wishenka.items.fetcher import PreviewTransportConfig, offline_replay_route
+
+        url = "https://example.com/oversized-page"
+        route = offline_replay_route({url: (200, {"Content-Length": "5242880"}, b"body")})
+        preview = await ItemPreviewService().fetch_preview(
+            url, routes=PreviewTransportConfig(default=route, mounts={})
         )
-        preview = await service.fetch_preview(
-            "https://example.com/oversized-page", client=mock_client
-        )
-        assert isinstance(preview, ItemPreviewDTO)
         assert preview.is_fallback is True
         assert preview.fallback_reason == "response_too_large"
 
@@ -471,13 +472,13 @@ class TestObservabilityLogging:
     @pytest.mark.asyncio
     async def test_ssrf_blocked_structured_logging(self, caplog: pytest.LogCaptureFixture) -> None:
         """Security events for SSRF blocks must log WARNING with host, ip, reason, and url."""
+        from wishenka.items.fetcher import PreviewTransportConfig, offline_replay_route
+
         service = ItemPreviewService()
-        mock_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda req: httpx.Response(200, text="ok"))
-        )
+        routes = PreviewTransportConfig(default=offline_replay_route({}), mounts={})
         with caplog.at_level(logging.WARNING, logger="wishenka.items"):
             preview = await service.fetch_preview(
-                "http://169.254.169.254/latest/meta-data/", client=mock_client
+                "http://169.254.169.254/latest/meta-data/", routes=routes
             )
 
         assert preview.is_fallback is True
@@ -542,21 +543,17 @@ class TestObservabilityLogging:
         assert getattr(fail_record, "host", None) == "nonexistent.local"
 
     @pytest.mark.asyncio
-    async def test_payload_size_violation_logging(self, caplog: pytest.LogCaptureFixture) -> None:
+    async def test_payload_size_violation_logging(
+        self, caplog: pytest.LogCaptureFixture, preview_dns: None
+    ) -> None:
         """Payload size violations must be logged with size metadata at WARNING."""
-        service = ItemPreviewService()
-        mock_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(
-                lambda req: httpx.Response(
-                    200,
-                    headers={"Content-Length": "5000000"},
-                    text="X" * 100,
-                )
-            )
-        )
+        from wishenka.items.fetcher import PreviewTransportConfig, offline_replay_route
+
+        url = "https://example.com/oversized"
+        route = offline_replay_route({url: (200, {"Content-Length": "5000000"}, b"body")})
         with caplog.at_level(logging.WARNING, logger="wishenka.items"):
-            preview = await service.fetch_preview(
-                "https://example.com/oversized", client=mock_client
+            preview = await ItemPreviewService().fetch_preview(
+                url, routes=PreviewTransportConfig(default=route, mounts={})
             )
 
         assert preview.is_fallback is True
@@ -579,24 +576,21 @@ class TestObservabilityLogging:
 
     @pytest.mark.asyncio
     async def test_invariant_never_log_raw_html_or_secrets(
-        self, caplog: pytest.LogCaptureFixture
+        self, caplog: pytest.LogCaptureFixture, preview_dns: None
     ) -> None:
-        """Observability invariant: Raw HTML body and secret tokens must never appear in logs."""
+        """Raw HTML and secret tokens never appear in logs."""
+        from wishenka.items.fetcher import PreviewTransportConfig, offline_replay_route
+
         secret_token = "TOP_SECRET_SESSION_TOKEN_XYZ987"
         secret_payload = f"<html><body><h1>Secret page</h1><p>{secret_token}</p></body></html>"
-
-        service = ItemPreviewService()
-        mock_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(
-                lambda req: httpx.Response(
-                    200,
-                    headers={"Content-Type": "text/html"},
-                    text=secret_payload,
-                )
-            )
+        url = "https://example.com/item/42"
+        route = offline_replay_route(
+            {url: (200, {"Content-Type": "text/html"}, secret_payload.encode())}
         )
         with caplog.at_level(logging.DEBUG, logger="wishenka.items"):
-            preview = await service.fetch_preview("https://example.com/item/42", client=mock_client)
+            preview = await ItemPreviewService().fetch_preview(
+                url, routes=PreviewTransportConfig(default=route, mounts={})
+            )
 
         assert preview.is_fallback is False
         assert secret_token not in caplog.text

@@ -6,7 +6,6 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import timedelta
-from http.cookiejar import CookieJar
 from pathlib import Path
 from typing import Any
 
@@ -16,10 +15,9 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 from wishenka.config import Settings
-from wishenka.items.fetcher import DEFAULT_TIMEOUT, RejectCookies
+from wishenka.items.fetcher import PreviewTransportConfig, safe_direct_route
 from wishenka.items.preview_cache import PreviewCache
 from wishenka.items.service import ItemPreviewService
-from wishenka.items.ssrf import SSRFSafeTransport
 from wishenka.logging import configure_logging
 from wishenka.notices.sender import NoticeSender, build_sender
 from wishenka.notices.store import NoticeStore
@@ -184,18 +182,13 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         limits = httpx.Limits(max_connections=20, max_keepalive_connections=10, keepalive_expiry=5)
-        transport = SSRFSafeTransport(limits=limits)
-        client = httpx.AsyncClient(
-            transport=transport,
-            timeout=DEFAULT_TIMEOUT,
-            follow_redirects=True,
-            cookies=CookieJar(policy=RejectCookies()),
-            trust_env=False,
-        )
-        client._wishenka_safe_transport = True  # type: ignore[attr-defined]
-        cache = PreviewCache()
-        app.state.item_preview_service = ItemPreviewService(client=client, cache=cache)
+        route = safe_direct_route(limits=limits)
+        cache: PreviewCache | None = None
         try:
+            cache = PreviewCache()
+            app.state.item_preview_service = ItemPreviewService(
+                routes=PreviewTransportConfig(default=route, mounts={}), cache=cache
+            )
             await app.state.wishlist_store.initialize()
             await app.state.user_store.initialize()
 
@@ -234,9 +227,10 @@ def create_app(
                 finally:
                     await _stop_notice_worker(app)
             finally:
-                cache.clear()
+                if cache is not None:
+                    cache.clear()
                 app.state.item_preview_service = None
-                await client.aclose()
+                await route.transport.aclose()
                 await app.state.wishlist_store.dispose()
                 await app.state.user_store.dispose()
                 logger.info("Wishenka web application shutting down")

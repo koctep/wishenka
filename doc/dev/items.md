@@ -219,7 +219,8 @@ Provides non-blocking IP validation, cached hostname resolution with single-flig
   - `sleep`: delegates to `self._inner.sleep`.
 - [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L500):
   - Subclass of `httpx.AsyncHTTPTransport`.
-  - In `__init__`, wraps `self._pool._network_backend` with `SSRFSafeNetworkBackend` when `self._pool` is an `httpcore.AsyncConnectionPool`.
+  - Installs `SSRFSafeNetworkBackend` into the expected connection pool. Unknown pool or backend
+    layouts fail closed; dispatch also checks that the pinned backend has not been replaced.
   - Overrides `handle_async_request(request)` to intercept the initial request and every subsequent HTTP redirect hop (`301`, `302`, `303`, `307`, `308`).
   - Rejects URL credentials and `Authorization` headers (`reason="credentials"`), disallowed schemes (`InvalidUrlSchemeError`), and missing hosts (`SSRFError`), resolves and validates the destination via `resolve_and_validate_host`, and pins the validated IPs in `_pinned_ips_var` inside a `try ... finally: _pinned_ips_var.reset(token)` block around `super().handle_async_request(request)` without rewriting `request.url` (preserving the `Host` header, TLS SNI `server_hostname`, relative redirect resolution, and `response.url`).
   - Covered by `tests/test_ssrf_dns_rebinding.py` (pinned-IP connection, redirect-hop pinning, Host/TLS SNI preservation, IPv6 pinning, multi-IP failover, concurrent `ContextVar` isolation, defense-in-depth fallback, and UDS blocking).
@@ -230,22 +231,39 @@ Located in [`wishenka/items/fetcher.py`](file:///home/src/wishenka/items/fetcher
 
 Dedicated network service responsible for pulling HTML bodies under strict security constraints:
 - Enforces `DEFAULT_TIMEOUT` (`4.0s` total, `2.0s` connect) and modern mobile headers (`DEFAULT_HEADERS`).
-- **Internal `_fetch_html(url, client=None)`**:
+- **Internal `_fetch_html(url, client=None, routes=None)`**:
   - Validates URL scheme against `ALLOWED_SCHEMES`.
   - Pre-validates destination host via `resolve_and_validate_host`.
-  - If no client is passed, instantiates `httpx.AsyncClient(transport=SSRFSafeTransport(), follow_redirects=True)`.
-  - An injected client uses an isolated preview client with a borrowed direct transport and a
-    request hook for redirect validation. It does not modify or close the owner's client.
+  - With no routes, creates and closes its own direct pinned transport. With explicit routes,
+    builds an isolated HTTPX client using non-owning wrappers around the supplied transports.
+  - Rejects an opaque `client`, even when `routes` are also supplied, before DNS or dispatch.
+    Use `PreviewTransportConfig` instead; the caller retains ownership of supplied routes.
+  - Validates each redirect before dispatch and disables environment proxies and cookies.
   - Executes streaming download via `_stream_and_read`.
 - **Early Fast-Fail & Streaming Accumulator (`_stream_and_read`)**:
   - Checks response header `Content-Length`. If $> 2 \text{ MB}$, immediately aborts and raises [`ResponseBodyTooLargeError`](file:///home/src/wishenka/items/exceptions.py#L56).
   - Iterates asynchronously over chunks via `response.aiter_bytes()`, tracking `total_bytes`. If cumulative size exceeds $2 \text{ MB}$, halts iteration immediately and raises [`ResponseBodyTooLargeError`](file:///home/src/wishenka/items/exceptions.py#L56).
   - Decodes accumulated raw bytes with `decode_html` after status and size checks. The buffered
     compatibility path uses the same decoder.
-- **Safe Fallback Wrapper `fetch_and_extract(url, client=None)`**:
+- **Safe Fallback Wrapper `fetch_and_extract(url, client=None, routes=None)`**:
   - High-level interface that calls `_fetch_html` and feeds the result to `HtmlMetadataExtractor.extract`.
   - Catches network, security, and parsing exceptions, logging a warning and returning a safe fallback [`ExtractedMetadata`](file:///home/src/wishenka/items/models.py#L34-L46) populated with `store_name=derive_store_name(url)`.
   - Explicitly re-raises [`CassetteError`](file:///home/src/wishenka/items/exceptions.py#L71) (including [`CassetteMissError`](file:///home/src/wishenka/items/exceptions.py#L75)) before the generic exception handler so missing cassette interactions fail closed during offline test replay.
+
+#### Explicit preview routes
+
+`PreviewTransportConfig(default, mounts)` snapshots its mount mapping. Use
+`safe_direct_route()` for a pinned direct route, `deny_route()` for a forbidden route, or
+`offline_replay_route()` for immutable response fixtures. HTTPX selects the most specific mount
+for every request and redirect. A denied route never falls back to a less-specific route.
+Factories bind each approved route to its original transport; arbitrary transports and substituted
+routes are rejected. Per-preview clients have isolated headers, cookies and authentication state;
+their non-owning wrappers do not close the route transport on completion or cancellation.
+
+A route rejection emits `item_preview_route_rejected` with `unknown_route` or `route_denied`,
+without the URL or client data. If a preview falls back with `ssrf_blocked`, inspect this event
+and migrate callers using `client=` to an explicit route configuration. Do not replace a rejected
+route with an unvalidated client or enable environment proxies.
 
 #### Extraction execution and responsiveness
 
@@ -389,12 +407,11 @@ Asynchronous facade orchestrating input classification, URL cleaning, secure fet
 
 #### Pooled requests and preview cache
 
-The FastAPI lifespan in `wishenka/web/app.py` owns one outbound HTTPX client and one
-`ItemPreviewService` with a `PreviewCache` per application instance. The UI uses the service from
-`app.state`; lifespan cleanup closes the client and clears the cache, including on startup errors.
-Independent processes and application instances have independent pools and caches. Standalone
-`ItemPreviewService()` calls still work without a shared cache or lifespan-owned client. A caller
-may inject a client or `PreviewCache` into the service; a per-call client bypasses the cache.
+The FastAPI lifespan owns one safe direct route and one `ItemPreviewService` with a
+`PreviewCache` per application instance. It closes the owned transport and clears the cache on
+shutdown and startup failure. Independent application instances have independent pools and
+caches. Standalone `ItemPreviewService()` calls create and close their own direct transport.
+A per-call route configuration bypasses the service cache; configured routes partition its keys.
 
 The bounded in-memory cache stores copies of extracted source metadata by cleaned URL. It rebuilds
 the preview with the current caller's input and residual text. A plain-text input, failure,
@@ -404,8 +421,8 @@ authentication challenges, and restrictive cache directives disqualify the chain
 accounts for origin age and expiry headers. Concurrent misses can still perform duplicate fetches.
 
 Every cache hit revalidates the original and redirect destinations against current DNS and scheme
-rules. Outbound requests reject URL credentials and do not retain or send cookies; proxy transports
-are bypassed or rejected for injected clients. DNS resolutions performed by
+rules. Outbound requests reject URL credentials and do not retain or send cookies; opaque clients
+and unapproved proxy transports are rejected before dispatch. DNS resolutions performed by
 [`resolve_and_validate_host`](file:///home/src/wishenka/items/ssrf.py#L266) are cached in-memory via
 [`DNSCache`](file:///home/src/wishenka/items/ssrf.py#L98) (`DEFAULT_DNS_CACHE_TTL_SECONDS = 60.0`,
 `DEFAULT_DNS_CACHE_CAPACITY = 512`) with per-event-loop single-flight coalescing
@@ -413,7 +430,11 @@ are bypassed or rejected for injected clients. DNS resolutions performed by
 [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L500) and
 [`SSRFSafeNetworkBackend`](file:///home/src/wishenka/items/ssrf.py#L383) pin validated IP addresses per
 request and redirect hop to prevent DNS rebinding (TOCTOU; [WISHENKA-92](https://pypost.atlassian.net/browse/WISHENKA-92)).
-The injected-client adapter uses private HTTPX/httpcore APIs, tracked in [WISHENKA-114](https://pypost.atlassian.net/browse/WISHENKA-114).
+Route selection uses the public HTTPX transport interface. Connection pinning still uses private
+HTTPX/httpcore pool internals; unexpected layouts fail closed. HTTPX is constrained to
+`>=0.28.0,<0.29`; review both HTTPX and httpcore upgrades before deployment. Replacing that
+connection-layer hook is tracked in
+[WISHENKA-284](https://pypost.atlassian.net/browse/WISHENKA-284).
 
 `tests/test_preview_resource_reuse.py` covers cache eligibility and expiry, isolation, lifecycle,
 redirect validation, and connection reuse with a local HTTP server. Run it through the repository
@@ -580,7 +601,9 @@ Located in [`wishenka/items/cassettes.py`](file:///home/src/wishenka/items/casse
 Provides an offline-first, VCR-compatible YAML HTTP recording, sanitization, and replay engine built on `httpx.AsyncBaseTransport` and `PyYAML` without external network access during regular test runs:
 
 - **Execution Modes ([`CassetteMode`](file:///home/src/wishenka/items/cassettes.py#L88), [`resolve_cassette_mode`](file:///home/src/wishenka/items/cassettes.py#L96))**:
-  - `CassetteMode.REPLAY` (`"replay"`, default): Strictly offline playback from the loaded YAML cassette. Pre-populates `_dns_cache` for recorded hosts with `SAFE_REPLAY_PUBLIC_IP = "93.184.216.34"` so `resolve_and_validate_host` completes offline without live `getaddrinfo` DNS lookups while preserving SSRF checks for forbidden IP literals. Any unrecorded `(method, normalized_uri)` request logs `cassette_miss` (`WARNING`) and raises [`CassetteMissError`](file:///home/src/wishenka/items/exceptions.py#L75).
+  - `CassetteMode.REPLAY` (`"replay"`, default): offline playback; a missing interaction logs
+    `cassette_miss` and raises `CassetteMissError`. It does not seed the shared DNS cache. The
+    CLI `--verify` uses a private fixture-only preview fetcher, so verification needs no DNS.
   - `CassetteMode.RECORD` (`"record"`): Replays existing interactions on hit; on miss, dispatches the request through `inner_transport` (defaulting to [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L500)), sanitizes the interaction, appends it to the cassette, and saves the YAML file.
   - `CassetteMode.REFRESH` (`"refresh"`): Always fetches fresh responses through `inner_transport`, sanitizes request and response data, replaces matching interactions in the cassette, and saves the YAML file.
   - Mode resolution checks the explicit `mode` parameter first and falls back to the `WISHENKA_CASSETTE_MODE` environment variable (defaulting to `"replay"`).
@@ -595,8 +618,13 @@ Provides an offline-first, VCR-compatible YAML HTTP recording, sanitization, and
   - [`sanitize_uri(uri)`](file:///home/src/wishenka/items/cassettes.py#L142): Normalizes URLs via [`clean_url`](file:///home/src/wishenka/items/marketplaces.py#L29) (stripping `utm_*`, `from=share*`, `clid`, `targetUrl`, `promo`, etc.), removes `user:pass@` netloc credentials, and strips query parameters matching [`SENSITIVE_QUERY_KEYS`](file:///home/src/wishenka/items/cassettes.py#L65) (`token`, `access_token`, `refresh_token`, `id_token`, `api_key`, `apikey`, `session`, `session_id`, `sessionid`, `auth`, `auth_token`, `key`, `secret`, `password`, `passwd`, `signature`, `sig`) or containing sensitive substrings.
   - [`sanitize_interaction(interaction)`](file:///home/src/wishenka/items/cassettes.py#L300): Applied automatically on `Cassette` initialization, `add_interaction`, `from_dict`, and `to_dict`/`save` so secrets can never be written to disk.
 - **Transport & Client Context Manager**:
-  - [`CassetteTransport`](file:///home/src/wishenka/items/cassettes.py#L498): Implements `httpx.AsyncBaseTransport.handle_async_request(request)`. Matches requests by `(method.upper(), sanitize_uri(uri))`, `clean_url(uri)`, or exact URI, and builds streaming-compatible `httpx.Response` objects (`content-length` recalculated for UTF-8 bytes while stripping `transfer-encoding` / `content-encoding`) so the full `ItemPreviewService.fetch_preview` $\rightarrow$ `UrlMetadataService._fetch_html` $\rightarrow$ `_BorrowedTransport` $\rightarrow$ `_stream_and_read` $\rightarrow$ `decode_html` $\rightarrow$ `HtmlMetadataExtractor.extract` pipeline executes without internal mocks.
-  - [`cassette_client(cassette_path, mode=..., inner_transport=..., marketplace=..., scenario=...)`](file:///home/src/wishenka/items/cassettes.py#L689): Async context manager yielding an `httpx.AsyncClient(transport=CassetteTransport(...), follow_redirects=True, trust_env=False)` ready to pass into `ItemPreviewService.fetch_preview(raw_input, client=client)`.
+  - `CassetteTransport` implements the async transport interface and matches requests by method
+    and normalized URI. Recording and refresh use a separate direct path. Response body headers
+    are normalized for replay; sensitive request and response fields are removed before saving.
+  - `cassette_client(...)` remains a standalone cassette HTTP client; it is not an approved
+    preview client. For preview integration, `cassette_replay_routes(cassette)` copies fixtures
+    into an explicit non-network `PreviewTransportConfig`. Normal preview still validates DNS.
+    Recording and refresh use a separate pinned direct path and reject custom recorder transports.
 - **Reference Marketplace Cassette Catalog (`tests/cassettes/marketplaces/`)**:
   - Contains 10 sanitized reference YAML cassettes covering the top-5 Russian marketplaces across two scenarios (`product` and `antibot`):
     - **Ozon**: `ozon_product.yaml` (`200 OK` JSON-LD `Product` + OpenGraph), `ozon_antibot.yaml` (`403 Forbidden` Cloudflare / «Доступ ограничен»).
@@ -606,7 +634,9 @@ Provides an offline-first, VCR-compatible YAML HTTP recording, sanitization, and
     - **Megamarket**: `megamarket_product.yaml` (`200 OK` JSON-LD `@graph` + `AggregateOffer`), `megamarket_antibot.yaml` (`503 Service Unavailable` DDoS-Guard / «Проверка браузера»).
 - **CLI Audit & Recording Utility (`python -m wishenka.items.cassettes`)**:
   - `--verify` (or `--mode replay`): Verifies all `*.yaml` cassettes in `--cassettes-dir` offline through `ItemPreviewService.fetch_preview`, asserting that `product` cassettes resolve with `is_fallback=False` and `antibot` cassettes degrade gracefully with `is_fallback=True`.
-  - `--mode record|refresh --url <url> --output <path> [--marketplace <slug>] [--scenario <product|antibot>]`: Records or refreshes a single cassette through `ItemPreviewService.fetch_preview` with automatic sanitization.
+  - `--mode record|refresh --url <url> --output <path>` records or refreshes a cassette
+    through the validated, pinned direct transport with automatic sanitization. Optional
+    `--marketplace` and `--scenario` specify the fixture metadata.
   - `--mode record|refresh [--cassettes-dir <dir>]`: Batch-refreshes all existing YAML cassettes in the target directory.
 
 ---
@@ -1197,75 +1227,36 @@ async with httpx.AsyncClient(base_url="https://api.wishenka.app") as client:
 
 ### 9. Offline Replay, Recording, and CLI Audit with Marketplace Web Cassettes
 
-Use [`cassette_client`](file:///home/src/wishenka/items/cassettes.py#L689), [`CassetteMode`](file:///home/src/wishenka/items/cassettes.py#L88), [`load_marketplace_cassette`](file:///home/src/wishenka/items/cassettes.py#L486), and [`CassetteMissError`](file:///home/src/wishenka/items/exceptions.py#L75) to test the full `ItemPreviewService.fetch_preview` pipeline against recorded marketplace responses without opening external sockets:
+The preview service accepts explicitly approved routes, not an injected HTTPX client. A direct
+route is owned by the caller; close its transport after all previews complete:
 
 ```python
-from pathlib import Path
-import pytest
-
-from wishenka.items.cassettes import (
-    DEFAULT_CASSETTES_DIR,
-    CassetteMode,
-    cassette_client,
-    load_marketplace_cassette,
-    sanitize_headers,
-    sanitize_uri,
-)
-from wishenka.items.exceptions import CassetteMissError
+from wishenka.items.fetcher import PreviewTransportConfig, safe_direct_route
 from wishenka.items.service import ItemPreviewService
 
-service = ItemPreviewService()
-
-# 1. Offline REPLAY of a recorded product card (even when input contains tracking query params)
-ozon_cassette_path = DEFAULT_CASSETTES_DIR / "ozon_product.yaml"
-async with cassette_client(ozon_cassette_path, mode=CassetteMode.REPLAY) as client:
-    preview = await service.fetch_preview(
-        "Посмотри наушники https://ozon.ru/product/besprovodnye-naushniki-sony-wh-1000xm5-123456789/"
-        "?utm_source=telegram&from=share_ios",
-        client=client,
-    )
-assert preview.is_fallback is False
-assert preview.store_name == "Ozon"
-assert preview.price == 29990
-assert preview.currency == "RUB"
-
-# 2. Offline REPLAY of a 200 OK Russian anti-bot challenge page (e.g. Yandex SmartCaptcha)
-yandex_antibot_path = DEFAULT_CASSETTES_DIR / "yandex_market_antibot.yaml"
-yandex_cassette = load_marketplace_cassette("yandex_market", "antibot")
-target_url = yandex_cassette.interactions[0].request.uri
-
-async with cassette_client(yandex_antibot_path, mode=CassetteMode.REPLAY) as client:
-    bot_preview = await service.fetch_preview(target_url, client=client)
-assert bot_preview.is_fallback is True
-assert bot_preview.fallback_reason == "anti_bot_challenge"
-assert bot_preview.store_name == "Яндекс Маркет"
-assert bot_preview.title is None  # Challenge <title> "Почти готово..." never leaks
-
-# 3. Fail-closed CassetteMissError when requesting an unrecorded URL in REPLAY mode
-async with cassette_client(ozon_cassette_path, mode=CassetteMode.REPLAY) as client:
-    with pytest.raises(CassetteMissError) as exc_info:
-        await service.fetch_preview("https://ozon.ru/product/unrecorded-999/", client=client)
-assert exc_info.value.method == "GET"
-
-# 4. Header and URI sanitization helpers
-clean_hdrs = sanitize_headers(
-    {
-        "Accept": "text/html",
-        "Cookie": "session_id=secret",
-        "Authorization": "Bearer token",
-        "Set-Cookie": "uid=123",
-    }
-)
-assert "cookie" not in clean_hdrs
-assert "authorization" not in clean_hdrs
-assert "set-cookie" not in clean_hdrs
-assert clean_hdrs["accept"] == ["text/html"]
-
-clean_link = sanitize_uri(
-    "https://user:pass@ozon.ru/product/123/?utm_source=tg&access_token=secret&sku=42"
-)
-assert clean_link == "https://ozon.ru/product/123/?sku=42"
+route = safe_direct_route()
+routes = PreviewTransportConfig(default=route, mounts={})
+try:
+    preview = await ItemPreviewService(routes=routes).fetch_preview("https://example.com/item")
+finally:
+    await route.transport.aclose()
 ```
+
+For fixture-backed preview integration, load a cassette and supply its replay routes:
+
+```python
+from wishenka.items.cassettes import cassette_replay_routes, load_marketplace_cassette
+from wishenka.items.service import ItemPreviewService
+
+cassette = load_marketplace_cassette("ozon", "product")
+routes = cassette_replay_routes(cassette)
+target = cassette.interactions[0].request.uri
+preview = await ItemPreviewService(routes=routes).fetch_preview(target)
+```
+
+The normal preview path validates DNS even for replay routes. Use the CLI `--verify` for fully
+offline verification: its private fixture-only fetcher runs the preview and recorded redirect
+chain without network or global DNS-cache changes. Missing interactions raise `CassetteMissError`.
 
 CLI commands for offline cassette verification and controlled recording/refresh:
 
@@ -1319,7 +1310,6 @@ Defined in [`wishenka/items/ssrf.py`](file:///home/src/wishenka/items/ssrf.py), 
 | `CHALLENGE_SIGNATURES` | List of 23 anti-bot / WAF markers | Substrings scanned case-insensitively in HTML responses (Cloudflare, Qrator, DDoS-Guard, Yandex SmartCaptcha, Avito IP firewall, Ozon/WB/Megamarket challenges). |
 | `WISHENKA_CASSETTE_MODE` | `"replay"` (default), `"record"`, `"refresh"` | Environment variable controlling `resolve_cassette_mode` when no explicit `mode` argument is supplied. |
 | `DEFAULT_CASSETTES_DIR` | `tests/cassettes/marketplaces` | Default directory containing versioned marketplace YAML cassettes. |
-| `SAFE_REPLAY_PUBLIC_IP` | `"93.184.216.34"` | Public IP seeded into `_dns_cache` for recorded cassette hosts during offline `REPLAY`. |
 | `SENSITIVE_HEADER_NAMES` / `SENSITIVE_HEADER_SUBSTRINGS` | Set of 16 names + 7 substrings | Headers stripped by `sanitize_headers` before persisting cassettes (`Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, `X-Csrf-Token`, client IP headers, etc.). |
 | `SENSITIVE_QUERY_KEYS` | Set of 18 query parameter names | Query keys stripped by `sanitize_uri` (`token`, `access_token`, `api_key`, `session_id`, `password`, `signature`, etc.). |
 

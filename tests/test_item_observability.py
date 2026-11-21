@@ -2,7 +2,7 @@
 
 import json
 import logging
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -189,19 +189,12 @@ class TestItemObservability:
         <meta property="product:price:amount" content="3500" />
         </head><body></body></html>
         """
-        mock_response = httpx.Response(
-            status_code=200,
-            text=html,
-            request=httpx.Request("GET", "https://ozon.ru/product/aeropress-123"),
-        )
-        mock_client = AsyncMock(spec=httpx.AsyncClient)
-        mock_client.get.return_value = mock_response
-
-        with caplog.at_level(logging.INFO, logger="wishenka.items"):
-            dto = await service.fetch_preview(
-                "https://ozon.ru/product/aeropress-123",
-                client=mock_client,
-            )
+        url = "https://ozon.ru/product/aeropress-123"
+        with (
+            caplog.at_level(logging.INFO, logger="wishenka.items"),
+            patch.object(service.url_metadata_service, "_fetch_html", return_value=(html, url)),
+        ):
+            dto = await service.fetch_preview(url)
 
         assert dto.title == "Aeropress Coffee Maker"
         assert not dto.is_fallback
@@ -225,14 +218,15 @@ class TestItemObservability:
         service = ItemPreviewService()
 
         # 1. Timeout
-        mock_client_timeout = AsyncMock(spec=httpx.AsyncClient)
-        mock_client_timeout.get.side_effect = httpx.TimeoutException("Read timed out")
-
-        with caplog.at_level(logging.WARNING, logger="wishenka.items"):
-            dto_timeout = await service.fetch_preview(
-                "https://ozon.ru/product/slow-item",
-                client=mock_client_timeout,
-            )
+        with (
+            caplog.at_level(logging.WARNING, logger="wishenka.items"),
+            patch.object(
+                service.url_metadata_service,
+                "_fetch_html",
+                side_effect=httpx.TimeoutException("Read timed out"),
+            ),
+        ):
+            dto_timeout = await service.fetch_preview("https://ozon.ru/product/slow-item")
         assert dto_timeout.is_fallback
         assert dto_timeout.fallback_reason == "timeout"
         timeout_rec = next(
@@ -247,14 +241,15 @@ class TestItemObservability:
         caplog.clear()
 
         # 2. Network error
-        mock_client_net = AsyncMock(spec=httpx.AsyncClient)
-        mock_client_net.get.side_effect = httpx.ConnectError("Connection refused")
-
-        with caplog.at_level(logging.WARNING, logger="wishenka.items"):
-            dto_net = await service.fetch_preview(
-                "https://wildberries.ru/catalog/error-item",
-                client=mock_client_net,
-            )
+        with (
+            caplog.at_level(logging.WARNING, logger="wishenka.items"),
+            patch.object(
+                service.url_metadata_service,
+                "_fetch_html",
+                side_effect=httpx.ConnectError("Connection refused"),
+            ),
+        ):
+            dto_net = await service.fetch_preview("https://wildberries.ru/catalog/error-item")
         assert dto_net.is_fallback
         assert dto_net.fallback_reason == "http_error"
         net_rec = next(
@@ -269,18 +264,23 @@ class TestItemObservability:
         caplog.clear()
 
         # 3. Anti-bot 403 challenge
-        mock_client_antibot = AsyncMock(spec=httpx.AsyncClient)
-        mock_client_antibot.get.return_value = httpx.Response(
+        antibot_response = httpx.Response(
             status_code=403,
             text="<html><title>Just a moment...</title></html>",
             request=httpx.Request("GET", "https://market.yandex.ru/product/antibot"),
         )
 
-        with caplog.at_level(logging.INFO, logger="wishenka.items"):
-            dto_antibot = await service.fetch_preview(
-                "https://market.yandex.ru/product/antibot",
-                client=mock_client_antibot,
-            )
+        with (
+            caplog.at_level(logging.INFO, logger="wishenka.items"),
+            patch.object(
+                service.url_metadata_service,
+                "_fetch_html",
+                side_effect=httpx.HTTPStatusError(
+                    "Blocked", request=antibot_response.request, response=antibot_response
+                ),
+            ),
+        ):
+            dto_antibot = await service.fetch_preview("https://market.yandex.ru/product/antibot")
         assert dto_antibot.is_fallback
         assert dto_antibot.fallback_reason == "anti_bot_challenge"
         antibot_rec = next(
@@ -296,18 +296,23 @@ class TestItemObservability:
         caplog.clear()
 
         # 4. HTTP 500 error
-        mock_client_500 = AsyncMock(spec=httpx.AsyncClient)
-        mock_client_500.get.return_value = httpx.Response(
+        error_response = httpx.Response(
             status_code=500,
             text="Server Error",
             request=httpx.Request("GET", "https://dns-shop.ru/product/err"),
         )
 
-        with caplog.at_level(logging.WARNING, logger="wishenka.items"):
-            dto_500 = await service.fetch_preview(
-                "https://dns-shop.ru/product/err",
-                client=mock_client_500,
-            )
+        with (
+            caplog.at_level(logging.WARNING, logger="wishenka.items"),
+            patch.object(
+                service.url_metadata_service,
+                "_fetch_html",
+                side_effect=httpx.HTTPStatusError(
+                    "Server error", request=error_response.request, response=error_response
+                ),
+            ),
+        ):
+            dto_500 = await service.fetch_preview("https://dns-shop.ru/product/err")
         assert dto_500.is_fallback
         assert dto_500.fallback_reason == "http_error"
         http_rec = next(
@@ -322,25 +327,22 @@ class TestItemObservability:
         caplog.clear()
 
         # 5. Metadata extraction exception
-        mock_client_parse_err = AsyncMock(spec=httpx.AsyncClient)
-        mock_client_parse_err.get.return_value = httpx.Response(
-            status_code=200,
-            text="<html></html>",
-            request=httpx.Request("GET", "https://avito.ru/item/bug"),
-        )
+        parse_url = "https://avito.ru/item/bug"
 
         with (
             caplog.at_level(logging.ERROR, logger="wishenka.items"),
+            patch.object(
+                service.url_metadata_service,
+                "_fetch_html",
+                return_value=("<html></html>", parse_url),
+            ),
             patch.object(
                 HtmlMetadataExtractor,
                 "extract",
                 side_effect=RuntimeError("Parsing crash"),
             ),
         ):
-            dto_parse_err = await service.fetch_preview(
-                "https://avito.ru/item/bug",
-                client=mock_client_parse_err,
-            )
+            dto_parse_err = await service.fetch_preview(parse_url)
         assert dto_parse_err.is_fallback
         parse_rec = next(
             r

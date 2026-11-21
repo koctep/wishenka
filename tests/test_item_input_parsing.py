@@ -301,8 +301,12 @@ class TestGracefulFallbackAndAntiBot:
             text="<html><head><title>Access Denied</title></head></html>",
         )
 
-        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-            mock_get.return_value = mock_response
+        with patch.object(
+            service.url_metadata_service, "_fetch_html", new_callable=AsyncMock
+        ) as mock_get:
+            mock_get.side_effect = httpx.HTTPStatusError(
+                "blocked", request=mock_response.request, response=mock_response
+            )
             preview = await service.fetch_preview("https://ozon.ru/product/12345")
 
         assert isinstance(preview, ItemPreviewDTO)
@@ -330,8 +334,12 @@ class TestGracefulFallbackAndAntiBot:
             text=html_challenge,
         )
 
-        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-            mock_get.return_value = mock_response
+        with patch.object(
+            service.url_metadata_service, "_fetch_html", new_callable=AsyncMock
+        ) as mock_get:
+            mock_get.side_effect = httpx.HTTPStatusError(
+                "blocked", request=mock_response.request, response=mock_response
+            )
             preview = await service.fetch_preview("https://wildberries.ru/catalog/123")
 
         assert preview.is_fallback is True
@@ -343,7 +351,9 @@ class TestGracefulFallbackAndAntiBot:
     async def test_timeout_fallback_to_manual_entry_dto(self) -> None:
         service = ItemPreviewService()
 
-        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
+        with patch.object(
+            service.url_metadata_service, "_fetch_html", new_callable=AsyncMock
+        ) as mock_get:
             mock_get.side_effect = httpx.TimeoutException("Connection timed out after 4.0s")
             preview = await service.fetch_preview("https://slow-shop.ru/item/999")
 

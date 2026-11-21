@@ -16,6 +16,7 @@ from wishenka.items.exceptions import (
 from wishenka.items.fetcher import (
     DEFAULT_HEADERS,
     DEFAULT_TIMEOUT,
+    PreviewTransportConfig,
     UrlMetadataService,
     fetch_provenance,
     validate_url,
@@ -63,25 +64,31 @@ class ItemPreviewService:
         url_metadata_service: UrlMetadataService | None = None,
         client: httpx.AsyncClient | None = None,
         cache: PreviewCache | None = None,
+        routes: PreviewTransportConfig | None = None,
     ) -> None:
         self.url_metadata_service = url_metadata_service or UrlMetadataService(
             timeout=DEFAULT_TIMEOUT
         )
         self.client = client
         self.cache = cache
+        self.routes = routes
 
     async def preview(
         self,
         raw_input: str,
         client: httpx.AsyncClient | None = None,
+        *,
+        routes: PreviewTransportConfig | None = None,
     ) -> ItemPreviewDTO:
         """Alias for fetch_preview."""
-        return await self.fetch_preview(raw_input, client=client)
+        return await self.fetch_preview(raw_input, client=client, routes=routes)
 
     async def fetch_preview(
         self,
         raw_input: str,
         client: httpx.AsyncClient | None = None,
+        *,
+        routes: PreviewTransportConfig | None = None,
     ) -> ItemPreviewDTO:
         """Classify input, scrape metadata if URL, and degrade gracefully on anti-bot/timeout."""
         start_time = time.perf_counter()
@@ -108,14 +115,17 @@ class ItemPreviewService:
         url_domain = extract_domain(target_url)
         store_name = derive_store_name(target_url)
 
+        cache_key = f"{self.routes.cache_identity}:{target_url}" if self.routes else target_url
+        cacheable = client is None and routes is None and self.client is None
+
         try:
-            cached = self.cache.get(target_url) if self.cache and client is None else None
+            cached = self.cache.get(cache_key) if self.cache and cacheable else None
             if cached is not None:
                 try:
                     for destination in cached.urls:
                         await validate_url(destination)
                 except Exception:
-                    self.cache.entries.pop(target_url, None)  # type: ignore[union-attr]
+                    self.cache.entries.pop(cache_key, None)  # type: ignore[union-attr]
                     raise
                 logger.debug(
                     "Preview cache lookup: hit",
@@ -124,7 +134,7 @@ class ItemPreviewService:
                 html_text = ""
                 response_url = cached.urls[-1]
             else:
-                if self.cache is not None and client is None:
+                if self.cache is not None and cacheable:
                     logger.debug(
                         "Preview cache lookup: miss",
                         extra={"event": "preview_cache_lookup", "cache_outcome": "miss"},
@@ -133,28 +143,42 @@ class ItemPreviewService:
                 html_text, response_url = await self.url_metadata_service._fetch_html(
                     target_url,
                     client=client or self.client,
+                    routes=routes or self.routes,
                 )
         except SSRFBlockedError as exc:
             duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
-            logger.warning(
-                "SSRF blocked for domain %s (host=%s, ip=%s, reason=%s): %s",
-                url_domain,
-                exc.host,
-                exc.ip_address,
-                exc.reason,
-                exc,
-                extra={
-                    "event": "item_preview_ssrf_blocked",
-                    "url": target_url,
-                    "url_domain": url_domain,
-                    "host": exc.host,
-                    "ip": exc.ip_address,
-                    "reason": exc.reason,
-                    "input_type": classification.input_type.value,
-                    "duration_ms": duration_ms,
-                    "fallback_reason": "ssrf_blocked",
-                },
-            )
+            if exc.reason in {"unknown_route", "route_denied"}:
+                logger.warning(
+                    "Preview route rejected (%s)",
+                    exc.reason,
+                    extra={
+                        "event": "item_preview_route_rejected",
+                        "reason": exc.reason,
+                        "input_type": classification.input_type.value,
+                        "duration_ms": duration_ms,
+                        "fallback_reason": "ssrf_blocked",
+                    },
+                )
+            else:
+                logger.warning(
+                    "SSRF blocked for domain %s (host=%s, ip=%s, reason=%s): %s",
+                    url_domain,
+                    exc.host,
+                    exc.ip_address,
+                    exc.reason,
+                    exc,
+                    extra={
+                        "event": "item_preview_ssrf_blocked",
+                        "url": target_url,
+                        "url_domain": url_domain,
+                        "host": exc.host,
+                        "ip": exc.ip_address,
+                        "reason": exc.reason,
+                        "input_type": classification.input_type.value,
+                        "duration_ms": duration_ms,
+                        "fallback_reason": "ssrf_blocked",
+                    },
+                )
             return ItemPreviewDTO(
                 input_type=classification.input_type,
                 url=target_url,
@@ -381,8 +405,8 @@ class ItemPreviewService:
                 extracted = await asyncio.to_thread(
                     HtmlMetadataExtractor.extract, html_text, base_url=response_url
                 )
-                if self.cache is not None and client is None:
-                    self.cache.put(target_url, extracted, fetch_provenance.get())
+                if self.cache is not None and cacheable:
+                    self.cache.put(cache_key, extracted, fetch_provenance.get())
             duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
             logger.info(
                 "Link preview successfully generated for domain %s in %sms",

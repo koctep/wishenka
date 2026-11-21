@@ -9,7 +9,12 @@ import httpx
 import pytest
 
 from wishenka.items.exceptions import ResponseBodyTooLargeError
-from wishenka.items.fetcher import UrlMetadataService
+from wishenka.items.fetcher import (
+    PreviewTransportConfig,
+    UrlMetadataService,
+    deny_route,
+    offline_replay_route,
+)
 from wishenka.items.parser import HtmlMetadataExtractor
 from wishenka.items.service import ItemPreviewService
 
@@ -35,27 +40,16 @@ async def preview_bytes(
 ) -> Any:
     """Use real HTTPX responses and parsing without network access."""
     monkeypatch.setattr("wishenka.items.fetcher.resolve_and_validate_host", AsyncMock())
-    response = httpx.Response(
-        200,
-        headers={"content-type": content_type},
-        content=body,
-        request=httpx.Request("GET", URL),
+    route = offline_replay_route({URL: (200, {"content-type": content_type}, body)})
+    routes = (
+        PreviewTransportConfig(default=route, mounts={})
+        if path == "default"
+        else PreviewTransportConfig(default=deny_route(), mounts={"https://example.com": route})
     )
-    fetcher = UrlMetadataService()
-    if path == "buffered":
-        mock_client = AsyncMock(spec=httpx.AsyncClient)
-        mock_client.get.return_value = response
-        return await ItemPreviewService(url_metadata_service=fetcher).fetch_preview(
-            URL, client=mock_client
-        )
-    transport = httpx.MockTransport(lambda request: response)
-    async with httpx.AsyncClient(transport=transport, trust_env=False) as client:
-        return await ItemPreviewService(url_metadata_service=fetcher, client=client).fetch_preview(
-            URL
-        )
+    return await ItemPreviewService(routes=routes).fetch_preview(URL)
 
 
-@pytest.mark.parametrize("path", ["streaming", "buffered"])
+@pytest.mark.parametrize("path", ["default", "mount"])
 @pytest.mark.parametrize(
     ("encoding", "content_type", "meta"),
     [
@@ -88,7 +82,7 @@ async def test_legacy_and_conflicting_declarations(
     assert not result.is_fallback
 
 
-@pytest.mark.parametrize("path", ["streaming", "buffered"])
+@pytest.mark.parametrize("path", ["default", "mount"])
 async def test_bom_precedes_legacy_declarations(path: str, monkeypatch: pytest.MonkeyPatch) -> None:
     result = await preview_bytes(
         page("<meta charset='koi8-r'>").encode("utf-8-sig"),
@@ -100,7 +94,7 @@ async def test_bom_precedes_legacy_declarations(path: str, monkeypatch: pytest.M
     assert result.description == DESCRIPTION
 
 
-@pytest.mark.parametrize("path", ["streaming", "buffered"])
+@pytest.mark.parametrize("path", ["default", "mount"])
 async def test_invalid_declarations_and_bytes_are_deterministic(
     path: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -111,7 +105,7 @@ async def test_invalid_declarations_and_bytes_are_deterministic(
     assert first.title is not None
 
 
-@pytest.mark.parametrize("path", ["streaming", "buffered"])
+@pytest.mark.parametrize("path", ["default", "mount"])
 @pytest.mark.parametrize("declaration", ["header", "meta"])
 async def test_nul_in_charset_uses_next_valid_declaration(
     path: str, declaration: str, monkeypatch: pytest.MonkeyPatch
@@ -127,21 +121,16 @@ async def test_nul_in_charset_uses_next_valid_declaration(
     assert not result.is_fallback
 
 
-@pytest.mark.parametrize("path", ["streaming", "buffered"])
+@pytest.mark.parametrize("path", ["content-length", "streamed-body"])
 async def test_size_limit_still_applies(path: str) -> None:
     fetcher = UrlMetadataService(max_bytes=16)
-    response = httpx.Response(200, content=b"x" * 17, request=httpx.Request("GET", URL))
-    if path == "buffered":
-        mock_client = AsyncMock(spec=httpx.AsyncClient)
-        mock_client.get.return_value = response
+    headers = {"Content-Length": "17"} if path == "content-length" else {}
+    response = httpx.Response(
+        200, content=b"x" * 17, headers=headers, request=httpx.Request("GET", URL)
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response)) as client:
         with pytest.raises(ResponseBodyTooLargeError):
-            await fetcher._fetch_via_get(mock_client, URL)
-    else:
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda request: response)
-        ) as client:
-            with pytest.raises(ResponseBodyTooLargeError):
-                await fetcher._stream_and_read(client, URL)
+            await fetcher._stream_and_read(client, URL)
 
 
 def script(data: Any) -> str:
