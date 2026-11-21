@@ -80,7 +80,7 @@ def _row_to_item(row: Row[Any]) -> WishItem:
     created = _parse_dt(row.created_at) or datetime.now(UTC)
     updated = _parse_dt(row.updated_at) or datetime.now(UTC)
     rec_uid = int(row.recipient_user_id) if row.recipient_user_id is not None else None
-    price = int(row.price) if row.price is not None else None
+    price = row.price if row.price is not None else None
     return WishItem(
         id=int(row.id),
         wishlist_id=int(row.wishlist_id),

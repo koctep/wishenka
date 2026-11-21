@@ -315,7 +315,7 @@ def create_capture_router(deps: Any) -> Router:
             values = json.loads(editing["data"])
             try:
                 value: Any = raw or None
-                if field in ("price", "quantity", "recipient_user_id") and value is not None:
+                if field in ("quantity", "recipient_user_id") and value is not None:
                     value = int(value)
                 # Validate this field independently of incomplete extracted values.
                 check = {"title": "placeholder", field: value}

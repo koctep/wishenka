@@ -393,6 +393,8 @@ class ItemPreviewService:
                     "url_domain": response_domain,
                     "input_type": classification.input_type.value,
                     "duration_ms": duration_ms,
+                    "price": extracted.price,
+                    "currency": extracted.currency,
                     "is_fallback": False,
                 },
             )

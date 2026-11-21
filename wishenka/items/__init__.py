@@ -53,7 +53,9 @@ from wishenka.items.parser import (
     HtmlMetadataExtractor,
     clean_title,
     derive_store_name,
+    extract_currency,
     normalize_currency,
+    parse_decimal_price,
     parse_price,
 )
 from wishenka.items.schemas import (
@@ -115,9 +117,11 @@ __all__ = [
     "clean_title",
     "clean_url",
     "derive_store_name",
+    "extract_currency",
     "is_ip_safe",
     "load_marketplace_cassette",
     "normalize_currency",
+    "parse_decimal_price",
     "parse_price",
     "resolve_and_validate_host",
     "resolve_cassette_mode",

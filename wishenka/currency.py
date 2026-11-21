@@ -7,4 +7,10 @@ CURRENCY_OPTIONS = (
     ("EUR", "EUR (€)"),
     ("KZT", "KZT (₸)"),
     ("BYN", "BYN (Br)"),
+    ("CNY", "CNY (¥)"),
+    ("GBP", "GBP (£)"),
+    ("JPY", "JPY (¥)"),
+    ("TRY", "TRY (₺)"),
+    ("GEL", "GEL (₾)"),
+    ("AMD", "AMD (֏)"),
 )

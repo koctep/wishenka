@@ -57,6 +57,7 @@
                            id="item-price-input"
                            name="price"
                            min="0"
+                           step="any"
                            max="999999999"
                            value="{{ form.price if form.price is not none else '' }}"
                            placeholder="0" />
@@ -64,8 +65,12 @@
                 <div class="form-group w-28">
                     <label for="item-currency-select">{{ t('web.item.field_currency', locale|default('en')) }}</label>
                     <select id="item-currency-select" name="currency">
+                        {% set selected_currency = form.currency or DEFAULT_CURRENCY %}
+                        {% if selected_currency not in CURRENCY_OPTIONS | map(attribute=0) | list %}
+                        <option value="{{ selected_currency }}" selected>{{ selected_currency }}</option>
+                        {% endif %}
                         {% for code, label in CURRENCY_OPTIONS %}
-                        <option value="{{ code }}" {% if (form.currency or DEFAULT_CURRENCY) == code %}selected{% endif %}>
+                        <option value="{{ code }}" {% if selected_currency == code %}selected{% endif %}>
                             {{ label }}
                         </option>
                         {% endfor %}

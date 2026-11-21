@@ -1,5 +1,6 @@
 """Tests for item preview and quantity observability, structured logging, and caplog contracts."""
 
+import json
 import logging
 from unittest.mock import AsyncMock, patch
 
@@ -31,6 +32,57 @@ def make_user(telegram_id: int, first_name: str) -> AuthenticatedUser:
 
 class TestItemObservability:
     """Validate structured logging emission for item classifier, parser, and quantity updates."""
+
+    def test_unknown_currency_fallback_does_not_log_source_text(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Merchant currency text cannot inject messages or leak into log fields."""
+        currency = "untrusted-secret\ninjected-log-line"
+        product = {
+            "@type": "Product",
+            "name": "Example",
+            "offers": {"@type": "Offer", "price": "12", "priceCurrency": currency},
+        }
+        html = f'<script type="application/ld+json">{json.dumps(product)}</script>'
+        with caplog.at_level(logging.DEBUG, logger="wishenka.items"):
+            metadata = HtmlMetadataExtractor.extract(html, "https://example.com/item")
+
+        assert metadata.price == 12
+        assert metadata.currency == "RUB"
+        records = [
+            r for r in caplog.records if getattr(r, "event", None) == "currency_fallback_default"
+        ]
+        assert len(records) == 1
+        assert records[0].__dict__["currency"] == "RUB"
+        assert "untrusted-secret" not in str(records[0].__dict__)
+        assert "injected-log-line" not in records[0].getMessage()
+
+    def test_offer_logs_do_not_include_untrusted_payloads(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Offer diagnostics contain bounded parsed values instead of source objects."""
+        secret = "untrusted-offer-payload"
+        offer = {
+            "@type": "AggregateOffer",
+            "highPrice": {"text": secret},
+            "priceSpecification": {"price": f"12.50 {secret}", "priceCurrency": "EUR"},
+        }
+        with caplog.at_level(logging.DEBUG, logger="wishenka.items"):
+            price, currency = HtmlMetadataExtractor._extract_offer_pricing(
+                offer, url_domain="example.com"
+            )
+
+        assert price == f"12.50 {secret}"
+        assert currency == "EUR"
+        records = [r for r in caplog.records if getattr(r, "event", "").startswith("jsonld_")]
+        assert {getattr(r, "event", None) for r in records} == {
+            "jsonld_price_specification_extracted",
+            "jsonld_aggregate_offer_extracted",
+        }
+        for record in records:
+            assert getattr(record, "offer_price", None) == "12.5"
+            assert secret not in str(record.__dict__)
 
     def test_universal_input_classification_observability(
         self,

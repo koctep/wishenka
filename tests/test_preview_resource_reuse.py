@@ -94,6 +94,101 @@ def test_public_preview_is_reused_in_actual_ui(
     assert len(recording_origin) == 1
 
 
+@pytest.mark.parametrize(("amount", "expected"), [("1.299,99 €", "1299.99"), ("0,50 €", "0.5")])
+def test_fractional_preview_persists_for_gifter(
+    preview_app: tuple[TestClient, str], monkeypatch: pytest.MonkeyPatch, amount: str, expected: str
+) -> None:
+    """Preview, quick-add, SQLite readback, and public gifter view keep the same amount."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bs4 import BeautifulSoup
+
+    client, endpoint = preview_app
+    url = "https://shop.example.com/product"
+    html = (
+        '<meta property="og:title" content="Product">'
+        f'<meta property="product:price:amount" content="{amount}">'
+    )
+    fetcher = MagicMock()
+    fetcher._fetch_html = AsyncMock(return_value=(html, url))
+    monkeypatch.setattr(
+        cast(FastAPI, client.app).state, "item_preview_service", ItemPreviewService(fetcher)
+    )
+
+    response = client.post(endpoint, data={"raw_input": url})
+
+    assert response.status_code == 200
+    assert f"{expected} EUR" in response.text
+    card = BeautifulSoup(response.text, "html.parser")
+    fields = {node["name"]: node["value"] for node in card.select('input[type="hidden"]')}
+    assert fields["price"] == expected
+    quick_response = client.post(endpoint.removesuffix("preview") + "quick", data=fields)
+    assert quick_response.status_code == 201
+    wishlist_id = int(endpoint.split("/")[3])
+    service = cast(FastAPI, client.app).state.domain_service
+    wishlist = asyncio.run(service.get_wishlist_by_id(wishlist_id))
+    assert wishlist.items[0].price == float(expected)
+    client.headers.pop("Authorization")
+    share_response = client.get(f"/share/{wishlist.public_token}")
+    assert share_response.status_code == 200
+    assert f"{expected} EUR" in share_response.text
+
+
+@pytest.mark.parametrize("currency", ["GBP", "JPY", "CNY", "TRY", "GEL", "AMD", "CHF"])
+def test_imported_currency_survives_wish_edit(
+    preview_app: tuple[TestClient, str], monkeypatch: pytest.MonkeyPatch, currency: str
+) -> None:
+    """Creating from preview and submitting the edit form keeps its selected currency."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bs4 import BeautifulSoup
+
+    client, endpoint = preview_app
+    url = "https://shop.example.com/product"
+    html = (
+        '<meta property="og:title" content="Product">'
+        '<meta property="product:price:amount" content="12.50">'
+        f'<meta property="product:price:currency" content="{currency}">'
+    )
+    fetcher = MagicMock()
+    fetcher._fetch_html = AsyncMock(return_value=(html, url))
+    monkeypatch.setattr(
+        cast(FastAPI, client.app).state, "item_preview_service", ItemPreviewService(fetcher)
+    )
+    # CHF is a stored legacy code rather than a parser-supported import.
+    if currency == "CHF":
+        from wishenka.items.schemas import ItemPreviewDTO
+
+        cast(FastAPI, client.app).state.item_preview_service.fetch_preview = AsyncMock(
+            return_value=ItemPreviewDTO(title="Product", price=12.5, currency=currency, url=url)
+        )
+    preview = client.post(endpoint, data={"raw_input": url})
+    assert preview.status_code == 200
+    card = BeautifulSoup(preview.text, "html.parser")
+    fields = {node["name"]: node["value"] for node in card.select('input[type="hidden"]')}
+    assert fields["currency"] == currency
+    assert client.post(endpoint.removesuffix("preview") + "quick", data=fields).status_code == 201
+
+    wishlist_id = int(endpoint.split("/")[3])
+    service = cast(FastAPI, client.app).state.domain_service
+    wishlist = asyncio.run(service.get_wishlist_by_id(wishlist_id))
+    item_id = wishlist.items[0].id
+    edit_url = f"/web/wishlists/{wishlist_id}/items/{item_id}/edit"
+    edit_page = client.get(edit_url)
+    assert edit_page.status_code == 200
+    form = BeautifulSoup(edit_page.text, "html.parser")
+    selected = form.select_one("#item-currency-select option[selected]")
+    assert selected is not None and selected["value"] == currency
+    response = client.post(
+        edit_url,
+        data={"title": "Edited product", "price": "12.5", "currency": selected["value"]},
+    )
+    assert response.status_code == 200
+    updated = asyncio.run(service.get_wishlist_by_id(wishlist_id))
+    assert updated.items[0].currency == currency
+    assert updated.items[0].price == 12.5
+
+
 def test_cache_lookup_logs_outcome_without_url(
     preview_app: tuple[TestClient, str],
     recording_origin: list[tuple[httpx.AsyncHTTPTransport, httpx.Request]],

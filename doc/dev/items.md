@@ -304,9 +304,63 @@ Parses HTML documents using `BeautifulSoup4` with a multi-level fallback cascade
   - Scrapes `<title>`, `<meta name="description">`, and `<link rel="icon">`.
 - **Sanitization Helpers**:
   - [`clean_title`](file:///home/src/wishenka/items/parser.py#L59-L75): Removes store advertising noise and marketing suffixes (e.g. `— купить в интернет-магазине Ozon`, `на маркетплейсе Wildberries`, `объявление на Авито`).
-  - [`parse_price`](file:///home/src/wishenka/items/parser.py#L77-L110): Handles non-breaking spaces (`\xa0`), mixed European/Russian decimal separators, and casts values to integer minor units.
-  - [`normalize_currency`](file:///home/src/wishenka/items/parser.py#L112-L123): Normalizes currency symbols (`₽`, `руб`, `rub`, `$`, `€`, `₸`, `kzt`, `byn`, `£`, `¥`) to ISO 4217 uppercase codes (`RUB`, `USD`, `EUR`, `KZT`, `BYN`, `GBP`, `CNY`), defaulting to `RUB`.
+  - `parse_decimal_price` parses localized positive prices as floats; `parse_price` is the
+    legacy whole-unit helper and truncates the fraction. The preview uses the decimal helper.
+  - `extract_currency` recognizes supported codes and inline labels; `normalize_currency`
+    resolves the currency or falls back to `RUB`. See the pricing notes below.
   - [`derive_store_name`](file:///home/src/wishenka/items/parser.py#L138-L167): Resolves store name via priority: OpenGraph `og:site_name` $\rightarrow$ brand $\rightarrow$ `KNOWN_STORES` domain map $\rightarrow$ [`MarketplaceRegistry.derive_store_name`](file:///home/src/wishenka/items/marketplaces.py#L210) $\rightarrow$ clean domain.
+
+#### International prices and currency
+
+`HtmlMetadataExtractor.extract(html, base_url)` selects the first valid positive JSON-LD offer
+price, including offer lists, nested offers, and `priceSpecification`. It pairs the selected price
+with its offer currency; an inline currency in that price takes precedence over unrelated
+OpenGraph currency metadata. If no usable JSON-LD price is found, OpenGraph and then microdata
+can supply it. `price`, `lowPrice`, `minPrice`, `highPrice`, and `maxPrice` are checked in that
+order. Invalid, zero, and negative offer prices are skipped.
+
+`parse_decimal_price(value)` accepts finite positive numbers and localized price strings. It
+handles decimal commas and dots, grouped thousands, and Unicode spaces. With a single separator
+and exactly three trailing digits, a nonzero integer prefix is interpreted as thousands grouping;
+a zero prefix is interpreted as a fractional amount. This is an intentional default where the
+source does not provide locale information. `parse_price(value)` remains available for callers
+that need integer units and truncates the fractional part; do not use it for a preview price.
+
+`extract_currency(text)` recognizes codes, names, and symbols for `RUB`, `USD`, `EUR`, `KZT`,
+`BYN`, `CNY`, `GBP`, `JPY`, `TRY`, `GEL`, and `AMD`. `normalize_currency` accepts a separate
+currency and optional `fallback_text` containing the price. An unqualified `¥` defaults to CNY;
+an explicit JPY or CNY marker disambiguates it. An unrecognized currency defaults to `RUB`.
+Aliases, known stores, and recognized implicit URL suffixes are static lists in the parser and
+classifier, rather than environment settings.
+
+For example:
+
+```python
+from wishenka.items.parser import extract_currency, parse_decimal_price
+
+assert parse_decimal_price("1.299,99 €") == 1299.99
+assert parse_decimal_price("0,50 €") == 0.5
+assert extract_currency("1.299,99 €") == "EUR"
+assert parse_decimal_price("-EUR 25") is None
+```
+
+Preview and wish DTOs accept `int | float | None`: whole amounts remain integers and fractional
+amounts pass through quick-add, edit, storage, and the gift-giver view. The existing SQLite
+`wl_items.price` column has INTEGER affinity, but SQLite stores non-integral numeric values as
+REAL; existing integer records remain compatible and no migration is required for SQLite. These
+are major currency units, not integer minor units. Python floats and SQLite REAL use binary
+floating point, so callers requiring exact decimal accounting must not treat this representation
+as a fixed-point ledger. The edit form offers all supported currencies and preserves a previously
+stored unknown currency as an option.
+
+For troubleshooting, inspect `metadata_extraction_completed`, `inline_currency_extracted`,
+`currency_fallback_default`, `jsonld_price_specification_extracted`, and
+`jsonld_aggregate_offer_extracted` logs. Offer diagnostics contain parsed numeric values and
+recognized currency, not raw merchant offer content. If a preview falls back to RUB, check the
+source currency and supported aliases. If separators are ambiguous, compare the source locale
+with the deterministic rules above. Run the focused regression suite with
+`make test` or `.venv/bin/pytest tests/test_international_currency_parsing.py`; the latter covers
+localized numbers, currency labels, JSON-LD offers, and the preview path.
 
 ### 6. Link Preview Orchestrator & Graceful Fallback [`ItemPreviewService`](file:///home/src/wishenka/items/service.py#L38-L387)
 

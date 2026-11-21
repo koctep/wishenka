@@ -16,7 +16,8 @@ EXPLICIT_URL_REGEX = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 
 # Implicit domain URL without protocol
 DOMAIN_URL_REGEX = re.compile(
-    r"\b(?:[a-zA-Z0-9-]+\.)+(?:ru|com|org|net|by|kz|io|me|app|store|shop|market|su)"
+    r"\b(?:[a-zA-Z0-9-]+\.)+"
+    r"(?:ru|com|org|net|by|kz|io|me|app|store|shop|market|su|uk|de|jp|cn|tr|ge|am|eu|fr|it|es|pl)"
     r"(?:/[^\s<>\"']*)?",
     re.IGNORECASE,
 )

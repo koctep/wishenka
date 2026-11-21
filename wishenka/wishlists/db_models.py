@@ -81,7 +81,7 @@ class WishItemRow(Base):
     title: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str | None] = mapped_column(String, nullable=True)
     link: Mapped[str | None] = mapped_column(String, nullable=True)
-    price: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    price: Mapped[int | float | None] = mapped_column(Integer, nullable=True)
     currency: Mapped[str] = mapped_column(String, nullable=False, default=DEFAULT_CURRENCY)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     received_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

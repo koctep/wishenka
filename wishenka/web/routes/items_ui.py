@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import logging
+import math
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -247,7 +248,7 @@ class _ParsedItemModalForm:
     clean_cat: str | None
     clean_recip_name: str | None
     clean_currency: str
-    parsed_price: int | None
+    parsed_price: int | float | None
     parsed_recipient_uid: int | None
     parsed_priority: ItemPriority
     validation_error: str | None
@@ -294,14 +295,14 @@ def _parse_item_modal_form(
     }
 
     validation_error: str | None = None
-    parsed_price: int | None = None
+    parsed_price: int | float | None = None
     parsed_recipient_uid: int | None = None
     parsed_priority = ItemPriority.MEDIUM
     if not clean_title:
         validation_error = t("web.item.empty_title", locale)
     else:
         try:
-            parsed_price = _parse_optional_int(price, locale)
+            parsed_price = _parse_optional_price(price, locale)
             parsed_recipient_uid = _parse_optional_int(recipient_user_id, locale)
             parsed_priority = _parse_priority(priority, locale)
         except ValueError as exc:
@@ -334,6 +335,21 @@ def _parse_optional_int(raw: str | None, locale: SupportedLocale = DEFAULT_LOCAL
         return None
     try:
         return int(raw.strip())
+    except ValueError as exc:
+        raise ValueError(t("web.item.invalid_numeric", locale)) from exc
+
+
+def _parse_optional_price(
+    raw: str | None, locale: SupportedLocale = DEFAULT_LOCALE
+) -> int | float | None:
+    """Parse an optional finite price, preserving whole-number compatibility."""
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = float(raw.strip())
+        if not math.isfinite(value):
+            raise ValueError("Non-finite price")
+        return int(value) if value.is_integer() else value
     except ValueError as exc:
         raise ValueError(t("web.item.invalid_numeric", locale)) from exc
 
@@ -533,7 +549,7 @@ async def quick_add_item(
         return _oob_modal_notice(t("web.item.empty_title", locale), status.HTTP_400_BAD_REQUEST)
 
     try:
-        parsed_price = _parse_optional_int(price, locale)
+        parsed_price = _parse_optional_price(price, locale)
         parsed_recipient_uid = _parse_optional_int(recipient_user_id, locale)
         parsed_priority = _parse_priority(priority, locale)
     except ValueError as exc:
@@ -643,7 +659,7 @@ async def get_new_item_modal(
     raw_input: str | None = None,
     title: str | None = None,
     link: str | None = None,
-    price: int | None = None,
+    price: int | float | None = None,
     currency: str = DEFAULT_CURRENCY,
     image_url: str | None = None,
     description: str | None = None,

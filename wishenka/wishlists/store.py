@@ -532,7 +532,7 @@ class WishlistStore:
         i_rows = (await conn.execute(i_stmt)).all()
         for ir in i_rows:
             rec_uid = int(ir.recipient_user_id) if ir.recipient_user_id is not None else None
-            price = int(ir.price) if ir.price is not None else None
+            price = ir.price if ir.price is not None else None
             disp_order = int(ir.display_order) if ir.display_order is not None else 0
             item = WishItem(
                 id=int(ir.id),
@@ -1386,7 +1386,7 @@ class WishlistStore:
             title=str(item_row.title),
             description=None if item_row.description is None else str(item_row.description),
             link=None if item_row.link is None else str(item_row.link),
-            price=None if item_row.price is None else int(item_row.price),
+            price=item_row.price,
             currency=str(item_row.currency or DEFAULT_CURRENCY),
             quantity=int(item_row.quantity),
             received_quantity=int(item_row.received_quantity),

@@ -9,7 +9,9 @@ from wishenka.web.templates import templates
 pytestmark = pytest.mark.timeout(10)
 
 
-@pytest.mark.parametrize(("currency", "expected"), [(None, "RUB"), ("USD", "USD")])
+@pytest.mark.parametrize(
+    ("currency", "expected"), [(None, "RUB"), ("USD", "USD"), ("JPY", "JPY"), ("CHF", "CHF")]
+)
 def test_edit_form_currency_choices(currency: str | None, expected: str) -> None:
     """A missing currency selects RUB while an explicit selection is preserved."""
     template = templates.env.get_template("partials/item_edit_modal.html")
@@ -17,12 +19,21 @@ def test_edit_form_currency_choices(currency: str | None, expected: str) -> None
     select = BeautifulSoup(html, "html.parser").select_one("#item-currency-select")
     assert select is not None
     options = select.select("option")
-    assert [(o["value"], o.get_text(strip=True)) for o in options] == [
+    standard_options = [
+        (o["value"], o.get_text(strip=True)) for o in options if o["value"] != "CHF"
+    ]
+    assert standard_options == [
         ("RUB", "RUB (₽)"),
         ("USD", "USD ($)"),
         ("EUR", "EUR (€)"),
         ("KZT", "KZT (₸)"),
         ("BYN", "BYN (Br)"),
+        ("CNY", "CNY (¥)"),
+        ("GBP", "GBP (£)"),
+        ("JPY", "JPY (¥)"),
+        ("TRY", "TRY (₺)"),
+        ("GEL", "GEL (₾)"),
+        ("AMD", "AMD (֏)"),
     ]
     selected = select.select_one("option[selected]")
     assert selected is not None

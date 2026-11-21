@@ -116,7 +116,7 @@ class WishItem:
     title: str = ""
     description: str | None = None
     link: str | None = None
-    price: int | None = None
+    price: int | float | None = None
     currency: str = DEFAULT_CURRENCY
     quantity: int = 1
     received_quantity: int = 0

@@ -16,7 +16,7 @@ class ItemPreviewDTO(BaseModel):
     title: str | None = None
     description: str | None = None
     image_url: str | None = None
-    price: int | None = None
+    price: int | float | None = None
     currency: str = DEFAULT_CURRENCY
     store_name: str | None = None
     store_icon_url: str | None = None
@@ -33,7 +33,7 @@ class CreateItemDTO(BaseModel):
     description: str | None = Field(default=None, max_length=2000)
     link: str | None = Field(default=None, max_length=2048)
     image_url: str | None = Field(default=None, max_length=2048)
-    price: int | None = Field(default=None, ge=0, le=999_999_999)
+    price: int | float | None = Field(default=None, ge=0, le=999_999_999)
     currency: str = Field(default=DEFAULT_CURRENCY, max_length=10)
     quantity: int = Field(default=1, ge=1, le=1000)
     priority: ItemPriority = Field(default=ItemPriority.MEDIUM)
@@ -58,7 +58,7 @@ class UpdateItemDTO(BaseModel):
     description: str | None = Field(default=None, max_length=2000)
     link: str | None = Field(default=None, max_length=2048)
     image_url: str | None = Field(default=None, max_length=2048)
-    price: int | None = Field(default=None, ge=0, le=999_999_999)
+    price: int | float | None = Field(default=None, ge=0, le=999_999_999)
     currency: str | None = Field(default=None, max_length=10)
     quantity: int | None = Field(default=None, ge=1, le=1000)
     priority: ItemPriority | None = None

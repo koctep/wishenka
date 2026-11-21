@@ -30,7 +30,7 @@ class ExtractedMetadata:
     title: str | None = None
     description: str | None = None
     image_url: str | None = None
-    price: int | None = None
+    price: int | float | None = None
     currency: str = DEFAULT_CURRENCY
     store_name: str | None = None
     store_icon_url: str | None = None

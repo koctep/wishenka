@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import re
 import time
 from typing import Any
@@ -14,26 +15,125 @@ from wishenka.items.models import ExtractedMetadata
 
 logger = logging.getLogger("wishenka.items")
 
-CURRENCY_MAP = {
+CURRENCY_MAP: dict[str, str] = {
+    # Russian Ruble (RUB)
     "₽": "RUB",
     "руб": "RUB",
     "руб.": "RUB",
+    "рубли": "RUB",
+    "рублей": "RUB",
     "rub": "RUB",
     "rur": "RUB",
+    # US Dollar (USD)
     "$": "USD",
+    "us$": "USD",
     "usd": "USD",
+    "доллар": "USD",
+    "долларов": "USD",
+    # Euro (EUR)
     "€": "EUR",
     "eur": "EUR",
+    "евро": "EUR",
+    # Kazakhstani Tenge (KZT)
     "₸": "KZT",
     "kzt": "KZT",
+    "тг": "KZT",
+    "тг.": "KZT",
+    "тенге": "KZT",
+    # Belarusian Ruble (BYN)
     "byn": "BYN",
     "br": "BYN",
+    "бел. руб.": "BYN",
+    # British Pound (GBP)
     "£": "GBP",
+    "￡": "GBP",
     "gbp": "GBP",
+    "gb£": "GBP",
+    "uk£": "GBP",
+    "фунт": "GBP",
+    "фунта": "GBP",
+    "фунтов": "GBP",
+    "фунт стерлингов": "GBP",
+    # Chinese Yuan (CNY)
     "¥": "CNY",
+    "￥": "CNY",
     "cny": "CNY",
+    "cn¥": "CNY",
+    "cn￥": "CNY",
+    "rmb": "CNY",
+    "元": "CNY",
+    "юан": "CNY",
+    "юань": "CNY",
+    "юаня": "CNY",
+    "юаней": "CNY",
+    # Japanese Yen (JPY)
     "jpy": "JPY",
+    "jp¥": "JPY",
+    "jp￥": "JPY",
+    "jpy¥": "JPY",
+    "円": "JPY",
+    "йен": "JPY",
+    "йена": "JPY",
+    "йены": "JPY",
+    "иен": "JPY",
+    "иена": "JPY",
+    "иены": "JPY",
+    "yen": "JPY",
+    # Turkish Lira (TRY)
+    "₺": "TRY",
+    "try": "TRY",
+    "tl": "TRY",
+    "тл": "TRY",
+    "trl": "TRY",
+    "лир": "TRY",
+    "лира": "TRY",
+    "лиры": "TRY",
+    "турецкая лира": "TRY",
+    # Georgian Lari (GEL)
+    "₾": "GEL",
+    "ლ": "GEL",
+    "gel": "GEL",
+    "лари": "GEL",
+    "lari": "GEL",
+    # Armenian Dram (AMD)
+    "֏": "AMD",
+    "amd": "AMD",
+    "դր": "AMD",
+    "դր.": "AMD",
+    "драм": "AMD",
+    "драма": "AMD",
+    "драмов": "AMD",
+    "dram": "AMD",
 }
+
+_INLINE_PREFIX_CURRENCIES: tuple[tuple[str, str], ...] = (
+    ("jpy¥", "JPY"),
+    ("jp¥", "JPY"),
+    ("jp￥", "JPY"),
+    ("cn¥", "CNY"),
+    ("cn￥", "CNY"),
+    ("gb£", "GBP"),
+    ("uk£", "GBP"),
+    ("us$", "USD"),
+)
+
+_INLINE_SYMBOL_CURRENCIES: tuple[tuple[str, str], ...] = (
+    ("円", "JPY"),
+    ("元", "CNY"),
+    ("₺", "TRY"),
+    ("₾", "GEL"),
+    ("֏", "AMD"),
+    ("£", "GBP"),
+    ("￡", "GBP"),
+    ("€", "EUR"),
+    ("₸", "KZT"),
+    ("₽", "RUB"),
+    ("$", "USD"),
+    ("¥", "CNY"),
+    ("￥", "CNY"),
+)
+
+_WORD_TOKEN_RE = re.compile(r"[a-zA-Zа-яА-ЯёЁ\u0530-\u058f\u10a0-\u10ff]+")
 
 KNOWN_STORES = {
     "ozon.ru": "Ozon",
@@ -49,6 +149,12 @@ KNOWN_STORES = {
     "aliexpress.ru": "AliExpress",
     "aliexpress.com": "AliExpress",
     "amazon.com": "Amazon",
+    "amazon.co.uk": "Amazon",
+    "amazon.de": "Amazon",
+    "amazon.co.jp": "Amazon",
+    "trendyol.com": "Trendyol",
+    "taobao.com": "Taobao",
+    "jd.com": "JD",
     "dns-shop.ru": "DNS",
     "mvideo.ru": "М.Видео",
     "eldorado.ru": "Эльдорадо",
@@ -75,19 +181,37 @@ def clean_title(raw_title: str) -> str:
     return title
 
 
-def parse_price(raw_price: Any) -> int | None:
-    """Clean and convert string or numeric price representation to integer units."""
-    if raw_price is None:
+_NEGATIVE_PREFIX_RE = re.compile(r"^\s*[^0-9a-zA-Zа-яА-ЯёЁ]*[-−]\s*[^0-9a-zA-Zа-яА-ЯёЁ]*$")
+_NEGATIVE_CURRENCY_PREFIX_RE = re.compile(r"[-−]\s*(?:[A-Za-z]{3}\s*)?[^\w\d]*$")
+_NEGATIVE_NAMED_CURRENCY_RE = re.compile(
+    r"[-−]\s*(?:" + "|".join(re.escape(token) for token in CURRENCY_MAP) + r")\s*$",
+    re.IGNORECASE,
+)
+_WHITESPACE_RE = re.compile(r"[\s\xa0\u202f\u2009\u2007]+")
+
+
+def parse_decimal_price(raw_price: Any) -> float | None:
+    """Clean and convert localized string or numeric price to an exact positive float (> 0)."""
+    if raw_price is None or isinstance(raw_price, bool):
         return None
     if isinstance(raw_price, (int, float)):
-        return int(raw_price)
+        val = float(raw_price)
+        return val if math.isfinite(val) and val > 0 else None
 
-    text = str(raw_price).strip().replace("\xa0", " ")
+    text = _WHITESPACE_RE.sub(" ", str(raw_price)).strip()
     if not text:
         return None
 
     match = re.search(r"(\d+(?:[\s.,]\d+)*)", text)
     if not match:
+        return None
+
+    prefix = text[: match.start()]
+    if (
+        _NEGATIVE_PREFIX_RE.match(prefix)
+        or _NEGATIVE_CURRENCY_PREFIX_RE.search(prefix)
+        or _NEGATIVE_NAMED_CURRENCY_RE.search(prefix)
+    ):
         return None
 
     num_str = match.group(1).replace(" ", "")
@@ -98,28 +222,120 @@ def parse_price(raw_price: Any) -> int | None:
             num_str = num_str.replace(".", "").replace(",", ".")
     elif "," in num_str:
         parts = num_str.split(",")
-        if len(parts) == 2 and len(parts[1]) in (1, 2):
-            num_str = f"{parts[0]}.{parts[1]}"
+        if len(parts) == 2:
+            if len(parts[1]) in (1, 2):
+                num_str = f"{parts[0]}.{parts[1]}"
+            elif len(parts[1]) == 3 and parts[0].lstrip("0") != "":
+                num_str = f"{parts[0]}{parts[1]}"
+            elif len(parts[1]) == 3:
+                num_str = f"{parts[0]}.{parts[1]}"
+            else:
+                num_str = num_str.replace(",", "")
+        elif len(parts[-1]) in (1, 2):
+            num_str = "".join(parts[:-1]) + "." + parts[-1]
         else:
-            num_str = num_str.replace(",", "")
+            num_str = "".join(parts)
+    elif "." in num_str:
+        parts = num_str.split(".")
+        if len(parts) == 2:
+            if len(parts[1]) in (1, 2):
+                num_str = f"{parts[0]}.{parts[1]}"
+            elif len(parts[1]) == 3 and parts[0].lstrip("0") != "":
+                num_str = f"{parts[0]}{parts[1]}"
+        elif len(parts[-1]) in (1, 2):
+            num_str = "".join(parts[:-1]) + "." + parts[-1]
+        else:
+            num_str = "".join(parts)
 
     try:
         val = float(num_str)
-        return int(val)
     except ValueError:
         return None
+    return val if math.isfinite(val) and val > 0 else None
 
 
-def normalize_currency(raw_currency: str | None) -> str:
-    """Normalize raw currency symbol or string into ISO 4217 uppercase code."""
-    if not raw_currency:
-        return DEFAULT_CURRENCY
-    cleaned = raw_currency.strip().lower()
-    if cleaned in CURRENCY_MAP:
-        return CURRENCY_MAP[cleaned]
-    upper = raw_currency.strip().upper()
-    if len(upper) == 3 and upper.isalpha():
-        return upper
+def parse_price(raw_price: Any) -> int | None:
+    """Clean and convert string or numeric price representation to positive integer units."""
+    val = parse_decimal_price(raw_price)
+    if val is None:
+        return None
+    int_val = int(val)
+    return int_val if int_val > 0 else None
+
+
+def extract_currency(raw_text: Any) -> str | None:
+    """Extract normalized 3-letter ISO 4217 currency code from standalone or inline text."""
+    if raw_text is None or isinstance(raw_text, (bool, int, float)):
+        return None
+    text = str(raw_text).strip()
+    if not text:
+        return None
+
+    lower = text.lower()
+    if lower in CURRENCY_MAP:
+        return CURRENCY_MAP[lower]
+    stripped_dot = lower.rstrip(".")
+    if stripped_dot in CURRENCY_MAP:
+        return CURRENCY_MAP[stripped_dot]
+
+    if len(text) == 3 and text.isascii() and text.isalpha():
+        return text.upper()
+
+    for prefix, iso_code in _INLINE_PREFIX_CURRENCIES:
+        if prefix in lower:
+            return iso_code
+
+    for token in _WORD_TOKEN_RE.findall(lower):
+        if token in CURRENCY_MAP:
+            return CURRENCY_MAP[token]
+
+    for symbol, iso_code in _INLINE_SYMBOL_CURRENCIES:
+        if symbol in text:
+            return iso_code
+
+    return None
+
+
+def normalize_currency(
+    raw_currency: str | None,
+    *,
+    fallback_text: Any = None,
+) -> str:
+    """Normalize raw currency symbol, code, or fallback price text into ISO 4217 uppercase code."""
+    if raw_currency and isinstance(raw_currency, str):
+        cleaned = raw_currency.strip()
+        if cleaned in ("¥", "￥"):
+            if fallback_text is not None:
+                fallback_iso = extract_currency(fallback_text)
+                if fallback_iso in ("JPY", "CNY"):
+                    return fallback_iso
+            return "CNY"
+        extracted = extract_currency(cleaned)
+        if extracted is not None:
+            return extracted
+
+    if fallback_text is not None:
+        fallback_iso = extract_currency(fallback_text)
+        if fallback_iso is not None:
+            logger.debug(
+                "Extracted inline currency %s from fallback price text",
+                fallback_iso,
+                extra={
+                    "event": "inline_currency_extracted",
+                    "currency": fallback_iso,
+                },
+            )
+            return fallback_iso
+
+    if raw_currency and isinstance(raw_currency, str) and raw_currency.strip():
+        logger.debug(
+            "Unrecognized currency token; falling back to %s",
+            DEFAULT_CURRENCY,
+            extra={
+                "event": "currency_fallback_default",
+                "currency": DEFAULT_CURRENCY,
+            },
+        )
     return DEFAULT_CURRENCY
 
 
@@ -251,61 +467,33 @@ class HtmlMetadataExtractor:
 
             products = cls._find_jsonld_products(data)
             if products:
-                prod = products[0]
-                if not title and prod.get("name"):
-                    title = str(prod["name"])
-                if not description and prod.get("description"):
-                    description = str(prod["description"])
-                if not image_url and prod.get("image"):
-                    img = prod["image"]
-                    if isinstance(img, list) and img:
-                        img = img[0]
-                    if isinstance(img, dict):
-                        img = img.get("url") or img.get("contentUrl")
-                    if img:
-                        image_url = str(img)
-                if not brand_name and prod.get("brand"):
-                    b = prod["brand"]
-                    if isinstance(b, dict):
-                        brand_name = b.get("name")
-                    elif b:
-                        brand_name = str(b)
-                if price_raw is None and prod.get("offers"):
-                    offers = prod["offers"]
-                    if isinstance(offers, list) and offers:
-                        offers = offers[0]
-                    if isinstance(offers, dict):
-                        offer_type = offers.get("@type")
-                        offer_price = offers.get("price")
-                        is_aggregate = (
-                            offer_type == "AggregateOffer"
-                            or (
-                                isinstance(offer_type, str)
-                                and offer_type.endswith("/AggregateOffer")
-                            )
-                            or offers.get("lowPrice") is not None
-                            or offers.get("highPrice") is not None
+                for prod in products:
+                    if not title and prod.get("name"):
+                        title = str(prod["name"])
+                    if not description and prod.get("description"):
+                        description = str(prod["description"])
+                    if not image_url and prod.get("image"):
+                        img = prod["image"]
+                        if isinstance(img, list) and img:
+                            img = img[0]
+                        if isinstance(img, dict):
+                            img = img.get("url") or img.get("contentUrl")
+                        if img:
+                            image_url = str(img)
+                    if not brand_name and prod.get("brand"):
+                        b = prod["brand"]
+                        if isinstance(b, dict):
+                            brand_name = b.get("name")
+                        elif b:
+                            brand_name = str(b)
+                    if price_raw is None and prod.get("offers") is not None:
+                        extracted_price, extracted_curr = cls._extract_offer_pricing(
+                            prod["offers"],
+                            url_domain=url_domain,
                         )
-                        if offer_price is None:
-                            offer_price = offers.get("lowPrice")
-                        if offer_price is None:
-                            offer_price = offers.get("highPrice")
-                        if is_aggregate:
-                            logger.debug(
-                                "Extracted AggregateOffer price for domain %s (price=%s)",
-                                url_domain,
-                                offer_price,
-                                extra={
-                                    "event": "jsonld_aggregate_offer_extracted",
-                                    "url_domain": url_domain,
-                                    "offer_price": offer_price,
-                                    "low_price": offers.get("lowPrice"),
-                                    "high_price": offers.get("highPrice"),
-                                },
-                            )
-                        price_raw = offer_price
-                        if not currency_raw:
-                            currency_raw = offers.get("priceCurrency")
+                        if extracted_price is not None:
+                            price_raw = extracted_price
+                            currency_raw = extracted_curr or extract_currency(extracted_price)
                 logger.debug(
                     "JSON-LD product metadata extracted for domain %s",
                     url_domain,
@@ -315,7 +503,8 @@ class HtmlMetadataExtractor:
                         "parser_stage": "json_ld",
                     },
                 )
-                break
+                if title and price_raw is not None:
+                    break
 
         # 2. OpenGraph Cascade
         og_site_tag = soup.select_one('meta[property="og:site_name"]')
@@ -337,13 +526,15 @@ class HtmlMetadataExtractor:
 
         if price_raw is None:
             og_price = soup.select_one(
-                'meta[property="product:price:amount"], meta[property="og:price:amount"]'
+                'meta[property="product:price:amount"], meta[property="og:price:amount"], '
+                'meta[name="product:price:amount"], meta[name="og:price:amount"]'
             )
             price_raw = _get_attr(og_price, "content")
 
         if not currency_raw:
             og_curr = soup.select_one(
-                'meta[property="product:price:currency"], meta[property="og:price:currency"]'
+                'meta[property="product:price:currency"], meta[property="og:price:currency"], '
+                'meta[name="product:price:currency"], meta[name="og:price:currency"]'
             )
             currency_raw = _get_attr(og_curr, "content")
 
@@ -390,16 +581,23 @@ class HtmlMetadataExtractor:
         # Cleaning & Normalization
         clean_name = clean_title(title) if title else None
         cleaned_desc = description.strip() if description else None
-        parsed_price = parse_price(price_raw)
-        normalized_curr = normalize_currency(currency_raw)
+        decimal_price = parse_decimal_price(price_raw)
+        parsed_price = (
+            int(decimal_price)
+            if decimal_price is not None and decimal_price.is_integer()
+            else decimal_price
+        )
+        normalized_curr = normalize_currency(currency_raw, fallback_text=price_raw)
         resolved_image = urljoin(base_url, image_url.strip()) if image_url else None
         store = derive_store_name(base_url, og_site_name=og_site_name, brand=brand_name)
 
         duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
         logger.info(
-            "HTML metadata extraction completed for domain %s in %sms",
+            "HTML metadata extraction completed for domain %s in %sms (price=%s, currency=%s)",
             url_domain,
             duration_ms,
+            parsed_price,
+            normalized_curr,
             extra={
                 "event": "metadata_extraction_completed",
                 "url_domain": url_domain,
@@ -407,6 +605,8 @@ class HtmlMetadataExtractor:
                 "duration_ms": duration_ms,
                 "has_title": bool(clean_name),
                 "has_price": parsed_price is not None,
+                "price": parsed_price,
+                "currency": normalized_curr,
                 "has_image": bool(resolved_image),
             },
         )
@@ -421,6 +621,108 @@ class HtmlMetadataExtractor:
             store_icon_url=store_icon_url,
             raw_html_title=raw_html_title,
         )
+
+    @classmethod
+    def _extract_offer_pricing(
+        cls,
+        offers_node: Any,
+        *,
+        url_domain: str | None = None,
+        inherited_currency: str | None = None,
+        _depth: int = 0,
+    ) -> tuple[Any, str | None]:
+        """Extract first valid positive (price_raw, currency_raw) from Offer, AggregateOffer,
+        nested priceSpecification, or multi-offer list/dict structures.
+        """
+        if _depth > 16 or offers_node is None:
+            return None, inherited_currency
+
+        if isinstance(offers_node, list):
+            for item in offers_node:
+                cand_price, cand_curr = cls._extract_offer_pricing(
+                    item,
+                    url_domain=url_domain,
+                    inherited_currency=inherited_currency,
+                    _depth=_depth + 1,
+                )
+                if cand_price is not None and parse_decimal_price(cand_price) is not None:
+                    return cand_price, cand_curr
+            return None, inherited_currency
+
+        if isinstance(offers_node, dict):
+            raw_curr = offers_node.get("priceCurrency")
+            curr = (
+                raw_curr.strip()
+                if isinstance(raw_curr, str) and raw_curr.strip()
+                else inherited_currency
+            )
+
+            offer_type = offers_node.get("@type")
+            is_aggregate = (
+                offer_type == "AggregateOffer"
+                or (isinstance(offer_type, str) and offer_type.endswith("/AggregateOffer"))
+                or offers_node.get("lowPrice") is not None
+                or offers_node.get("highPrice") is not None
+            )
+
+            offer_price: Any = None
+            for field in ("price", "lowPrice", "minPrice", "highPrice", "maxPrice"):
+                val = offers_node.get(field)
+                if val is not None and parse_decimal_price(val) is not None:
+                    offer_price = val
+                    break
+
+            if offer_price is None and offers_node.get("priceSpecification") is not None:
+                offer_price, spec_curr = cls._extract_offer_pricing(
+                    offers_node["priceSpecification"],
+                    url_domain=url_domain,
+                    inherited_currency=curr,
+                    _depth=_depth + 1,
+                )
+                if offer_price is not None and spec_curr:
+                    curr = spec_curr
+                if offer_price is not None:
+                    safe_price = format(parse_decimal_price(offer_price) or 0, ".15g")
+                    safe_currency = extract_currency(curr)
+                    logger.debug(
+                        "Extracted priceSpecification price for domain %s (price=%s, currency=%s)",
+                        url_domain,
+                        safe_price,
+                        safe_currency,
+                        extra={
+                            "event": "jsonld_price_specification_extracted",
+                            "url_domain": url_domain,
+                            "offer_price": safe_price,
+                            "currency": safe_currency,
+                        },
+                    )
+
+            if offer_price is None and offers_node.get("offers") is not None:
+                offer_price, nested_curr = cls._extract_offer_pricing(
+                    offers_node["offers"],
+                    url_domain=url_domain,
+                    inherited_currency=curr,
+                    _depth=_depth + 1,
+                )
+                if offer_price is not None and nested_curr:
+                    curr = nested_curr
+
+            if is_aggregate and offer_price is not None:
+                safe_price = format(parse_decimal_price(offer_price) or 0, ".15g")
+                logger.debug(
+                    "Extracted AggregateOffer price for domain %s (price=%s)",
+                    url_domain,
+                    safe_price,
+                    extra={
+                        "event": "jsonld_aggregate_offer_extracted",
+                        "url_domain": url_domain,
+                        "offer_price": safe_price,
+                    },
+                )
+
+            return offer_price, curr
+
+        return None, inherited_currency
 
     @staticmethod
     def _is_product_type(type_val: Any) -> bool:

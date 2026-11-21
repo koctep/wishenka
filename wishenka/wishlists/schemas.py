@@ -30,7 +30,7 @@ class WishItemRecipientViewDTO(BaseModel):
     description: str | None = None
     link: str | None = None
     image_url: str | None = None
-    price: int | None = None
+    price: int | float | None = None
     currency: str = DEFAULT_CURRENCY
     store_name: str | None = None
     store_icon_url: str | None = None
@@ -67,7 +67,7 @@ class WishItemGifterViewDTO(BaseModel):
     description: str | None = None
     link: str | None = None
     image_url: str | None = None
-    price: int | None = None
+    price: int | float | None = None
     currency: str = DEFAULT_CURRENCY
     store_name: str | None = None
     store_icon_url: str | None = None
@@ -120,7 +120,7 @@ class MyReservationItemDTO(BaseModel):
     item_title: str
     item_link: str | None = None
     item_image_url: str | None = None
-    item_price: int | None = None
+    item_price: int | float | None = None
     currency: str = DEFAULT_CURRENCY
     reserved_quantity: int
     status: ReservationStatus
@@ -155,7 +155,7 @@ class GiftedItemDTO(BaseModel):
     description: str | None = None
     link: str | None = None
     image_url: str | None = None
-    price: int | None = None
+    price: int | float | None = None
     currency: str = DEFAULT_CURRENCY
     store_name: str | None = None
     store_icon_url: str | None = None
