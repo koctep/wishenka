@@ -282,6 +282,9 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "miniapp.share.telegram_opened": "Telegram chooser opened",
         "miniapp.share.telegram_unavailable": "Telegram sharing is unavailable",
         "miniapp.share.public_title": "Public gift-selection link",
+        "miniapp.share.public_hint": (
+            "Gift givers can view wishes and reserve gifts secretly, but cannot edit the list."
+        ),
         "miniapp.share.replace_public": "Replace public link",
         "miniapp.share.public_replaced": "Old public link no longer works",
         "miniapp.share.replace_public_failed": "Could not replace the public link",
@@ -293,6 +296,12 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "miniapp.history.viewed_at": "Viewed: {date}",
         "miniapp.history.load_failed": "Could not load history",
         "miniapp.wishlist_settings.heading": "Settings",
+        "miniapp.wishlist_settings.subtitle": "Update the details of this wishlist.",
+        "miniapp.wishlist_settings.hint_title": "A name people will recognize.",
+        "miniapp.wishlist_settings.hint_description": "Add details for your guests.",
+        "miniapp.wishlist_settings.hint_event": "Optional occasion name.",
+        "miniapp.wishlist_settings.hint_date": "Optional occasion date and time.",
+        "miniapp.wishlist_settings.cancelled": "Changes discarded",
         "miniapp.wishlist_settings.field_title": "Title",
         "miniapp.wishlist_settings.field_description": "Description",
         "miniapp.wishlist_settings.field_event": "Event",
@@ -300,10 +309,16 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "miniapp.wishlist_settings.save": "Save settings",
         "miniapp.wishlist_settings.cancel": "Cancel",
         "miniapp.wishlist_settings.saved": "Settings saved",
+        "miniapp.wishlist_settings.saved_refresh_failed": (
+            "Settings saved, but the wishlist could not be refreshed"
+        ),
         "miniapp.wishlist_settings.save_failed": (
             "Could not save settings. Your changes are still here."
         ),
         "miniapp.members.heading": "Manage members",
+        "miniapp.members.subtitle": "Owners and admins manage the list; collaborators add wishes.",
+        "miniapp.members.invite_hint": "Anyone joining can add and edit wishes as a collaborator.",
+        "miniapp.members.role_updated": "Member role updated",
         "miniapp.members.remove": "Remove member",
         "miniapp.members.removed": "Member removed",
         "miniapp.members.remove_failed": "Could not remove member",
@@ -320,11 +335,20 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "miniapp.list.removed_favorite": "Removed from favorites",
         "miniapp.list.favorite_failed": "Could not update favorites",
         "miniapp.list.wishes_heading": "Wishes",
+        "miniapp.list.occasion_prefix": "Occasion:",
+        "miniapp.list.wishes_subtitle": "The wishes in this list.",
+        "miniapp.list.wishes_empty": "There are no wishes yet.",
+        "miniapp.list.restored": "Wishlist restored",
         "miniapp.list.wishes_future_update": "Adding wishes will be available in a future update.",
         "miniapp.list.archived_notice": "This wishlist is archived and read-only.",
         "miniapp.list.restore": "Restore wishlist",
         "miniapp.list.restore_failed": "Could not restore wishlist",
         "miniapp.list.load_failed": "Could not load this wishlist",
+        "miniapp.list.refresh_unavailable": "Wishlist temporarily unavailable",
+        "miniapp.list.refresh_retry": "Try again",
+        "miniapp.list.changed_refresh_failed": (
+            "Your change was saved, but the wishlist could not be refreshed"
+        ),
         "miniapp.deleted.heading": "Recently deleted",
         "miniapp.deleted.days_left": "{days} d. left until permanent deletion",
         "miniapp.deleted.restore": "Restore",
@@ -832,6 +856,9 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "miniapp.share.telegram_opened": "Открыт выбор чата в Telegram",
         "miniapp.share.telegram_unavailable": "Отправка через Telegram недоступна",
         "miniapp.share.public_title": "Публичная ссылка для выбора подарков",
+        "miniapp.share.public_hint": (
+            "Гости могут посмотреть желания и тайно забронировать подарки, но не менять список."
+        ),
         "miniapp.share.replace_public": "Заменить публичную ссылку",
         "miniapp.share.public_replaced": "Старая публичная ссылка больше не работает",
         "miniapp.share.replace_public_failed": "Не удалось заменить публичную ссылку",
@@ -843,6 +870,12 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "miniapp.history.viewed_at": "Просмотрено: {date}",
         "miniapp.history.load_failed": "Не удалось загрузить историю",
         "miniapp.wishlist_settings.heading": "Настройки",
+        "miniapp.wishlist_settings.subtitle": "Измените данные этого вишлиста.",
+        "miniapp.wishlist_settings.hint_title": "Название, по которому узнают вишлист.",
+        "miniapp.wishlist_settings.hint_description": "Добавьте подробности для гостей.",
+        "miniapp.wishlist_settings.hint_event": "Название события, необязательно.",
+        "miniapp.wishlist_settings.hint_date": "Дата и время события, необязательно.",
+        "miniapp.wishlist_settings.cancelled": "Изменения отменены",
         "miniapp.wishlist_settings.field_title": "Название",
         "miniapp.wishlist_settings.field_description": "Описание",
         "miniapp.wishlist_settings.field_event": "Событие",
@@ -850,10 +883,18 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "miniapp.wishlist_settings.save": "Сохранить настройки",
         "miniapp.wishlist_settings.cancel": "Отмена",
         "miniapp.wishlist_settings.saved": "Настройки сохранены",
+        "miniapp.wishlist_settings.saved_refresh_failed": (
+            "Настройки сохранены, но обновить вишлист не удалось"
+        ),
         "miniapp.wishlist_settings.save_failed": (
             "Не удалось сохранить настройки. Ваши изменения сохранены в форме."
         ),
         "miniapp.members.heading": "Управление участниками",
+        "miniapp.members.subtitle": (
+            "Владелец и администраторы управляют списком, соавторы добавляют желания."
+        ),
+        "miniapp.members.invite_hint": "По этой ссылке соавтор может добавлять и менять желания.",
+        "miniapp.members.role_updated": "Роль участника изменена",
         "miniapp.members.remove": "Удалить участника",
         "miniapp.members.removed": "Участник удалён",
         "miniapp.members.remove_failed": "Не удалось удалить участника",
@@ -870,11 +911,20 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "miniapp.list.removed_favorite": "Удалено из избранного",
         "miniapp.list.favorite_failed": "Не удалось обновить избранное",
         "miniapp.list.wishes_heading": "Желания",
+        "miniapp.list.occasion_prefix": "Событие:",
+        "miniapp.list.wishes_subtitle": "Желания в этом списке.",
+        "miniapp.list.wishes_empty": "Пока нет желаний.",
+        "miniapp.list.restored": "Вишлист восстановлен",
         "miniapp.list.wishes_future_update": "Добавление желаний появится в следующем обновлении.",
         "miniapp.list.archived_notice": "Этот вишлист в архиве и доступен только для чтения.",
         "miniapp.list.restore": "Восстановить вишлист",
         "miniapp.list.restore_failed": "Не удалось восстановить вишлист",
         "miniapp.list.load_failed": "Не удалось загрузить этот вишлист",
+        "miniapp.list.refresh_unavailable": "Вишлист временно недоступен",
+        "miniapp.list.refresh_retry": "Попробовать снова",
+        "miniapp.list.changed_refresh_failed": (
+            "Изменение сохранено, но обновить вишлист не удалось"
+        ),
         "miniapp.deleted.heading": "Недавно удалённые",
         "miniapp.deleted.days_left": "Осталось {days} дн. до окончательного удаления",
         "miniapp.deleted.restore": "Восстановить",

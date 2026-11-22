@@ -78,6 +78,46 @@ label { display: block; margin: .5rem 0; }
 .badge-admin { background: #fef3c7; color: #b45309; }
 .badge-member { background: #dcfce7; color: #15803d; }
 .badge-favorite { background: #fce7f3; color: #be185d; }
+#app :is(.wishlist-detail-header, .list-wishes-section, .list-admin-section,
+  .share-panel, .list-archived-banner) {
+  box-sizing: border-box; min-width: 0; border: 1px solid var(--border-subtle);
+  overflow-wrap: anywhere;
+}
+#app :is(.list-header-nav, .list-header-title-row, .form-actions, .share-panel-actions,
+  .member-row-info, .member-row-actions) {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; min-width: 0;
+}
+#app :is(.form-actions, .share-panel-actions, .member-row-actions) button {
+  margin: 0; max-width: 100%; min-width: 0; overflow-wrap: anywhere;
+}
+#app .list-header-title-row h1 { margin: .5rem 0; }
+#app :is(.list-description, .list-event-meta, .settings-field-hint) { color: var(--muted); }
+#app .wishlist-detail-header, #app .share-panel--public { border-left: 4px solid var(--accent); }
+#app .list-wishes-section { border: 2px solid var(--accent); }
+#app .list-settings-section { border-left: 4px solid var(--muted-border); }
+#app :is(.list-members-section, .share-panel--invite) { border-left: 4px solid #0f766e; }
+#app .list-wish-card {
+  border: 1px solid var(--border-subtle); border-radius: .7rem; padding: .5rem .75rem;
+  margin: .5rem 0; background: var(--surface-subtle);
+}
+#app .list-wish-title { margin: 0; font-weight: 600; }
+#app .wishlist-settings-form { padding: 0; margin: 0; box-shadow: none; }
+#app .settings-field-label, #app .settings-field-hint { display: block; }
+#app .settings-field-hint { font-size: .85rem; }
+#app .settings-field input, #app .share-panel input { margin: .25rem 0; }
+#app .member-row {
+  padding: .65rem .75rem; border: 1px solid var(--border-subtle); border-radius: .75rem;
+  background: var(--surface-subtle); margin: .5rem 0;
+  display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: .5rem;
+}
+#app .member-name { font-weight: 600; overflow-wrap: anywhere; }
+#app .member-row-info .badge { margin: 0; }
+#app .share-panel--invite { background: var(--surface-subtle); box-shadow: none; }
+#app :is(.share-reset-btn, .invite-revoke-btn) { margin: .75rem 0 0; }
+#app :is(.settings-cancel-btn, .share-reset-btn, .invite-revoke-btn) {
+  border-color: var(--muted-border); color: var(--ink);
+}
+#app .list-archived-banner { background: var(--surface-subtle); }
 .top-nav { margin: .5rem 0; display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
 .settings-link, .back-link {
   display: inline-flex;

@@ -102,30 +102,44 @@ function linkFor(prefix, token) {
   }
   return `https://t.me/${bot}/${app}?startapp=${prefix}_${token}`;
 }
-function sharePanel(token, prefix, title) {
-  const panel = node('section');
+function sharePanel(token, prefix, title, options = {}) {
+  const panel = node('section', '', {
+    class: `list-admin-section share-panel ${options.className || ''}`
+  });
   panel.append(node('h2', title));
+  if (options.hint) {
+    panel.append(node('p', options.hint, {class: 'section-subtitle share-panel-hint'}));
+  }
   let url;
   try { url = linkFor(prefix, token); } catch (error) {
     panel.append(node('p', error.message));
+    if (options.footerAction) panel.append(options.footerAction);
     return panel;
   }
-  const field = node('input', '', {value: url, readonly: '', 'aria-label': title});
+  const field = node('input', '', {value: url, readonly: '', 'aria-label': title,
+    class: 'share-link-input'});
   panel.append(field);
-  panel.append(button(t('miniapp.share.copy_link'), async () => {
+  const actions = node('div', '', {class: 'share-panel-actions'});
+  actions.append(button(t('miniapp.share.copy_link'), async () => {
     try {
       if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
       await navigator.clipboard.writeText(url);
       status(t('miniapp.share.link_copied'));
     } catch (_) { field.select(); status(t('miniapp.share.copy_failed')); }
-  }));
-  panel.append(button(t('miniapp.share.share_telegram'), () => {
+  }, 'share-copy-btn'));
+  actions.append(button(t('miniapp.share.share_telegram'), () => {
     try {
       if (!bridge?.openTelegramLink) throw new Error('Telegram unavailable');
       bridge.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(url)}`);
       status(t('miniapp.share.telegram_opened'));
     } catch (_) { status(t('miniapp.share.telegram_unavailable')); }
-  }, 'btn-primary'));
+  }, 'btn-primary share-telegram-btn'));
+  panel.append(actions);
+  if (options.footerAction) {
+    const footer = node('div', '', {class: 'share-panel-footer'});
+    footer.append(options.footerAction);
+    panel.append(footer);
+  }
   return panel;
 }
 const KNOWN_ROLES = new Set(['owner', 'admin', 'member', 'favorite']);
@@ -443,70 +457,105 @@ async function showHome() {
   } catch (_) { status(t('miniapp.home.load_failed')); }
 }
 function settingsForm(list) {
-  const form = node('form');
+  const form = node('form', '', {class: 'wishlist-settings-form'});
   const inputs = {};
-  for (const [name, label, type] of [
-    ['name', t('miniapp.wishlist_settings.field_title'), 'text'],
-    ['description', t('miniapp.wishlist_settings.field_description'), 'text'],
-    ['event_title', t('miniapp.wishlist_settings.field_event'), 'text'],
-    ['event_date', t('miniapp.wishlist_settings.field_date'), 'datetime-local']
+  for (const [name, label, type, hint] of [
+    ['name', 'title', 'text', 'title'],
+    ['description', 'description', 'text', 'description'],
+    ['event_title', 'event', 'text', 'event'],
+    ['event_date', 'date', 'datetime-local', 'date']
   ]) {
-    const wrap = node('label', label);
+    const wrap = node('label', '', {class: 'settings-field'});
+    wrap.append(node('span', t(`miniapp.wishlist_settings.field_${label}`),
+      {class: 'settings-field-label'}));
     const input = node('input', '', {name, type});
     const raw = list[name] || '';
     input.value = name === 'event_date' && raw ? new Date(raw).toISOString().slice(0, 16) : raw;
     inputs[name] = input;
-    wrap.append(input);
+    wrap.append(input, node('span', t(`miniapp.wishlist_settings.hint_${hint}`),
+      {class: 'settings-field-hint'}));
     form.append(wrap);
   }
   const save = node('button', t('miniapp.wishlist_settings.save'), {
-    type: 'submit', class: 'btn-primary'
+    type: 'submit', class: 'btn-primary settings-save-btn'
   });
-  form.append(save, button(t('miniapp.wishlist_settings.cancel'), () => showList(list.id)));
+  const actions = node('div', '', {class: 'form-actions settings-form-actions'});
+  actions.append(save, button(t('miniapp.wishlist_settings.cancel'), async () => {
+    if (await showList(list.id)) status(t('miniapp.wishlist_settings.cancelled'));
+  }, 'settings-cancel-btn'));
+  form.append(actions);
   form.addEventListener('submit', async event => {
     event.preventDefault();
+    save.disabled = true;
     try {
       const date = inputs.event_date.value;
       const data = {name: inputs.name.value, description: inputs.description.value || null,
         event_title: inputs.event_title.value || null,
         event_date: date ? new Date(`${date}Z`).toISOString() : null};
       await api(`/api/wishlists/${list.id}`, {method: 'PATCH', body: JSON.stringify(data)});
-      status(t('miniapp.wishlist_settings.saved'));
-      await showList(list.id);
+      const refreshed = await showList(list.id);
+      status(t(refreshed ? 'miniapp.wishlist_settings.saved' :
+        'miniapp.wishlist_settings.saved_refresh_failed'));
     } catch (_) { status(t('miniapp.wishlist_settings.save_failed')); }
+    finally { save.disabled = false; }
   });
   return form;
 }
 function memberControls(list) {
-  const section = node('section');
+  const section = node('section', '', {class: 'list-admin-section list-members-section',
+    role: 'region', 'aria-label': t('miniapp.members.heading')});
   section.append(node('h2', t('miniapp.members.heading')));
+  section.append(node('p', t('miniapp.members.subtitle'), {class: 'section-subtitle'}));
+  const members = node('div', '', {class: 'member-list'});
   for (const member of list.members || []) {
-    const row = node('div', `${member.display_name} (${roleLabel(member.role)}) `);
-    if (member.role === 'member') row.append(button(t('miniapp.members.remove'), async () => {
+    const row = node('div', '', {class: 'member-row'});
+    const info = node('div', '', {class: 'member-row-info'});
+    info.append(node('span', member.display_name, {class: 'member-name'}),
+      renderBadge(member.role));
+    const actions = node('div', '', {class: 'member-row-actions'});
+    if (member.role === 'member') actions.append(button(t('miniapp.members.remove'), async () => {
       try { await api(`/api/wishlists/${list.id}/members/${member.user_id}`, {method: 'DELETE'});
-        await showList(list.id); status(t('miniapp.members.removed'));
+        await refreshAfterMutation(list.id, 'miniapp.members.removed');
       } catch (_) { status(t('miniapp.members.remove_failed')); }
-    }, 'btn-danger'));
+    }, 'btn-danger member-remove-btn'));
     if (list.role === 'owner' && member.role !== 'owner') {
       const next = member.role === 'admin' ? 'member' : 'admin';
       const roleBtnLabel = next === 'admin'
         ? t('miniapp.members.make_admin')
         : t('miniapp.members.remove_admin');
-      row.append(button(roleBtnLabel, async () => {
+      actions.append(button(roleBtnLabel, async () => {
         try { await api(`/api/wishlists/${list.id}/members/${member.user_id}/role`,
-          {method: 'PATCH', body: JSON.stringify({role: next})}); await showList(list.id);
+          {method: 'PATCH', body: JSON.stringify({role: next})});
+          await refreshAfterMutation(list.id, 'miniapp.members.role_updated');
         } catch (_) { status(t('miniapp.members.role_change_failed')); }
-      }));
+      }, 'member-role-btn'));
     }
-    section.append(row);
+    row.append(info, actions);
+    members.append(row);
   }
-  section.append(sharePanel(list.invite_token, 'i', t('miniapp.members.invite_heading')));
-  section.append(button(t('miniapp.members.revoke_invite'), async () => {
+  section.append(members);
+  const revoke = button(t('miniapp.members.revoke_invite'), async () => {
     try { await api(`/api/wishlists/${list.id}/invite/reset`, {method: 'POST'});
-      await showList(list.id); status(t('miniapp.members.invite_revoked'));
+      await refreshAfterMutation(list.id, 'miniapp.members.invite_revoked');
     } catch (_) { status(t('miniapp.members.revoke_invite_failed')); }
+  }, 'invite-revoke-btn');
+  section.append(sharePanel(list.invite_token, 'i', t('miniapp.members.invite_heading'), {
+    className: 'share-panel--invite', hint: t('miniapp.members.invite_hint'), footerAction: revoke
   }));
   return section;
+}
+async function refreshAfterMutation(id, successMessage) {
+  root.replaceChildren(node('h1', t('nav.loading')));
+  if (await showList(id)) {
+    status(t(successMessage));
+    return;
+  }
+  root.replaceChildren(
+    node('h1', t('miniapp.list.refresh_unavailable')),
+    button(t('miniapp.list.refresh_retry'), () => showList(id), 'list-refresh-retry-btn'),
+    button(t('nav.back'), showHome, 'list-back-btn')
+  );
+  status(t('miniapp.list.changed_refresh_failed'));
 }
 async function showList(id) {
   status(t('nav.loading'));
@@ -514,52 +563,86 @@ async function showList(id) {
     api(`/api/history/${id}`, {method: 'POST'}).catch(() => {});
     const list = await api(`/api/wishlists/${id}`);
     const listTitle = list.name || t('miniapp.common.untitled_wishlist');
-    root.replaceChildren(button(t('nav.back'), showHome), node('h1', listTitle));
-    if (list.role) {
-      root.append(renderBadge(list.role));
-    }
+    const header = node('section', '', {class: 'wishlist-detail-header'});
+    const nav = node('div', '', {class: 'list-header-nav'});
+    nav.append(button(t('nav.back'), showHome, 'list-back-btn'));
     if (list.role !== 'owner') {
       const isFav = Boolean(list.is_favorite);
       const favLabel = isFav
         ? t('miniapp.list.remove_favorite')
         : t('miniapp.list.add_favorite');
-      root.append(button(favLabel, async () => {
+      nav.append(button(favLabel, async () => {
         try {
           if (isFav) {
             await api(`/api/favorites/${list.id}`, {method: 'DELETE'});
-            status(t('miniapp.list.removed_favorite'));
           } else {
             await api(`/api/favorites/${list.id}`, {method: 'POST'});
-            status(t('miniapp.list.added_favorite'));
           }
-          await showList(list.id);
+          await refreshAfterMutation(list.id,
+            isFav ? 'miniapp.list.removed_favorite' : 'miniapp.list.added_favorite');
         } catch (_) { status(t('miniapp.list.favorite_failed')); }
-      }));
+      }, 'list-favorite-btn'));
     }
-    root.append(node('p', list.description || ''), node('h2', t('miniapp.list.wishes_heading')));
-    for (const item of list.items || []) root.append(node('p', item.title));
-    root.append(node('p', t('miniapp.list.wishes_future_update')));
+    const titleRow = node('div', '', {class: 'list-header-title-row'});
+    titleRow.append(node('h1', listTitle, {class: 'list-title'}));
+    if (list.role) titleRow.append(renderBadge(list.role));
+    header.append(nav, titleRow);
+    const eventParts = [];
+    if (list.event_title) eventParts.push(list.event_title);
+    if (list.event_date) eventParts.push(formatDate(list.event_date));
+    if (eventParts.length) {
+      const eventText = `${t('miniapp.list.occasion_prefix')} ${eventParts.join(' · ')}`;
+      header.append(node('p', eventText, {class: 'list-event-meta'}));
+    }
+    if (list.description) header.append(node('p', list.description, {class: 'list-description'}));
+    const wishes = node('section', '', {class: 'wishlist-section list-wishes-section',
+      role: 'region', 'aria-label': t('miniapp.list.wishes_heading')});
+    const items = list.items || [];
+    renderSectionHeader(wishes, t('miniapp.list.wishes_heading'), items.length,
+      t('miniapp.list.wishes_subtitle'));
+    for (const item of items) {
+      const card = node('div', '', {class: 'list-wish-card'});
+      card.append(node('p', item.title, {class: 'list-wish-title'}));
+      wishes.append(card);
+    }
+    const note = node('div', '', {class: 'empty-state list-wishes-note'});
+    if (!items.length) {
+      note.append(node('p', t('miniapp.list.wishes_empty'), {class: 'empty-notice'}));
+    }
+    note.append(node('p', t('miniapp.list.wishes_future_update'), {class: 'empty-hint'}));
+    wishes.append(note);
+    root.replaceChildren(header, wishes);
     const manager = ['owner', 'admin'].includes(list.role);
     if (manager && list.status === 'active') {
-      root.append(node('h2', t('miniapp.wishlist_settings.heading')), settingsForm(list));
-      root.append(sharePanel(list.share_token || '', 'p', t('miniapp.share.public_title')));
-      root.append(button(t('miniapp.share.replace_public'), async () => {
+      const settings = node('section', '', {class: 'list-admin-section list-settings-section',
+        role: 'region', 'aria-label': t('miniapp.wishlist_settings.heading')});
+      settings.append(node('h2', t('miniapp.wishlist_settings.heading')),
+        node('p', t('miniapp.wishlist_settings.subtitle'), {class: 'section-subtitle'}),
+        settingsForm(list));
+      root.append(settings);
+      const reset = button(t('miniapp.share.replace_public'), async () => {
         try { await api(`/api/wishlists/${list.id}/share/reset`, {method: 'POST'});
-          await showList(list.id); status(t('miniapp.share.public_replaced'));
+          await refreshAfterMutation(list.id, 'miniapp.share.public_replaced');
         } catch (_) { status(t('miniapp.share.replace_public_failed')); }
+      }, 'share-reset-btn');
+      root.append(sharePanel(list.share_token || '', 'p', t('miniapp.share.public_title'), {
+        className: 'share-panel--public', hint: t('miniapp.share.public_hint'), footerAction: reset
       }));
       root.append(memberControls(list));
     } else if (list.status === 'archived') {
-      root.append(node('p', t('miniapp.list.archived_notice')));
-      if (manager) root.append(button(t('miniapp.list.restore'), async () => {
+      const banner = node('section', '', {class: 'list-admin-section list-archived-banner'});
+      banner.append(node('p', t('miniapp.list.archived_notice'), {class: 'archived-notice'}));
+      if (manager) banner.append(button(t('miniapp.list.restore'), async () => {
         try {
           await api(`/api/wishlists/${list.id}/restore`, {method: 'POST'});
-          await showList(id);
+          await refreshAfterMutation(id, 'miniapp.list.restored');
         } catch (_) { status(t('miniapp.list.restore_failed')); }
-      }));
+      }, 'btn-primary list-restore-btn'));
+      root.append(banner);
     }
     status('');
-  } catch (_) { status(t('miniapp.list.load_failed')); }
+    return true;
+  } catch (_) { status(t('miniapp.list.load_failed')); return false; }
 }
 function unavailableLink() {
   root.replaceChildren(

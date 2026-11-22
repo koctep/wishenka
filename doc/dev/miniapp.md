@@ -351,8 +351,48 @@ capabilities. The application strictly adheres to the following token safety rul
 - **Client Handling**:
   - The form is pre-populated with current settings from `GET /api/wishlists/{id}`.
   - Submitting sends `PATCH /api/wishlists/{id}` with the updated fields and CSRF header.
-  - Cancelling restores the original values without making a network request.
+  - Cancelling reloads the detail from `GET /api/wishlists/{id}` without sending a settings PATCH.
+    The best-effort history recording in `showList` still runs.
   - If a save fails, user inputs are preserved in the form along with an accessible error message.
+  - A failed reload after a successful save reports that the save succeeded but refresh failed.
+    A failed reload after cancel retains the loading error instead of claiming cancellation.
+
+### Wishlist Detail Workspace (WISHENKA-290)
+
+`showList(id)` in `static/miniapp.js` fetches the authenticated detail and renders a header with
+the localized fallback title, role badge, optional event metadata, and description. The wishes
+section appears immediately after the header. The detail is a summary; item editing remains on the
+separate server-rendered wishlist page. The shared `static/miniapp.css` supplies responsive section,
+action-row, and member-row styles; text and role labels come from `miniapp.*` catalog entries.
+
+For an active list, owners and admins get settings, a public gift-link panel, and a member panel
+with a separate collaborator-invitation link. Members cannot access those management controls.
+An archived list instead shows an archive notice; only owners and admins can restore it. Non-owners
+can toggle favorites. Server-side permission checks remain authoritative.
+
+`sharePanel(token, prefix, title, options)` renders copy and Telegram share actions. Public links
+use the `p` prefix and collaborator invitations use `i`; `linkFor` validates the bot, Mini App name,
+and token before constructing either URL. Configure `WISHENKA_TELEGRAM_BOT_USERNAME` and
+`WISHENKA_TELEGRAM_APP_SHORT_NAME` as described in the configuration reference below. If clipboard
+access fails, the input is selected for manual copying. Tokens are bearer capabilities: do not log
+the URL or token when debugging.
+
+After a successful favorite, link rotation, membership, role, or restore mutation,
+`refreshAfterMutation` clears the old controls before requesting the detail again. If the request
+fails, it reports that the change succeeded and offers retry or back navigation; this prevents a
+rotated, invalid link from remaining available to copy. For a settings save, `showList` returns a
+boolean so the client can distinguish a failed PATCH from a successful PATCH followed by a failed
+refresh. Inspect the detail GET and mutation response separately when diagnosing stale content.
+
+The Node and Chromium regression tests cover localized detail regions, settings, sharing, member
+actions, refresh failures, and mobile layout. Run them with:
+
+```bash
+make test PYTEST_JOBS=2 \
+  PYTEST_ARGS='tests/test_wishlist_detail_ui.py tests/test_wishlist_detail_browser.py -q'
+```
+
+The browser tests require Chromium; see [testing.md](testing.md) for setup.
 
 ### 3. Member Administration
 
@@ -402,7 +442,7 @@ Collaborator invitations grant editing access and must never be conflated with p
 
 Public links allow gift givers to view items and make reservations without collaborator privileges.
 
-- **URL format**: `https://t.me/<bot_username>/<app_name>?startapp=w_<public_token>`
+- **URL format**: `https://t.me/<bot_username>/<app_name>?startapp=p_<public_token>`
 - **Copy Link**: Copies the full URL to the clipboard using `navigator.clipboard.writeText`.
   Status is announced politely via `aria-live`.
 - **Telegram Share**: Uses `window.Telegram.WebApp.openTelegramLink` with a `t.me/share/url`
