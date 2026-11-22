@@ -31,7 +31,7 @@ function node(tag, text = '', attributes = {}) {
 }
 function button(text, handler, className = '') {
   const el = node('button', text, {type: 'button'});
-  if (className) el.className = className;
+  if (className) el.setAttribute('class', className);
   el.addEventListener('click', handler);
   return el;
 }
@@ -136,13 +136,55 @@ function roleLabel(role) {
 function renderBadge(role) {
   return node('span', roleLabel(role), {class: `badge badge-${role}`});
 }
-function wishlistCard(list, onClick) {
-  const card = node('div', '', {class: 'wishlist-card'});
-  const titleBtn = button(list.name || t('miniapp.common.untitled_wishlist'), onClick);
-  card.append(titleBtn);
-  if (list.role) {
-    card.append(renderBadge(list.role));
+function formatDate(iso) {
+  if (!iso) return '';
+  const parsed = new Date(iso);
+  if (isNaN(parsed.getTime())) return String(iso);
+  const tag = activeLocale() === 'ru' ? 'ru-RU' : 'en-US';
+  return parsed.toLocaleDateString(tag, {day: 'numeric', month: 'short', year: 'numeric'});
+}
+function renderSectionHeader(section, title, count, subtitle) {
+  const header = node('div', '', {class: 'wishlist-section-header'});
+  header.append(
+    node('h2', title),
+    node('span', String(count), {class: 'section-count'})
+  );
+  section.append(header);
+  if (subtitle) {
+    section.append(node('p', subtitle, {class: 'section-subtitle'}));
   }
+}
+function renderEmptyState(noticeKey, hintKey) {
+  const box = node('div', '', {class: 'empty-state'});
+  box.append(
+    node('p', t(noticeKey), {class: 'empty-notice'}),
+    node('p', t(hintKey), {class: 'empty-hint'})
+  );
+  return box;
+}
+function wishlistCard(list, onClick, options = {}) {
+  const title = list.name || t('miniapp.common.untitled_wishlist');
+  const card = node('div', '', {class: 'wishlist-card'});
+  const header = node('div', '', {class: 'wishlist-card-header'});
+  header.append(node('h3', title, {class: 'wishlist-card-title'}));
+  if (list.role) {
+    header.append(renderBadge(list.role));
+  }
+  card.append(header);
+  const metaParts = [];
+  if (list.event_title) metaParts.push(String(list.event_title));
+  if (list.event_date) metaParts.push(formatDate(list.event_date));
+  if (metaParts.length > 0) {
+    card.append(node('p', metaParts.join(' · '), {class: 'wishlist-card-meta'}));
+  }
+  const actions = node('div', '', {class: 'wishlist-card-actions'});
+  const openBtn = button(t('miniapp.home.open_wishlist'), onClick, 'wishlist-card-open');
+  openBtn.setAttribute('aria-label', t('miniapp.home.open_wishlist_named', {name: title}));
+  actions.append(openBtn);
+  if (options.secondaryAction) {
+    actions.append(options.secondaryAction);
+  }
+  card.append(actions);
   return card;
 }
 async function showHistory() {
@@ -187,11 +229,14 @@ async function showHistory() {
   } catch (_) { status(t('miniapp.history.load_failed')); }
 }
 async function showHome() {
-  root.replaceChildren(node('h1', t('miniapp.home.title')));
-  const nav = node('nav', '', {class: 'top-nav'});
+  root.replaceChildren(
+    node('h1', t('miniapp.home.title')),
+    node('p', t('miniapp.home.lead'), {class: 'home-lead'})
+  );
+  const nav = node('nav', '', {class: 'top-nav home-top-nav'});
   const settingsLink = node('a', t('nav.settings'), {
     href: '/settings',
-    class: 'settings-link',
+    class: 'settings-link home-nav-action',
   });
   nav.append(
     button(t('miniapp.home.create_wishlist'), async () => {
@@ -199,8 +244,8 @@ async function showHome() {
         const list = await api('/api/wishlists', {method: 'POST', body: '{}'});
         await showList(list.id);
       } catch (_) { status(t('miniapp.home.create_failed')); }
-    }, 'btn-primary'),
-    button(t('miniapp.home.viewing_history'), showHistory),
+    }, 'btn-primary home-create-btn'),
+    button(t('miniapp.home.viewing_history'), showHistory, 'home-nav-action'),
     settingsLink
   );
   root.append(nav);
@@ -214,17 +259,31 @@ async function showHome() {
 
     const myLists = lists.filter(l => l.role === 'owner');
     const collabLists = lists.filter(l => ['admin', 'member'].includes(l.role));
+    const activeIds = new Set(lists.map(l => l.id));
+    const pureFavs = (Array.isArray(favs) ? favs : []).filter(
+      l => !activeIds.has(l.id) && !['owner', 'admin', 'member'].includes(l.role)
+    );
 
     // My wishlists section
     const myTitle = t('miniapp.home.my_wishlists');
     const mySection = node('section', '', {
       'aria-label': myTitle,
       role: 'region',
-      class: 'wishlist-section'
+      class: 'wishlist-section wishlist-section--owned'
     });
-    mySection.append(node('h2', myTitle));
+    renderSectionHeader(
+      mySection,
+      myTitle,
+      myLists.length,
+      t('miniapp.home.my_wishlists_sub')
+    );
     if (myLists.length === 0) {
-      mySection.append(node('p', t('miniapp.home.my_wishlists_empty'), {class: 'empty-notice'}));
+      mySection.append(
+        renderEmptyState(
+          'miniapp.home.my_wishlists_empty',
+          'miniapp.home.my_wishlists_empty_hint'
+        )
+      );
     } else {
       myLists.forEach(l => mySection.append(wishlistCard(l, () => showList(l.id))));
     }
@@ -235,12 +294,20 @@ async function showHome() {
     const collabSection = node('section', '', {
       'aria-label': collabTitle,
       role: 'region',
-      class: 'wishlist-section'
+      class: 'wishlist-section wishlist-section--collab'
     });
-    collabSection.append(node('h2', collabTitle));
+    renderSectionHeader(
+      collabSection,
+      collabTitle,
+      collabLists.length,
+      t('miniapp.home.collaborating_sub')
+    );
     if (collabLists.length === 0) {
       collabSection.append(
-        node('p', t('miniapp.home.collaborating_empty'), {class: 'empty-notice'})
+        renderEmptyState(
+          'miniapp.home.collaborating_empty',
+          'miniapp.home.collaborating_empty_hint'
+        )
       );
     } else {
       collabLists.forEach(l => collabSection.append(wishlistCard(l, () => showList(l.id))));
@@ -252,21 +319,36 @@ async function showHome() {
     const favSection = node('section', '', {
       'aria-label': favTitle,
       role: 'region',
-      class: 'wishlist-section'
+      class: 'wishlist-section wishlist-section--favorites'
     });
-    favSection.append(node('h2', favTitle));
-    if (favs.length === 0) {
-      favSection.append(node('p', t('miniapp.home.favorites_empty'), {class: 'empty-notice'}));
+    renderSectionHeader(
+      favSection,
+      favTitle,
+      pureFavs.length,
+      t('miniapp.home.favorites_sub')
+    );
+    if (pureFavs.length === 0) {
+      favSection.append(
+        renderEmptyState(
+          'miniapp.home.favorites_empty',
+          'miniapp.home.favorites_empty_hint'
+        )
+      );
     } else {
-      favs.forEach(l => {
-        const card = wishlistCard(l, () => showList(l.id));
-        card.append(button(t('miniapp.home.remove'), async () => {
+      pureFavs.forEach(l => {
+        const itemTitle = l.name || t('miniapp.common.untitled_wishlist');
+        const removeBtn = button(t('miniapp.home.remove_favorite'), async () => {
           try {
             await api(`/api/favorites/${l.id}`, {method: 'DELETE'});
             await showHome();
             status(t('miniapp.home.removed_from_favorites'));
           } catch (_) { status(t('miniapp.home.remove_favorite_failed')); }
-        }));
+        }, 'wishlist-card-remove');
+        removeBtn.setAttribute(
+          'aria-label',
+          t('miniapp.home.remove_favorite_named', {name: itemTitle})
+        );
+        const card = wishlistCard(l, () => showList(l.id), {secondaryAction: removeBtn});
         favSection.append(card);
       });
     }
@@ -278,17 +360,26 @@ async function showHome() {
       const deletedSection = node('section', '', {
         'aria-label': deletedTitle,
         role: 'region',
-        class: 'wishlist-section deleted-section'
+        class: 'wishlist-section deleted-section wishlist-section--deleted'
       });
-      deletedSection.append(node('h2', deletedTitle));
+      renderSectionHeader(
+        deletedSection,
+        deletedTitle,
+        deletedLists.length,
+        t('miniapp.home.deleted_sub')
+      );
       deletedLists.forEach(l => {
         const card = node('div', '', {class: 'wishlist-card deleted-wishlist-card'});
-        card.append(
-          node('span', l.name || t('miniapp.common.untitled_wishlist')),
+        const header = node('div', '', {class: 'wishlist-card-header'});
+        header.append(
+          node('h3', l.name || t('miniapp.common.untitled_wishlist'), {
+            class: 'wishlist-card-title'
+          }),
           node('span', t('miniapp.deleted.days_left', {days: l.days_remaining}), {
             class: 'history-time deleted-meta'
           })
         );
+        card.append(header);
         const restoreBtn = button(t('miniapp.deleted.restore'), async () => {
           restoreBtn.disabled = true;
           status(t('miniapp.deleted.restoring'));
@@ -305,8 +396,10 @@ async function showHome() {
               status(t('miniapp.deleted.restore_failed'));
             }
           }
-        });
-        card.append(restoreBtn);
+        }, 'wishlist-card-restore');
+        const actions = node('div', '', {class: 'wishlist-card-actions'});
+        actions.append(restoreBtn);
+        card.append(actions);
         deletedSection.append(card);
       });
       root.append(deletedSection);
@@ -326,9 +419,17 @@ async function showHome() {
         if (sourceLink && title && badge) {
           const card = node('a', '', {
             href: sourceLink.getAttribute('href') || '',
+            class: 'reservations-card',
           });
+          const main = node('span', '', {class: 'reservations-card-main'});
+          main.append(
+            node('span', title.textContent || '', {class: 'reservations-title'}),
+            node('span', t('miniapp.home.reservations_hint'), {
+              class: 'reservations-card-hint',
+            }),
+          );
           card.append(
-            node('span', title.textContent || ''),
+            main,
             node('span', badge.textContent || '', {class: 'reservations-badge'}),
           );
           const firstSection = root.querySelector('.wishlist-section');

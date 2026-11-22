@@ -433,6 +433,76 @@ pytest.mark.browser]`, 5 тестов, мобильный viewport `412x800`) п
 make test-serial PYTEST_ARGS="tests/test_visual_identity_browser.py"
 ```
 
+### Тесты обзора и навигации домашнего экрана Mini App (WISHENKA-289)
+
+Два модуля проверяют структуру домашнего экрана `#app`, дедупликацию секций по приоритету ролей
+`owner > admin > member > favorite`, карточку `.reservations-card`, иерархию действий карточек
+(`.wishlist-card-open` и `.wishlist-card-remove`), двухчастные пустые состояния `.empty-state`,
+условную секцию `.deleted-section.wishlist-section--deleted` и мобильную геометрию в `en` и `ru`
+(описание архитектуры и ключей:
+[miniapp.md](miniapp.md#6-categorized-home-screen-overview-navigation--card-anatomy-wishenka-289)):
+
+- **`tests/test_home_overview_ui.py`** (`pytestmark = pytest.mark.timeout(20)`, 13 тест-кейсов в
+  7 тестовых функциях: 1 непараметризованная и 6 с `@pytest.mark.parametrize("locale", ["en",
+  "ru"])`, изолированный Node VM harness с `timeout=10`):
+  1. `test_home_overview_i18n_keys_and_bilingual_parity` (1 кейс): проверяет наличие и двуязычную
+     симметрию всех 13 новых ключей `miniapp.home.*` и сохранённых ключей в `CATALOG`,
+     `miniapp_catalog()` и встроенном `<script id="miniapp-i18n">`, совпадение плейсхолдеров и
+     префиксы `aria-label` по WCAG 2.5.3 Label in Name.
+  2. `test_home_section_grouping_and_role_precedence_deduplication` (`en`, `ru` — 2 кейса):
+     проверяет заголовок `#app h1`, `.home-lead`, `.top-nav.home-top-nav` (2 `<button>` и
+     `a.settings-link[href="/settings"]`), 3 прямых `.wishlist-section` (`--owned`, `--collab`,
+     `--favorites`), заголовки `.wishlist-section-header` с `.section-count`, `.section-subtitle`
+     и отсутствие дублирования списков соавтора/администратора в секции **Favorites**.
+  3. `test_home_cards_scannability_action_hierarchy_and_favorites_removal` (`en`, `ru` — 2 кейса):
+     проверяет `<h3 class="wishlist-card-title">` (включая fallback без названия),
+     `.wishlist-card-meta` (`event_title` и `formatDate(event_date)`), `.wishlist-card-open` и
+     подчинённую кнопку `.wishlist-card-remove` (без `.btn-primary` и `.btn-danger`), переход по
+     `Open` (`GET /api/wishlists/42`) и удаление закладки (`DELETE /api/favorites/42`).
+  4. `test_home_empty_states_two_part_guidance_and_hidden_deleted_section` (`en`, `ru` — 2 кейса):
+     проверяет рендеринг `.empty-state` (`.empty-notice` + `.empty-hint`) при `0` элементов в трёх
+     основных секциях и скрытие `.deleted-section`, когда список удалённых пуст.
+  5. `test_home_recently_deleted_section_restore_and_error_states` (`en`, `ru` — 2 кейса):
+     проверяет условную секцию `.deleted-section.wishlist-section--deleted`, карточку
+     `.deleted-wishlist-card` и сценарии `POST /api/wishlists/77/restore-deleted` со статусами
+     `200`, `410` (`miniapp.deleted.expired`) и `500` (`miniapp.deleted.restore_failed` с
+     повторным включением кнопки).
+  6. `test_home_reservations_card_rendering_and_non_blocking_fallback` (`en`, `ru` — 2 кейса):
+     проверяет вставку `a.reservations-card` (`.reservations-card-main`, `.reservations-title`,
+     `.reservations-card-hint`, `.reservations-badge`) перед первой `.wishlist-section` и
+     неблокирующий fallback при HTTP 500 от `/web/reservations/card`.
+  7. `test_home_navigation_startapp_create_focus_and_preserved_script_contracts` (`en`, `ru` —
+     2 кейса): проверяет контракт `test_reservations_cabinet_ui.home_script_problems(js_source)`,
+     фокус на кнопке создания при `startapp=create` без `POST /api/wishlists`, отправку
+     `POST /api/wishlists` `{}` по клику на создание и переход в `showHistory()` (`GET
+     /api/history`).
+- **`tests/test_home_overview_browser.py`** (`pytestmark = [pytest.mark.timeout(45),
+  pytest.mark.browser]`, 6 тест-кейсов в 3 тестовых функциях в настоящем headless Chromium через
+  `tests/browser_cdp.py`):
+  1. `test_home_overview_sections_dedup_cards_nav_and_mobile_geometry` (`("en", (412, 800))`,
+     `("ru", (412, 800))`, `("ru", (360, 800))` — 3 кейса): проверяет отсутствие горизонтального
+     скролла (`scrollWidth <= innerWidth`), 2 кнопки в `.top-nav.home-top-nav` с кнопкой создания
+     на верхнем ряду, `a.reservations-card` со счётчиком `1` перед первой секцией, различные левые
+     границы секций, дедупликацию списков соавтора/администратора из **Favorites**, отсутствие
+     перекрытий и обрезки длинных заголовков, интерактивные цели `>= 44x44` px, контур
+     `:focus-visible` после `Tab` и соблюдение Surprise Invariant.
+  2. `test_home_overview_empty_states_deleted_restore_and_single_step_navigation` (`"en"`, `"ru"`
+     на `412x800` — 2 кейса): проверяет спокойные светлые `.empty-state` (`min(rgb) >= 240`, без
+     `.alert-error`), одношаговую навигацию в историю просмотров, `/settings` и
+     `/web/reservations`, фокус при `startapp=create` без создания вишлиста, а также условную
+     секцию `.deleted-section.wishlist-section--deleted` с восстановлением списка при HTTP 500 от
+     `/web/reservations/card`.
+  3. `test_home_overview_favorites_remove_and_open_wishlist_browser` (`"en"` на `412x800` —
+     1 кейс): проверяет, что клик по `.wishlist-card-remove` убирает вишлист только из
+     **Favorites** без удаления самого списка у владельца, а клик по `.wishlist-card-open`
+     открывает детальный экран вишлиста.
+
+Запуск модулей:
+
+```bash
+make test-serial PYTEST_ARGS="tests/test_home_overview_ui.py tests/test_home_overview_browser.py"
+```
+
 ### Изолированная диагностика поддержки и единый principal приватного бота (WISHENKA-182)
 
 Модуль `tests/test_wishenka_182_repro.py` (`pytestmark = pytest.mark.timeout(30)`, 4 теста: 3 async, 1 sync)

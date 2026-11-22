@@ -132,10 +132,15 @@ pages (`.settings-page`, wishlist views, and `invite_preview.html`):
 - **Palette and layout tokens (`:root`)**:
   - Light shell palette (`WISHENKA-288`): `--canvas` (`#fff7f9`, page background), `--surface`
     (`#ffffff`, card and field surface), `--ink` (`#351326`, primary plum foreground and headings),
-    `--muted` (`#695663`, `.history-time` and `.empty-notice`), `--accent` (`#8c2551`, primary
-    fill, button border, and checkbox `accent-color`), `--accent-dark` (`#6f173f`, links,
-    secondary button labels, and primary `:hover`), `--danger` (`#a61335`, `.btn-danger` border
-    and label), and `--focus` (`#71319a`, `:focus-visible` outline).
+    `--muted` (`#695663`, `.history-time`, `.section-subtitle`, and `.empty-hint`), `--accent`
+    (`#8c2551`, primary fill, button border, and checkbox `accent-color`), `--accent-dark`
+    (`#6f173f`, links, secondary button labels, and primary `:hover`), `--danger` (`#a61335`,
+    `.btn-danger` border and label), and `--focus` (`#71319a`, `:focus-visible` outline).
+  - Additive Home surface and border tokens (`WISHENKA-289`): `--surface-subtle` (`#fffafd`,
+    card and empty-state surface), `--border-subtle` (`#edd8e0`, section, card, and reservations
+    card borders), `--accent-soft` (`#fff0f4`, `.section-count`, `.wishlist-card-open`, and
+    `.reservations-card:hover` fill), and `--muted-border` (`#d5c1ca`, dashed `.deleted-section`
+    and `.wishlist-card-remove` borders).
   - Structural tokens: `--touch-target` (`44px`), `--content-width` (`42rem`), `--receipt-height`
     (`90vh`), `--layer-drag` (`10`), `--layer-quick-add` (`40`), `--layer-receipt` (`100`), and
     `--layer-modal` (`100`).
@@ -227,12 +232,16 @@ the fixed quick-add bar so dark Telegram themes never mix with light-shell foreg
 - **`wishenka/web/static/miniapp.js`**:
   - `button(text, handler, className = '')` applies `className` when non-empty while preserving
     `type="button"`, `textContent`, click handlers, function boundaries, and `#status` live updates.
-  - `'btn-primary'`: `showHome` create button, `sharePanel` Telegram share button, `settingsForm`
-    save submit (`node('button', ..., {type: 'submit', class: 'btn-primary'})`), `publicView`
-    reserve button, and `invitationView` accept button.
+  - `'btn-primary'`: `showHome` create button (`'btn-primary home-create-btn'`), `sharePanel`
+    Telegram share button, `settingsForm` save submit (`node('button', ..., {type: 'submit',
+    class: 'btn-primary'})`), `publicView` reserve button, and `invitationView` accept button.
   - `'btn-danger'`: `showHistory` clear-history button and `memberControls` remove-member button.
-  - Default secondary (`className = ''`): Back, Viewing history, Copy link, Cancel, role toggle,
-    revoke/replace link buttons, favorite actions, restore actions, and home card open buttons.
+  - Scoped Home action classes (`WISHENKA-289`): `'home-nav-action'` on `showHome` Viewing history
+    button (paired with `a.settings-link.home-nav-action`), `'wishlist-card-open'` on
+    `wishlistCard` primary open button, `'wishlist-card-remove'` on Favorites subordinate bookmark
+    removal button, and `'wishlist-card-restore'` on Recently deleted restore button.
+  - Default secondary (`className = ''`): Back, Copy link, Cancel, role toggle, revoke/replace
+    link buttons, and detail-screen favorite toggle actions.
 - **`wishenka/web/templates/settings.html`**:
   - `#birthdate-form button[type="submit"]` uses `class="btn-primary"` (distinct from secondary
     `#birthdate-clear-btn`).
@@ -404,73 +413,194 @@ Public links allow gift givers to view items and make reservations without colla
 
 ---
 
-### 6. Categorized Home Screen Sections & Role Badges
+### 6. Categorized Home Screen Overview, Navigation & Card Anatomy (WISHENKA-289)
 
-The Mini App home screen organizes wishlists into three distinct semantic sections (`<section>`
-elements with `role="region"` and accessible `aria-label` attributes):
+`showHome()` in [`wishenka/web/static/miniapp.js`](../../wishenka/web/static/miniapp.js) renders the
+Mini App Home overview inside `#app`, combining a top navigation hub, the reservations summary
+entry, and categorized direct-child `<section>` blocks styled by
+[`wishenka/web/static/miniapp.css`](../../wishenka/web/static/miniapp.css).
 
-1. **"My wishlists"** (`aria-label="My wishlists"`): Displays wishlists where the authenticated
-   user is the owner (`role: "owner"`). If empty, shows "No personal wishlists yet".
-2. **"Collaborating"** (`aria-label="Collaborating"`): Displays wishlists where the authenticated
-   user is an active collaborator with `role: "admin"` or `role: "member"`. If empty, shows
-   "No collaborative wishlists yet".
-3. **"Favorites"** (`aria-label="Favorites"`): Displays wishlists saved by the user. If empty,
-   shows "No favorites yet". Each card includes an explicit "Remove" button for quick unfavoriting.
+#### Home Header & Top Navigation Hub
 
-#### Reservations card
+- **Header**: `<h1>` renders `t('miniapp.home.title')` (`Wishlists` / `Вишлисты`), followed by
+  `<p class="home-lead">` with `t('miniapp.home.lead')`.
+- **Navigation bar (`<nav class="top-nav home-top-nav">`)**: contains three direct controls (with
+  exactly two `<button>` elements):
+  1. **Create wishlist (`<button class="btn-primary home-create-btn">`)**: first `<button>` in
+     `#app` so `startapp=create` focuses it via `root.querySelector('button')?.focus()` without
+     auto-creating a list. Spans the full primary row on mobile (`flex: 1 1 100%`) and submits
+     `POST /api/wishlists` with `body: '{}'` (`WISHENKA-296` compatibility).
+  2. **Viewing history (`<button class="home-nav-action">`)**: secondary button (`flex: 1 1
+     8.5rem`) transitioning to `showHistory()` in one tap.
+  3. **Settings (`<a href="/settings" class="settings-link home-nav-action">`)**: localized
+     `t('nav.settings')` link paired beside Viewing history on the secondary row.
+- Every direct child of `#app .home-top-nav` enforces `box-sizing: border-box`, `margin: 0`,
+  `min-width: var(--touch-target)`, `min-height: var(--touch-target)` (`44px`), and
+  `max-width: 100%`.
 
-After those three sections load, `showHome` requests
-`GET /web/reservations/card` and inserts «Мои бронирования» before the
-first `.wishlist-section`. The copy uses `node()` (`textContent`). The
-badge text is `total_distinct_items`: distinct wishes on which the
-caller holds an occupying promise (`ACTIVE` or `PURCHASED`). A second
-promise on the same wish does not increment it. Units do not increment
-it. A response that is not OK, a fragment missing the link, title,
-or badge, and a failed fetch, leave the three sections in place.
+#### Reservations Summary Card (`.reservations-card`)
 
-`publicView` and `invitationView` do not request the card, so a shared
-view and an invite view do not show it. `GET /share/{public_token}`
-does not render it either.
+After rendering the wishlist sections, `showHome()` performs a non-blocking
+`fetch('/web/reservations/card', {credentials: 'same-origin'})`, parses the response HTML with
+`new DOMParser().parseFromString(..., 'text/html')`, and constructs `<a class="reservations-card">`
+via `node()` (`textContent` only, never `innerHTML`):
 
-On a personal list the owner is the recipient of every wish, so those
-wishes are not shown as that owner's promises and do not increase the
-badge. Grouping, «К желанию», the four actions, refresh, logs, and
-the CSRF window are in
-[reservations.md](reservations.md#7-my-reservations-cabinet).
+- **Structure**:
+  - `<span class="reservations-card-main">` containing `<span class="reservations-title">`
+    (extracted from `.reservations-title`) and `<span class="reservations-card-hint">`
+    (`t('miniapp.home.reservations_hint')`).
+  - `<span class="reservations-badge">` displaying `total_distinct_items`: distinct wishes on
+    which the caller holds an occupying promise (`ACTIVE` or `PURCHASED`). Multiple promises or
+    units on the same wish do not increment the badge.
+- **Placement and non-blocking fallback**: inserted into `#app` before
+  `root.querySelector('.wishlist-section')` via `root.insertBefore(card, firstSection)`. Any
+  non-OK response, network error, or HTML fragment missing `a`, `.reservations-title`, or
+  `.reservations-badge` is silently ignored in `try / catch`, leaving all wishlist sections
+  rendered and usable.
+- **Scope and privacy**: `publicView`, `invitationView`, and `GET /share/{public_token}` never
+  request `/web/reservations/card`. On a personal list the owner is the recipient of every wish,
+  so those wishes never count toward the owner's promises. Cabinet details are in
+  [reservations.md](reservations.md#7-my-reservations-cabinet).
 
-#### Role Badges & Precedence Rules
+#### Direct-Child Wishlist Sections & Role Precedence Deduplication
 
-Each wishlist card displays a localized visual badge indicating the user's role on that list:
-- `owner` $\rightarrow$ **«Владелец»** (`badge badge-owner`)
-- `admin` $\rightarrow$ **«Администратор»** (`badge badge-admin`)
-- `member` $\rightarrow$ **«Соавтор»** (`badge badge-member`)
-- `favorite` $\rightarrow$ **«Избранное»** (`badge badge-favorite`)
+`showHome()` fetches `/api/wishlists`, `/api/favorites` (`.catch(() => [])`), and
+`/api/wishlists/deleted` (`.catch(() => [])`) in parallel via `Promise.all` and attaches each
+category as a direct-child `<section role="region" aria-label="...">` of `#app`:
 
-**Role Precedence Rule**:
-```text
-owner > admin > member > favorite
-```
-If an active collaborator (`admin` or `member`) also adds that wishlist to their favorites, the
-collaborative operational role strictly takes precedence over `favorite` in both the card badge and
-the home section placement. The wishlist appears in the "Collaborating" section with their
-collaborator badge (`Администратор` or `Соавтор`).
+1. **My wishlists (`.wishlist-section.wishlist-section--owned`)**: active wishlists where
+   `l.role === 'owner'` (`border-left: 4px solid var(--accent)`).
+2. **Collaborating (`.wishlist-section.wishlist-section--collab`)**: active wishlists where
+   `['admin', 'member'].includes(l.role)` (`border-left: 4px solid #0f766e`).
+3. **Favorites (`.wishlist-section.wishlist-section--favorites`)**: external bookmarked wishlists
+   filtered by `pureFavs` (`border-left: 4px solid var(--focus)`).
+4. **Recently deleted (`.wishlist-section.deleted-section.wishlist-section--deleted`)**: rendered
+   conditionally only when `Array.isArray(deletedLists) && deletedLists.length > 0` (completely
+   omitted when empty), styled with `border-style: dashed; border-color: var(--muted-border);
+   border-left: 4px solid var(--muted);`.
+
+Each section opens with `renderSectionHeader(section, title, count, subtitle)`, which appends
+`<div class="wishlist-section-header">` (`<h2>` + `<span class="section-count">`) and
+`<p class="section-subtitle">`.
+
+**Role Badges & Precedence Deduplication (`owner > admin > member > favorite`)**:
+
+- `renderBadge(role)` renders `<span class="badge badge-${role}">` via `roleLabel(role)`:
+  - `owner` $\rightarrow$ `Owner` / `Владелец` (`badge badge-owner`)
+  - `admin` $\rightarrow$ `Admin` / `Администратор` (`badge badge-admin`)
+  - `member` $\rightarrow$ `Collaborator` / `Соавтор` (`badge badge-member`)
+  - `favorite` $\rightarrow$ `Favorite` / `Избранное` (`badge badge-favorite`)
+- Because `GET /api/favorites` returns all rows from `wl_favorites` (including shared lists where
+  the caller is `admin` or `member`), `showHome()` builds `activeIds = new Set(lists.map(l =>
+  l.id))` and filters `pureFavs` with `!activeIds.has(l.id) && !['owner', 'admin',
+  'member'].includes(l.role)`. Collaborator-favorited lists appear once in **Collaborating** with
+  their operational badge (`Admin` or `Collaborator`) and are never duplicated into **Favorites**.
+
+#### Scannable Wishlist Card Anatomy & Two-Part Empty States
+
+Active cards are built by `wishlistCard(list, onClick, options = {})` as `<div
+class="wishlist-card">` (`flex-direction: column` under `#app .wishlist-card`):
+
+- **Header (`.wishlist-card-header`)**: `<h3 class="wishlist-card-title">` (`list.name ||
+  t('miniapp.common.untitled_wishlist')`, `min-width: 0; flex: 1 1 11rem; overflow-wrap:
+  anywhere;`) paired with `renderBadge(list.role)` (`margin-left: 0; flex-shrink: 0;`). The title
+  is never rendered inside a `<button>`.
+- **Optional non-sensitive metadata (`.wishlist-card-meta`)**: joins `list.event_title` and
+  `formatDate(list.event_date)` (`toLocaleDateString` with `{day: 'numeric', month: 'short',
+  year: 'numeric'}` in `ru-RU` / `en-US`, falling back to `String(iso)` on invalid dates) with
+  `' · '`. Reservation counts, giver names, and purchase statuses are never included (Surprise
+  Invariant).
+- **Actions row (`.wishlist-card-actions`)**:
+  - **Primary card action (`<button class="wishlist-card-open">`)**: visible label
+    `t('miniapp.home.open_wishlist')` (`Open` / `Открыть`) and `aria-label`
+    `t('miniapp.home.open_wishlist_named', {name: title})` (`Open: {name}` / `Открыть «{name}»`).
+    Styled with `background: var(--accent-soft); border-color: var(--accent); color:
+    var(--accent-dark); font-weight: 700; flex: 1 1 7rem;` (`#fde2ea` on hover) so it stands out
+    over secondary card actions while leaving **Create wishlist** as the sole solid `.btn-primary`
+    CTA on Home.
+  - **Favorites subordinate removal (`<button class="wishlist-card-remove">`)**: passed via
+    `options.secondaryAction` only in **Favorites** with visible label
+    `t('miniapp.home.remove_favorite')` (`Remove from favorites` / `Убрать из избранного`) and
+    `aria-label` `t('miniapp.home.remove_favorite_named', {name: itemTitle})`. Both `aria-label`
+    templates start with the visible button text to satisfy WCAG 2.5.3 Label in Name. Styled with
+    `background: var(--surface); border-color: var(--muted-border); color: var(--muted);
+    font-weight: 600; flex: 1 1 9rem;` (never `.btn-danger`), calling
+    `DELETE /api/favorites/${l.id}`, re-running `showHome()`, and announcing
+    `t('miniapp.home.removed_from_favorites')`.
+- **Two-part empty states (`renderEmptyState(noticeKey, hintKey)`)**: when **My wishlists**,
+  **Collaborating**, or **Favorites** has `0` items, the section renders `<div
+  class="empty-state">` (`background: var(--surface-subtle); border: 1px dashed
+  var(--border-subtle);`) containing `<p class="empty-notice">` (why the section is empty) and
+  `<p class="empty-hint">` (what the user can do next).
+- **Mobile `<= 412px` wrap rules**: `box-sizing: border-box` on cards and controls, `flex-wrap:
+  wrap` and `min-width: 0` on `.wishlist-section-header`, `.wishlist-card-header`, and
+  `.wishlist-card-actions`, `overflow-wrap: anywhere` on titles, subtitles, metadata, hints, and
+  action buttons, and `min-height: var(--touch-target)` (`44px`) on all interactive controls
+  prevent horizontal overflow (`scrollWidth <= innerWidth`) at `412x800` and `360x800` in both EN
+  and RU.
 
 #### Recently Deleted Wishlists (Owner Restore)
 
 When the authenticated caller owns soft-deleted wishlists still inside the retention window
-(`WISHENKA_WISHLIST_RETENTION_DAYS`, default `30` days), `showHome()` fetches
-`GET /api/wishlists/deleted` in parallel with `/api/wishlists` and `/api/favorites`, and renders
-an owner-only `.deleted-section` (`miniapp.deleted.heading`):
+(`WISHENKA_WISHLIST_RETENTION_DAYS`, default `30` days), `showHome()` renders
+`.wishlist-section.deleted-section.wishlist-section--deleted` (`miniapp.deleted.heading`,
+`miniapp.home.deleted_sub`):
 
-- Each `.deleted-wishlist-card` displays the wishlist title (or `miniapp.common.untitled_wishlist`),
-  remaining retention days (`miniapp.deleted.days_left` with `days_remaining`), and a restore
-  button (`miniapp.deleted.restore`).
-- Clicking restore sends `POST /api/wishlists/{id}/restore-deleted` with the session CSRF token,
-  restores the list to `active` with rotated `public_token` and `invite_token`, refreshes the home
-  screen, and announces `miniapp.deleted.restored`.
-- If the retention window expired before submission, the server returns `410 Gone`
-  (`code: "retention_expired"`), and the UI refreshes the home screen and shows
-  `miniapp.deleted.expired`.
+- Each `.wishlist-card.deleted-wishlist-card` renders `.wishlist-card-header` with
+  `<h3 class="wishlist-card-title">` (`l.name || t('miniapp.common.untitled_wishlist')`) and
+  `<span class="history-time deleted-meta">` (`t('miniapp.deleted.days_left',
+  {days: l.days_remaining})`), followed by `.wishlist-card-actions` containing
+  `<button class="wishlist-card-restore">` (`t('miniapp.deleted.restore')`).
+- Clicking restore disables the button, announces `miniapp.deleted.restoring`, sends
+  `POST /api/wishlists/{id}/restore-deleted` with the session CSRF token, refreshes `showHome()`,
+  and announces `miniapp.deleted.restored`.
+- If the retention window expired before submission (`410 Gone`), `showHome()` refreshes and
+  announces `miniapp.deleted.expired`; on other errors the button re-enables and announces
+  `miniapp.deleted.restore_failed`.
+
+#### Home Overview Localization Keys (`wishenka/i18n/catalog.py`)
+
+In addition to preserved keys (`nav.settings`, `miniapp.home.title`,
+`miniapp.home.create_wishlist`, `miniapp.home.viewing_history`, `miniapp.home.my_wishlists`,
+`miniapp.home.collaborating`, `miniapp.home.favorites`, `miniapp.home.*_empty`,
+`miniapp.home.remove`, and `miniapp.deleted.*`), `CATALOG` defines 13 paired EN/RU
+`miniapp.home.*` keys embedded into `#miniapp-i18n`:
+
+- `miniapp.home.lead`:
+  - EN: `"Your lists, shared plans, and saved favorites in one place."`
+  - RU: `"Ваши списки, совместные планы и избранное в одном месте."`
+- `miniapp.home.reservations_hint`:
+  - EN: `"Active and purchased gift promises"`
+  - RU: `"Активные и купленные обещания подарков"`
+- `miniapp.home.my_wishlists_sub`:
+  - EN: `"Lists you created and manage"`
+  - RU: `"Списки, которые вы создали и ведёте"`
+- `miniapp.home.collaborating_sub`:
+  - EN: `"Shared lists where you co-edit as admin or collaborator"`
+  - RU: `"Общие списки, где вы участвуете как администратор или соавтор"`
+- `miniapp.home.favorites_sub`:
+  - EN: `"Friends' and family wishlists saved for quick access"`
+  - RU: `"Сохранённые вишлисты друзей и близких для быстрого доступа"`
+- `miniapp.home.deleted_sub`:
+  - EN: `"Lists you can restore before the retention window expires"`
+  - RU: `"Списки, которые можно восстановить до окончания срока хранения"`
+- `miniapp.home.my_wishlists_empty_hint`:
+  - EN: `"Tap Create wishlist above to start your first personal list."`
+  - RU: `"Нажмите «Создать вишлист» выше, чтобы собрать свой первый список."`
+- `miniapp.home.collaborating_empty_hint`:
+  - EN: `"Ask a list owner for an invitation link to co-edit a wishlist together."`
+  - RU: `"Попросите владельца списка прислать ссылку-приглашение для совместного ведения."`
+- `miniapp.home.favorites_empty_hint`:
+  - EN: `"Open someone's shared wishlist link and add it to favorites to keep it handy."`
+  - RU: `"Откройте чужой вишлист по публичной ссылке и добавьте его в избранное."`
+- `miniapp.home.open_wishlist`:
+  - EN: `"Open"` / RU: `"Открыть"`
+- `miniapp.home.open_wishlist_named`:
+  - EN: `"Open: {name}"` / RU: `"Открыть «{name}»"`
+- `miniapp.home.remove_favorite`:
+  - EN: `"Remove from favorites"` / RU: `"Убрать из избранного"`
+- `miniapp.home.remove_favorite_named`:
+  - EN: `"Remove from favorites: {name}"` / RU: `"Убрать из избранного «{name}»"`
 
 ---
 

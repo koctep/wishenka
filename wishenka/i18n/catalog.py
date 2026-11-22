@@ -240,16 +240,37 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "miniapp.role.favorite": "Favorite",
         "miniapp.common.untitled_wishlist": "Untitled wishlist",
         "miniapp.home.title": "Wishlists",
+        "miniapp.home.lead": "Your lists, shared plans, and saved favorites in one place.",
         "miniapp.home.create_wishlist": "Create wishlist",
         "miniapp.home.create_failed": "Could not create wishlist. Try again.",
         "miniapp.home.viewing_history": "Viewing history",
+        "miniapp.home.reservations_hint": "Active and purchased gift promises",
         "miniapp.home.my_wishlists": "My wishlists",
+        "miniapp.home.my_wishlists_sub": "Lists you created and manage",
         "miniapp.home.my_wishlists_empty": "No personal wishlists yet",
+        "miniapp.home.my_wishlists_empty_hint": (
+            "Tap Create wishlist above to start your first personal list."
+        ),
         "miniapp.home.collaborating": "Collaborating",
+        "miniapp.home.collaborating_sub": (
+            "Shared lists where you co-edit as admin or collaborator"
+        ),
         "miniapp.home.collaborating_empty": "No collaborative wishlists yet",
+        "miniapp.home.collaborating_empty_hint": (
+            "Ask a list owner for an invitation link to co-edit a wishlist together."
+        ),
         "miniapp.home.favorites": "Favorites",
+        "miniapp.home.favorites_sub": "Friends' and family wishlists saved for quick access",
         "miniapp.home.favorites_empty": "No favorites yet",
+        "miniapp.home.favorites_empty_hint": (
+            "Open someone's shared wishlist link and add it to favorites to keep it handy."
+        ),
+        "miniapp.home.deleted_sub": "Lists you can restore before the retention window expires",
+        "miniapp.home.open_wishlist": "Open",
+        "miniapp.home.open_wishlist_named": "Open: {name}",
         "miniapp.home.remove": "Remove",
+        "miniapp.home.remove_favorite": "Remove from favorites",
+        "miniapp.home.remove_favorite_named": "Remove from favorites: {name}",
         "miniapp.home.removed_from_favorites": "Removed from favorites",
         "miniapp.home.remove_favorite_failed": "Could not remove from favorites",
         "miniapp.home.load_failed": "Could not load wishlists. Check your session and try again.",
@@ -761,16 +782,41 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "miniapp.role.favorite": "Избранное",
         "miniapp.common.untitled_wishlist": "Вишлист без названия",
         "miniapp.home.title": "Вишлисты",
+        "miniapp.home.lead": "Ваши списки, совместные планы и избранное в одном месте.",
         "miniapp.home.create_wishlist": "Создать вишлист",
         "miniapp.home.create_failed": "Не удалось создать вишлист. Попробуйте ещё раз.",
         "miniapp.home.viewing_history": "История просмотров",
+        "miniapp.home.reservations_hint": "Активные и купленные обещания подарков",
         "miniapp.home.my_wishlists": "Мои вишлисты",
+        "miniapp.home.my_wishlists_sub": "Списки, которые вы создали и ведёте",
         "miniapp.home.my_wishlists_empty": "Пока нет личных вишлистов",
+        "miniapp.home.my_wishlists_empty_hint": (
+            "Нажмите «Создать вишлист» выше, чтобы собрать свой первый список."
+        ),
         "miniapp.home.collaborating": "Совместные",
+        "miniapp.home.collaborating_sub": (
+            "Общие списки, где вы участвуете как администратор или соавтор"
+        ),
         "miniapp.home.collaborating_empty": "Пока нет совместных вишлистов",
+        "miniapp.home.collaborating_empty_hint": (
+            "Попросите владельца списка прислать ссылку-приглашение для совместного ведения."
+        ),
         "miniapp.home.favorites": "Избранные",
+        "miniapp.home.favorites_sub": (
+            "Сохранённые вишлисты друзей и близких для быстрого доступа"
+        ),
         "miniapp.home.favorites_empty": "Пока нет избранных вишлистов",
+        "miniapp.home.favorites_empty_hint": (
+            "Откройте чужой вишлист по публичной ссылке и добавьте его в избранное."
+        ),
+        "miniapp.home.deleted_sub": (
+            "Списки, которые можно восстановить до окончания срока хранения"
+        ),
+        "miniapp.home.open_wishlist": "Открыть",
+        "miniapp.home.open_wishlist_named": "Открыть «{name}»",
         "miniapp.home.remove": "Удалить",
+        "miniapp.home.remove_favorite": "Убрать из избранного",
+        "miniapp.home.remove_favorite_named": "Убрать из избранного «{name}»",
         "miniapp.home.removed_from_favorites": "Удалено из избранного",
         "miniapp.home.remove_favorite_failed": "Не удалось удалить из избранного",
         "miniapp.home.load_failed": (
