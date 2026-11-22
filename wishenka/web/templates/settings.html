@@ -63,7 +63,9 @@
                 {{ t('settings.birthdate_year', locale) }}
                 <input type="number" id="birth-year" name="year" min="1900" max="2100" value="{{ birthdate.year or '' }}">
             </label>
-            <button type="submit">{{ t('settings.birthdate_save', locale) }}</button>
+            <button type="submit" class="btn-primary">
+                {{ t('settings.birthdate_save', locale) }}
+            </button>
             <button id="birthdate-clear-btn" type="button">{{ t('settings.birthdate_clear', locale) }}</button>
         </form>
         <p id="birthdate-feedback" role="status" aria-live="polite"></p>
@@ -140,7 +142,7 @@
         <h2 id="delete-account-heading">{{ t('settings.delete_account_heading', locale) }}</h2>
         <p>{{ t('settings.delete_account_description', locale) }}</p>
         <div id="delete-account-entry">
-            <button id="delete-account-start-btn" type="button">
+            <button id="delete-account-start-btn" type="button" class="btn-danger">
                 {{ t('settings.delete_account_button', locale) }}
             </button>
         </div>
@@ -153,7 +155,7 @@
                 <li>{{ t('settings.delete_summary_reservations', locale) }} <strong id="impact-reservations">0</strong></li>
             </ul>
             <div class="delete-actions">
-                <button id="delete-account-confirm-btn" type="button">
+                <button id="delete-account-confirm-btn" type="button" class="btn-danger">
                     {{ t('settings.delete_confirm_button', locale) }}
                 </button>
                 <button id="delete-account-cancel-btn" type="button">

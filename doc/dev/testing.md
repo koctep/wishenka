@@ -395,6 +395,44 @@ pytest.mark.browser]`, 12 параметризованных тестов) пр�
 make test-serial PYTEST_ARGS="tests/test_bot_menu_miniapp_e2e_browser.py"
 ```
 
+### Тесты единого визуального стиля (WISHENKA-288)
+
+Модуль `tests/test_visual_identity_browser.py` (`pytestmark = [pytest.mark.timeout(45),
+pytest.mark.browser]`, 5 тестов, мобильный viewport `412x800`) проверяет общую визуальную
+идентичность и контраст в `wishenka/web/static/miniapp.css`, `wishenka/web/static/miniapp.js` и
+серверных шаблонах (описание токенов и классов:
+[miniapp.md](miniapp.md#shared-visual-identity-and-palette-tokens)):
+
+- **`test_both_shells_use_coherent_light_canvas_and_surfaces`:** проверяет на `/`
+  (`.wishlist-section`) и `/settings` (`#language-heading`) непрозрачный светлый фон
+  (`min(rgb) >= 225`), отличие поверхности `section` от фона и согласованность каналов (`<= 16`).
+- **`test_home_primary_action_is_visually_distinct_from_history`:** проверяет визуальное отличие
+  основного действия создания вишлиста (`.btn-primary`) от кнопки истории в `.top-nav` на `/`.
+- **`test_settings_actions_and_selection_have_distinct_visual_states`:** проверяет на `/settings`
+  визуальное отличие кнопки сохранения (`.btn-primary`) и удаления аккаунта (`.btn-danger`) от
+  кнопки очистки, отличие `.locale-option[aria-pressed="true"]` от `false`, изменение стиля
+  `#birthdate-clear-btn` при `disabled = true` и видимый контур `:focus-visible` после `Tab`.
+- **`test_dark_theme_modal_heading_and_focus_outline_contrast`:** проверяет при fallback
+  (`None`, `None`) и тёмных `--tg-theme-bg-color: #202020` / `--tg-theme-text-color: #f5f5f5`
+  контраст `>= 4.5` для `h2` и `:focus-visible` контура внутри `#item-archive-modal .modal-sheet`
+  и `#item-receipt-modal .receipt-sheet`.
+- **`test_invite_preview_primary_link_has_button_geometry_and_touch_target`:** проверяет, что на
+  `/invite/nonexistent-invite-token` ссылка `a.btn.btn-primary` имеет геометрию кнопки
+  (`>= 44x44` px, `inline-flex`, `border-box`, без подчёркивания, `fontWeight >= 600`, контраст
+  `>= 4.5`) и видимый `:focus-visible` контур после `Tab`.
+
+Интеграция с браузерным набором: модуль использует общие `tests/browser_cdp.py`,
+`tests/browser_helpers.py` (`Seeded`, `focus`, `js_str`, `open_receipt_dialog`, `settle`) и
+фикстуры `tests/conftest.py`, работает полностью офлайн, проходит AST-проверку маркера и
+таймаута `tests/test_browser_prerequisites.py::test_new_browser_modules_declare_marker_and_timeout`
+и дополняет `tests/test_receipt_theme_browser.py` и `tests/test_receipt_accessibility_browser.py`.
+
+Запуск модуля:
+
+```bash
+make test-serial PYTEST_ARGS="tests/test_visual_identity_browser.py"
+```
+
 ### Изолированная диагностика поддержки и единый principal приватного бота (WISHENKA-182)
 
 Модуль `tests/test_wishenka_182_repro.py` (`pytestmark = pytest.mark.timeout(30)`, 4 теста: 3 async, 1 sync)

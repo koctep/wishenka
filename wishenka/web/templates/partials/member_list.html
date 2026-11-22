@@ -31,7 +31,8 @@
         <button hx-delete="/wishlists/{{ wishlist_id }}/members/{{ member.user_id }}/partial"
                 hx-target="#member-list"
                 hx-swap="outerHTML"
-                class="btn-delete text-xs text-red-600 font-medium px-2 py-1 border rounded">
+                class="btn-delete btn-danger text-xs text-red-600
+                       font-medium px-2 py-1 border rounded">
             {{ t('web.common.delete', locale|default('en')) }}
         </button>
         {% endif %}

@@ -29,8 +29,9 @@ function node(tag, text = '', attributes = {}) {
   Object.entries(attributes).forEach(([name, value]) => el.setAttribute(name, value));
   return el;
 }
-function button(text, handler) {
+function button(text, handler, className = '') {
   const el = node('button', text, {type: 'button'});
+  if (className) el.className = className;
   el.addEventListener('click', handler);
   return el;
 }
@@ -124,7 +125,7 @@ function sharePanel(token, prefix, title) {
       bridge.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(url)}`);
       status(t('miniapp.share.telegram_opened'));
     } catch (_) { status(t('miniapp.share.telegram_unavailable')); }
-  }));
+  }, 'btn-primary'));
   return panel;
 }
 const KNOWN_ROLES = new Set(['owner', 'admin', 'member', 'favorite']);
@@ -160,7 +161,7 @@ async function showHistory() {
           await showHistory();
           status(t('miniapp.history.cleared'));
         } catch (_) { status(t('miniapp.history.clear_failed')); }
-      }));
+      }, 'btn-danger'));
     }
     const historySection = node('section', '', {'aria-label': historyTitle, role: 'region'});
     if (history.length === 0) {
@@ -198,7 +199,7 @@ async function showHome() {
         const list = await api('/api/wishlists', {method: 'POST', body: '{}'});
         await showList(list.id);
       } catch (_) { status(t('miniapp.home.create_failed')); }
-    }),
+    }, 'btn-primary'),
     button(t('miniapp.home.viewing_history'), showHistory),
     settingsLink
   );
@@ -357,7 +358,9 @@ function settingsForm(list) {
     wrap.append(input);
     form.append(wrap);
   }
-  const save = node('button', t('miniapp.wishlist_settings.save'), {type: 'submit'});
+  const save = node('button', t('miniapp.wishlist_settings.save'), {
+    type: 'submit', class: 'btn-primary'
+  });
   form.append(save, button(t('miniapp.wishlist_settings.cancel'), () => showList(list.id)));
   form.addEventListener('submit', async event => {
     event.preventDefault();
@@ -382,7 +385,7 @@ function memberControls(list) {
       try { await api(`/api/wishlists/${list.id}/members/${member.user_id}`, {method: 'DELETE'});
         await showList(list.id); status(t('miniapp.members.removed'));
       } catch (_) { status(t('miniapp.members.remove_failed')); }
-    }));
+    }, 'btn-danger'));
     if (list.role === 'owner' && member.role !== 'owner') {
       const next = member.role === 'admin' ? 'member' : 'admin';
       const roleBtnLabel = next === 'admin'
@@ -500,7 +503,7 @@ async function publicView(token) {
             if (err && err.status && err.status !== 503) pendingKey = '';
             status(t('miniapp.public.reserve_failed'));
           }
-        }));
+        }, 'btn-primary'));
       }
       root.append(section);
     }
@@ -523,7 +526,7 @@ async function invitationView(token) {
           headers: {'X-Invite-Token': token}});
         await showList(result.wishlist_id);
       } catch (_) { status(t('miniapp.invite.join_failed')); }
-    }));
+    }, 'btn-primary'));
     status('');
   } catch (_) { status(t('miniapp.invite.unavailable')); }
 }

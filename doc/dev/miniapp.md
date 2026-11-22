@@ -74,6 +74,12 @@ wishlists domain service and security middleware to satisfy four primary goals:
   `activeLocale()`, `roleLabel()`, and `formatDateTime()` backed by `#miniapp-i18n`, and performs
   API calls with session cookies and CSRF headers. Uses safe DOM manipulation (`textContent`)
   rather than HTML string interpolation to prevent Cross-Site Scripting (XSS).
+- **Shared Stylesheet (`static/miniapp.css`)**: Single CSS entrypoint loaded by both the Mini
+  App shell (`GET /`) and `base.html` server-rendered views (including `settings.html` and
+  `invite_preview.html`). Owns the shared light Wishenka visual palette, semantic button hierarchy,
+  mobile touch targets, `:focus-visible` outlines, and the scoped Telegram theme boundary for
+  `.receipt-sheet` and `.modal-sheet`. See
+  [Shared Visual Identity and Palette Tokens](#shared-visual-identity-and-palette-tokens).
 - **Wishlist Page Script (`static/wishlist.js`)**: Second static script, loaded by `base.html` on
   server-rendered wishlist pages (not by the Mini App shell, which loads only `miniapp.js`).
   Implements the card toggle and drag-and-drop reorder. See
@@ -116,6 +122,152 @@ variables. Representative light, dark and fallback palettes are covered by
 sufficient contrast. `tests/test_currency_defaults.py` checks defaults and explicit currencies
 across views and DTO boundaries. These constants and presentation tokens have no environment
 settings; change the source definitions when their defaults or choices must change.
+
+### Shared Visual Identity and Palette Tokens
+
+[`wishenka/web/static/miniapp.css`](../../wishenka/web/static/miniapp.css) establishes the light
+Wishenka design system shared across the Mini App SPA (`#app`) and server-rendered `base.html`
+pages (`.settings-page`, wishlist views, and `invite_preview.html`):
+
+- **Palette and layout tokens (`:root`)**:
+  - Light shell palette (`WISHENKA-288`): `--canvas` (`#fff7f9`, page background), `--surface`
+    (`#ffffff`, card and field surface), `--ink` (`#351326`, primary plum foreground and headings),
+    `--muted` (`#695663`, `.history-time` and `.empty-notice`), `--accent` (`#8c2551`, primary
+    fill, button border, and checkbox `accent-color`), `--accent-dark` (`#6f173f`, links,
+    secondary button labels, and primary `:hover`), `--danger` (`#a61335`, `.btn-danger` border
+    and label), and `--focus` (`#71319a`, `:focus-visible` outline).
+  - Structural tokens: `--touch-target` (`44px`), `--content-width` (`42rem`), `--receipt-height`
+    (`90vh`), `--layer-drag` (`10`), `--layer-quick-add` (`40`), `--layer-receipt` (`100`), and
+    `--layer-modal` (`100`).
+- **Surfaces, typography, and mobile spacing**:
+  - `:root` sets `font: 16px system-ui, sans-serif; color: var(--ink); background: var(--canvas);`
+    and `body` centers `--content-width` with `1rem` padding.
+  - `section, form` render light `--surface` cards (`border-radius: 1rem`, soft plum shadow
+    `0 3px 12px rgba(99, 33, 60, .08)`). `.birthdate-form` resets `margin: 0; padding: 0;
+    box-shadow: none;`, whereas `.quick-add-form` sets `margin: 0 auto; padding: 0; max-width:
+    var(--content-width); box-shadow: none;` to avoid nested card shadows.
+  - `h1, h2, h3` use `var(--ink)`, `line-height: 1.2`, and `overflow-wrap: anywhere` so longer
+    Russian and English headings wrap cleanly on mobile (`h1` uses
+    `clamp(1.75rem, 6vw, 2.25rem)`).
+  - `.top-nav`, `.locale-options`, and `.wishlist-card, .history-item` use `display: flex;
+    flex-wrap: wrap;` with `.5rem` or `.25rem` gaps so action buttons, badges, and metadata wrap
+    cleanly on narrow viewports.
+  - Unscoped `button, input, a:where(.btn, .btn-primary, .btn-danger)` (`min-height:
+    var(--touch-target)`, `box-sizing: border-box`, `font: inherit`, `margin: .25rem`) and
+    unscoped `input` / `input:not([type="checkbox"])` (`width: 100%; max-width: 100%`,
+    `border: 1px solid #aa8998`, `border-radius: .5rem`, `padding: .5rem` on non-checkboxes) do
+    not set `background: var(--surface)` or `color: var(--ink)`, so non-checkbox `<input>`
+    elements in `.modal-sheet` keep browser defaults. Only
+    `:where(#app, .settings-page) :is(select, textarea)` sets `background: var(--surface);
+    color: var(--ink);` alongside `box-sizing: border-box`, `max-width: 100%`,
+    `min-height: var(--touch-target)`, `font: inherit`, `border: 1px solid #aa8998`,
+    `border-radius: .5rem`, and `padding: .5rem`.
+- **Semantic action hierarchy, states, and 44 px link-button targets**:
+  - **Base and secondary controls (`button, a:where(.btn, .btn-primary, .btn-danger)`)**: share
+    `box-sizing: border-box`, `min-height: var(--touch-target)` (`44px`), `margin: .25rem`,
+    `padding: .5rem .85rem`, `border: 1px solid var(--accent)`, `border-radius: .7rem`,
+    `background: var(--surface)`, `color: var(--accent-dark)`, and `font-weight: 600`. Link
+    buttons (`a:where(.btn, .btn-primary, .btn-danger)`) also enforce `display: inline-flex;
+    align-items: center; justify-content: center; text-decoration: none;`, matching `<button>`
+    geometry and touch targets. Enabled hover applies `#fff0f4` via
+    `:where(button, a.btn, a.btn-primary, a.btn-danger):hover:not(:disabled)`. `.settings-link,
+    .back-link` share `display: inline-flex; align-items: center;
+    min-height: var(--touch-target); border: 1px solid var(--accent); border-radius: .7rem;
+    color: var(--accent-dark); font-weight: 600; text-decoration: none;`, while using
+    `padding: .25rem .75rem` (not `.5rem .85rem`) and omitting `box-sizing: border-box`,
+    `justify-content: center`, `margin: .25rem`, `background: var(--surface)`, and the `#fff0f4`
+    hover fill.
+  - **Primary and selected state (`.btn-primary, .locale-option[aria-pressed="true"]`)**: filled
+    `var(--accent)` background and border with `white` text, darkening to `var(--accent-dark)` on
+    hover. Active language buttons in `settings.html` are driven by `[aria-pressed="true"]`
+    (replacing the legacy `.locale-option.is-active` CSS rule).
+  - **Destructive actions (`.btn-danger`)**: `border-color: var(--danger); color: var(--danger);`
+    with `#fff0f1` hover on `:hover:not(:disabled)`.
+  - **Disabled state (`button:disabled`)**: `background: #ece6e9; border-color: #a7979e; color:
+    #5d5056; cursor: not-allowed;` (`.btn-move-up:disabled, .btn-move-down:disabled` also keep
+    `opacity: .4`, and `.btn-receipt-confirm:disabled` keeps `opacity: .6; cursor: progress`).
+  - **Keyboard focus (`:focus-visible`)**: `outline: 3px solid var(--focus); outline-offset: 3px;`.
+
+### Scoped Telegram Theme Boundary
+
+The Mini App shell (`#app`) and settings/SSR shells (`.settings-page` / `body`) stay locked to
+the light Wishenka palette. Telegram theme variables are scoped strictly to overlay sheets and
+the fixed quick-add bar so dark Telegram themes never mix with light-shell foregrounds:
+
+- **Paired sheet variables**: `.receipt-sheet` and `.modal-sheet` bind
+  `background: var(--receipt-bg); color: var(--receipt-text);` (defined as
+  `--receipt-bg: var(--tg-theme-bg-color, #ffffff)` and
+  `--receipt-text: var(--tg-theme-text-color, #29222b)`, with
+  `--receipt-error: var(--receipt-text)`). `.quick-add-container` retains
+  `background: var(--tg-theme-bg-color, #ffffff)` around `.quick-add-form`
+  (`background: var(--surface)`).
+- **Focus ring contrast (`--focus: var(--receipt-text)`)**: both `.receipt-sheet` and
+  `.modal-sheet` override `--focus` to `var(--receipt-text)` so global `:focus-visible` outlines
+  keep contrast against `--receipt-bg` in both light and dark Telegram palettes.
+- **Heading foreground inheritance**: `.receipt-sheet :is(h1, h2, h3), .modal-sheet :is(h1, h2,
+  h3) { color: inherit; }` (plus `.modal-header h2 { color: inherit; }`, covering
+  `partials/share_modal.html` where `.modal-header` sits outside `.modal-sheet`) ensures sheet
+  headings inherit `--receipt-text` instead of light-shell `var(--ink)`.
+- **Nested form and control scoping**: `.receipt-sheet form`, `.receipt-sheet select`,
+  `.receipt-sheet .quantity-control input`, `.modal-sheet select`, and `.modal-sheet textarea`
+  explicitly use `--receipt-bg` and `--receipt-text` (`.modal-sheet form` uses `background:
+  transparent; color: inherit; box-shadow: none;`). Light `select`/`textarea` styling is scoped
+  to `:where(#app, .settings-page) :is(select, textarea)` so it never leaks into modal sheets.
+  Non-checkbox `<input>` elements in `.modal-sheet` (`partials/item_edit_modal.html`) keep
+  default field colors.
+- **Close, cancel, and modal action contrast**: `.receipt-sheet .btn-modal-close`,
+  `.modal-sheet .btn-modal-close`, and `.modal-sheet .btn-cancel` set
+  `background: var(--receipt-bg); color: var(--receipt-text);` (including
+  `:hover:not(:disabled)`), preventing global `button` / `#fff0f4` rules from breaking contrast
+  on dark Telegram themes. `.btn-save` uses `var(--accent)` / `var(--accent-dark)` with `#fff`
+  text; `.btn-confirm-archive` and `.btn-archive-item` use `#b91c1c` / `#991b1b`.
+
+### Semantic Button Class Contracts
+
+- **`wishenka/web/static/miniapp.js`**:
+  - `button(text, handler, className = '')` applies `className` when non-empty while preserving
+    `type="button"`, `textContent`, click handlers, function boundaries, and `#status` live updates.
+  - `'btn-primary'`: `showHome` create button, `sharePanel` Telegram share button, `settingsForm`
+    save submit (`node('button', ..., {type: 'submit', class: 'btn-primary'})`), `publicView`
+    reserve button, and `invitationView` accept button.
+  - `'btn-danger'`: `showHistory` clear-history button and `memberControls` remove-member button.
+  - Default secondary (`className = ''`): Back, Viewing history, Copy link, Cancel, role toggle,
+    revoke/replace link buttons, favorite actions, restore actions, and home card open buttons.
+- **`wishenka/web/templates/settings.html`**:
+  - `#birthdate-form button[type="submit"]` uses `class="btn-primary"` (distinct from secondary
+    `#birthdate-clear-btn`).
+  - `#delete-account-start-btn` and `#delete-account-confirm-btn` use `class="btn-danger"`
+    (distinct from secondary `#delete-account-cancel-btn`).
+  - `.locale-option` carries `aria-pressed="true"|"false"` (plus `is-active` when active); CSS
+    styles the selected state via `.locale-option[aria-pressed="true"]`.
+  - `<a href="/" class="back-link">` renders as a 44 px return link matching `.settings-link`.
+- **`wishenka/web/templates/partials/member_list.html`**:
+  - Owner member-removal `<button>` uses `class="btn-delete btn-danger text-xs text-red-600
+    font-medium px-2 py-1 border rounded"`, keeping `.btn-delete` and legacy uncompiled Tailwind
+    classes intact alongside `btn-danger` (`base.html` loads only `/static/miniapp.css` with no
+    Tailwind build).
+- **Other template semantic hooks**:
+  - `wishenka/web/templates/invite_preview.html` uses `a.btn.btn-primary` (error return link) and
+    `button.btn.btn-primary` (join submit), receiving shared `44px` button geometry.
+  - `wishenka/web/templates/partials/item_quick_add.html` uses `class="btn-secondary text-sm"` on
+    `#btn-quick-details` (styled by base `button` rules; no separate `.btn-secondary` CSS rule)
+    and `class="btn-primary text-sm font-semibold"` on `#btn-quick-add`.
+
+### Visual Identity Browser Verification
+
+`tests/test_visual_identity_browser.py` (`pytestmark = [pytest.mark.timeout(45),
+pytest.mark.browser]`) exercises real offline Chromium rendering at a `412x800` mobile viewport
+using the shared CDP harness (`tests/browser_cdp.py`, `tests/browser_helpers.py`,
+`tests/conftest.py`):
+
+- Verifies coherent light `--canvas` and distinguishable `--surface` sections across `/` and
+  `/settings`, primary vs secondary button distinction on home `.top-nav`, primary/secondary/danger/
+  disabled/selected-locale/focus-visible states on `/settings`, light and dark Telegram theme
+  `>= 4.5` contrast for `.modal-sheet` / `.receipt-sheet` headings and `:focus-visible` rings,
+  and `>= 44x44` px touch-target geometry on `invite_preview.html` `a.btn.btn-primary`.
+- Complements `tests/test_receipt_theme_browser.py` and
+  `tests/test_receipt_accessibility_browser.py`; module details and run command are in
+  [testing.md](testing.md#тесты-единого-визуального-стиля-wishenka-288).
 
 ---
 
@@ -756,7 +908,10 @@ of inline JavaScript and inline `on*` event handlers from SSR templates so a str
     on mobile and centers as a rounded dialog at `@media (min-width: 640px)`.
   - Modal forms, alerts (`.alert-error`, `.alert-warning`), and action buttons (`.btn-save`,
     `.btn-archive-item`, `.btn-confirm-archive`, `.btn-cancel`, `.btn-modal-close`) enforce
-    `min-height: var(--touch-target)` (`44px`).
+    `min-height: var(--touch-target)` (`44px`). `.modal-sheet` sets `--receipt-bg`,
+    `--receipt-text`, `--focus: var(--receipt-text)`, `:is(h1, h2, h3) { color: inherit; }`, and
+    paired `--receipt-bg` / `--receipt-text` on `.btn-modal-close` / `.btn-cancel` (see
+    [Scoped Telegram Theme Boundary](#scoped-telegram-theme-boundary)).
 - **Inline Archive Target (`partials/item_edit_modal.html`)**:
   - `.btn-archive-item` carries `hx-target="#item-modal-container"` and `hx-swap="none"` so
     archive OOB responses never overwrite the button element itself.
@@ -1016,3 +1171,14 @@ The following settings configure the Mini App and web security layer:
   share the same parent container, `static/app.js` is loaded, and
   `.item-thumbnail[hidden], .item-thumbnail-placeholder[hidden] { display: none; }` is present in
   `static/miniapp.css`.
+
+### 15. Dark-Theme Modal Heading, Focus Ring, or Close Button Low Contrast
+
+- **Cause**: A global rule (`h1, h2, h3 { color: var(--ink); }`, `:focus-visible`, or `button`
+  surface colors) overrides the sheet's Telegram theme pair (`--receipt-bg` / `--receipt-text`),
+  or a template renders `.modal-header` outside `.modal-sheet`.
+- **Solution**: Keep the container inside `.receipt-sheet` or `.modal-sheet` (which set
+  `--focus: var(--receipt-text)` and `:is(h1, h2, h3) { color: inherit; }`), ensure
+  `.modal-header h2 { color: inherit; }` and `.btn-modal-close` / `.btn-cancel` sheet overrides
+  remain intact, and verify with `tests/test_visual_identity_browser.py` and
+  `tests/test_receipt_theme_browser.py`.
