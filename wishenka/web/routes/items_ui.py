@@ -476,9 +476,9 @@ async def preview_item_input(
         )
         return HTMLResponse(content="", status_code=status.HTTP_200_OK)
 
-    preview_service: ItemPreviewService = (
-        getattr(request.app.state, "item_preview_service", None) or ItemPreviewService()
-    )
+    preview_service: ItemPreviewService = getattr(
+        request.app.state, "item_preview_service", None
+    ) or ItemPreviewService(settings=getattr(request.app.state, "settings", None))
     preview = await preview_service.fetch_preview(raw_input)
     duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
     domain = extract_domain(preview.url or classification.normalized_url)

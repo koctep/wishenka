@@ -27,7 +27,7 @@ The `wishenka.items` package and its integration with `wishenka.wishlists` imple
                                                                              v
                                                     +------------------------------------------------+
                                                     |            UrlMetadataService                  |
-                                                    |  - Scheme Check (http / https only)            |
+                                                    |  - Scheme Check (SSRFPolicy.allowed_schemes)   |
                                                     |  - Async DNS Resolution (getaddrinfo)          |
                                                     |  - SSRF IP Validation (is_ip_safe)             |
                                                     |  - SSRFSafeTransport + SSRFSafeNetworkBackend  |
@@ -38,12 +38,12 @@ The `wishenka.items` package and its integration with `wishenka.wishlists` imple
                                                               v                             v
                                             +---------------------------+   +--------------------------------+
                                             | SSRFBlockedError / Scheme |   | Streaming HTTP Response Body   |
-                                            | Graceful Fallback Preview |   | - Early Content-Length <= 2 MB |
-                                            | - fallback_reason =       |   | - Stream chunk count <= 2 MB   |
-                                            |   "ssrf_blocked"          |   +--------------------------------+
-                                            | - is_fallback = True      |             |              |
+                                            | Graceful Fallback Preview |   | - Content-Length <= max_bytes  |
+                                            | - fallback_reason =       |   | - Stream chunks <= max_bytes   |
+                                            |   "ssrf_blocked"          |   |   (default 2 MB, configurable) |
+                                            | - is_fallback = True      |   +--------------------------------+
                                             +---------------------------+             |              |
-                                                                          > 2 MB Body |              | Body <= 2 MB
+                                                                          > max_bytes |              | <= max_bytes
                                                                                       v              v
                                             +---------------------------+   +--------------------------------+
                                             | ResponseBodyTooLargeError |   | Anti-Bot Challenge / Error?    |
@@ -86,15 +86,15 @@ The `wishenka.items` package and its integration with `wishenka.wishlists` imple
    - Extensible marketplace protocol [`MarketplaceRule`](file:///home/src/wishenka/items/marketplaces.py#L83) with built-in rules for major Russian e-commerce platforms: **Ozon**, **Wildberries**, **Yandex Market**, **Avito**, and **Megamarket**.
    - Resolves canonical store names and platform aliases (e.g. `wb.ru` $\rightarrow$ `Wildberries`, `m.avito.ru` $\rightarrow$ `Авито`).
 3. **Server-Side Request Forgery (SSRF) Defense**:
-   - Multi-layered defense-in-depth preventing outbound calls to internal infrastructure, local loops, cloud metadata services, and unroutable addresses:
-     - Scheme whitelist: strictly `http` and `https` allowed; `file://`, `gopher://`, `ftp://`, etc. rejected early.
-     - IP boundary enforcement: blocks IPv4/IPv6 private ranges (RFC 1918), loopbacks (`127.0.0.0/8`, `::1`), link-local (`169.254.0.0/16`, `fe80::/10`), cloud metadata endpoints (`169.254.169.254`), CGNAT (`100.64.0.0/10`), multicast, broadcast, and IPv6-mapped IPv4 representations (`::ffff:127.0.0.1`).
-     - Non-blocking asynchronous DNS resolution via `asyncio.get_running_loop().getaddrinfo` with validation across all returned IP addresses, backed by a bounded in-memory TTL/LRU DNS cache ([`DNSCache`](file:///home/src/wishenka/items/ssrf.py#L98), default 60s TTL / 512 entries) and per-event-loop single-flight coalescing (`WISHENKA-94`).
-     - Custom transport [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L500) and [`SSRFSafeNetworkBackend`](file:///home/src/wishenka/items/ssrf.py#L383) that inspect every outbound request and every intermediate redirect hop, pin validated IPs in a task-scoped `ContextVar` (`_pinned_ips_var`), and connect directly to the pinned IP without re-querying DNS (eliminating DNS rebinding TOCTOU).
-4. **DoS & Payload Size Limiting (2 MB Hard Ceiling)**:
-   - Enforces a strict 2 MB (`2,097,152` bytes) limit on all upstream responses:
-     - Fast-fail early rejection on `Content-Length > 2 MB` before downloading response bytes.
-     - Streaming chunk accumulation counter (`aiter_bytes`) enforcing the 2 MB ceiling in real time to neutralize chunked transfer encoding bombs (`Transfer-Encoding: chunked`) or infinite streams.
+   - Multi-layered defense-in-depth driven by an immutable [`SSRFPolicy`](file:///home/src/wishenka/items/ssrf.py#L45-L72) resolved from [`Settings`](file:///home/src/wishenka/config.py#L68-L205) (`WISHENKA_SSRF_*` environment variables / `.env`), preventing outbound calls to internal infrastructure, local loops, cloud metadata services, and unroutable addresses:
+     - Scheme allowlist: defaults to `http` and `https`, configurable via `ssrf_allowed_schemes` (`WISHENKA_SSRF_ALLOWED_SCHEMES`) within `SUPPORTED_SSRF_SCHEMES = {"http", "https"}`; `file://`, `gopher://`, `ftp://`, etc. fail fast on startup or are rejected before network I/O.
+     - IP boundary enforcement: unconditionally blocks IPv4/IPv6 private ranges (RFC 1918), loopbacks (`127.0.0.0/8`, `::1`), link-local (`169.254.0.0/16`, `fe80::/10`), cloud metadata endpoints (`169.254.169.254`), CGNAT (`100.64.0.0/10`), multicast, broadcast, reserved/unspecified addresses, and IPv6-mapped IPv4 representations (`::ffff:127.0.0.1`), plus configurable CIDR blocks via `ssrf_forbidden_cidrs` (`WISHENKA_SSRF_FORBIDDEN_CIDRS`, 20 default CIDRs).
+     - Non-blocking asynchronous DNS resolution via `asyncio.get_running_loop().getaddrinfo` with validation across all returned IP addresses, backed by a bounded in-memory TTL/LRU DNS cache ([`DNSCache`](file:///home/src/wishenka/items/ssrf.py#L298-L361), default 60s TTL / 512 entries) that re-validates cached IPs against the caller's active `forbidden_networks` on every hit, and per-event-loop single-flight coalescing keyed by normalized `(host, port)` and active CIDR networks (`WISHENKA-94`, `WISHENKA-93`).
+     - Custom transport [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L750-L867) and [`SSRFSafeNetworkBackend`](file:///home/src/wishenka/items/ssrf.py#L623-L747) that inspect every outbound request and every intermediate redirect hop under the active `SSRFPolicy` (`_active_policy_var`), pin validated IPs in a task-scoped `ContextVar` (`_pinned_ips_var`), redact URL userinfo credentials before logging ([`redact_url_credentials`](file:///home/src/wishenka/items/ssrf.py#L107-L115)), and connect directly to the pinned IP without re-querying DNS (eliminating DNS rebinding TOCTOU).
+4. **DoS & Payload Size Limiting (Configurable, 2 MB Default Ceiling)**:
+   - Enforces a configurable response size ceiling (`ssrf_max_response_bytes` / `WISHENKA_SSRF_MAX_RESPONSE_BYTES`, defaulting to 2 MB / `2,097,152` bytes, or per-service `max_bytes` override) on all upstream responses:
+     - Fast-fail early rejection on `Content-Length > self.max_bytes` before downloading response bytes.
+     - Streaming chunk accumulation counter (`aiter_bytes`) enforcing `self.max_bytes` in real time to neutralize chunked transfer encoding bombs (`Transfer-Encoding: chunked`) or infinite streams.
      - Raises [`ResponseBodyTooLargeError`](file:///home/src/wishenka/items/exceptions.py#L56) immediately when breached, aborting network consumption.
 5. **Cascading HTML Metadata Extraction with JSON-LD `@graph` & `AggregateOffer`**:
    - Prioritized hierarchical extraction pipeline: **JSON-LD Schema.org Product/Offer** $\rightarrow$ **OpenGraph** (`og:title`, `og:image`, `product:price:amount`) $\rightarrow$ **Microdata** (`itemprop`) $\rightarrow$ **Standard HTML** (`<title>`, `<meta name="description">`, `<link rel="icon">`).
@@ -104,7 +104,7 @@ The `wishenka.items` package and its integration with `wishenka.wishlists` imple
    - Normalizes currency symbols (`₽`, `руб`, `₸`, `Br`, `$`, `€`, `£`, `¥`) to standard ISO 4217 uppercase codes.
 6. **Anti-Bot & Threat Graceful Fallback**:
    - Zero-crash degradation on SSRF blocks, oversized payloads, anti-bot gates (Cloudflare Turnstile, Qrator, DDoS-GUARD, WAF signatures, Russian marketplace anti-bot screens such as Yandex SmartCaptcha, Avito IP firewall, Ozon/Wildberries/Megamarket browser verification pages, HTTP 403 Forbidden, HTTP 429 Too Many Requests, HTTP 503 Service Unavailable), and network timeouts (4.0s total, 2.0s connect).
-   - Rather than returning 500 server errors, emits a valid fallback [`ItemPreviewDTO`](file:///home/src/wishenka/items/schemas.py#L11-L24) populated with the clean sanitized URL, recognized store name, and extracted residual title for seamless manual entry (never leaking anti-bot challenge `<title>` text such as `"Почти готово..."` or `"Доступ ограничен: проблема с IP"` into the wish title).
+   - Rather than returning 500 server errors, emits a valid fallback [`ItemPreviewDTO`](file:///home/src/wishenka/items/schemas.py#L11-L24) populated with the cleaned URL, recognized store name, and extracted residual title for seamless manual entry (never leaking anti-bot challenge `<title>` text such as `"Почти готово..."` or `"Доступ ограничен: проблема с IP"` into the wish title).
 7. **Piece Accounting & Multi-Quantity Invariants**:
    - Desired quantity boundary: $1 \le \text{desired} \le 1000$.
    - Occupied units are the sum of reservation `quantity` in `ACTIVE` or `PURCHASED`. The free remainder a promise may take is $\max(0, \text{requested} - \text{received} - \text{occupied})$.
@@ -181,84 +181,95 @@ Handles marketplace-specific store identification, URL cleaning, and affiliate t
 
 ### 3. SSRF Protection Suite (`wishenka.items.ssrf`)
 
-Located in [`wishenka/items/ssrf.py`](file:///home/src/wishenka/items/ssrf.py).
+Located in [`wishenka/items/ssrf.py`](file:///home/src/wishenka/items/ssrf.py) (with public symbols also re-exported from [`wishenka/items/__init__.py`](file:///home/src/wishenka/items/__init__.py#L67-L74)).
 
-Provides non-blocking IP validation, cached hostname resolution with single-flight coalescing, and HTTPX transport-level request interception:
-- **Constants**:
-  - `MAX_RESPONSE_BYTES = 2 * 1024 * 1024` (2 MB).
-  - `ALLOWED_SCHEMES = frozenset({"http", "https"})`.
+Provides policy resolution from application settings, credential redaction, non-blocking IP validation, cached hostname resolution with policy-aware single-flight coalescing, and HTTPX transport-level request interception:
+
+- **Backward-Compatible Default Constants** (derived from [`wishenka/config.py`](file:///home/src/wishenka/config.py#L11-L35)):
+  - [`MAX_RESPONSE_BYTES`](file:///home/src/wishenka/items/ssrf.py#L34) `= DEFAULT_SSRF_MAX_RESPONSE_BYTES` (`2 * 1024 * 1024` / 2 MB).
+  - [`ALLOWED_SCHEMES`](file:///home/src/wishenka/items/ssrf.py#L35) `= frozenset(DEFAULT_SSRF_ALLOWED_SCHEMES)` (`frozenset({"http", "https"})`).
   - `DEFAULT_DNS_CACHE_TTL_SECONDS = 60.0` (60 seconds).
   - `DEFAULT_DNS_CACHE_CAPACITY = 512` (512 normalized `(host, port)` entries).
-  - `FORBIDDEN_NETWORKS`: tuple of 20 CIDR blocks covering private RFC 1918, CGNAT (`100.64.0.0/10`), loopback (`127.0.0.0/8`, `::1`), link-local (`169.254.0.0/16`, `fe80::/10`), cloud metadata (`169.254.169.254`), multicast (`224.0.0.0/4`, `ff00::/8`), broadcast (`255.255.255.255/32`), and IPv6 ULA (`fc00::/7`).
-- [`is_ip_safe(ip)`](file:///home/src/wishenka/items/ssrf.py#L54):
-  - Validates `ipaddress.IPv4Address` or `ipaddress.IPv6Address`.
-  - Automatically unmaps IPv6-mapped IPv4 addresses (e.g. `::ffff:127.0.0.1` unwraps to `127.0.0.1` and is recursively validated).
-  - Checks standard flags: `ip.is_global`, `ip.is_private`, `ip.is_loopback`, `ip.is_link_local`, `ip.is_multicast`, `ip.is_reserved`, `ip.is_unspecified`.
-  - Verifies address is not contained within any network in `FORBIDDEN_NETWORKS`.
-- [`DNSCacheEntry`](file:///home/src/wishenka/items/ssrf.py#L85), [`DNSCache`](file:///home/src/wishenka/items/ssrf.py#L98), and [`clear_dns_cache()`](file:///home/src/wishenka/items/ssrf.py#L171) (`WISHENKA-94`):
+  - [`FORBIDDEN_NETWORKS`](file:///home/src/wishenka/items/ssrf.py#L39-L41): tuple of 20 default `ipaddress` CIDR networks parsed from `DEFAULT_SSRF_FORBIDDEN_CIDRS` covering private RFC 1918, CGNAT (`100.64.0.0/10`), loopback (`127.0.0.0/8`, `::1`), link-local (`169.254.0.0/16`, `fe80::/10`), cloud metadata (`169.254.169.254`), multicast (`224.0.0.0/4`, `ff00::/8`), broadcast (`255.255.255.255/32`), and IPv6 ULA (`fc00::/7`).
+- **[`SSRFPolicy`](file:///home/src/wishenka/items/ssrf.py#L45-L72), [`get_default_ssrf_policy()`](file:///home/src/wishenka/items/ssrf.py#L182-L197), [`resolve_ssrf_policy()`](file:///home/src/wishenka/items/ssrf.py#L213-L228), and [`_active_policy_var`](file:///home/src/wishenka/items/ssrf.py#L76-L79)**:
+  - `SSRFPolicy` is an immutable (`frozen=True, slots=True`) dataclass holding `max_response_bytes`, `allowed_schemes: frozenset[str]`, and `forbidden_networks: tuple[IPNetwork, ...]`. `__post_init__` enforces `max_response_bytes >= 1`, non-empty `allowed_schemes`, and `allowed_schemes.issubset(SUPPORTED_SSRF_SCHEMES)`.
+  - `SSRFPolicy.from_settings(settings=None)` compiles a `Settings` instance (defaulting to `Settings()`) into a new `SSRFPolicy` on each call, pre-parsing `ssrf_forbidden_cidrs` into `IPNetwork` tuples and normalizing `ssrf_allowed_schemes` into a `frozenset[str]`.
+  - `get_default_ssrf_policy()` computes a lightweight env/`.env` snapshot key (`_current_ssrf_env_signature()`) over `WISHENKA_SSRF_MAX_RESPONSE_BYTES`, `WISHENKA_SSRF_ALLOWED_SCHEMES`, `WISHENKA_SSRF_FORBIDDEN_CIDRS`, and `(cwd, .env mtime_ns, .env size)`. Matching snapshots return the cached `SSRFPolicy` without re-parsing `.env`; changes instantiate `Settings()`, refresh `_default_policy_cache`, and emit `ssrf_policy_loaded` (`DEBUG`). Invalid env/`.env` values raise `pydantic.ValidationError` fail-fast without poisoning the cache.
+  - `_active_policy_var` (`ContextVar[SSRFPolicy | None]`) and [`_use_ssrf_policy(policy)`](file:///home/src/wishenka/items/ssrf.py#L201-L210) propagate an active policy across `await` boundaries (including HTTPX request hooks and 2-argument `resolve_and_validate_host(host, port)` calls) without altering existing call signatures or breaking monkeypatched test stubs.
+  - `resolve_ssrf_policy(*, settings=None, policy=None)` enforces mutual exclusion between `settings` and `policy` (`ValueError`), resolving in order: explicit `policy` -> `SSRFPolicy.from_settings(settings)` -> `_active_policy_var.get()` -> `get_default_ssrf_policy()`.
+- **[`redact_url_credentials(url)`](file:///home/src/wishenka/items/ssrf.py#L107-L115)**:
+  - Strips `username` and `password` userinfo via `httpx.URL(url).copy_with(username="", password="")` (returning `"[invalid-url]"` on malformed URLs) before any SSRF, payload-size, or preview warning logs write a URL, and before `ItemPreviewService.fetch_preview` derives `url_domain` or `store_name`.
+- [`is_ip_safe(ip, *, forbidden_networks=None)`](file:///home/src/wishenka/items/ssrf.py#L270-L282):
+  - Accepts `str`, `ipaddress.IPv4Address`, or `ipaddress.IPv6Address` and resolves `active_networks` from explicit `forbidden_networks` if given, otherwise from `resolve_ssrf_policy().forbidden_networks` (`_active_policy_var` or `get_default_ssrf_policy()`).
+  - Checks membership in `active_networks`, recursively unwraps IPv6-mapped IPv4 addresses (e.g. `::ffff:93.184.216.34` or `::ffff:127.0.0.1`) passing the same `active_networks`, and **unconditionally** enforces baseline `ipaddress` safety checks (`not ip.is_global`, `ip.is_private`, `ip.is_loopback`, `ip.is_link_local`, `ip.is_multicast`, `ip.is_reserved`, `ip.is_unspecified`) regardless of `ssrf_forbidden_cidrs` (so even an empty `ssrf_forbidden_cidrs=()` / `'[]'` never permits internal, loopback, CGNAT, or metadata addresses).
+- [`DNSCacheEntry`](file:///home/src/wishenka/items/ssrf.py#L286-L290), [`DNSCache`](file:///home/src/wishenka/items/ssrf.py#L298-L361), and [`clear_dns_cache()`](file:///home/src/wishenka/items/ssrf.py#L371-L373) (`WISHENKA-94`):
   - `DNSCacheEntry(ips: tuple[str, ...], expires_at: float)` is an immutable (`frozen=True, slots=True`) dataclass storing SSRF-validated IP strings and a `time.monotonic()` expiration timestamp.
   - `DNSCache(capacity=DEFAULT_DNS_CACHE_CAPACITY, ttl=DEFAULT_DNS_CACHE_TTL_SECONDS)` is a bounded in-memory TTL and LRU cache backed by `OrderedDict[tuple[str, int], DNSCacheEntry]`.
   - Keys are normalized via `_normalize_dns_key(host, port)` to `(host.strip("[]").lower().rstrip("."), port)`.
   - `get(host, port)` checks whether an entry exists and `expires_at > time.monotonic()`. Expired entries are lazily removed (emitting `dns_cache_expired` at `DEBUG`); valid hits refresh LRU ordering via `move_to_end` and return a fresh `list(entry.ips)` copy so caller mutations cannot corrupt cached state.
   - `put(host, port, ips)` stores non-empty validated IP tuples when `capacity > 0` and `ttl > 0`, refreshes LRU position, and evicts the least-recently-used entries (`popitem(last=False)`) when `len(_entries) > capacity` (emitting `dns_cache_evicted` at `DEBUG`).
   - `clear_dns_cache()` resets the process-local `_dns_cache` singleton (invoked automatically before and after every pytest test by the `autouse` `_clear_dns_cache` fixture in [`tests/conftest.py`](file:///home/src/tests/conftest.py)).
-- [`resolve_and_validate_host(host, port)`](file:///home/src/wishenka/items/ssrf.py#L266) & Single-Flight Coalescing (`_in_flight_resolutions`):
-  - If `host` is a direct IP literal, validates it directly via `is_ip_safe` without touching `_dns_cache`.
-  - For domain names, checks `_dns_cache.get(clean_host, port)` first; on hit, logs `dns_cache_hit` (`DEBUG`) and returns the cached safe IP list immediately.
-  - On cache miss, coordinates concurrent lookups on the same event loop via `_in_flight_resolutions` (`WeakKeyDictionary[asyncio.AbstractEventLoop, dict[tuple[str, int], asyncio.Future[list[str]]]]`):
+- [`resolve_and_validate_host(host, port=80, *, forbidden_networks=None)`](file:///home/src/wishenka/items/ssrf.py#L473-L614) & Policy-Isolated Single-Flight Coalescing (`_in_flight_resolutions`):
+  - Resolves `active_networks` from explicit `forbidden_networks` or the active `SSRFPolicy` (`_active_policy_var` / `get_default_ssrf_policy()`).
+  - If `host` is a direct IP literal, validates it directly against `active_networks` and baseline safety checks without touching `_dns_cache`.
+  - For domain names, checks `_dns_cache.get(clean_host, port)` first; on hit, **re-validates every cached IP** against `active_networks` before logging `dns_cache_hit` (`DEBUG`, with `forbidden_cidr_count`) and returning. If a cached IP violates a stricter active policy's `forbidden_networks`, logs `ssrf_blocked` (`WARNING`, `cache_revalidation=True`, `forbidden_cidr_count`) and raises [`SSRFBlockedError`](file:///home/src/wishenka/items/exceptions.py#L26) without evicting the shared `_dns_cache` entry for other callers.
+  - On cache miss, coordinates concurrent lookups on the same event loop via `_in_flight_resolutions` (`WeakKeyDictionary[asyncio.AbstractEventLoop, dict[tuple[tuple[str, int], tuple[IPNetwork, ...]], asyncio.Future[list[str]]]]`), keying single-flight coalescing by `(_normalize_dns_key(clean_host, port), active_networks)` so concurrent requests under differing CIDR policies never cross-contaminate:
     - If an in-flight `Future` already exists for `(loop, key)`, follower coroutines log `dns_single_flight_coalesced` (`DEBUG`) and await `asyncio.shield(existing_future)`, returning a fresh `list(...)` copy without spawning duplicate `loop.getaddrinfo` threadpool calls.
-    - Otherwise, the leader coroutine logs `dns_cache_miss` (`DEBUG`), registers a new `Future`, calls `_resolve_and_validate_uncached(host, clean_host, port)` (`await loop.getaddrinfo(clean_host, port, proto=socket.IPPROTO_TCP)`), and verifies that **all** resolved IP addresses pass `is_ip_safe`. If any resolved address is restricted, immediately raises [`SSRFBlockedError`](file:///home/src/wishenka/items/exceptions.py#L26).
-  - **No Negative Caching**: `SSRFBlockedError`, `socket.gaierror`, `OSError`, and empty resolution results (`[]`) are **never** stored in `_dns_cache`. Only non-empty IP lists where every address passed `is_ip_safe` are cached.
-  - Covered by [`tests/test_dns_cache.py`](file:///home/src/tests/test_dns_cache.py).
-- [`_pinned_ips_var`](file:///home/src/wishenka/items/ssrf.py#L377):
+    - Otherwise, the leader coroutine logs `dns_cache_miss` (`DEBUG`), registers a new `Future`, calls `_resolve_and_validate_uncached(host, clean_host, port, active_networks)` (`await loop.getaddrinfo(clean_host, port, proto=socket.IPPROTO_TCP)`), and verifies that **all** resolved IP addresses pass `_is_ip_safe_for_networks(ip_obj, active_networks)`. If any resolved address is restricted, immediately raises [`SSRFBlockedError`](file:///home/src/wishenka/items/exceptions.py#L26).
+  - **No Negative Caching**: `SSRFBlockedError`, `socket.gaierror`, `OSError`, and empty resolution results (`[]`) are **never** stored in `_dns_cache`. Only non-empty IP lists where every address passed validation are cached.
+  - Covered by [`tests/test_dns_cache.py`](file:///home/src/tests/test_dns_cache.py) and [`tests/test_ssrf_configurable_settings.py`](file:///home/src/tests/test_ssrf_configurable_settings.py).
+- [`_pinned_ips_var`](file:///home/src/wishenka/items/ssrf.py#L617-L620):
   - `ContextVar[dict[tuple[str, int], list[str]] | None]` that isolates validated IP lists per async task keyed by `(clean_host, port)` across concurrent requests.
-- [`SSRFSafeNetworkBackend`](file:///home/src/wishenka/items/ssrf.py#L383):
-  - Subclass of `httpcore.AsyncNetworkBackend` wrapping the connection pool's inner network backend.
-  - `connect_tcp`: reads pinned IPs for `(host.strip("[]"), port)` from `_pinned_ips_var` (falling back to `resolve_and_validate_host` for defense-in-depth on cache miss), deduplicates them, and tries each numeric IP sequentially via `self._inner.connect_tcp(host=ip, ...)` without ever passing the raw hostname to the underlying socket backend. Raises `httpcore.ConnectError` if the validated IP list is empty or all pinned attempts fail.
+- [`SSRFSafeNetworkBackend`](file:///home/src/wishenka/items/ssrf.py#L623-L747):
+  - Subclass of `httpcore.AsyncNetworkBackend` wrapping the connection pool's inner network backend and holding an optional pinned `policy: SSRFPolicy | None`.
+  - `connect_tcp`: reads pinned IPs for `(host.strip("[]"), port)` from `_pinned_ips_var`; on pinned-cache miss, resolves `active_policy = resolve_ssrf_policy(policy=self._policy)`, logs `ssrf_pinned_cache_miss` (`DEBUG` with `policy_source` `"pinned"`/`"ambient"` and `forbidden_cidr_count`), and calls `resolve_and_validate_host(clean_host, port)` inside `with _use_ssrf_policy(active_policy):`. Deduplicates IPs and tries each numeric IP sequentially via `self._inner.connect_tcp(host=ip, ...)` without ever passing the raw hostname to the underlying socket backend. Raises `httpcore.ConnectError` if the validated IP list is empty or all pinned attempts fail.
   - `connect_unix_socket`: blocks Unix domain socket connections with `SSRFBlockedError(..., reason="uds")`.
   - `sleep`: delegates to `self._inner.sleep`.
-- [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L500):
-  - Subclass of `httpx.AsyncHTTPTransport`.
-  - Installs `SSRFSafeNetworkBackend` into the expected connection pool. Unknown pool or backend
-    layouts fail closed; dispatch also checks that the pinned backend has not been replaced.
+- [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L750-L867):
+  - Subclass of `httpx.AsyncHTTPTransport` accepting optional keyword-only `policy: SSRFPolicy | None = None` or `settings: Settings | None = None` (mutually exclusive; specifying either pins `self._policy` and emits `ssrf_policy_configured` at `DEBUG`, whereas zero-arg construction validates ambient `get_default_ssrf_policy()` at init if `_active_policy_var` is unset so invalid `WISHENKA_SSRF_*` env vars fail fast, while keeping `self._policy = None` to follow `_active_policy_var` or runtime env changes).
+  - Installs `SSRFSafeNetworkBackend(backend, policy=self._policy)` into the expected connection pool. Unknown pool or backend layouts fail closed; dispatch also checks that the pinned backend has not been replaced (`reason="unsafe_backend"`).
   - Overrides `handle_async_request(request)` to intercept the initial request and every subsequent HTTP redirect hop (`301`, `302`, `303`, `307`, `308`).
-  - Rejects URL credentials and `Authorization` headers (`reason="credentials"`), disallowed schemes (`InvalidUrlSchemeError`), and missing hosts (`SSRFError`), resolves and validates the destination via `resolve_and_validate_host`, and pins the validated IPs in `_pinned_ips_var` inside a `try ... finally: _pinned_ips_var.reset(token)` block around `super().handle_async_request(request)` without rewriting `request.url` (preserving the `Host` header, TLS SNI `server_hostname`, relative redirect resolution, and `response.url`).
-  - Covered by `tests/test_ssrf_dns_rebinding.py` (pinned-IP connection, redirect-hop pinning, Host/TLS SNI preservation, IPv6 pinning, multi-IP failover, concurrent `ContextVar` isolation, defense-in-depth fallback, and UDS blocking).
+  - Rejects URL credentials and `Authorization` headers (`log_ssrf_credentials_blocked`, `reason="credentials"`), resolves `active_policy = resolve_ssrf_policy(policy=self._policy)`, validates `request.url.scheme` against `active_policy.allowed_schemes` (logging credential-redacted `url` via `log_ssrf_invalid_scheme` and raising [`InvalidUrlSchemeError`](file:///home/src/wishenka/items/exceptions.py#L43)), rejects missing hosts (`SSRFError`), resolves and validates the destination under `with _use_ssrf_policy(active_policy):`, and pins the validated IPs in `_pinned_ips_var` inside a `try ... finally: _pinned_ips_var.reset(token)` block around `super().handle_async_request(request)` without rewriting `request.url` (preserving the `Host` header, TLS SNI `server_hostname`, relative redirect resolution, and `response.url`).
+  - Covered by [`tests/test_ssrf_dns_rebinding.py`](file:///home/src/tests/test_ssrf_dns_rebinding.py) and [`tests/test_ssrf_configurable_settings.py`](file:///home/src/tests/test_ssrf_configurable_settings.py) (pinned-IP connection, redirect-hop pinning, Host/TLS SNI preservation, IPv6 pinning, multi-IP failover, concurrent `ContextVar` isolation, defense-in-depth fallback, configurable schemes/CIDRs, and UDS blocking).
 
-### 4. Safe HTML Fetcher [`UrlMetadataService`](file:///home/src/wishenka/items/fetcher.py#L49)
+### 4. Safe HTML Fetcher [`UrlMetadataService`](file:///home/src/wishenka/items/fetcher.py#L279-L518)
 
 Located in [`wishenka/items/fetcher.py`](file:///home/src/wishenka/items/fetcher.py).
 
 Dedicated network service responsible for pulling HTML bodies under strict security constraints:
-- Enforces `DEFAULT_TIMEOUT` (`4.0s` total, `2.0s` connect) and modern mobile headers (`DEFAULT_HEADERS`).
+- Accepts optional `max_bytes: int | None = None`, `timeout: httpx.Timeout = DEFAULT_TIMEOUT` (`4.0s` total, `2.0s` connect), and keyword-only `settings: Settings | None = None` or `policy: SSRFPolicy | None = None` (plus `DEFAULT_HEADERS` for storefront compatibility).
+- Resolves `base_policy = resolve_ssrf_policy(settings=settings, policy=policy)`; when `max_bytes` is explicitly supplied, rejects `bool` or values `< 1` (`ValueError`) and applies `dataclasses.replace(base_policy, max_response_bytes=max_bytes)`, storing `self.policy` and `self.max_bytes = effective_policy.max_response_bytes` (emitting `ssrf_policy_configured` at `DEBUG` when `settings`, `policy`, or `max_bytes` is supplied).
+- **URL & Hook Helpers ([`validate_url`](file:///home/src/wishenka/items/fetcher.py#L69-L98), [`_validate_request`](file:///home/src/wishenka/items/fetcher.py#L101-L109), [`safe_direct_route`](file:///home/src/wishenka/items/fetcher.py#L217-L231))**:
+  - `validate_url(url, *, policy=None, settings=None)` resolves `active_policy = resolve_ssrf_policy(settings=settings, policy=policy)`, rejects URL userinfo credentials (`log_ssrf_credentials_blocked`, `SSRFBlockedError(..., reason="credentials")`), validates the scheme against `active_policy.allowed_schemes` (`log_ssrf_invalid_scheme`, `InvalidUrlSchemeError`), and runs `resolve_and_validate_host(parsed.host, port)` inside `with _use_ssrf_policy(active_policy):`.
+  - `_validate_request(request)` strips `cookie`, blocks `authorization` headers (`log_ssrf_credentials_blocked`, `reason="credentials"`), and delegates to `await validate_url(str(request.url))` (preserving the 1-arg HTTPX request hook / `wishenka.items.cassettes` contract while inheriting `_active_policy_var` from `_fetch_html`).
+  - `safe_direct_route(*, limits=None, settings=None, policy=None)` constructs a [`PreviewRoute`](file:///home/src/wishenka/items/fetcher.py#L179-L185) wrapping `SSRFSafeTransport` with forwarded `limits`, `settings`, and `policy`.
 - **Internal `_fetch_html(url, client=None, routes=None)`**:
-  - Validates URL scheme against `ALLOWED_SCHEMES`.
-  - Pre-validates destination host via `resolve_and_validate_host`.
-  - With no routes, creates and closes its own direct pinned transport. With explicit routes,
-    builds an isolated HTTPX client using non-owning wrappers around the supplied transports.
-  - Rejects an opaque `client`, even when `routes` are also supplied, before DNS or dispatch.
-    Use `PreviewTransportConfig` instead; the caller retains ownership of supplied routes.
-  - Validates each redirect before dispatch and disables environment proxies and cookies.
+  - Rejects URL userinfo credentials (`reason="credentials"`) and validates URL scheme against `self.policy.allowed_schemes` (`InvalidUrlSchemeError`).
+  - Rejects an opaque `client`, even when `routes` are also supplied, before DNS or dispatch. Use `PreviewTransportConfig` instead; the caller retains ownership of supplied routes.
+  - Enters `with _use_ssrf_policy(self.policy):`, pre-validates destination host via `resolve_and_validate_host(host, port)`, and builds an isolated HTTPX client (`trust_env=False`, `CookieJar(policy=RejectCookies())`, `event_hooks={"request": [_validate_request]}`):
+    - With no routes, creates `safe_direct_route(policy=self.policy)` and closes it in `finally`.
+    - With explicit routes, builds non-owning `_BorrowedTransport` wrappers around the supplied transports.
   - Executes streaming download via `_stream_and_read`.
 - **Early Fast-Fail & Streaming Accumulator (`_stream_and_read`)**:
-  - Checks response header `Content-Length`. If $> 2 \text{ MB}$, immediately aborts and raises [`ResponseBodyTooLargeError`](file:///home/src/wishenka/items/exceptions.py#L56).
-  - Iterates asynchronously over chunks via `response.aiter_bytes()`, tracking `total_bytes`. If cumulative size exceeds $2 \text{ MB}$, halts iteration immediately and raises [`ResponseBodyTooLargeError`](file:///home/src/wishenka/items/exceptions.py#L56).
+  - Checks response header `Content-Length`. If `> self.max_bytes` (default 2 MB / `2,097,152` bytes, or configured `ssrf_max_response_bytes` / `max_bytes`), logs credential-redacted `payload_size_violation` (`reason="content_length_exceeded"`), aborts, and raises [`ResponseBodyTooLargeError`](file:///home/src/wishenka/items/exceptions.py#L56).
+  - Iterates asynchronously over chunks via `response.aiter_bytes()`, tracking `total_bytes`. If cumulative size exceeds `self.max_bytes`, halts iteration immediately, logs credential-redacted `payload_size_violation` (`reason="stream_chunk_overflow"`), and raises [`ResponseBodyTooLargeError`](file:///home/src/wishenka/items/exceptions.py#L56).
   - Decodes accumulated raw bytes with `decode_html` after status and size checks. The buffered
     compatibility path uses the same decoder.
 - **Safe Fallback Wrapper `fetch_and_extract(url, client=None, routes=None)`**:
   - High-level interface that calls `_fetch_html` and feeds the result to `HtmlMetadataExtractor.extract`.
-  - Catches network, security, and parsing exceptions, logging a warning and returning a safe fallback [`ExtractedMetadata`](file:///home/src/wishenka/items/models.py#L34-L46) populated with `store_name=derive_store_name(url)`.
+  - Catches network, security, and parsing exceptions, logging a credential-redacted `fetch_and_extract_fallback` warning and returning a safe fallback [`ExtractedMetadata`](file:///home/src/wishenka/items/models.py#L34-L46) populated with `store_name=derive_store_name(url)`.
   - Explicitly re-raises [`CassetteError`](file:///home/src/wishenka/items/exceptions.py#L71) (including [`CassetteMissError`](file:///home/src/wishenka/items/exceptions.py#L75)) before the generic exception handler so missing cassette interactions fail closed during offline test replay.
 
 #### Explicit preview routes
 
 `PreviewTransportConfig(default, mounts)` snapshots its mount mapping. Use
-`safe_direct_route()` for a pinned direct route, `deny_route()` for a forbidden route, or
-`offline_replay_route()` for immutable response fixtures. HTTPX selects the most specific mount
-for every request and redirect. A denied route never falls back to a less-specific route.
-Factories bind each approved route to its original transport; arbitrary transports and substituted
-routes are rejected. Per-preview clients have isolated headers, cookies and authentication state;
-their non-owning wrappers do not close the route transport on completion or cancellation.
+`safe_direct_route(settings=..., policy=...)` for a pinned direct route, `deny_route()` for a
+forbidden route, or `offline_replay_route()` for immutable response fixtures. HTTPX selects the
+most specific mount for every request and redirect. A denied route never falls back to a
+less-specific route. Factories bind each approved route to its original transport; arbitrary
+transports and substituted routes are rejected. Per-preview clients have isolated headers, cookies
+and authentication state; their non-owning wrappers do not close the route transport on completion
+or cancellation.
 
 A route rejection emits `item_preview_route_rejected` with `unknown_route` or `route_denied`,
 without the URL or client data. If a preview falls back with `ssrf_blocked`, inspect this event
@@ -425,8 +436,8 @@ list or object width:
     list-identity memoization deduplicates shared in-process `list` references rather than
     structurally equal distinct JSON arrays, and assumes inputs do not mutate during traversal.
   - Each uncached candidate retains its own `20,000`-visit `@type` budget so earlier wide types
-    never starve later candidates; for fetched HTML within the `2 MB` (`MAX_RESPONSE_BYTES`)
-    limit, `json.loads()` yields a strict tree whose total nodes across scripts are bounded
+    never starve later candidates; for fetched HTML within the configured response-size
+    limit (2 MB by default), `json.loads()` yields a strict tree whose total nodes across scripts are bounded
     linearly by the response bytes.
   - On a memo miss, `_walk_jsonld_products` captures limit-hit `visited_nodes` via the
     `_type_limit_collector` `ContextVar` around `_is_product_type(type_val)`. On a memo hit whose
@@ -444,26 +455,33 @@ list or object width:
     discovery-local memoization, and `DEBUG` telemetry without raw payload leaks. Run with
     `.venv/bin/pytest tests/test_jsonld_traversal_bounds.py`.
 
-### 6. Link Preview Orchestrator & Graceful Fallback [`ItemPreviewService`](file:///home/src/wishenka/items/service.py#L38-L387)
+### 6. Link Preview Orchestrator & Graceful Fallback [`ItemPreviewService`](file:///home/src/wishenka/items/service.py#L67-L508)
 
 Located in [`wishenka/items/service.py`](file:///home/src/wishenka/items/service.py).
 
-Asynchronous facade orchestrating input classification, URL cleaning, secure fetching, anti-bot detection, and graceful degradation:
-- Accepts optional `url_metadata_service` in `__init__` for dependency injection.
-- Invokes `UniversalInputClassifier.classify(raw_input)`.
+Asynchronous facade orchestrating input classification, URL cleaning, policy-aware secure fetching, anti-bot detection, and graceful degradation:
+- Accepts optional `url_metadata_service`, `client`, `cache`, `routes`, and keyword-only `settings: Settings | None = None` or `policy: SSRFPolicy | None = None` in `__init__`:
+  - When `settings` or `policy` is supplied, resolves `self.policy = resolve_ssrf_policy(settings=settings, policy=policy)` and logs `ssrf_policy_configured` (`DEBUG`).
+  - Otherwise, inherits `url_metadata_service.policy` only when `isinstance(getattr(url_metadata_service, "policy", None), SSRFPolicy)` (preserving `MagicMock` compatibility for injected test doubles), or falls back to `resolve_ssrf_policy()`.
+  - When `url_metadata_service` is `None`, creates `UrlMetadataService(timeout=DEFAULT_TIMEOUT, policy=self.policy)`.
+- Wired with application `Settings` across all runtime entrypoints:
+  - [`create_app`](file:///home/src/wishenka/web/app.py#L161-L289) passes `settings=settings` to [`safe_direct_route(limits=limits, settings=settings)`](file:///home/src/wishenka/web/app.py#L185) and [`ItemPreviewService(..., settings=settings)`](file:///home/src/wishenka/web/app.py#L189-L193).
+  - [`preview_item_input`](file:///home/src/wishenka/web/routes/items_ui.py#L479-L481) falls back to `ItemPreviewService(settings=getattr(request.app.state, "settings", None))` when `app.state.item_preview_service` is not set.
+  - [`wishenka.bot.__main__.run()`](file:///home/src/wishenka/bot/__main__.py#L63-L103) passes [`ItemPreviewService(settings=settings)`](file:///home/src/wishenka/bot/__main__.py#L85) into bot `Dependencies`.
+- Invokes `UniversalInputClassifier.classify(raw_input)`:
   - For `PLAIN_TEXT`, returns manual entry preview immediately without network activity.
-  - For `EXPLICIT_URL`, `IMPLICIT_URL`, and `COMPOSITE_SHARE`, sanitizes the target link via `clean_url` and dispatches safe preview fetching.
+  - For `EXPLICIT_URL`, `IMPLICIT_URL`, and `COMPOSITE_SHARE`, sanitizes the target link via `clean_url`, strips any URL userinfo via [`redact_url_credentials`](file:///home/src/wishenka/items/ssrf.py#L107-L115) before deriving `url_domain`/`store_name` and writing warning logs, and dispatches safe preview fetching.
 - **Anti-Bot Challenge & WAF Detection**:
   - Inspects upstream HTTP status codes: HTTP 403 Forbidden, HTTP 429 Too Many Requests, and HTTP 503 Service Unavailable.
-  - Scans HTML bodies (including `200 OK` responses) against [`CHALLENGE_SIGNATURES`](file:///home/src/wishenka/items/service.py#L31-L55):
+  - Scans HTML bodies (including `200 OK` responses) against [`CHALLENGE_SIGNATURES`](file:///home/src/wishenka/items/service.py#L40-L64):
     - Cloudflare challenges: `_cf_chl_opt`, `challenge-running`, `just a moment...`, `cf-mitigated`, `turnstile`, `checking your browser`.
     - Generic WAFs: `access denied`, `waf`, `ddos-guard`.
     - Qrator anti-bot shield: `qrator`, `qrator_jsid`, `qrator-js`.
     - Russian marketplace anti-bot and CAPTCHA screens (`WISHENKA-97`): `доступ ограничен`, `доступ временно ограничен`, `почти готово`, `проверка браузера`, `подтвердите, что запросы отправляли вы, а не робот`, `smartcaptcha`, `showcaptcha` (Yandex SmartCaptcha), `firewall-container` (Avito IP firewall), `antibot-challenge`, `ozon-captcha`, `fab_chlg` (Ozon / Wildberries / Megamarket).
   - Intercepts challenges (both on `403`/`429`/`503` and `200 OK` HTML challenge pages) and emits `item_preview_anti_bot` and `anti_bot_challenge_detected` logs (including `status_code=200` for `200 OK` challenges), returning an `ItemPreviewDTO` with `is_fallback=True`, `fallback_reason="anti_bot_challenge"`, `store_name`, and `title=classification.residual_text` (preventing challenge page `<title>` text from leaking into wish titles).
 - **Comprehensive Exception Trap**:
-  - SSRF violations: `fallback_reason="ssrf_blocked"`.
-  - Payload overflow (>2 MB): `fallback_reason="response_too_large"`.
+  - SSRF violations and disallowed schemes (`SSRFBlockedError`, `InvalidUrlSchemeError`): `fallback_reason="ssrf_blocked"`.
+  - Payload overflow (`> self.policy.max_response_bytes`, default 2 MB): `fallback_reason="response_too_large"`.
   - Upstream timeout (>4.0s): `fallback_reason="timeout"`.
   - Web cassette testbench errors ([`CassetteError`](file:///home/src/wishenka/items/exceptions.py#L71) / [`CassetteMissError`](file:///home/src/wishenka/items/exceptions.py#L75)): explicitly re-raised (`except CassetteError: raise`) so unrecorded requests in offline `REPLAY` mode fail immediately instead of being masked as `fallback_reason="http_error"`.
   - Other network / HTTP errors: `fallback_reason="http_error"`.
@@ -471,11 +489,12 @@ Asynchronous facade orchestrating input classification, URL cleaning, secure fet
 
 #### Pooled requests and preview cache
 
-The FastAPI lifespan owns one safe direct route and one `ItemPreviewService` with a
-`PreviewCache` per application instance. It closes the owned transport and clears the cache on
-shutdown and startup failure. Independent application instances have independent pools and
-caches. Standalone `ItemPreviewService()` calls create and close their own direct transport.
-A per-call route configuration bypasses the service cache; configured routes partition its keys.
+The FastAPI lifespan owns one safe direct route (`safe_direct_route(limits=limits, settings=settings)`)
+and one `ItemPreviewService` with a `PreviewCache` per application instance. It closes the owned
+transport and clears the cache on shutdown and startup failure. Independent application instances
+have independent pools, caches, and SSRF policies. Standalone `ItemPreviewService()` calls
+resolve the ambient default `SSRFPolicy` and create/close their own direct transport. A per-call
+route configuration bypasses the service cache; configured routes partition its keys.
 
 The bounded in-memory cache stores copies of extracted source metadata by cleaned URL. It rebuilds
 the preview with the current caller's input and residual text. A plain-text input, failure,
@@ -484,20 +503,26 @@ shared caching with `Cache-Control: public`; query strings, URL credentials, `Se
 authentication challenges, and restrictive cache directives disqualify the chain. Freshness
 accounts for origin age and expiry headers. Concurrent misses can still perform duplicate fetches.
 
-Every cache hit revalidates the original and redirect destinations against current DNS and scheme
-rules. Outbound requests reject URL credentials and do not retain or send cookies; opaque clients
-and unapproved proxy transports are rejected before dispatch. DNS resolutions performed by
-[`resolve_and_validate_host`](file:///home/src/wishenka/items/ssrf.py#L266) are cached in-memory via
-[`DNSCache`](file:///home/src/wishenka/items/ssrf.py#L98) (`DEFAULT_DNS_CACHE_TTL_SECONDS = 60.0`,
-`DEFAULT_DNS_CACHE_CAPACITY = 512`) with per-event-loop single-flight coalescing
-([WISHENKA-94](https://pypost.atlassian.net/browse/WISHENKA-94)), while outbound connections via
-[`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L500) and
-[`SSRFSafeNetworkBackend`](file:///home/src/wishenka/items/ssrf.py#L383) pin validated IP addresses per
-request and redirect hop to prevent DNS rebinding (TOCTOU; [WISHENKA-92](https://pypost.atlassian.net/browse/WISHENKA-92)).
-Route selection uses the public HTTPX transport interface. Connection pinning still uses private
-HTTPX/httpcore pool internals; unexpected layouts fail closed. HTTPX is constrained to
-`>=0.28.0,<0.29`; review both HTTPX and httpcore upgrades before deployment. Replacing that
-connection-layer hook is tracked in
+Every cache hit revalidates the original and redirect destinations (`cached.urls`) via
+[`validate_url`](file:///home/src/wishenka/items/fetcher.py#L69-L98) inside
+`with _use_ssrf_policy(self.policy):` against the service's active DNS, CIDR, and scheme rules. If
+revalidation fails (for example, a cached `http://` entry under an `https`-only policy or a host
+whose IP enters `ssrf_forbidden_cidrs`), the entry is evicted from `self.cache.entries`,
+`preview_cache_revalidation_evicted` is logged (`DEBUG`), and the request degrades gracefully to
+`fallback_reason="ssrf_blocked"`. Outbound requests reject URL credentials and do not retain or
+send cookies; opaque clients and unapproved proxy transports are rejected before dispatch. DNS
+resolutions performed by [`resolve_and_validate_host`](file:///home/src/wishenka/items/ssrf.py#L473-L614)
+are cached in-memory via [`DNSCache`](file:///home/src/wishenka/items/ssrf.py#L298-L361)
+(`DEFAULT_DNS_CACHE_TTL_SECONDS = 60.0`, `DEFAULT_DNS_CACHE_CAPACITY = 512`) with per-event-loop
+single-flight coalescing ([WISHENKA-94](https://pypost.atlassian.net/browse/WISHENKA-94)) and
+cache-hit CIDR revalidation, while outbound connections via
+[`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L750-L867) and
+[`SSRFSafeNetworkBackend`](file:///home/src/wishenka/items/ssrf.py#L623-L747) pin validated IP
+addresses per request and redirect hop to prevent DNS rebinding (TOCTOU;
+[WISHENKA-92](https://pypost.atlassian.net/browse/WISHENKA-92)). Route selection uses the public
+HTTPX transport interface. Connection pinning still uses private HTTPX/httpcore pool internals;
+unexpected layouts fail closed. HTTPX is constrained to `>=0.28.0,<0.29`; review both HTTPX and
+httpcore upgrades before deployment. Replacing that connection-layer hook is tracked in
 [WISHENKA-284](https://pypost.atlassian.net/browse/WISHENKA-284).
 
 `tests/test_preview_resource_reuse.py` covers cache eligibility and expiry, isolation, lifecycle,
@@ -668,7 +693,7 @@ Provides an offline-first, VCR-compatible YAML HTTP recording, sanitization, and
   - `CassetteMode.REPLAY` (`"replay"`, default): offline playback; a missing interaction logs
     `cassette_miss` and raises `CassetteMissError`. It does not seed the shared DNS cache. The
     CLI `--verify` uses a private fixture-only preview fetcher, so verification needs no DNS.
-  - `CassetteMode.RECORD` (`"record"`): Replays existing interactions on hit; on miss, dispatches the request through `inner_transport` (defaulting to [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L500)), sanitizes the interaction, appends it to the cassette, and saves the YAML file.
+  - `CassetteMode.RECORD` (`"record"`): Replays existing interactions on hit; on miss, dispatches the request through `inner_transport` (defaulting to [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L750-L867)), sanitizes the interaction, appends it to the cassette, and saves the YAML file.
   - `CassetteMode.REFRESH` (`"refresh"`): Always fetches fresh responses through `inner_transport`, sanitizes request and response data, replaces matching interactions in the cassette, and saves the YAML file.
   - Mode resolution checks the explicit `mode` parameter first and falls back to the `WISHENKA_CASSETTE_MODE` environment variable (defaulting to `"replay"`).
 - **Data Models & VCR YAML Schema**:
@@ -744,9 +769,9 @@ WishlistError
 | [`CassetteMissError`](file:///home/src/wishenka/items/exceptions.py#L75) | `CassetteError` | `method`, `uri`, `cassette_path` | N/A | Requested `(method, sanitized_uri)` interaction is missing from the loaded cassette in offline `CassetteMode.REPLAY`. |
 | [`ItemParsingError`](file:///home/src/wishenka/items/exceptions.py#L18) | `ItemError` | None | `400` | Base exception for parsing, URL extraction, and network fetch limits. |
 | [`SSRFError`](file:///home/src/wishenka/items/exceptions.py#L22) | `ItemParsingError` | None | `400` | Base exception for SSRF blocks and URL security violations. |
-| [`SSRFBlockedError`](file:///home/src/wishenka/items/exceptions.py#L26) | `SSRFError` | `ip_address`, `host`, `reason` | `400` | Host or IP resolves to private, loopback, link-local, cloud metadata, or reserved range. |
-| [`InvalidUrlSchemeError`](file:///home/src/wishenka/items/exceptions.py#L43) | `SSRFError` | `scheme` | `400` | URL scheme is not `http` or `https` (e.g. `file://`, `ftp://`). |
-| [`ResponseBodyTooLargeError`](file:///home/src/wishenka/items/exceptions.py#L56) | `ItemParsingError` | `content_length`, `max_allowed` | `400` | Response exceeds 2 MB (`Content-Length` header or streaming chunk limit). |
+| [`SSRFBlockedError`](file:///home/src/wishenka/items/exceptions.py#L26) | `SSRFError` | `ip_address`, `host`, `reason` | `400` | Host or IP resolves to private, loopback, link-local, cloud metadata, reserved, or configured `ssrf_forbidden_cidrs` range (or triggers URL credentials / unsafe backend / UDS blocks). |
+| [`InvalidUrlSchemeError`](file:///home/src/wishenka/items/exceptions.py#L43) | `SSRFError` | `scheme` | `400` | URL scheme is disallowed by the active `SSRFPolicy.allowed_schemes` (default `http` and `https`). |
+| [`ResponseBodyTooLargeError`](file:///home/src/wishenka/items/exceptions.py#L56) | `ItemParsingError` | `content_length`, `max_allowed` | `400` | Response exceeds configured `ssrf_max_response_bytes` / `max_bytes` limit (default 2 MB / `2,097,152` bytes). |
 | [`ItemNotFoundError`](file:///home/src/wishenka/wishlists/exceptions.py#L36) | `WishlistError` | None | `404` | Target `item_id` does not exist or does not belong to the specified wishlist. |
 | [`CannotReduceQuantityBelowReservedError`](file:///home/src/wishenka/wishlists/exceptions.py#L44) | `WishlistError` | None | `409` | A schema-valid quantity is below `received_quantity`; the legacy exception name is retained. |
 | [`InventoryBusyError`](file:///home/src/wishenka/wishlists/exceptions.py#L52) | `WishlistError` | None | `503` | `SQLITE_BUSY` after `busy_timeout`. The transaction rolled back and the wish is unchanged. The message names no gifter. |
@@ -964,12 +989,13 @@ assert rule.store_name == "Яндекс Маркет"
 
 ### 3. Generating Link Previews with SSRF & Anti-Bot Fallback
 
-Use [`ItemPreviewService.fetch_preview`](file:///home/src/wishenka/items/service.py#L58-L377) (or alias `.preview(...)`):
+Instantiate [`ItemPreviewService(...)`](file:///home/src/wishenka/items/service.py#L70-L79) (optionally passing `settings=Settings(...)` or `policy=SSRFPolicy(...)` at initialization rather than on `fetch_preview`/`.preview(...)`), then call [`ItemPreviewService.fetch_preview`](file:///home/src/wishenka/items/service.py#L113-L500) (or alias [`.preview(...)`](file:///home/src/wishenka/items/service.py#L103-L111)):
 
 ```python
+from wishenka.config import Settings
 from wishenka.items.service import ItemPreviewService
 
-service = ItemPreviewService()
+service = ItemPreviewService(settings=Settings())
 
 # 1. Successful public preview scrape
 preview = await service.fetch_preview("https://example.com/product/aerogrill")
@@ -1043,13 +1069,16 @@ assert metadata.store_name == "Ozon"
 
 ### 5. Direct HTML Fetching with SSRF and Size Bounds
 
-Use [`UrlMetadataService`](file:///home/src/wishenka/items/fetcher.py#L49) for lower-level safe fetching:
+Use [`UrlMetadataService`](file:///home/src/wishenka/items/fetcher.py#L279-L518) and [`validate_url`](file:///home/src/wishenka/items/fetcher.py#L69-L98) for lower-level safe fetching:
 
 ```python
+from wishenka.config import Settings
 from wishenka.items.exceptions import ResponseBodyTooLargeError, SSRFBlockedError
-from wishenka.items.fetcher import UrlMetadataService
+from wishenka.items.fetcher import UrlMetadataService, validate_url
 
-fetcher = UrlMetadataService()
+settings = Settings(ssrf_max_response_bytes=512 * 1024, ssrf_allowed_schemes=("https",))
+fetcher = UrlMetadataService(settings=settings)
+await validate_url("https://example.com/product/123", settings=settings)
 
 # Safe high-level extraction (never raises, returns ExtractedMetadata)
 metadata = await fetcher.fetch_and_extract("https://example.com/product/123")
@@ -1057,39 +1086,53 @@ print(metadata.title, metadata.price, metadata.store_name)
 
 # Low-level fetching with explicit security exception handling
 try:
-    html_text, effective_url = await fetcher._fetch_html("http://127.0.0.1:8080/admin")
+    html_text, effective_url = await fetcher._fetch_html("https://127.0.0.1:8080/admin")
 except SSRFBlockedError as exc:
     print(f"Blocked SSRF target: {exc.host} ({exc.ip_address}) - reason: {exc.reason}")
 except ResponseBodyTooLargeError as exc:
     print(f"Payload exceeded {exc.max_allowed} bytes (actual: {exc.content_length})")
 ```
 
-### 6. Direct IP, Hostname Validation, and DNS Cache Management
+### 6. Direct IP, Hostname Validation, Policy Resolution, and DNS Cache Management
 
-Use [`is_ip_safe`](file:///home/src/wishenka/items/ssrf.py#L54), [`resolve_and_validate_host`](file:///home/src/wishenka/items/ssrf.py#L266), [`DNSCache`](file:///home/src/wishenka/items/ssrf.py#L98), and [`clear_dns_cache`](file:///home/src/wishenka/items/ssrf.py#L171):
+Use [`SSRFPolicy`](file:///home/src/wishenka/items/ssrf.py#L45-L72), [`get_default_ssrf_policy`](file:///home/src/wishenka/items/ssrf.py#L182-L197), [`resolve_ssrf_policy`](file:///home/src/wishenka/items/ssrf.py#L213-L228), [`redact_url_credentials`](file:///home/src/wishenka/items/ssrf.py#L107-L115), [`is_ip_safe`](file:///home/src/wishenka/items/ssrf.py#L270-L282), [`resolve_and_validate_host`](file:///home/src/wishenka/items/ssrf.py#L473-L614), [`DNSCache`](file:///home/src/wishenka/items/ssrf.py#L298-L361), and [`clear_dns_cache`](file:///home/src/wishenka/items/ssrf.py#L371-L373):
 
 ```python
 import ipaddress
+from wishenka.config import Settings
 from wishenka.items.exceptions import SSRFBlockedError
 from wishenka.items.ssrf import (
     DEFAULT_DNS_CACHE_CAPACITY,
     DEFAULT_DNS_CACHE_TTL_SECONDS,
     DNSCache,
+    SSRFPolicy,
     clear_dns_cache,
+    get_default_ssrf_policy,
     is_ip_safe,
+    redact_url_credentials,
     resolve_and_validate_host,
+    resolve_ssrf_policy,
 )
 
-# Direct IP checks
+# Policy resolution & credential redaction
+default_policy = get_default_ssrf_policy()
+strict_policy = resolve_ssrf_policy(
+    settings=Settings(ssrf_forbidden_cidrs=("93.184.216.0/24",))
+)
+assert redact_url_credentials("https://user:secret@example.com/item") == "https://example.com/item"
+
+# Direct IP checks (ambient default policy + optional custom forbidden_networks)
 assert is_ip_safe("93.184.216.34") is True  # Public IP (example.com)
-assert is_ip_safe("127.0.0.1") is False  # Loopback
+assert is_ip_safe("93.184.216.34", forbidden_networks=strict_policy.forbidden_networks) is False
+assert is_ip_safe("127.0.0.1", forbidden_networks=()) is False  # Baseline loopback always blocked
 assert is_ip_safe("10.0.0.1") is False  # RFC 1918 Private
 assert is_ip_safe("169.254.169.254") is False  # Cloud metadata / Link-local
 assert is_ip_safe("100.64.0.1") is False  # CGNAT
 assert is_ip_safe("::ffff:127.0.0.1") is False  # IPv6-mapped IPv4 loopback
 
-# Asynchronous DNS resolution check (caches validated public IPs for 60s TTL;
-# concurrent cold misses for the same (host, port) coalesce into a single lookup)
+# Asynchronous DNS resolution check (caches validated public IPs for 60s TTL,
+# revalidates cached hits against active forbidden_networks, and isolates
+# single-flight coalescing per (host, port, active_networks))
 resolved_ips = await resolve_and_validate_host("example.com", port=443)
 assert len(resolved_ips) > 0
 
@@ -1357,17 +1400,25 @@ Set on the wishlist engine in [`_configure_immediate_transactions`](file:///home
 
 ### Network & Security Settings
 
-Defined in [`wishenka/items/ssrf.py`](file:///home/src/wishenka/items/ssrf.py), [`wishenka/items/fetcher.py`](file:///home/src/wishenka/items/fetcher.py), [`wishenka/items/marketplaces.py`](file:///home/src/wishenka/items/marketplaces.py), [`wishenka/items/service.py`](file:///home/src/wishenka/items/service.py), and [`wishenka/items/cassettes.py`](file:///home/src/wishenka/items/cassettes.py):
+Configurable SSRF defaults and validation live in [`wishenka/config.py`](file:///home/src/wishenka/config.py) (`Settings`), with policy enforcement and network constants in [`wishenka/items/ssrf.py`](file:///home/src/wishenka/items/ssrf.py), [`wishenka/items/fetcher.py`](file:///home/src/wishenka/items/fetcher.py), [`wishenka/items/marketplaces.py`](file:///home/src/wishenka/items/marketplaces.py), [`wishenka/items/service.py`](file:///home/src/wishenka/items/service.py), [`wishenka/items/cassettes.py`](file:///home/src/wishenka/items/cassettes.py), [`wishenka/web/app.py`](file:///home/src/wishenka/web/app.py), [`wishenka/web/routes/items_ui.py`](file:///home/src/wishenka/web/routes/items_ui.py), and [`wishenka/bot/__main__.py`](file:///home/src/wishenka/bot/__main__.py):
 
-| Constant / Env Var | Value | Description |
+- **Environment Variable & `.env` Parsing (`SettingsConfigDict(env_prefix="WISHENKA_", env_file=".env", extra="ignore")`)**:
+  - `ssrf_max_response_bytes` (`WISHENKA_SSRF_MAX_RESPONSE_BYTES`): `int = Field(default=DEFAULT_SSRF_MAX_RESPONSE_BYTES, ge=1)`. Pre-validator `_validate_ssrf_max_response_bytes` rejects `bool` and `float` before Pydantic `int` parsing, failing fast with `pydantic.ValidationError` on `0`, negative values, blanks, or non-integer strings.
+  - `ssrf_allowed_schemes` (`WISHENKA_SSRF_ALLOWED_SCHEMES`): `Annotated[tuple[str, ...], NoDecode] = DEFAULT_SSRF_ALLOWED_SCHEMES`. Suppressing `pydantic-settings` auto-JSON decoding with `NoDecode` allows [`_parse_env_string_tuple`](file:///home/src/wishenka/config.py#L38-L65) to accept **both** JSON arrays (`'["https"]'`) and comma-separated strings (`'https'`, `'http, https'`), as well as Python string iterables. Validator [`_validate_ssrf_allowed_schemes`](file:///home/src/wishenka/config.py#L143-L163) rejects blank strings, empty comma segments (e.g. `"http, "`), internal whitespace, `"/"`, `":"`, non-strings, empty sequences (`()` / `'[]'`), and schemes outside `SUPPORTED_SSRF_SCHEMES = frozenset({"http", "https"})`, normalizing to lowercase and deduplicating in order.
+  - `ssrf_forbidden_cidrs` (`WISHENKA_SSRF_FORBIDDEN_CIDRS`): `Annotated[tuple[str, ...], NoDecode] = DEFAULT_SSRF_FORBIDDEN_CIDRS`. Accepts **both** JSON arrays (`'["93.184.216.0/24"]'`) and comma-separated strings (`'93.184.216.0/24, 2001:db8::/32'`), plus Python string iterables. Validator [`_validate_ssrf_forbidden_cidrs`](file:///home/src/wishenka/config.py#L165-L183) rejects blank strings (`""`, `"   "`), empty comma segments (`"10.0.0.0/8, "`), entries containing whitespace, non-strings, and invalid CIDR syntax (`ipaddress.ip_network(item, strict=False)`), canonicalizing via `str(network)` and deduplicating in order. Empty sequences (`()` / `'[]'`) are accepted and represent zero additional configured CIDRs; baseline IP safety invariants in `is_ip_safe` remain unconditional.
+- **Propagation**: `Settings` compiles to [`SSRFPolicy`](file:///home/src/wishenka/items/ssrf.py#L45-L72) and flows through [`create_app`](file:///home/src/wishenka/web/app.py#L185-L193), [`preview_item_input`](file:///home/src/wishenka/web/routes/items_ui.py#L479-L481) fallback, [`wishenka.bot.__main__.run()`](file:///home/src/wishenka/bot/__main__.py#L85), [`safe_direct_route`](file:///home/src/wishenka/items/fetcher.py#L217-L231), [`validate_url`](file:///home/src/wishenka/items/fetcher.py#L69-L98), [`UrlMetadataService`](file:///home/src/wishenka/items/fetcher.py#L279-L518), [`ItemPreviewService`](file:///home/src/wishenka/items/service.py#L67-L508), and [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L750-L867). Zero-argument callers resolve the ambient `get_default_ssrf_policy()` (cached per env/`.env` snapshot) or active `_active_policy_var`. `wishenka/config.py` imports no internal `wishenka.*` modules and emits no logs, keeping startup validation fail-fast and dependency-cycle free.
+
+| Setting / Env Var / Constant | Default Value | Description |
 | --- | --- | --- |
-| `MAX_RESPONSE_BYTES` | `2 * 1024 * 1024` (2 MB) | Maximum permitted response size before abortion. |
-| `ALLOWED_SCHEMES` | `frozenset({"http", "https"})` | Whitelisted URL schemes. |
+| `ssrf_max_response_bytes` / `WISHENKA_SSRF_MAX_RESPONSE_BYTES` / `MAX_RESPONSE_BYTES` | `2 * 1024 * 1024` (2 MB / `2,097,152` bytes) | Maximum permitted response size (`>= 1` integer) before aborting via `ResponseBodyTooLargeError`. |
+| `ssrf_allowed_schemes` / `WISHENKA_SSRF_ALLOWED_SCHEMES` / `ALLOWED_SCHEMES` | `("http", "https")` / `frozenset({"http", "https"})` | Non-empty allowlist of URL schemes (JSON array or CSV string), bounded by `SUPPORTED_SSRF_SCHEMES`. |
+| `SUPPORTED_SSRF_SCHEMES` | `frozenset({"http", "https"})` | Closed set of schemes accepted by `Settings` and `SSRFPolicy` validation. |
+| `ssrf_forbidden_cidrs` / `WISHENKA_SSRF_FORBIDDEN_CIDRS` / `FORBIDDEN_NETWORKS` | 20 default IPv4/IPv6 CIDRs (`DEFAULT_SSRF_FORBIDDEN_CIDRS`) | Configurable CIDR blocklist (JSON array or CSV string); merged with unconditional baseline IP safety checks. |
 | `DEFAULT_DNS_CACHE_TTL_SECONDS` | `60.0` (60 seconds) | Monotonic TTL for cached SSRF-validated DNS resolutions in `DNSCache`. |
 | `DEFAULT_DNS_CACHE_CAPACITY` | `512` | Maximum normalized `(host, port)` entries in `DNSCache` before LRU eviction. |
 | `DEFAULT_TIMEOUT` | `httpx.Timeout(4.0, connect=2.0)` | Total budget `4.0s`, connection budget `2.0s`. |
 | `DEFAULT_HEADERS` | iOS Safari Mobile UA, Ru/En Accept | Standard headers maximizing storefront compatibility. |
-| Preview cache | 256 entries, 300 seconds maximum TTL | Per application instance; LRU eviction and shorter origin freshness apply. |
+| Preview cache | 256 entries, 300 seconds maximum TTL | Per application instance; LRU eviction, origin freshness, and active `SSRFPolicy` hit revalidation apply. |
 | Preview connection pool | 20 connections, 10 keep-alive, 5 seconds idle expiry | Lifespan-owned outbound transport; per application instance. |
 | `TRACKING_QUERY_PREFIXES` | `("utm_",)` | Prefixes stripped from URL queries. |
 | `TRACKING_QUERY_KEYS` | Set of 14 ad click / affiliate keys | Query keys stripped (`clid`, `targeturl`, `src`, `promo`, `track`, `ref`, `fbclid`, `gclid`, `yclid`, etc.). |
@@ -1377,9 +1428,9 @@ Defined in [`wishenka/items/ssrf.py`](file:///home/src/wishenka/items/ssrf.py), 
 | `SENSITIVE_HEADER_NAMES` / `SENSITIVE_HEADER_SUBSTRINGS` | Set of 16 names + 7 substrings | Headers stripped by `sanitize_headers` before persisting cassettes (`Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, `X-Csrf-Token`, client IP headers, etc.). |
 | `SENSITIVE_QUERY_KEYS` | Set of 18 query parameter names | Query keys stripped by `sanitize_uri` (`token`, `access_token`, `api_key`, `session_id`, `password`, `signature`, etc.). |
 
-### Forbidden Network CIDRs (`FORBIDDEN_NETWORKS`)
+### Forbidden Network CIDRs (`DEFAULT_SSRF_FORBIDDEN_CIDRS` / `FORBIDDEN_NETWORKS`)
 
-The following subnets are hard-blocked from outbound connections:
+The following 20 subnets comprise [`DEFAULT_SSRF_FORBIDDEN_CIDRS`](file:///home/src/wishenka/config.py#L14-L35) (and [`FORBIDDEN_NETWORKS`](file:///home/src/wishenka/items/ssrf.py#L39-L41)). They can be extended or replaced via `WISHENKA_SSRF_FORBIDDEN_CIDRS`, while baseline `ipaddress` safety checks in [`is_ip_safe`](file:///home/src/wishenka/items/ssrf.py#L270-L282) (`not ip.is_global`, `is_private`, `is_loopback`, `is_link_local`, `is_multicast`, `is_reserved`, `is_unspecified`, plus recursive `ip.ipv4_mapped` unwrapping) remain **unconditionally enforced** even when `ssrf_forbidden_cidrs` is set to `()` or `'[]'`:
 - `0.0.0.0/8` (Current network)
 - `10.0.0.0/8` (Private RFC 1918)
 - `100.64.0.0/10` (Shared Address Space / CGNAT)
@@ -1403,7 +1454,7 @@ The following subnets are hard-blocked from outbound connections:
 
 ### Structured Audit and Operational Logging
 
-All events are logged via structured extra dictionaries under logger names `"wishenka.items"` (URL parsing and preview pipeline), `"wishenka.wishlists"` (domain service lifecycle), `"wishenka.wishlists.store"` (wish-scoped inventory commit, busy, and rollback), `"wishenka.web.items"` (REST API layer), and `"wishenka.web.items_ui"` (TMA HTMX UI layer):
+All events are logged via structured extra dictionaries under logger names `"wishenka.items"` (URL parsing, SSRF policy, and preview pipeline), `"wishenka.web"` (web startup SSRF metadata), `"wishenka.wishlists"` (domain service lifecycle), `"wishenka.wishlists.store"` (wish-scoped inventory commit, busy, and rollback), `"wishenka.web.items"` (REST API layer), and `"wishenka.web.items_ui"` (TMA HTMX UI layer):
 
 #### 1. Wish Items Lifecycle & Accounting Events (`wishenka.wishlists`, `wishenka.wishlists.store`, `wishenka.web.items`)
 
@@ -1452,18 +1503,22 @@ All events are logged via structured extra dictionaries under logger names `"wis
 | `cassette_recorded` | `INFO` | `method`, `uri`, `status_code`, `mode`, `marketplace`, `scenario`, `cassette_path` | New interaction fetched, sanitized, and recorded in `RECORD` mode. |
 | `cassette_refreshed` | `INFO` | `method`, `uri`, `status_code`, `mode`, `marketplace`, `scenario`, `cassette_path` | Existing interaction re-fetched, sanitized, and overwritten in `REFRESH` mode. |
 | `item_preview_plain_text` | `DEBUG` | `input_type`, `duration_ms` | Non-URL text input processed without network calls. |
+| `ssrf_policy_loaded` | `DEBUG` | `component`, `source` (`"default_settings"`), `max_response_bytes`, `allowed_schemes`, `forbidden_cidr_count` | Ambient default `SSRFPolicy` loaded/reloaded from `Settings()` when env/`.env` snapshot initializes or changes. |
+| `ssrf_policy_configured` | `DEBUG` | `component` (`"SSRFSafeTransport"`, `"UrlMetadataService"`, `"ItemPreviewService"`), `source` (`"settings"`, `"policy"`, `"max_bytes_override"`), `max_response_bytes`, `allowed_schemes`, `forbidden_cidr_count` | Component initialized with an explicit `Settings`, `SSRFPolicy`, or `max_bytes` override. |
 | `preview_cache_lookup` | `DEBUG` | `cache_outcome` (`hit`, `miss`) | Cache lookup without logging its URL or key. |
+| `preview_cache_revalidation_evicted` | `DEBUG` | `url_domain`, `destination_count` | Cached `PreviewCache` entry evicted after failing active `SSRFPolicy` revalidation (`validate_url`). |
 | `item_preview_success` | `INFO` | `url_domain`, `duration_ms`, `input_type`, `is_fallback=False` | Successful link preview retrieval (HTTP 200). |
-| `item_preview_ssrf_blocked` | `WARNING` | `url`, `url_domain`, `host`, `ip`, `reason`, `duration_ms` | SSRF attempt caught during preview generation; returns fallback. |
-| `item_preview_invalid_scheme` | `WARNING` | `url`, `scheme`, `duration_ms` | Unsupported URL scheme caught; returns fallback. |
-| `item_preview_response_too_large` | `WARNING` | `url`, `url_domain`, `content_length`, `max_allowed`, `duration_ms` | Oversized payload caught during preview generation; returns fallback. |
+| `item_preview_ssrf_blocked` | `WARNING` | `url`, `url_domain`, `host`, `ip`, `reason`, `forbidden_cidr_count`, `input_type`, `duration_ms`, `fallback_reason="ssrf_blocked"` | SSRF attempt caught during preview generation (credential-redacted `url`); returns fallback. |
+| `item_preview_invalid_scheme` | `WARNING` | `url`, `url_domain`, `scheme`, `allowed_schemes`, `reason="invalid_scheme"`, `input_type`, `duration_ms`, `fallback_reason="ssrf_blocked"` | Disallowed URL scheme caught against active `SSRFPolicy` (credential-redacted `url`); returns fallback. |
+| `item_preview_response_too_large` | `WARNING` | `url`, `url_domain`, `content_length`, `max_allowed`, `reason="response_too_large"`, `input_type`, `duration_ms`, `fallback_reason="response_too_large"` | Oversized payload exceeding active `max_bytes` caught during preview generation (credential-redacted `url`); returns fallback. |
 | `item_preview_timeout` | `WARNING` | `url_domain`, `duration_ms`, `fallback_reason="timeout"` | HTTP connection or read timeout ($> 4.0\text{s}$). |
 | `item_preview_http_error` | `WARNING` | `status_code`, `url_domain`, `duration_ms`, `fallback_reason="http_error"` | Upstream HTTP $\ge 400$ error handled safely. |
 | `item_preview_network_error` | `WARNING` | `url_domain`, `duration_ms`, `fallback_reason="http_error"` | Network transport error handled safely. |
 | `item_metadata_parsing_error` | `ERROR` | `url_domain`, `duration_ms`, `fallback_reason="http_error"` | Unexpected HTML parsing failure during extraction. |
-| `ssrf_blocked` | `WARNING` | `host`, `ip`, `reason` | Low-level SSRF rejection on outbound connection or redirect (includes `reason="credentials"` and `reason="uds"`). |
-| `payload_size_violation` | `WARNING` | `url`, `content_length`, `max_allowed`, `reason` | `Content-Length` or streaming chunks exceed 2 MB. |
-| `dns_cache_hit` | `DEBUG` | `host`, `port`, `ip_count` | Unexpired SSRF-validated IP list returned from `DNSCache`. |
+| `ssrf_blocked` | `WARNING` | `host`, `ip`, `reason`, `forbidden_cidr_count`, `cache_revalidation`, `url`, `scheme`, `allowed_schemes`, `path` (variant-dependent) | Low-level SSRF rejection on `validate_url`, redirect hook, DNS lookup, `DNSCache` revalidation (`cache_revalidation=True`), or transport (`reason`: `"forbidden_ip"`, `"credentials"`, `"invalid_scheme"`, `"uds"`, `"unsafe_backend"`, `"missing_host"`). Credential-redacted `url` is included for `"invalid_scheme"`/`"missing_host"`; `"credentials"` logs `host` only. |
+| `payload_size_violation` | `WARNING` | `url`, `content_length` or `streamed_bytes`, `max_allowed`, `reason` | `Content-Length` (`"content_length_exceeded"`) or streaming chunks (`"stream_chunk_overflow"`) exceed configured `self.max_bytes` (credential-redacted `url`). |
+| `fetch_and_extract_fallback` | `WARNING` | `url`, `error` | `UrlMetadataService.fetch_and_extract` caught fetch/parse failure and returned fallback `ExtractedMetadata` (credential-redacted `url`). |
+| `dns_cache_hit` | `DEBUG` | `host`, `port`, `ip_count`, `forbidden_cidr_count` | Unexpired SSRF-validated IP list returned from `DNSCache` after active-policy CIDR revalidation. |
 | `dns_cache_miss` | `DEBUG` | `host`, `port` | Cold or expired hostname initiated an uncached DNS resolution leader task. |
 | `dns_single_flight_coalesced` | `DEBUG` | `host`, `port` | Concurrent request joined an already in-flight DNS resolution on the same event loop. |
 | `dns_cache_expired` | `DEBUG` | `host`, `port` | Cached DNS entry's monotonic TTL elapsed and was lazily removed on lookup. |
@@ -1471,7 +1526,7 @@ All events are logged via structured extra dictionaries under logger names `"wis
 | `dns_resolution_start` | `DEBUG` | `host`, `clean_host`, `port` | Starting asynchronous DNS resolution. |
 | `dns_resolution_success` | `DEBUG` | `host`, `resolved_ips` | Successfully resolved hostname to safe IPs. |
 | `dns_resolution_failed` | `INFO` | `host`, `error` | Host failed to resolve (NXDOMAIN, gaierror). |
-| `ssrf_pinned_cache_miss` | `DEBUG` | `host`, `port` | Defense-in-depth fallback resolution when `_pinned_ips_var` has no entry for `(host, port)`. |
+| `ssrf_pinned_cache_miss` | `DEBUG` | `host`, `port`, `policy_source` (`"pinned"` / `"ambient"`), `forbidden_cidr_count` | Defense-in-depth fallback resolution when `_pinned_ips_var` has no entry for `(host, port)`. |
 | `ssrf_no_validated_ips` | `WARNING` | `host`, `port` | `connect_tcp` aborted because no validated IP addresses are available. |
 | `ssrf_pinned_connect_failed` | `DEBUG` | `host`, `ip`, `port`, `error` | Single pinned IP TCP connection attempt failed; failing over to next pinned IP. |
 | `ssrf_all_pinned_connects_failed` | `WARNING` | `host`, `port`, `attempted_count`, `error` | All pinned IP TCP connection attempts failed for `host:port`. |
@@ -1494,11 +1549,25 @@ All events are logged via structured extra dictionaries under logger names `"wis
 | `ui_item_archived` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id` | Wish item safely archived via HTMX UI while preserving gifter reservations. |
 | `ui_item_restored` | `INFO` | `wishlist_id`, `item_id`, `actor_id`, `user_id` | Archived wish item restored to the active list via HTMX UI. |
 
+#### 4. Web Application Startup SSRF Metadata (`wishenka.web`)
+
+Inside [`create_app`](file:///home/src/wishenka/web/app.py#L209-L220) lifespan, `"Wishenka web application starting up"` (`INFO` on logger `wishenka.web`) logs bounded SSRF configuration metadata alongside application runtime fields:
+- `ssrf_max_response_bytes`: configured `settings.ssrf_max_response_bytes` integer limit.
+- `ssrf_allowed_schemes`: `list(settings.ssrf_allowed_schemes)` (e.g. `["http", "https"]` or `["https"]`).
+- `ssrf_forbidden_cidr_count`: `len(settings.ssrf_forbidden_cidrs)` (bounded scalar count; full CIDR lists and application secrets are never dumped).
+
 ### Privacy & Data Protection Guarantees
 
 In accordance with security requirements:
 - **Zero Capability Token Leaks**: Wishlist capability tokens (`public_token`, `invite_token`) are strictly omitted from item logs and exceptions.
-- **Zero Authentication Secret Leaks**: Telegram `init_data`, session cookies, and authorization bearer tokens are completely excluded from log attributes.
+- **Credential handling**: Outbound requests reject URL userinfo and authorization headers.
+  [`redact_url_credentials`](file:///home/src/wishenka/items/ssrf.py#L107-L115) removes
+  userinfo from the URL fields in SSRF, size, and preview warning logs. This is not a general
+  guarantee for all derived values: `ItemPreviewDTO.url` can retain userinfo, and the fallback
+  store-name and UI domain parsing paths can derive a value from the original URL. Avoid treating
+  those values as credential-free; the remaining parsing and redaction gap is tracked in
+  `ai-tasks/WISHENKA-93/60-tech-debt.md`.
+- **Bounded Policy Telemetry**: Startup and policy logs emit scalar bounds (`ssrf_forbidden_cidr_count`, `forbidden_cidr_count`, `max_response_bytes`, `allowed_schemes`) rather than dumping full CIDR lists.
 - **No Payload Leaks**: Raw HTML bodies, full upstream responses, and long user notes are never dumped into logs.
 - **Tracking Parameter Value Isolation**: URL tracking removal logs list sanitized key names only (`removed_keys=["utm_source"]`), strictly omitting query parameter values that might contain sensitive affiliate IDs or campaign tokens.
 - **No Internal IP Leak to Clients**: Client-facing DTOs (`ItemPreviewDTO`) receive generic `fallback_reason="ssrf_blocked"`; internal IP details remain isolated to server audit logs.
@@ -1528,19 +1597,22 @@ In accordance with security requirements:
   tracked in WISHENKA-117.
 
 ### 1. SSRF Blocked Targets (`fallback_reason="ssrf_blocked"`)
+
 - **Symptom**: `ItemPreviewDTO` returns with `is_fallback=True` and `fallback_reason="ssrf_blocked"`.
-- **Cause**: The input URL points to an IP or domain resolving to localhost (`127.0.0.1`, `::1`), private networks (`10.x`, `172.16.x`, `192.168.x`), cloud metadata (`169.254.169.254`), or CGNAT (`100.64.x`).
-- **Resolution**: This is the intended security defense. Check the server logs under `event="ssrf_blocked"` or `event="item_preview_ssrf_blocked"` for the exact destination host, resolved IP, and restriction rule. If a legitimate public service was erroneously classified, verify whether its DNS records include private IPs. Note that `DNSCache` never caches negative results (`SSRFBlockedError`, `socket.gaierror`, or empty IP lists), so fixing an upstream DNS record takes effect immediately on the next request (or after at most `DEFAULT_DNS_CACHE_TTL_SECONDS = 60.0` seconds if a previous public IP entry was cached; call `clear_dns_cache()` in tests or interactive sessions to flush immediately). If a host fails DNS resolution or all pinned IPs fail to connect, inspect `dns_resolution_failed`, `ssrf_no_validated_ips`, and `ssrf_all_pinned_connects_failed` (in `DEBUG`, `dns_cache_hit`, `dns_cache_miss`, `dns_single_flight_coalesced`, `dns_cache_expired`, `dns_cache_evicted`, and `ssrf_pinned_connect_failed` trace DNS caching and per-IP failover attempts).
+- **Cause**: The input URL points to an IP or domain resolving to localhost (`127.0.0.1`, `::1`), private networks (`10.x`, `172.16.x`, `192.168.x`), cloud metadata (`169.254.169.254`), CGNAT (`100.64.x`), or a custom range configured in `WISHENKA_SSRF_FORBIDDEN_CIDRS` (including after a `DNSCache` or `PreviewCache` hit revalidation against a stricter active policy).
+- **Resolution**: This is the intended security defense. Check server logs under `event="ssrf_blocked"` or `event="item_preview_ssrf_blocked"` for the destination host, resolved IP, `reason`, `forbidden_cidr_count`, and `cache_revalidation=True` (when a warm `DNSCache` hit was rejected by the active policy; `PreviewCache` evictions log `preview_cache_revalidation_evicted` at `DEBUG`). Verify `WISHENKA_SSRF_FORBIDDEN_CIDRS` in `.env` or environment variables (note that baseline `ipaddress` protections in `is_ip_safe` remain enforced even if `WISHENKA_SSRF_FORBIDDEN_CIDRS='[]'`). Note that `DNSCache` never caches negative results (`SSRFBlockedError`, `socket.gaierror`, or empty IP lists), so fixing an upstream DNS record takes effect immediately on the next request (or after at most `DEFAULT_DNS_CACHE_TTL_SECONDS = 60.0` seconds if a previous public IP entry was cached; call `clear_dns_cache()` in tests or interactive sessions to flush immediately). If a host fails DNS resolution or all pinned IPs fail to connect, inspect `dns_resolution_failed`, `ssrf_no_validated_ips`, and `ssrf_all_pinned_connects_failed` (in `DEBUG`, `ssrf_policy_loaded`, `ssrf_policy_configured`, `dns_cache_hit`, `dns_cache_miss`, `dns_single_flight_coalesced`, `dns_cache_expired`, `dns_cache_evicted`, and `ssrf_pinned_connect_failed` trace policy resolution, DNS caching, and per-IP failover attempts).
 
-### 2. Disallowed URL Schemes (`fallback_reason="ssrf_blocked"`)
-- **Symptom**: `fallback_reason="ssrf_blocked"` is returned for links using schemes like `ftp://`, `file://`, or `data:`.
-- **Cause**: The system explicitly restricts network requests to `http` and `https`.
-- **Resolution**: Only standard web URLs are permitted for link preview extraction. Users can still complete item creation manually.
+### 2. Disallowed URL Schemes or Invalid SSRF Startup Config (`fallback_reason="ssrf_blocked"` / `ValidationError`)
 
-### 3. Response Body Exceeds 2 MB (`fallback_reason="response_too_large"`)
+- **Symptom**: `fallback_reason="ssrf_blocked"` is returned for links using schemes like `ftp://`, `file://`, `data:`, or `http://` when `WISHENKA_SSRF_ALLOWED_SCHEMES` is restricted to `https`; or application startup / `Settings()` raises `pydantic.ValidationError` on invalid `WISHENKA_SSRF_*` values.
+- **Cause**: Runtime requests are checked against `SSRFPolicy.allowed_schemes` (default `("http", "https")`, configurable via `WISHENKA_SSRF_ALLOWED_SCHEMES`). Startup configuration fails fast if `WISHENKA_SSRF_MAX_RESPONSE_BYTES` is non-integer/`bool`/`float`/`< 1`, if `WISHENKA_SSRF_ALLOWED_SCHEMES` is empty/malformed/outside `{"http", "https"}`, or if `WISHENKA_SSRF_FORBIDDEN_CIDRS` contains blank strings, trailing empty comma items (e.g. `"10.0.0.0/8, "`), or invalid CIDR blocks.
+- **Resolution**: Check `item_preview_invalid_scheme` / `ssrf_blocked` (`reason="invalid_scheme"`, `allowed_schemes`) and `wishenka.web` startup `ssrf_allowed_schemes` metadata. Ensure `WISHENKA_SSRF_ALLOWED_SCHEMES` and `WISHENKA_SSRF_FORBIDDEN_CIDRS` are either valid JSON string arrays (e.g. `'["https"]'`) or comma-separated strings without trailing commas (e.g. `'https'` or `'http, https'`). Users can still complete item creation manually when a URL falls back.
+
+### 3. Response Body Exceeds Configured Size Limit (`fallback_reason="response_too_large"`)
+
 - **Symptom**: `ItemPreviewDTO` returns with `is_fallback=True` and `fallback_reason="response_too_large"`.
-- **Cause**: The target URL serves a response body larger than 2,097,152 bytes (e.g. a high-resolution media file, firmware archive, or bloated uncompressed HTML document).
-- **Resolution**: Check the server logs for `event="payload_size_violation"`. The log indicates whether it was rejected early via `content_length_exceeded` or stopped during streaming (`stream_chunk_overflow`). The preview degrades gracefully to manual entry, protecting the worker from OOM failures.
+- **Cause**: The target URL serves a response body larger than the configured ceiling (`ssrf_max_response_bytes` / `WISHENKA_SSRF_MAX_RESPONSE_BYTES`, defaulting to 2 MB / `2,097,152` bytes, or an explicit `UrlMetadataService(max_bytes=...)` override).
+- **Resolution**: Check server logs for `event="payload_size_violation"` and `event="item_preview_response_too_large"` (`max_allowed`, `content_length` / `streamed_bytes`, and `reason="content_length_exceeded"` or `"stream_chunk_overflow"`). Adjust `WISHENKA_SSRF_MAX_RESPONSE_BYTES` if larger legitimate HTML documents must be parsed; otherwise the preview degrades gracefully to manual entry, protecting the worker from OOM failures. To verify all configurable SSRF settings, env formats, fail-fast validation, cache revalidation, and observability contracts offline, run `.venv/bin/pytest tests/test_ssrf_configurable_settings.py` (uses `pytestmark = pytest.mark.timeout(30)` in [`tests/test_ssrf_configurable_settings.py`](file:///home/src/tests/test_ssrf_configurable_settings.py#L53)).
 
 ### 4. Anti-Bot Challenge Fallbacks (Cloudflare / Qrator / WAF / Turnstile / SmartCaptcha / Avito Firewall / 200 OK & 403 / 503)
 - **Symptom**: `ItemPreviewDTO` returns with `is_fallback=True` and `fallback_reason="anti_bot_challenge"`.

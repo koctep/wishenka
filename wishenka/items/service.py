@@ -6,6 +6,7 @@ import time
 
 import httpx
 
+from wishenka.config import Settings
 from wishenka.items.classifier import UniversalInputClassifier
 from wishenka.items.exceptions import (
     CassetteError,
@@ -26,6 +27,13 @@ from wishenka.items.models import InputType
 from wishenka.items.parser import HtmlMetadataExtractor, derive_store_name, extract_domain
 from wishenka.items.preview_cache import PreviewCache
 from wishenka.items.schemas import ItemPreviewDTO
+from wishenka.items.ssrf import (
+    SSRFPolicy,
+    _use_ssrf_policy,
+    log_ssrf_policy_event,
+    redact_url_credentials,
+    resolve_ssrf_policy,
+)
 
 logger = logging.getLogger("wishenka.items")
 
@@ -65,9 +73,28 @@ class ItemPreviewService:
         client: httpx.AsyncClient | None = None,
         cache: PreviewCache | None = None,
         routes: PreviewTransportConfig | None = None,
+        *,
+        settings: Settings | None = None,
+        policy: SSRFPolicy | None = None,
     ) -> None:
+        if settings is not None or policy is not None:
+            resolved_policy = resolve_ssrf_policy(settings=settings, policy=policy)
+        elif url_metadata_service is not None and isinstance(
+            getattr(url_metadata_service, "policy", None), SSRFPolicy
+        ):
+            resolved_policy = url_metadata_service.policy
+        else:
+            resolved_policy = resolve_ssrf_policy()
+        self.policy = resolved_policy
+        if settings is not None or policy is not None:
+            log_ssrf_policy_event(
+                event="ssrf_policy_configured",
+                component="ItemPreviewService",
+                policy=self.policy,
+                source="settings" if settings is not None else "policy",
+            )
         self.url_metadata_service = url_metadata_service or UrlMetadataService(
-            timeout=DEFAULT_TIMEOUT
+            timeout=DEFAULT_TIMEOUT, policy=self.policy
         )
         self.client = client
         self.cache = cache
@@ -112,8 +139,9 @@ class ItemPreviewService:
             )
 
         target_url = clean_url(classification.normalized_url or raw_input)
-        url_domain = extract_domain(target_url)
-        store_name = derive_store_name(target_url)
+        safe_target_url = redact_url_credentials(target_url)
+        url_domain = extract_domain(safe_target_url)
+        store_name = derive_store_name(safe_target_url)
 
         cache_key = f"{self.routes.cache_identity}:{target_url}" if self.routes else target_url
         cacheable = client is None and routes is None and self.client is None
@@ -122,10 +150,21 @@ class ItemPreviewService:
             cached = self.cache.get(cache_key) if self.cache and cacheable else None
             if cached is not None:
                 try:
-                    for destination in cached.urls:
-                        await validate_url(destination)
+                    with _use_ssrf_policy(self.policy):
+                        for destination in cached.urls:
+                            await validate_url(destination)
                 except Exception:
                     self.cache.entries.pop(cache_key, None)  # type: ignore[union-attr]
+                    logger.debug(
+                        "Preview cache entry evicted after SSRF policy revalidation failure "
+                        "for domain %s",
+                        url_domain,
+                        extra={
+                            "event": "preview_cache_revalidation_evicted",
+                            "url_domain": url_domain,
+                            "destination_count": len(cached.urls),
+                        },
+                    )
                     raise
                 logger.debug(
                     "Preview cache lookup: hit",
@@ -169,11 +208,12 @@ class ItemPreviewService:
                     exc,
                     extra={
                         "event": "item_preview_ssrf_blocked",
-                        "url": target_url,
+                        "url": safe_target_url,
                         "url_domain": url_domain,
                         "host": exc.host,
                         "ip": exc.ip_address,
                         "reason": exc.reason,
+                        "forbidden_cidr_count": len(self.policy.forbidden_networks),
                         "input_type": classification.input_type.value,
                         "duration_ms": duration_ms,
                         "fallback_reason": "ssrf_blocked",
@@ -192,13 +232,14 @@ class ItemPreviewService:
             logger.warning(
                 "Invalid URL scheme '%s' for %s: %s",
                 exc.scheme,
-                target_url,
+                safe_target_url,
                 exc,
                 extra={
                     "event": "item_preview_invalid_scheme",
-                    "url": target_url,
+                    "url": safe_target_url,
                     "url_domain": url_domain,
                     "scheme": exc.scheme,
+                    "allowed_schemes": sorted(self.policy.allowed_schemes),
                     "reason": "invalid_scheme",
                     "input_type": classification.input_type.value,
                     "duration_ms": duration_ms,
@@ -223,7 +264,7 @@ class ItemPreviewService:
                 exc,
                 extra={
                     "event": "item_preview_response_too_large",
-                    "url": target_url,
+                    "url": safe_target_url,
                     "url_domain": url_domain,
                     "content_length": exc.content_length,
                     "max_allowed": exc.max_allowed,

@@ -67,6 +67,7 @@ from wishenka.items.service import ItemPreviewService
 from wishenka.items.ssrf import (
     ALLOWED_SCHEMES,
     MAX_RESPONSE_BYTES,
+    SSRFPolicy,
     SSRFSafeTransport,
     is_ip_safe,
     resolve_and_validate_host,
@@ -107,6 +108,7 @@ __all__ = [
     "ResponseBodyTooLargeError",
     "SSRFBlockedError",
     "SSRFError",
+    "SSRFPolicy",
     "SSRFSafeTransport",
     "UniversalInputClassifier",
     "UpdateItemDTO",

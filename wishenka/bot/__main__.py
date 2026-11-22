@@ -82,7 +82,7 @@ async def run() -> None:
                 settings.mini_app_url,
                 store,
                 wishlist_store,
-                ItemPreviewService(),
+                ItemPreviewService(settings=settings),
                 support_chat_id=settings.support_chat_id,
                 support_admin_ids=settings.support_admin_ids,
                 support_session_ttl_seconds=settings.support_session_ttl_seconds,

@@ -6,7 +6,7 @@ import logging
 import weakref
 from collections.abc import Mapping
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from types import MappingProxyType
 from typing import Any
@@ -14,6 +14,7 @@ from uuid import uuid4
 
 import httpx
 
+from wishenka.config import Settings
 from wishenka.items.encoding import decode_html
 from wishenka.items.exceptions import (
     CassetteError,
@@ -24,10 +25,15 @@ from wishenka.items.exceptions import (
 from wishenka.items.models import ExtractedMetadata
 from wishenka.items.parser import HtmlMetadataExtractor, derive_store_name
 from wishenka.items.ssrf import (
-    ALLOWED_SCHEMES,
-    MAX_RESPONSE_BYTES,
+    SSRFPolicy,
     SSRFSafeTransport,
+    _use_ssrf_policy,
+    log_ssrf_credentials_blocked,
+    log_ssrf_invalid_scheme,
+    log_ssrf_policy_event,
+    redact_url_credentials,
     resolve_and_validate_host,
+    resolve_ssrf_policy,
 )
 
 logger = logging.getLogger("wishenka.items")
@@ -60,18 +66,36 @@ fetch_provenance: ContextVar[tuple[tuple[str, httpx.Headers], ...]] = ContextVar
 )
 
 
-async def validate_url(url: str) -> None:
+async def validate_url(
+    url: str,
+    *,
+    policy: SSRFPolicy | None = None,
+    settings: Settings | None = None,
+) -> None:
     """Validate a URL and its current DNS destination before fetch or cache reuse."""
+    active_policy = resolve_ssrf_policy(settings=settings, policy=policy)
     parsed = httpx.URL(url)
-    if parsed.scheme.lower() not in ALLOWED_SCHEMES:
-        raise InvalidUrlSchemeError("Invalid URL scheme", scheme=parsed.scheme)
     if parsed.username or parsed.password:
         from wishenka.items.exceptions import SSRFBlockedError
 
+        log_ssrf_credentials_blocked(host=parsed.host)
         raise SSRFBlockedError("URL credentials are forbidden", reason="credentials")
-    await resolve_and_validate_host(
-        parsed.host, parsed.port or (443 if parsed.scheme == "https" else 80)
-    )
+    scheme = parsed.scheme.lower()
+    if scheme not in active_policy.allowed_schemes:
+        allowed_display = ", ".join(sorted(active_policy.allowed_schemes))
+        log_ssrf_invalid_scheme(
+            url=url,
+            host=parsed.host,
+            scheme=scheme,
+            allowed_schemes=active_policy.allowed_schemes,
+        )
+        raise InvalidUrlSchemeError(
+            f"URL scheme '{scheme}' is not allowed; permitted schemes: {allowed_display}",
+            scheme=parsed.scheme,
+        )
+    port = parsed.port or (443 if scheme == "https" else 80)
+    with _use_ssrf_policy(active_policy):
+        await resolve_and_validate_host(parsed.host, port)
 
 
 async def _validate_request(request: httpx.Request) -> None:
@@ -80,6 +104,7 @@ async def _validate_request(request: httpx.Request) -> None:
     if "authorization" in request.headers:
         from wishenka.items.exceptions import SSRFBlockedError
 
+        log_ssrf_credentials_blocked(host=request.url.host)
         raise SSRFBlockedError("Authorization is forbidden", reason="credentials")
     await validate_url(str(request.url))
 
@@ -189,9 +214,21 @@ def deny_route() -> PreviewRoute:
     return _issue_route(_DenyTransport())
 
 
-def safe_direct_route(*, limits: httpx.Limits | None = None) -> PreviewRoute:
+def safe_direct_route(
+    *,
+    limits: httpx.Limits | None = None,
+    settings: Settings | None = None,
+    policy: SSRFPolicy | None = None,
+) -> PreviewRoute:
     """Construct an owned pinned-IP direct route without proxy configuration."""
-    return _issue_route(SSRFSafeTransport(**({"limits": limits} if limits is not None else {})))
+    kwargs: dict[str, Any] = {}
+    if limits is not None:
+        kwargs["limits"] = limits
+    if settings is not None:
+        kwargs["settings"] = settings
+    if policy is not None:
+        kwargs["policy"] = policy
+    return _issue_route(SSRFSafeTransport(**kwargs))
 
 
 @dataclass(frozen=True, init=False)
@@ -244,11 +281,35 @@ class UrlMetadataService:
 
     def __init__(
         self,
-        max_bytes: int = MAX_RESPONSE_BYTES,
+        max_bytes: int | None = None,
         timeout: httpx.Timeout = DEFAULT_TIMEOUT,
+        *,
+        settings: Settings | None = None,
+        policy: SSRFPolicy | None = None,
     ) -> None:
-        self.max_bytes = max_bytes
+        base_policy = resolve_ssrf_policy(settings=settings, policy=policy)
+        if max_bytes is not None:
+            if isinstance(max_bytes, bool) or max_bytes < 1:
+                raise ValueError("max_bytes must be >= 1")
+            effective_policy = replace(base_policy, max_response_bytes=max_bytes)
+        else:
+            effective_policy = base_policy
+        self.policy = effective_policy
+        self.max_bytes = effective_policy.max_response_bytes
         self.timeout = timeout
+        if settings is not None or policy is not None or max_bytes is not None:
+            if max_bytes is not None:
+                source = "max_bytes_override"
+            elif settings is not None:
+                source = "settings"
+            else:
+                source = "policy"
+            log_ssrf_policy_event(
+                event="ssrf_policy_configured",
+                component="UrlMetadataService",
+                policy=self.policy,
+                source=source,
+            )
 
     async def _fetch_html(
         self,
@@ -262,7 +323,7 @@ class UrlMetadataService:
             Tuple of (html_text, final_effective_url).
 
         Raises:
-            InvalidUrlSchemeError: If URL scheme is not http or https.
+            InvalidUrlSchemeError: If URL scheme is disallowed by the active SSRF policy.
             SSRFBlockedError: If destination or redirect target is unsafe.
             ResponseBodyTooLargeError: If payload exceeds max_bytes.
             httpx.HTTPError: On standard network or HTTP protocol errors.
@@ -271,22 +332,19 @@ class UrlMetadataService:
         if parsed.username or parsed.password:
             from wishenka.items.exceptions import SSRFBlockedError
 
+            log_ssrf_credentials_blocked(host=parsed.host)
             raise SSRFBlockedError("URL credentials are forbidden", reason="credentials")
         scheme = parsed.scheme.lower()
-        if scheme not in ALLOWED_SCHEMES:
-            logger.warning(
-                "Invalid URL scheme '%s' for '%s'",
-                scheme,
-                url,
-                extra={
-                    "event": "ssrf_blocked",
-                    "url": url,
-                    "scheme": scheme,
-                    "reason": "invalid_scheme",
-                },
+        if scheme not in self.policy.allowed_schemes:
+            allowed_display = ", ".join(sorted(self.policy.allowed_schemes))
+            log_ssrf_invalid_scheme(
+                url=url,
+                host=parsed.host,
+                scheme=scheme,
+                allowed_schemes=self.policy.allowed_schemes,
             )
             raise InvalidUrlSchemeError(
-                f"URL scheme '{scheme}' is not allowed; only http and https are permitted",
+                f"URL scheme '{scheme}' is not allowed; permitted schemes: {allowed_display}",
                 scheme=scheme,
             )
 
@@ -297,34 +355,37 @@ class UrlMetadataService:
 
         host = parsed.host
         port = parsed.port or (443 if scheme == "https" else 80)
-        await resolve_and_validate_host(host, port)
+        with _use_ssrf_policy(self.policy):
+            await resolve_and_validate_host(host, port)
 
-        owned_route = safe_direct_route() if routes is None else None
-        if routes is None:
-            assert owned_route is not None
-            selected = PreviewTransportConfig(default=owned_route, mounts={})
-        else:
-            selected = routes
-        try:
-            async with httpx.AsyncClient(
-                transport=_BorrowedTransport(selected.default),
-                mounts={key: _BorrowedTransport(route) for key, route in selected.mounts.items()},
-                timeout=self.timeout,
-                cookies=CookieJar(policy=RejectCookies()),
-                event_hooks={"request": [_validate_request]},
-                trust_env=False,
-            ) as preview_client:
-                return await self._stream_and_read(preview_client, url)
-        finally:
-            if owned_route is not None:
-                await owned_route.transport.aclose()
+            owned_route: PreviewRoute | None = None
+            if routes is None:
+                owned_route = safe_direct_route(policy=self.policy)
+                selected = PreviewTransportConfig(default=owned_route, mounts={})
+            else:
+                selected = routes
+            try:
+                async with httpx.AsyncClient(
+                    transport=_BorrowedTransport(selected.default),
+                    mounts={
+                        key: _BorrowedTransport(route) for key, route in selected.mounts.items()
+                    },
+                    timeout=self.timeout,
+                    cookies=CookieJar(policy=RejectCookies()),
+                    event_hooks={"request": [_validate_request]},
+                    trust_env=False,
+                ) as preview_client:
+                    return await self._stream_and_read(preview_client, url)
+            finally:
+                if owned_route is not None:
+                    await owned_route.transport.aclose()
 
     async def _stream_and_read(
         self,
         client: httpx.AsyncClient,
         url: str,
     ) -> tuple[str, str]:
-        """Stream response and enforce 2MB limit via Content-Length and chunk inspection."""
+        """Stream response and enforce max_bytes limit via Content-Length and chunk inspection."""
         async with client.stream(
             "GET",
             url,
@@ -336,15 +397,16 @@ class UrlMetadataService:
                 with contextlib.suppress(ValueError, TypeError):
                     cl_val = int(cl_header)
                     if cl_val > self.max_bytes:
+                        safe_url = redact_url_credentials(url)
                         logger.warning(
                             "Payload size violation: "
                             "Content-Length %d exceeds limit of %d bytes for %s",
                             cl_val,
                             self.max_bytes,
-                            url,
+                            safe_url,
                             extra={
                                 "event": "payload_size_violation",
-                                "url": url,
+                                "url": safe_url,
                                 "content_length": cl_val,
                                 "max_allowed": self.max_bytes,
                                 "reason": "content_length_exceeded",
@@ -361,15 +423,16 @@ class UrlMetadataService:
             async for chunk in response.aiter_bytes():
                 total_bytes += len(chunk)
                 if total_bytes > self.max_bytes:
+                    safe_url = redact_url_credentials(url)
                     logger.warning(
                         "Payload size violation: "
                         "streaming bytes %d exceeded limit of %d bytes for %s",
                         total_bytes,
                         self.max_bytes,
-                        url,
+                        safe_url,
                         extra={
                             "event": "payload_size_violation",
-                            "url": url,
+                            "url": safe_url,
                             "streamed_bytes": total_bytes,
                             "max_allowed": self.max_bytes,
                             "reason": "stream_chunk_overflow",
@@ -444,11 +507,12 @@ class UrlMetadataService:
         except CassetteError:
             raise
         except Exception as exc:
+            safe_url = redact_url_credentials(url)
             logger.warning(
                 "UrlMetadataService fetch_and_extract failed for %s: %s; returning fallback",
-                url,
+                safe_url,
                 exc,
-                extra={"event": "fetch_and_extract_fallback", "url": url, "error": str(exc)},
+                extra={"event": "fetch_and_extract_fallback", "url": safe_url, "error": str(exc)},
             )
             store_name = derive_store_name(url)
             return ExtractedMetadata(store_name=store_name)

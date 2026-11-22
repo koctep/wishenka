@@ -182,12 +182,14 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         limits = httpx.Limits(max_connections=20, max_keepalive_connections=10, keepalive_expiry=5)
-        route = safe_direct_route(limits=limits)
+        route = safe_direct_route(limits=limits, settings=settings)
         cache: PreviewCache | None = None
         try:
             cache = PreviewCache()
             app.state.item_preview_service = ItemPreviewService(
-                routes=PreviewTransportConfig(default=route, mounts={}), cache=cache
+                routes=PreviewTransportConfig(default=route, mounts={}),
+                cache=cache,
+                settings=settings,
             )
             await app.state.wishlist_store.initialize()
             await app.state.user_store.initialize()
@@ -211,6 +213,9 @@ def create_app(
                     "environment": settings.environment,
                     "debug": settings.debug,
                     "log_level": settings.log_level,
+                    "ssrf_max_response_bytes": settings.ssrf_max_response_bytes,
+                    "ssrf_allowed_schemes": list(settings.ssrf_allowed_schemes),
+                    "ssrf_forbidden_cidr_count": len(settings.ssrf_forbidden_cidrs),
                 },
             )
             yield
