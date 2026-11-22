@@ -445,14 +445,6 @@ async def record_view(request: Request, wishlist_id: int, user: User) -> dict[st
 async def clear_history(request: Request, user: User) -> dict[str, Any]:
     async def action(service: WishlistService) -> dict[str, Any]:
         await service.clear_history(user)
-        logger.info(
-            "Viewing history cleared for user %s",
-            user.telegram_id,
-            extra={
-                "event": "view_history_cleared",
-                "user_id": user.telegram_id,
-            },
-        )
         return {"status": "cleared"}
 
     return await execute(request, action)

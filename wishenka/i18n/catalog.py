@@ -325,6 +325,18 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "miniapp.history.empty": "No viewing history yet",
         "miniapp.history.viewed_at": "Viewed: {date}",
         "miniapp.history.load_failed": "Could not load history",
+        "miniapp.history.empty_hint": "The section fills as you open wishlists",
+        "miniapp.history.open_home": "Go to my wishlists",
+        "miniapp.history.retry": "Retry",
+        "miniapp.history.just_now": "just now",
+        "miniapp.history.clear_confirm_title": "Clear viewing history?",
+        "miniapp.history.clear_confirm_body": (
+            "Entries to remove from your history: {count}. "
+            "Wishlists and favorites are not affected."
+        ),
+        "miniapp.history.clear_confirm_yes": "Yes, clear history",
+        "miniapp.history.clear_confirm_cancel": "Cancel",
+        "miniapp.history.clearing": "Clearing history...",
         "miniapp.wishlist_settings.heading": "Settings",
         "miniapp.wishlist_settings.subtitle": "Update the details of this wishlist.",
         "miniapp.wishlist_settings.hint_title": "A name people will recognize.",
@@ -931,6 +943,17 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "miniapp.history.empty": "История просмотров пока пуста",
         "miniapp.history.viewed_at": "Просмотрено: {date}",
         "miniapp.history.load_failed": "Не удалось загрузить историю",
+        "miniapp.history.empty_hint": "Раздел заполняется, когда вы открываете вишлисты",
+        "miniapp.history.open_home": "К моим вишлистам",
+        "miniapp.history.retry": "Повторить",
+        "miniapp.history.just_now": "только что",
+        "miniapp.history.clear_confirm_title": "Очистить историю просмотров?",
+        "miniapp.history.clear_confirm_body": (
+            "Записей будет удалено: {count}. Вишлисты и избранное не затрагиваются."
+        ),
+        "miniapp.history.clear_confirm_yes": "Да, очистить историю",
+        "miniapp.history.clear_confirm_cancel": "Отмена",
+        "miniapp.history.clearing": "Очищаем историю...",
         "miniapp.wishlist_settings.heading": "Настройки",
         "miniapp.wishlist_settings.subtitle": "Измените данные этого вишлиста.",
         "miniapp.wishlist_settings.hint_title": "Название, по которому узнают вишлист.",

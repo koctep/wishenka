@@ -765,23 +765,99 @@ collaborator membership:
 
 ### 8. Viewing History & Automated Tracking
 
-Viewing history allows users to re-access recently visited wishlists:
+#### Overview
+
+Viewing history lets users re-open recently visited wishlists. `showHistory()` (WISHENKA-292)
+renders a scannable card list with a readable last-viewed time, a one-tap Open action, and a
+deliberate, two-step "Clear history". The API contract is unchanged; the screen is client-side
+only (`wishenka/web/static/miniapp.js`, `wishenka/web/static/miniapp.css`).
 
 - **Automatic View Recording**: When an authenticated user opens any wishlist (`showList`), the
-  client dispatches an asynchronous background request `POST /api/history/{id}`.
-- **History View (`showHistory()`)**:
-  - Accessible via the "Viewing history" button in the home top navigation bar.
-  - Lists visited wishlists in reverse-chronological order, displaying the list title, relative or
-    localized visit timestamp (`Viewed: <date>`), and role badge (if applicable).
-  - An accessible "Clear history" button triggers `DELETE /api/history` to erase
-    all history entries.
-  - When history is empty, an accessible notice "No viewing history yet" is shown.
-- **Deduplication**: Re-visiting an already recorded wishlist updates its `viewed_at` timestamp
-  rather than appending a duplicate row.
-- **20-Entry Bound**: Viewing history is strictly bounded to at most 20 entries per user. When a
-  21st entry is added, the oldest entry is automatically pruned from persistence.
-- **Zero-Leak Guarantees**: History endpoints (`GET /api/history`) project only sanitized list
-  metadata and omit all reservation records and buyer details.
+  client dispatches a background `POST /api/history/{id}`.
+- **Deduplication**: Re-visiting a recorded wishlist updates `viewed_at`, no duplicate row.
+- **20-Entry Bound**: At most 20 entries per user; the oldest is pruned on the 21st.
+- **Zero-Leak Guarantees**: `GET /api/history` projects only sanitized list metadata and omits
+  reservation records and buyer details; the screen renders only title, time and role badge.
+- Entry point: the "Viewing history" button in the home top navigation.
+
+#### Architecture
+
+`showHistory()` renders a heading (`h1`, `tabindex="-1"`) and a
+`section[role="region"][aria-busy]`, then fills the section by state:
+
+| State | Section content | Hooks |
+| --- | --- | --- |
+| loading | `aria-busy="true"`, status `nav.loading`, no Clear | `section[aria-busy]` |
+| error | alert plus Retry, no Clear | `.history-error[role=alert]`, `.history-retry` |
+| empty | notice, hint, button to Home, no Clear | `.history-empty`, `.history-empty-action` |
+| list | `ul.history-list` of `li.history-card` plus footer | see Usage |
+| confirming | Clear replaced inline by confirmation group | `.history-confirm` |
+| clearing | group `aria-busy`, both buttons disabled | `.history-confirm[aria-busy]` |
+| clear-failed | alert inside the group, list kept, retry allowed | `.history-error` |
+
+- **Helpers**: `renderHistoryCard(item)`, `renderHistoryEmpty()`, `renderHistoryFooter(count)`
+  and `formatViewedAt(iso)`.
+- **Confirm flow** (`renderHistoryFooter`): the first click on `.history-clear` sends no request;
+  it swaps the button for `.history-confirm` and focuses Cancel (`.history-confirm-cancel`).
+  Cancel or `Escape` swaps Clear back and restores focus to it. `.history-confirm-yes` sends
+  exactly one `DELETE /api/history`; while it runs both buttons are disabled, repeated clicks and
+  Cancel are ignored (`clearing` guard). On failure the group stays with a
+  `miniapp.history.clear_failed` alert and the list is untouched. On success `showHistory()`
+  re-renders (empty state), status `miniapp.history.cleared` is announced, focus moves to `h1`.
+- **Time rendering** (`formatViewedAt`): under 60 s shows `miniapp.history.just_now`; under
+  7 days a relative `Intl.RelativeTimeFormat` string (minute, hour or day, `numeric: 'auto'`);
+  7 days or more an absolute `toLocaleString` (`dateStyle: medium`, `timeStyle: short`). The
+  locale is `activeLocale()` (`ru-RU` or `en-US`). Output is `<time datetime=ISO title=ABSOLUTE>`.
+  A missing or invalid `viewed_at` omits the `<time>` element (never "Invalid Date"). Without
+  `Intl.RelativeTimeFormat` the absolute form is used.
+- **Stale-render token**: module-level `historyRenderToken` is incremented per `showHistory()`
+  call. After each `await` the call returns if its token is no longer current, so a slow
+  response cannot overwrite a newer screen (navigation away, Retry, re-render after clear).
+- **Layout**: cards wrap and shrink at 320 px (no overflow, targets of at least 44 px). Clear is
+  a quiet secondary action below the list; the confirm button uses `btn-danger`. `.history-item`
+  is kept on cards for the shared row rule; it is no longer shared with the home card rule.
+
+#### Usage
+
+- **Endpoints** (unchanged): `GET /api/history` (up to 20, newest first), `POST /api/history/{id}`
+  (404 for missing or deleted lists), `DELETE /api/history` (clears the caller's history only).
+  Service details: [wishlists.md](wishlists.md#get_history--clear_history).
+- **Element hooks** used by `tests/test_history_screen_browser.py`: `ul.history-list`,
+  `li.history-card`, `h2.history-title`, `.history-meta`, `time.history-time[datetime][title]`,
+  `.badge` (role), `.history-open` (aria-label `miniapp.home.open_wishlist_named`),
+  `.history-footer`, `.history-clear`, `.history-confirm`, `.history-confirm-title`,
+  `.history-confirm-cancel`, `.history-confirm-yes`, `.history-error`, `.history-retry`,
+  `.history-empty`, `.history-empty-action`. Renaming any of them breaks the tests.
+- **i18n keys** (`miniapp.history.*`, RU and EN): `title`, `clear`, `cleared`, `clear_failed`,
+  `empty`, `empty_hint`, `open_home`, `viewed_at`, `load_failed`, `retry`, `just_now`,
+  `clear_confirm_title`, `clear_confirm_body` (`{count}`), `clear_confirm_yes`,
+  `clear_confirm_cancel`, `clearing`. Family notes: [i18n.md](i18n.md#architecture).
+- **Known access-model limitation (pre-existing, tracked)**: `POST /api/history/{id}` and
+  `POST /api/favorites/{id}` check only that the list exists and is not deleted, not membership,
+  so a user can record a guessable id and read its title and event fields back from
+  `GET /api/history`. The redesign changed no contract and renders no extra fields. Decision and
+  options: [60-tech-debt.md](../../ai-tasks/WISHENKA-292/60-tech-debt.md); Jira
+  WISHENKA-303 (history) and WISHENKA-302 (favorites).
+
+#### Configuration
+
+None: no settings, environment variables or schema changes.
+
+#### Troubleshooting
+
+- **Empty vs error**: the empty state (`.history-empty`, no alert) means `GET /api/history`
+  returned `[]` (nothing recorded, cleared, or lists deleted). The error state
+  (`.history-error` with Retry) means the request failed; check the request log for
+  `GET /api/history` and the event `view_history_listed` (`count`).
+- **Entry missing after opening a list**: the background `POST /api/history/{id}` failed or got
+  `404` (deleted list); look for `view_history_recorded`.
+- **Clear stuck in "clearing"**: the `DELETE` never settled (slow or dropped connection). The
+  buttons stay disabled by design to prevent duplicates; reload the screen. A failed request
+  shows `miniapp.history.clear_failed` and re-enables the buttons.
+- **Reading `view_history_cleared`**: emitted exactly once per `DELETE /api/history`, by
+  `WishlistService.clear_history` (the route no longer logs it). Fields: `user_id`,
+  `removed_count` (rows removed; `0` when already empty). Two events per request mean the
+  route-level logger was reintroduced.
 
 ---
 

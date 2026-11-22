@@ -167,19 +167,18 @@ def test_view_history_lifecycle_observability(
 
     # 3. Clear history -> view_history_cleared
     caplog.clear()
-    with caplog.at_level(logging.INFO, logger="wishenka.web.wishlists"):
+    with (
+        caplog.at_level(logging.INFO, logger="wishenka.web.wishlists"),
+        caplog.at_level(logging.INFO, logger="wishenka.wishlists"),
+    ):
         resp = client.delete("/api/history", headers=headers)
         assert resp.status_code == 200
 
-    clear_records = [
-        r
-        for r in caplog.records
-        if r.name == "wishenka.web.wishlists"
-        and r.levelname == "INFO"
-        and getattr(r, "event", None) == "view_history_cleared"
-    ]
-    assert len(clear_records) >= 1
-    assert getattr(clear_records[0], "user_id", None) == 202
+    cleared = [r for r in caplog.records if getattr(r, "event", None) == "view_history_cleared"]
+    assert len(cleared) == 1
+    assert getattr(cleared[0], "user_id", None) == 202
+    assert getattr(cleared[0], "removed_count", None) == 1
+    assert "History Obs Wishlist" not in cleared[0].getMessage()
 
 
 def test_warning_on_self_favoriting_and_deleted_wishlists(

@@ -3313,13 +3313,17 @@ class WishlistService:
 
     async def clear_history(self, user: AuthenticatedUser) -> None:
         """Clear all viewing history entries for user."""
+        before = len(self._view_history)
         self._view_history = [e for e in self._view_history if e.user_id != user.telegram_id]
+        removed = before - len(self._view_history)
         logger.info(
-            "Viewing history cleared for user %s",
+            "Viewing history cleared for user %s (removed=%s)",
             user.telegram_id,
+            removed,
             extra={
                 "event": "view_history_cleared",
                 "user_id": user.telegram_id,
+                "removed_count": removed,
             },
         )
 

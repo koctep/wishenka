@@ -887,7 +887,10 @@ async def clear_history(
 
 - `get_history`: Returns up to `limit` entries as `(Wishlist, datetime)` tuples in reverse
   chronological order of viewing. Excludes soft-deleted wishlists.
-- `clear_history`: Removes all viewing history entries for the authenticated user.
+- `clear_history`: Removes all viewing history entries for the authenticated user and logs
+  `view_history_cleared` with `user_id` and `removed_count`. This is the only emitter: the
+  `DELETE /api/history` route does not log it (WISHENKA-292). Screen:
+  [miniapp.md](miniapp.md#8-viewing-history--automated-tracking).
 
 ---
 
@@ -1495,7 +1498,7 @@ Settings in `wishenka.config.Settings` (prefixed with `WISHENKA_` in environment
 | `favorite_deleted_wishlist_denied` | `WARNING` | Deleted list blocked | `wishlist_id`, `user_id` |
 | `view_history_listed` | `INFO` | History fetched | `user_id`, `count` |
 | `view_history_recorded` | `INFO` | View recorded | `wishlist_id`, `user_id` |
-| `view_history_cleared` | `INFO` | History cleared | `user_id` |
+| `view_history_cleared` | `INFO` | History cleared (once per delete) | `user_id`, `removed_count` |
 | `wishlist_store_read` | `INFO` | State read | `wishlists_count` |
 | `wishlist_store_write` | `INFO` | Changes committed | `wishlists_count` |
 | `wishlist_repo_mutation` | `INFO` | Repo mutation | `entity`, `operation`, `count` |

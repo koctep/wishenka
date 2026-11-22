@@ -201,46 +201,141 @@ function wishlistCard(list, onClick, options = {}) {
   card.append(actions);
   return card;
 }
+let historyRenderToken = 0;
+function formatViewedAt(iso) {
+  const moment = iso ? new Date(iso) : null;
+  if (!moment || isNaN(moment.getTime())) return null;
+  const tag = activeLocale() === 'ru' ? 'ru-RU' : 'en-US';
+  const absolute = moment.toLocaleString(tag, {dateStyle: 'medium', timeStyle: 'short'});
+  const seconds = Math.max(0, (Date.now() - moment.getTime()) / 1000);
+  const units = [['minute', 60], ['hour', 3600], ['day', 86400]];
+  let text = absolute;
+  if (seconds < 60) {
+    text = t('miniapp.history.just_now');
+  } else if (seconds < 7 * 86400 && typeof Intl.RelativeTimeFormat === 'function') {
+    const [unit, size] = units.filter(([, s]) => seconds >= s).pop();
+    text = new Intl.RelativeTimeFormat(tag, {numeric: 'auto'})
+      .format(-Math.floor(seconds / size), unit);
+  }
+  return {text, absolute, iso: moment.toISOString()};
+}
+function renderHistoryCard(item) {
+  const name = item.name || t('miniapp.common.untitled_wishlist');
+  const card = node('li', '', {class: 'history-card history-item'});
+  const main = node('div', '', {class: 'history-card-main'});
+  const meta = node('p', '', {class: 'history-meta'});
+  const viewed = formatViewedAt(item.viewed_at);
+  if (viewed) {
+    meta.append(node('time', t('miniapp.history.viewed_at', {date: viewed.text}), {
+      class: 'history-time', datetime: viewed.iso, title: viewed.absolute
+    }));
+  }
+  if (item.role) meta.append(renderBadge(item.role));
+  main.append(node('h2', name, {class: 'history-title'}), meta);
+  const open = button(t('miniapp.home.open_wishlist'), () => showList(item.id), 'history-open');
+  open.setAttribute('aria-label', t('miniapp.home.open_wishlist_named', {name}));
+  card.append(main, open);
+  return card;
+}
+function renderHistoryEmpty() {
+  const box = node('div', '', {class: 'empty-state history-empty'});
+  box.append(
+    node('p', t('miniapp.history.empty'), {class: 'empty-notice'}),
+    node('p', t('miniapp.history.empty_hint'), {class: 'empty-hint'}),
+    button(t('miniapp.history.open_home'), showHome, 'history-empty-action')
+  );
+  return box;
+}
+function renderHistoryFooter(count) {
+  const footer = node('div', '', {class: 'history-footer'});
+  let clearing = false;
+  const clearBtn = button(t('miniapp.history.clear'), () => openConfirm(), 'history-clear');
+  const cancelBtn = button(
+    t('miniapp.history.clear_confirm_cancel'), () => closeConfirm(), 'history-confirm-cancel'
+  );
+  const yesBtn = button(
+    t('miniapp.history.clear_confirm_yes'), () => confirmClear(), 'history-confirm-yes btn-danger'
+  );
+  const failure = node('p', '', {class: 'history-error', role: 'alert'});
+  const actions = node('div', '', {class: 'history-confirm-actions'});
+  actions.append(cancelBtn, yesBtn);
+  const group = node('div', '', {class: 'history-confirm', role: 'group'});
+  group.append(
+    node('p', t('miniapp.history.clear_confirm_title'), {class: 'history-confirm-title'}),
+    node('p', t('miniapp.history.clear_confirm_body', {count}), {class: 'empty-hint'}),
+    actions
+  );
+  group.addEventListener('keydown', ev => { if (ev.key === 'Escape') closeConfirm(); });
+  function openConfirm() {
+    clearBtn.replaceWith(group);
+    cancelBtn.focus();
+  }
+  function closeConfirm() {
+    if (clearing) return;
+    failure.remove();
+    group.replaceWith(clearBtn);
+    clearBtn.focus();
+  }
+  async function confirmClear() {
+    if (clearing) return;
+    clearing = true;
+    failure.remove();
+    cancelBtn.disabled = yesBtn.disabled = true;
+    group.setAttribute('aria-busy', 'true');
+    status(t('miniapp.history.clearing'));
+    try {
+      await api('/api/history', {method: 'DELETE'});
+    } catch (_) {
+      clearing = false;
+      cancelBtn.disabled = yesBtn.disabled = false;
+      group.removeAttribute('aria-busy');
+      status('');
+      failure.textContent = t('miniapp.history.clear_failed');
+      group.insertBefore(failure, actions);
+      return;
+    }
+    await showHistory();
+    status(t('miniapp.history.cleared'));
+    root.querySelector('h1')?.focus();
+  }
+  footer.append(clearBtn);
+  return footer;
+}
 async function showHistory() {
+  const token = ++historyRenderToken;
   const historyTitle = t('miniapp.history.title');
+  const section = node('section', '', {
+    'aria-label': historyTitle, role: 'region', 'aria-busy': 'true'
+  });
   root.replaceChildren(
     button(t('nav.back'), showHome),
-    node('h1', historyTitle)
+    node('h1', historyTitle, {tabindex: '-1'}),
+    section
   );
   status(t('nav.loading'));
+  let history;
   try {
-    const history = await api('/api/history');
-    if (history.length > 0) {
-      root.append(button(t('miniapp.history.clear'), async () => {
-        try {
-          await api('/api/history', {method: 'DELETE'});
-          await showHistory();
-          status(t('miniapp.history.cleared'));
-        } catch (_) { status(t('miniapp.history.clear_failed')); }
-      }, 'btn-danger'));
-    }
-    const historySection = node('section', '', {'aria-label': historyTitle, role: 'region'});
-    if (history.length === 0) {
-      historySection.append(node('p', t('miniapp.history.empty')));
-    } else {
-      history.forEach(item => {
-        const row = node('div', '', {class: 'history-item'});
-        const title = item.name || t('miniapp.common.untitled_wishlist');
-        row.append(button(title, () => showList(item.id)));
-        if (item.viewed_at) {
-          const dateStr = formatDateTime(item.viewed_at);
-          const viewedLabel = ` ${t('miniapp.history.viewed_at', {date: dateStr})} `;
-          row.append(node('span', viewedLabel, {class: 'history-time'}));
-        }
-        if (item.role) {
-          row.append(renderBadge(item.role));
-        }
-        historySection.append(row);
-      });
-    }
-    root.append(historySection);
+    history = await api('/api/history');
+  } catch (_) {
+    if (token !== historyRenderToken) return;
+    section.removeAttribute('aria-busy');
     status('');
-  } catch (_) { status(t('miniapp.history.load_failed')); }
+    section.append(
+      node('p', t('miniapp.history.load_failed'), {class: 'history-error', role: 'alert'}),
+      button(t('miniapp.history.retry'), showHistory, 'history-retry')
+    );
+    return;
+  }
+  if (token !== historyRenderToken) return;
+  section.setAttribute('aria-busy', 'false');
+  if (history.length === 0) {
+    section.append(renderHistoryEmpty());
+  } else {
+    const list = node('ul', '', {class: 'history-list'});
+    history.forEach(item => list.append(renderHistoryCard(item)));
+    section.append(list, renderHistoryFooter(history.length));
+  }
+  status('');
 }
 async function showHome() {
   root.replaceChildren(

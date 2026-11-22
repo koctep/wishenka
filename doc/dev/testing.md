@@ -523,6 +523,26 @@ make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_personal_settings_browser.py -q'
 make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_personal_settings_observability.py -q'
 ```
 
+### Тесты экрана истории просмотров (WISHENKA-292)
+
+Архитектура, состояния и селекторы:
+[miniapp.md](miniapp.md#8-viewing-history--automated-tracking).
+
+- **`tests/test_history_screen_browser.py`** (32 теста, настоящий Chromium через CDP, реальный
+  сервер; подмена `fetch` на странице для отказов, задержек и фиксированных времён): карточки
+  и порядок, открытие записи, относительное и абсолютное время по локали, двухшаговое
+  подтверждение очистки (Cancel, Escape и фокус, ровно один `DELETE`, состояние clearing,
+  отказ и повтор), пустое состояние, ошибка загрузки и Retry, `aria-busy`, 320 px без
+  переполнения, клавиатура и заголовки; 5 контрольных тестов `test_control_*` (лимит 20,
+  удалённый список, область очистки, приватность).
+- **`tests/test_wishlist_sections_observability.py`** (`caplog`): жизненный цикл истории
+  проверяет ровно одно событие `view_history_cleared` с `removed_count`.
+
+```bash
+make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_history_screen_browser.py -q'
+make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_wishlist_sections_observability.py -q'
+```
+
 ### Изолированная диагностика поддержки и единый principal приватного бота (WISHENKA-182)
 
 Модуль `tests/test_wishenka_182_repro.py` (`pytestmark = pytest.mark.timeout(30)`, 4 теста: 3 async, 1 sync)
