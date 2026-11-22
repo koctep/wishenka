@@ -88,6 +88,36 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
             "Your account has been permanently deleted and all sessions have been signed out."
         ),
         "settings.delete_failed": "Could not delete account. Please try again.",
+        "settings.saving": "Saving…",
+        "settings.rejected": "Not saved. The previous value is kept; please try again.",
+        "settings.not_saved_after_error": (
+            "Not saved: the request failed. The current value was checked and is unchanged."
+        ),
+        "settings.confirmed_after_error": (
+            "The server reported an error, but the new value was checked and is in effect."
+        ),
+        "settings.refreshed": "The current value was checked and is shown.",
+        "settings.unknown_state": (
+            "Could not confirm the current value. Use Retry to check it again."
+        ),
+        "settings.retry": "Retry",
+        "settings.reload": "Reload page",
+        "settings.locale_reload_needed": (
+            "The language was changed on the server. Reload the page to apply it."
+        ),
+        "settings.birthdate_current_label": "Current birthday:",
+        "settings.birthdate_priority_hint": (
+            "The year is optional. A date saved here is not overwritten by Telegram later."
+        ),
+        "settings.precedence_hint": (
+            "These are defaults. A choice for a single wishlist below takes precedence; "
+            "“Inherit global” follows these defaults."
+        ),
+        "settings.delete_preview_failed": "Could not load the deletion summary. Please try again.",
+        "settings.delete_unknown": (
+            "The result of deletion is unknown. Reload the page to check the account status."
+        ),
+        "settings.deleting": "Deleting…",
         # Telegram bot commands menu (setMyCommands)
         "bot.commands.start": "Open menu and wishlists",
         "bot.commands.help": "How Wishenka works",
@@ -649,6 +679,38 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
             "Ваш аккаунт безвозвратно удалён, все активные сессии завершены."
         ),
         "settings.delete_failed": "Не удалось удалить аккаунт. Попробуйте ещё раз.",
+        "settings.saving": "Сохраняем…",
+        "settings.rejected": "Не сохранено. Прежнее значение сохранено; повторите попытку.",
+        "settings.not_saved_after_error": (
+            "Не сохранено: запрос не удался. Текущее значение проверено и не изменилось."
+        ),
+        "settings.confirmed_after_error": (
+            "Сервер сообщил об ошибке, но новое значение проверено и действует."
+        ),
+        "settings.refreshed": "Текущее значение проверено и показано.",
+        "settings.unknown_state": (
+            "Не удалось подтвердить текущее значение. Нажмите «Повторить», чтобы проверить снова."
+        ),
+        "settings.retry": "Повторить",
+        "settings.reload": "Перезагрузить страницу",
+        "settings.locale_reload_needed": (
+            "Язык изменён на сервере. Перезагрузите страницу, чтобы применить его."
+        ),
+        "settings.birthdate_current_label": "Текущая дата рождения:",
+        "settings.birthdate_priority_hint": (
+            "Год необязателен. Сохранённая здесь дата не будет перезаписана данными Telegram."
+        ),
+        "settings.precedence_hint": (
+            "Это значения по умолчанию. Выбор для отдельного вишлиста ниже имеет приоритет; "
+            "«Как в общих» следует этим значениям."
+        ),
+        "settings.delete_preview_failed": (
+            "Не удалось загрузить сводку удаления. Повторите попытку."
+        ),
+        "settings.delete_unknown": (
+            "Результат удаления неизвестен. Перезагрузите страницу, чтобы проверить аккаунт."
+        ),
+        "settings.deleting": "Удаляем…",
         # Telegram bot commands menu (setMyCommands)
         "bot.commands.start": "Открыть меню и вишлисты",
         "bot.commands.help": "Как работает Вишенка",

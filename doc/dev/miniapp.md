@@ -394,6 +394,105 @@ make test PYTEST_JOBS=2 \
 
 The browser tests require Chromium; see [testing.md](testing.md) for setup.
 
+### Personal Settings Screen (WISHENKA-291)
+
+#### Overview
+
+`GET /settings` shows language, birthday, birthday reminders, account-wide notification defaults,
+per-list exceptions and a separated account-deletion section. Every toggle has visible on/off
+text, per-list rows show an "inherited" or "override" badge with the effective value, and every
+change reports pending, saved, error or unknown state. Backend contracts, categories and
+precedence are unchanged (see [users.md](users.md) and
+[notifications.md][notification-preferences]).
+
+[notification-preferences]:
+    notifications.md#notification-preferences--birthday_reminders-priority-wishenka-34
+
+#### Architecture
+
+Server-rendered `settings.html` plus one controller, `initController()` in
+`wishenka/web/static/settings.js`. The server is authoritative; the controller keeps the last
+confirmed value per control and never stores a second copy of the data.
+
+- **States** per control or feedback region: `idle` (confirmed value), `pending` (control
+  disabled, `settings.saving` note), `saved` (`settings.saved`), `error` (localized message, value
+  restored or reconciled) and `unknown` (read also failed: controls stay disabled, `Retry`).
+- **Serialization**: `exclusive(category, task)` queues mutations per notification category,
+  covering the global toggle and all list overrides of that category; an older response cannot
+  overwrite a newer effective value.
+- **Restore vs reconcile**: only `DEFINITE_REJECTIONS` (`401`, `403`, `404`, `422`, rejected before
+  any write) restore the last confirmed value. `5xx`, network loss and malformed success bodies
+  are ambiguous: the controller reads the truth back (`GET /api/profile/preferences`, the list
+  `GET`, or the profile preferences for birthdate and locale) and shows the committed value
+  (`settings.confirmed_after_error` or `settings.not_saved_after_error`). If the read fails too,
+  the affected controls become `unknown`, stay disabled and offer Retry (`settings.unknown_state`,
+  `settings.retry`) until a read succeeds.
+- **Inherited badges**: after a global change they are derived from confirmed global and override
+  values (`deriveInheritedBadges`); explicit overrides never change.
+- **Birthdate**: the form draft survives rejected saves; fields clear only after a confirmed
+  clear. **Locale**: buttons use a CSRF fetch (`window.prepareCsrf`) instead of HTMX; the page
+  reloads only after confirmed success, otherwise `settings.locale_reload_needed` / Retry.
+- **Deletion**: preview (`GET /api/profile/deletion-preview`) must succeed before the confirm
+  panel appears; `POST /api/profile/delete` is sent once, never retried. After a network or `5xx`
+  failure the page says the outcome is unknown (`settings.delete_unknown`) and a fresh page
+  load decides account status.
+
+#### Usage
+
+- **Endpoints**: `PATCH /api/profile/locale`, `GET /api/profile/preferences`,
+  `PATCH /api/profile/birthdate`, `PUT /api/profile/notifications/global`,
+  `GET|PUT /api/profile/notifications/wishlists/{id}`, `GET /api/profile/deletion-preview`,
+  `POST /api/profile/delete`. No new endpoints or fields.
+- **Selectors and ids the script depends on**: root `.settings-page` (with `data-i18n-*`),
+  `input[data-global-category]`, `select[data-wishlist-override]` (`data-wishlist-id`,
+  `data-category`), badges `[data-effective-for="{wishlistId}-{category}"] strong`, state text
+  `#state-{category}`, `.locale-option` with `[data-locale-endpoint]`, `#birthdate-form`
+  (`#birth-day`, `#birth-month`, `#birth-year`, `#birthdate-clear-btn`, `#birthdate-current`),
+  `#toggle-birthday-reminders`, `#delete-account-start-btn`, `#delete-account-confirm-panel`,
+  `#delete-account-confirm-btn`, `#delete-account-cancel-btn`, `#delete-impact-summary`. Feedback
+  regions: `#locale-feedback`, `#birthdate-feedback`, `#birthday-reminders-feedback`,
+  `#global-notifications-feedback`, `#wishlist-notifications-feedback`,
+  `#delete-account-feedback` (live regions; Retry buttons carry `data-retry-for`).
+  Renaming any of these breaks the controller and the browser tests.
+- **i18n**: new `settings.*` keys (RU and EN) include `saving`, `rejected`, `not_saved_after_error`,
+  `confirmed_after_error`, `refreshed`, `unknown_state`, `retry`, `reload`,
+  `locale_reload_needed`, `delete_preview_failed`, `delete_unknown`, `deleting`,
+  `precedence_hint`, `birthdate_priority_hint` and `birthdate_current_label`. Strings reach the
+  script as `data-i18n-*` attributes on `.settings-page`; see [i18n.md](i18n.md).
+- **Layout**: `miniapp.css` gives 44 px targets, wrapping of long list titles, a mobile card
+  layout from 320 px, state badges and a separated danger zone.
+
+#### Configuration
+
+None: no settings, environment variables or schema changes.
+
+#### Troubleshooting
+
+- **Controls stuck disabled with "state unknown"**: the mutation was ambiguous and the
+  reconciliation GET also failed. Press Retry (or reload); check `GET /api/profile/preferences`
+  status in the request log.
+- **Value reverted after an error**: expected for `401`, `403`, `404`, `422`; look for the
+  WARNING events `notification_global_invalid_request`, `notification_wishlist_invalid_request`,
+  `notification_wishlist_not_found`, `birthdate_invalid_request`, `locale_invalid_request`.
+- **Saved but UI showed an error**: a `5xx` after commit; the UI reads the value back. Success
+  events are `notification_global_updated`, `notification_wishlist_updated`,
+  `locale_explicit_updated`, `birthdate_explicit_updated`, `birthdate_explicit_cleared`
+  (no birthdate values, titles or tokens are logged; no client telemetry exists).
+- **Deletion outcome unknown**: reload `/settings`; a redirect or `401` means the account is gone.
+  See `account_deletion_rejected`, `account_deleted`, `account_deletion_failed`.
+
+#### Tests
+
+```bash
+make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_personal_settings_browser.py -q'
+make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_personal_settings_observability.py -q'
+```
+
+`tests/test_personal_settings_browser.py` (real Chromium via CDP) covers states, badges,
+failures, reconciliation, locale, birthdate and deletion;
+`tests/test_personal_settings_observability.py` (`caplog`) covers the log
+contract. Details: [testing.md](testing.md).
+
 ### 3. Member Administration
 
 Collaborative wishlists allow multiple users to maintain wish items together.
@@ -1042,7 +1141,10 @@ of inline JavaScript and inline `on*` event handlers from SSR templates so a str
   - `.settings-page` in `settings.html` provides localized strings read by `settings.js` via
     `getI18n()`: `data-i18n-saved`, `data-i18n-birthdate-source-explicit`,
     `data-i18n-invalid-birthdate`, `data-i18n-invalid-notification`, `data-i18n-state-enabled`,
-    `data-i18n-state-disabled`, `data-i18n-delete-completed`, and `data-i18n-delete-failed`.
+    `data-i18n-state-disabled`, `data-i18n-delete-completed`, and `data-i18n-delete-failed`,
+    plus the pending, rejection, reconciliation, retry, reload and deletion-outcome strings added
+    by WISHENKA-291 (see
+    [Personal Settings Screen](#personal-settings-screen-wishenka-291)).
 - **Delegated click handlers (`handleDelegatedClick` in `app.js`)**:
   - Replaces all six inline `onclick` attributes across three dynamically swapped partials using a
     single `document.addEventListener('click', handleDelegatedClick)` listener:

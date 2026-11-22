@@ -10,6 +10,21 @@
      data-i18n-invalid-notification="{{ t('settings.invalid_notification_setting', locale) }}"
      data-i18n-state-enabled="{{ t('settings.state.enabled', locale) }}"
      data-i18n-state-disabled="{{ t('settings.state.disabled', locale) }}"
+     data-i18n-birthdate-source-auto="{{ t('settings.birthdate_source_auto', locale) }}"
+     data-i18n-birthdate-empty="{{ t('settings.birthdate_empty', locale) }}"
+     data-i18n-saving="{{ t('settings.saving', locale) }}"
+     data-i18n-deleting="{{ t('settings.deleting', locale) }}"
+     data-i18n-rejected="{{ t('settings.rejected', locale) }}"
+     data-i18n-not-saved-after-error="{{ t('settings.not_saved_after_error', locale) }}"
+     data-i18n-confirmed-after-error="{{ t('settings.confirmed_after_error', locale) }}"
+     data-i18n-refreshed="{{ t('settings.refreshed', locale) }}"
+     data-i18n-unknown-state="{{ t('settings.unknown_state', locale) }}"
+     data-i18n-retry="{{ t('settings.retry', locale) }}"
+     data-i18n-reload="{{ t('settings.reload', locale) }}"
+     data-i18n-locale-error="{{ t('settings.save_error', locale) }}"
+     data-i18n-locale-reload-needed="{{ t('settings.locale_reload_needed', locale) }}"
+     data-i18n-delete-preview-failed="{{ t('settings.delete_preview_failed', locale) }}"
+     data-i18n-delete-unknown="{{ t('settings.delete_unknown', locale) }}"
      data-i18n-delete-completed="{{ t('settings.delete_completed', locale) }}"
      data-i18n-delete-failed="{{ t('settings.delete_failed', locale) }}">
     <p class="mb-4">
@@ -24,16 +39,16 @@
             {{ t('settings.current_source_label', locale) }}
             <strong>{{ t('settings.source_explicit' if locale_source == 'explicit' else 'settings.source_auto', locale) }}</strong>
         </p>
-        <div class="locale-options" role="group" aria-label="{{ t('settings.language_heading', locale) }}">
+        <div class="locale-options"
+             data-locale-endpoint="/api/profile/locale"
+             role="group"
+             aria-label="{{ t('settings.language_heading', locale) }}">
             {% for code in SUPPORTED_LOCALES %}
             <button type="button"
                     class="locale-option{% if code == locale %} is-active{% endif %}"
                     aria-pressed="{{ 'true' if code == locale else 'false' }}"
-                    hx-patch="/api/profile/locale"
-                    hx-ext="json-enc"
-                    hx-vals='{"locale": "{{ code }}"}'
-                    hx-swap="none"
-                    hx-target="#locale-feedback">
+                    data-locale="{{ code }}"
+                    hx-vals='{"locale": "{{ code }}"}'>
                 {{ t('settings.locale_' ~ code, locale) }}
             </button>
             {% endfor %}
@@ -50,6 +65,18 @@
                 {{ t('settings.birthdate_source_explicit' if birthdate.source == 'explicit' else 'settings.birthdate_source_auto', locale) }}
             </strong>
         </p>
+        <p class="birthdate-current-status">
+            {{ t('settings.birthdate_current_label', locale) }}
+            <strong id="birthdate-current">
+                {%- if birthdate.day and birthdate.month -%}
+                {{ '%02d.%02d' % (birthdate.day, birthdate.month) }}
+                {%- if birthdate.year -%}.{{ birthdate.year }}{%- endif -%}
+                {%- else -%}
+                {{ t('settings.birthdate_empty', locale) }}
+                {%- endif -%}
+            </strong>
+        </p>
+        <p class="settings-hint">{{ t('settings.birthdate_priority_hint', locale) }}</p>
         <form id="birthdate-form" class="birthdate-form">
             <label>
                 {{ t('settings.birthdate_day', locale) }}
@@ -80,7 +107,12 @@
                    data-global-category="birthday_reminders"
                    data-feedback-target="birthday-reminders-feedback"
                    {% if birthday_reminders %}checked{% endif %}>
-            <span>{{ t('settings.birthday_reminders_label', locale) }}</span>
+            <span class="toggle-label">{{ t('settings.birthday_reminders_label', locale) }}</span>
+            <span class="toggle-state"
+                  id="state-birthday_reminders">{{
+                t('settings.state.enabled' if birthday_reminders
+                  else 'settings.state.disabled', locale)
+            }}</span>
         </label>
         <p id="birthday-reminders-feedback" role="status" aria-live="polite"></p>
     </section>
@@ -88,6 +120,7 @@
     <section aria-labelledby="notifications-heading" class="mt-6">
         <h2 id="notifications-heading">{{ t('settings.notifications_heading', locale) }}</h2>
         <p>{{ t('settings.notifications_description', locale) }}</p>
+        <p class="settings-hint">{{ t('settings.precedence_hint', locale) }}</p>
         <div class="notification-toggles">
             {% for cat in wishlist_categories %}
             <label class="toggle-row">
@@ -95,7 +128,12 @@
                        data-global-category="{{ cat }}"
                        data-feedback-target="global-notifications-feedback"
                        {% if global_notifications.get(cat) %}checked{% endif %}>
-                <span>{{ t('settings.category.' ~ cat, locale) }}</span>
+                <span class="toggle-label">{{ t('settings.category.' ~ cat, locale) }}</span>
+                <span class="toggle-state"
+                      id="state-{{ cat }}">{{
+                    t('settings.state.enabled' if global_notifications.get(cat)
+                      else 'settings.state.disabled', locale)
+                }}</span>
             </label>
             {% endfor %}
         </div>

@@ -234,6 +234,10 @@ Five Alembic revisions extend the wishlist database schema for notifications, re
 - **Access check**: Only non-deleted wishlists (`status IN ('active', 'archived')`) where the user is `owner_id`, a member in `wl_members`, or has the list in `wl_favorites` are exposed or configurable.
 - **`birthday_reminders` precedence in `wishenka/notices/reminders.py`**: When `claim_reminder` or `refresh_reminder` evaluates a `kind == "birthday"` row, `_read_user_setting` resolves `COALESCE(birthday_reminders, reminders)` (falling back to `1` if neither row exists). Disabling `birthday_reminders` suppresses already-queued `reminder_outbox` birthday rows (`status = 'skipped'`) without deleting `birthday_entries`.
 - **Mini App endpoints (`wishenka/web/routes/profile.py`)**: `GET /api/profile/preferences`, `PUT /api/profile/notifications/global`, `GET /api/profile/notifications/wishlists/{wishlist_id}`, and `PUT /api/profile/notifications/wishlists/{wishlist_id}` (plus `GET /settings` UI).
+- **Settings UI (`WISHENKA-291`)**: the screen shows inherited vs override badges derived from
+  this resolution order and reconciles ambiguous failures by re-reading the preferences; no
+  backend rule changed. See
+  [miniapp.md](miniapp.md#personal-settings-screen-wishenka-291).
 
 ### Private `/birthdays` Tracking Flow
 

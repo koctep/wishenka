@@ -484,3 +484,47 @@ html.is-touch-reordering { overscroll-behavior-y: contain; }
 .receipt-sheet .btn-modal-close:hover:not(:disabled),
 .modal-sheet .btn-modal-close:hover:not(:disabled),
 .modal-sheet .btn-cancel:hover:not(:disabled) { background: var(--receipt-bg); }
+
+/* Personal settings */
+.settings-page { overflow-wrap: anywhere; }
+.settings-page .settings-hint { color: var(--muted); font-size: .92rem; line-height: 1.4; }
+.settings-page .birthdate-form {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .25rem .5rem;
+}
+.settings-page .birthdate-form label { margin: 0; min-width: 0; }
+.settings-page .birthdate-form button { grid-column: 1 / -1; margin: .25rem 0; }
+.toggle-row {
+  display: flex; align-items: center; gap: .75rem; min-height: var(--touch-target);
+  margin: .25rem 0;
+}
+.toggle-row input[type="checkbox"] {
+  flex: 0 0 var(--touch-target); width: var(--touch-target); height: var(--touch-target);
+  margin: 0;
+}
+.toggle-row .toggle-label { flex: 1 1 auto; min-width: 0; }
+.toggle-state {
+  flex: 0 0 auto; padding: .15rem .6rem; border: 1px solid var(--muted-border);
+  border-radius: 999px; font-size: .85rem; font-weight: 700; background: var(--surface-subtle);
+}
+.wishlist-pref-card {
+  margin: .75rem 0; padding: .75rem; border: 1px solid var(--muted-border);
+  border-radius: .75rem;
+}
+.wishlist-pref-card h3 { margin: 0 0 .5rem; }
+.wishlist-pref-row {
+  display: grid; gap: .35rem; padding: .5rem 0; border-top: 1px solid var(--muted-border);
+}
+.wishlist-pref-row select { width: 100%; }
+.wishlist-pref-row .pref-category { font-weight: 600; }
+.effective-badge { font-size: .9rem; color: var(--muted); }
+.settings-page [role="status"] { min-height: 1.4rem; margin: .5rem 0 0; font-weight: 600; }
+.settings-page [role="status"].is-error { color: var(--danger); }
+.settings-page [role="status"].is-error::before { content: "\26A0\FE0F\00a0"; }
+.settings-page [role="status"].is-success::before { content: "\2713\00a0"; }
+.settings-page .pending-note { color: var(--muted); font-style: italic; }
+.settings-page .pending-note[hidden] { display: none; }
+.settings-page .retry-btn { margin: .25rem 0; }
+.settings-danger-zone { margin-top: 2rem; border: 2px solid var(--danger); background: #fff8f8; }
+.settings-danger-zone ul { padding-left: 1.25rem; }
+.delete-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.delete-actions button { margin: 0; flex: 1 1 10rem; }

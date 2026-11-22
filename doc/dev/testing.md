@@ -503,6 +503,26 @@ make test-serial PYTEST_ARGS="tests/test_visual_identity_browser.py"
 make test-serial PYTEST_ARGS="tests/test_home_overview_ui.py tests/test_home_overview_browser.py"
 ```
 
+### Тесты экрана личных настроек (WISHENKA-291)
+
+Архитектура, id и селекторы экрана:
+[miniapp.md](miniapp.md#personal-settings-screen-wishenka-291).
+
+- **`tests/test_personal_settings_browser.py`** (настоящий Chromium через `tests/browser_cdp.py`,
+  изолированные пользователи, принудительные HTTP-ошибки, обрывы сети и задержки ответов):
+  видимые состояния on/off и бейджи inherited/override, pending, saved, error и unknown,
+  сверка чтением после `5xx` и кнопка Retry, откат только после `401/403/404/422`, сериализация
+  по категориям, черновик даты рождения, смена языка, предпросмотр и подтверждение удаления без
+  повторов, мобильная геометрия 320/375 px и цели не менее 44 px.
+- **`tests/test_personal_settings_observability.py`** (`caplog`, таймаут 30 с): события успеха
+  вызываются один раз на мутацию, отклонённые запросы дают WARNING без события успеха, в логах нет
+  дат рождения, названий списков и токенов.
+
+```bash
+make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_personal_settings_browser.py -q'
+make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_personal_settings_observability.py -q'
+```
+
 ### Изолированная диагностика поддержки и единый principal приватного бота (WISHENKA-182)
 
 Модуль `tests/test_wishenka_182_repro.py` (`pytestmark = pytest.mark.timeout(30)`, 4 теста: 3 async, 1 sync)

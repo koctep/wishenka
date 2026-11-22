@@ -250,6 +250,10 @@ At transaction start, the service computes `subject_hash = compute_revocation_su
 
 ### Mini App HTTP Endpoints
 
+The settings screen client behavior (pending, restore vs reconcile, unknown state, deletion
+without retries) is documented in
+[miniapp.md](miniapp.md#personal-settings-screen-wishenka-291); endpoint contracts are unchanged.
+
 | Method & Path | Task | Purpose |
 | --- | --- | --- |
 | `PATCH /api/profile/locale` | `WISHENKA-33` (Implemented) | Switch `locale` (`ru` \| `en`) with `locale_source = "explicit"`, `HX-Refresh: true` + CSRF, and background bot command sync. |
@@ -357,6 +361,10 @@ No Prometheus/OpenTelemetry exporter is currently wired in the codebase; these c
 - **Schema drift in standalone unit tests**: Keep `UserStore.initialize()` DDL and `PRAGMA table_info(users)` column checks aligned with the Alembic revision in `wishenka/wishlists/alembic/versions/`.
 
 ### Verification Suites (`WISHENKA-33/34/35`)
+
+- `tests/test_personal_settings_browser.py` and `tests/test_personal_settings_observability.py`
+  (`WISHENKA-291`) — settings UI states, failure reconciliation and log contract of the
+  `/api/profile/*` calls (see [miniapp.md](miniapp.md#personal-settings-screen-wishenka-291)).
 
 - `tests/test_wishenka_34_repro.py` (`WISHENKA-34`, Implemented) — API availability for `/api/profile/preferences` and `/api/profile/notifications/global`, per-wishlist override priority and `null` reset, `birthday_reminders` suppression without deleting `birthday_entries`, explicit birthdate persistence across `upsert_user`, invalid date (`30 Feb`) rejection, and surprise invariant preservation.
 - `tests/test_wishenka_34_preferences.py` (`WISHENKA-34`, Implemented) — unit and integration coverage for `validate_birthdate`, `UserStore.set_birthdate` / `clear_birthdate`, `NotificationPreferencesStore`, `/settings` SSR rendering (RU/EN), and `/api/profile/*` validation/404/CSRF contracts.
