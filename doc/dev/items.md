@@ -529,6 +529,21 @@ httpcore upgrades before deployment. Replacing that connection-layer hook is tra
 redirect validation, and connection reuse with a local HTTP server. Run it through the repository
 test workflow when changing preview transport or cache behavior.
 
+`tests/test_ssrf_and_response_limits.py` also exercises IPv6 policy decisions for 6to4, Teredo,
+scoped addresses, and equivalent compressed and expanded forms. Offline redirect cases use
+controlled DNS and replay responses to check a safe multi-hop chain, rejection of a restricted
+later hop before dispatch, and termination of a circular chain at HTTPX's redirect limit. Run the
+focused regression module with:
+
+```bash
+PYTHONPATH=. .venv/bin/pytest tests/test_ssrf_and_response_limits.py -q
+```
+
+These tests do not make external network requests. If an address classification changes after a
+Python upgrade, inspect the `ipaddress` policy and the configured CIDRs before updating expected
+results. Browser-dependent tests in the full suite require Chromium; see
+[testing.md](testing.md) for setup and troubleshooting.
+
 ### 7. Wish Items Domain Service & Piece Accounting ([`wishenka.wishlists.service`](file:///home/src/wishenka/wishlists/service.py))
 
 Located in [`wishenka/wishlists/service.py`](file:///home/src/wishenka/wishlists/service.py) and [`wishenka/wishlists/models.py`](file:///home/src/wishenka/wishlists/models.py).

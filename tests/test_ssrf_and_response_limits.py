@@ -595,3 +595,93 @@ class TestObservabilityLogging:
         assert preview.is_fallback is False
         assert secret_token not in caplog.text
         assert "<h1>Secret page</h1>" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("address", "expected_safe"),
+    [
+        ("2002:0808:0808::1", False),  # 6to4
+        ("2002:0a00:0001::1", False),  # 6to4 with private embedded IPv4
+        ("2001:0:4136:e378:8000:63bf:3fff:fdd2", False),  # Teredo
+        ("fe80::1%eth0", False),
+        ("2606:4700:4700::1111%eth0", True),
+        ("2606:4700:4700::1111", True),
+        ("2606:4700:4700:0:0:0:0:1111", True),
+        ("::1", False),
+        ("0:0:0:0:0:0:0:1", False),
+    ],
+)
+def test_complex_ipv6_address_policy(address: str, expected_safe: bool) -> None:
+    """Apply the same policy to special prefixes and equivalent address forms."""
+    assert is_ip_safe(ipaddress.ip_address(address)) is expected_safe
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked", [False, True], ids=["safe-chain", "blocked-later-hop"])
+async def test_multihop_redirect_validation(
+    preview_dns: None, monkeypatch: pytest.MonkeyPatch, blocked: bool
+) -> None:
+    """A later restricted hop is rejected before its transport dispatch."""
+    from wishenka.items.fetcher import PreviewTransportConfig, offline_replay_route
+
+    start = "https://example.com/start"
+    intermediate = "https://example.com/intermediate"
+    final = "http://192.168.1.1/secret" if blocked else "https://example.com/final"
+    route = offline_replay_route(
+        {
+            start: (302, {"Location": intermediate}, b""),
+            intermediate: (302, {"Location": final}, b""),
+            final: (200, {"Content-Type": "text/html"}, b"<p>success</p>"),
+        }
+    )
+    calls: list[str] = []
+    original = route.transport.handle_async_request
+
+    async def observe(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return await original(request)
+
+    monkeypatch.setattr(route.transport, "handle_async_request", observe)
+    routes = PreviewTransportConfig(default=route, mounts={})
+    if blocked:
+        with pytest.raises(SSRFBlockedError):
+            await UrlMetadataService()._fetch_html(start, routes=routes)
+        assert calls == [start, intermediate]
+    else:
+        html, final_url = await UrlMetadataService()._fetch_html(start, routes=routes)
+        assert html == "<p>success</p>"
+        assert final_url == final
+        assert calls == [start, intermediate, final]
+
+
+@pytest.mark.asyncio
+async def test_circular_redirect_stops_at_httpx_limit(
+    preview_dns: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A circular chain stops at HTTPX's actual default redirect limit."""
+    from wishenka.items.fetcher import PreviewTransportConfig, offline_replay_route
+
+    first = "https://example.com/first"
+    second = "https://example.com/second"
+    route = offline_replay_route(
+        {
+            first: (302, {"Location": second}, b""),
+            second: (302, {"Location": first}, b""),
+        }
+    )
+    calls: list[str] = []
+    original = route.transport.handle_async_request
+
+    async def observe(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return await original(request)
+
+    monkeypatch.setattr(route.transport, "handle_async_request", observe)
+    async with httpx.AsyncClient() as default_client:
+        redirect_limit = default_client.max_redirects
+    with pytest.raises(httpx.TooManyRedirects):
+        await UrlMetadataService()._fetch_html(
+            first, routes=PreviewTransportConfig(default=route, mounts={})
+        )
+    assert len(calls) == redirect_limit + 1
+    assert calls == [first if index % 2 == 0 else second for index in range(len(calls))]
