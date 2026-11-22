@@ -7,21 +7,100 @@ redirect-hop pinning, and graceful fallback.
 """
 
 import asyncio
+import logging
 import socket
 import ssl
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpcore
 import httpx
 import pytest
 
+from wishenka.items import ssrf
 from wishenka.items.exceptions import SSRFBlockedError
 from wishenka.items.fetcher import UrlMetadataService
 from wishenka.items.models import ExtractedMetadata
 from wishenka.items.ssrf import SSRFSafeNetworkBackend, SSRFSafeTransport, _pinned_ips_var
 
 pytestmark = pytest.mark.timeout(30)
+
+
+async def test_backend_dns_failure_never_connects(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed lookup cannot fall back to connecting to an unresolved hostname."""
+    loop = asyncio.get_running_loop()
+    resolver = AsyncMock(side_effect=socket.gaierror("DNS unavailable"))
+    monkeypatch.setattr(loop, "getaddrinfo", resolver)
+    monkeypatch.setattr(ssrf, "_dns_cache", ssrf.DNSCache())
+    inner = AsyncMock(spec=httpcore.AsyncNetworkBackend)
+    token = _pinned_ips_var.set(None)
+    try:
+        with (
+            caplog.at_level(logging.WARNING, logger="wishenka.items.ssrf"),
+            pytest.raises(httpcore.ConnectError, match="No validated IP"),
+        ):
+            await SSRFSafeNetworkBackend(inner).connect_tcp("missing.example", 443)
+    finally:
+        _pinned_ips_var.reset(token)
+
+    resolver.assert_awaited_once()
+    inner.connect_tcp.assert_not_awaited()
+    records = [r for r in caplog.records if getattr(r, "event", None) == "ssrf_no_validated_ips"]
+    assert len(records) == 1
+    assert (records[0].__dict__["host"], records[0].__dict__["port"]) == ("missing.example", 443)
+
+
+async def test_backend_wraps_exhausted_os_errors(caplog: pytest.LogCaptureFixture) -> None:
+    """Exhaustion reports the number of attempts and chains the last OS error."""
+    host, port = "exhausted.example", 443
+    addresses = ["93.184.216.34", "151.101.1.69"]
+    failures = [OSError("first failed"), OSError("last failed")]
+    inner = AsyncMock(spec=httpcore.AsyncNetworkBackend)
+    inner.connect_tcp.side_effect = failures
+    token = _pinned_ips_var.set({(host, port): addresses})
+    try:
+        with (
+            caplog.at_level(logging.WARNING, logger="wishenka.items.ssrf"),
+            pytest.raises(httpcore.ConnectError, match="last failed") as exc,
+        ):
+            await SSRFSafeNetworkBackend(inner).connect_tcp(host, port)
+    finally:
+        _pinned_ips_var.reset(token)
+
+    assert exc.value.__cause__ is failures[-1]
+    assert [call.kwargs["host"] for call in inner.connect_tcp.await_args_list] == addresses
+    records = [
+        r for r in caplog.records if getattr(r, "event", None) == "ssrf_all_pinned_connects_failed"
+    ]
+    assert len(records) == 1
+    assert (records[0].__dict__["host"], records[0].__dict__["port"]) == (host, port)
+    assert records[0].__dict__["attempted_count"] == 2
+
+
+async def test_backend_deduplicates_pinned_ips_in_order(caplog: pytest.LogCaptureFixture) -> None:
+    """Repeated pinned IPs are attempted once, in their original order."""
+    host, port = "duplicates.example", 443
+    first, second = "93.184.216.34", "151.101.1.69"
+    inner = AsyncMock(spec=httpcore.AsyncNetworkBackend)
+    inner.connect_tcp.side_effect = OSError("unreachable")
+    token = _pinned_ips_var.set({(host, port): [first, second, first, second]})
+    try:
+        with (
+            caplog.at_level(logging.WARNING, logger="wishenka.items.ssrf"),
+            pytest.raises(httpcore.ConnectError, match="unreachable"),
+        ):
+            await SSRFSafeNetworkBackend(inner).connect_tcp(host, port)
+    finally:
+        _pinned_ips_var.reset(token)
+
+    assert [call.kwargs["host"] for call in inner.connect_tcp.await_args_list] == [first, second]
+    assert all(call.kwargs["port"] == port for call in inner.connect_tcp.await_args_list)
+    records = [
+        r for r in caplog.records if getattr(r, "event", None) == "ssrf_all_pinned_connects_failed"
+    ]
+    assert len(records) == 1 and records[0].__dict__["attempted_count"] == 2
 
 
 def test_transport_rejects_unexpected_pool(monkeypatch: pytest.MonkeyPatch) -> None:

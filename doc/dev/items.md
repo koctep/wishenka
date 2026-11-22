@@ -223,6 +223,15 @@ Provides policy resolution from application settings, credential redaction, non-
 - [`SSRFSafeNetworkBackend`](file:///home/src/wishenka/items/ssrf.py#L623-L747):
   - Subclass of `httpcore.AsyncNetworkBackend` wrapping the connection pool's inner network backend and holding an optional pinned `policy: SSRFPolicy | None`.
   - `connect_tcp`: reads pinned IPs for `(host.strip("[]"), port)` from `_pinned_ips_var`; on pinned-cache miss, resolves `active_policy = resolve_ssrf_policy(policy=self._policy)`, logs `ssrf_pinned_cache_miss` (`DEBUG` with `policy_source` `"pinned"`/`"ambient"` and `forbidden_cidr_count`), and calls `resolve_and_validate_host(clean_host, port)` inside `with _use_ssrf_policy(active_policy):`. Deduplicates IPs and tries each numeric IP sequentially via `self._inner.connect_tcp(host=ip, ...)` without ever passing the raw hostname to the underlying socket backend. Raises `httpcore.ConnectError` if the validated IP list is empty or all pinned attempts fail.
+  - Offline backend regression tests in `tests/test_ssrf_dns_rebinding.py` check that failed DNS
+    resolution never connects to an unvalidated hostname, exhausted pinned addresses produce
+    `ssrf_all_pinned_connects_failed` with the unique attempt count, and duplicate addresses are
+    attempted once in their original order. An exhausted `OSError` is chained to the resulting
+    `httpcore.ConnectError`. Run the focused module with:
+
+    ```bash
+    PYTHONPATH=. .venv/bin/pytest tests/test_ssrf_dns_rebinding.py -q
+    ```
   - `connect_unix_socket`: blocks Unix domain socket connections with `SSRFBlockedError(..., reason="uds")`.
   - `sleep`: delegates to `self._inner.sleep`.
 - [`SSRFSafeTransport`](file:///home/src/wishenka/items/ssrf.py#L750-L867):
