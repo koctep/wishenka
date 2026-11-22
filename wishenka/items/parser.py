@@ -5,6 +5,8 @@ import logging
 import math
 import re
 import time
+from collections.abc import Iterator
+from contextvars import ContextVar
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
@@ -14,6 +16,11 @@ from wishenka.currency import DEFAULT_CURRENCY
 from wishenka.items.models import ExtractedMetadata
 
 logger = logging.getLogger("wishenka.items")
+
+# A discovery-local collector preserves limit events on memo hits without shared state.
+_type_limit_collector: ContextVar[list[int] | None] = ContextVar(
+    "jsonld_type_limit_collector", default=None
+)
 
 CURRENCY_MAP: dict[str, str] = {
     # Russian Ruble (RUB)
@@ -725,67 +732,137 @@ class HtmlMetadataExtractor:
         return None, inherited_currency
 
     @staticmethod
-    def _is_product_type(type_val: Any) -> bool:
-        """Check if @type string or list corresponds to Schema.org Product."""
-        stack = [(type_val, 0)]
+    def _walk_product_type(type_val: Any) -> tuple[bool, int]:
+        """Inspect types lazily and report the actual peak number of pending records."""
+        stack: list[tuple[str, Any, int]] = [("visit", type_val, 0)]
         visited = 0
+        peak = 1
         depth_exceeded = False
-        while stack and visited < 20_000:
-            value, depth = stack.pop()
+        while stack:
+            action, value, depth = stack.pop()
+            if action == "iterate":
+                try:
+                    item = next(value)
+                except StopIteration:
+                    continue
+                stack.append(("iterate", value, depth))
+                action, value = "visit", item
+            if visited >= 20_000:
+                stack.append((action, value, depth))
+                peak = max(peak, len(stack))
+                break
             visited += 1
             if depth > 128:
                 depth_exceeded = True
-                continue
-            if isinstance(value, str):
+            elif isinstance(value, str):
                 val = value.strip().lower()
                 if val == "product" or val.endswith("/product"):
-                    return True
+                    return True, peak
             elif isinstance(value, list):
-                stack.extend((item, depth + 1) for item in reversed(value))
+                stack.append(("iterate", iter(value), depth + 1))
+            peak = max(peak, len(stack))
         if depth_exceeded or stack:
             logger.debug(
                 "JSON-LD type inspection reached a limit",
                 extra={"event": "jsonld_type_limit", "visited_nodes": visited},
             )
-        return False
+            collector = _type_limit_collector.get()
+            if collector is not None:
+                collector.append(visited)
+        return False, peak
 
     @staticmethod
-    def _find_jsonld_products(data: Any) -> list[dict[str, Any]]:
-        """Find products in graph-first order with bounded iterative traversal."""
+    def _is_product_type(type_val: Any) -> bool:
+        """Check if @type string or list corresponds to Schema.org Product."""
+        return HtmlMetadataExtractor._walk_product_type(type_val)[0]
+
+    @staticmethod
+    def _walk_jsonld_products(data: Any) -> tuple[list[dict[str, Any]], int]:
+        """Discover products with width-independent pending state and a local type memo."""
         results: list[dict[str, Any]] = []
-        stack: list[tuple[Any, int, bool]] = [(data, 0, False)]
+        stack: list[tuple[str, Any, int]] = [("visit", data, 0)]
+        # Values retain list objects, avoiding identity reuse during this invocation.
+        memo: dict[Any, tuple[Any, bool, int | None]] = {}
         visited = 0
+        peak = 1
         depth_exceeded = False
-        while stack and visited < 20_000:
-            node, depth, process = stack.pop()
-            if process:
-                if HtmlMetadataExtractor._is_product_type(node.get("@type")):
+        while stack:
+            action, node, depth = stack.pop()
+            if action == "iterate":
+                iterator: Iterator[Any] = node
+                try:
+                    child = next(iterator)
+                except StopIteration:
+                    continue
+                stack.append(("iterate", iterator, depth))
+                action, node = "visit", child
+            if visited >= 20_000:
+                stack.append((action, node, depth))
+                peak = max(peak, len(stack))
+                break
+            if action == "process":
+                type_val = node.get("@type")
+                if isinstance(type_val, list):
+                    key: Any = ("list", id(type_val))
+                elif type(type_val) in (str, int, float, bool, type(None)):
+                    key = (type(type_val), type_val)
+                else:
+                    key = None
+                cached = memo.get(key) if key is not None else None
+                if cached is None:
+                    limits: list[int] = []
+                    token = _type_limit_collector.set(limits)
+                    try:
+                        matched = HtmlMetadataExtractor._is_product_type(type_val)
+                    finally:
+                        _type_limit_collector.reset(token)
+                    if key is not None and len(memo) < 20_000:
+                        memo[key] = (type_val, matched, limits[0] if limits else None)
+                else:
+                    _, matched, limit_visited = cached
+                    if limit_visited is not None:
+                        logger.debug(
+                            "JSON-LD type inspection reached a limit",
+                            extra={"event": "jsonld_type_limit", "visited_nodes": limit_visited},
+                        )
+                if matched:
                     results.append(node)
                 continue
             visited += 1
             if depth > 128:
                 depth_exceeded = True
-                continue
-            if isinstance(node, dict):
-                stack.extend(
-                    (v, depth + 1, False) for k, v in reversed(list(node.items())) if k != "@graph"
-                )
-                stack.append((node, depth, True))
-                if isinstance(node.get("@graph"), (list, dict)):
+            elif isinstance(node, dict):
+                children = (value for key, value in node.items() if key != "@graph")
+                stack.append(("iterate", iter(children), depth + 1))
+                stack.append(("process", node, depth))
+                graph = node.get("@graph")
+                if isinstance(graph, (list, dict)):
                     logger.debug(
                         "Traversing JSON-LD @graph container (items=%d)",
-                        len(node["@graph"]),
-                        extra={
-                            "event": "jsonld_graph_traversal",
-                            "graph_items_count": len(node["@graph"]),
-                        },
+                        len(graph),
+                        extra={"event": "jsonld_graph_traversal", "graph_items_count": len(graph)},
                     )
-                    stack.append((node["@graph"], depth + 1, False))
+                    stack.append(("visit", graph, depth + 1))
             elif isinstance(node, list):
-                stack.extend((item, depth + 1, False) for item in reversed(node))
+                stack.append(("iterate", iter(node), depth + 1))
+            peak = max(peak, len(stack))
         if depth_exceeded or stack:
             logger.debug(
                 "JSON-LD discovery reached a limit",
                 extra={"event": "jsonld_discovery_limit", "visited_nodes": visited},
             )
-        return results
+        return results, peak
+
+    @staticmethod
+    def _find_jsonld_products(data: Any) -> list[dict[str, Any]]:
+        """Find products in graph-first order with bounded iterative traversal."""
+        return HtmlMetadataExtractor._walk_jsonld_products(data)[0]
+
+    @staticmethod
+    def _jsonld_traversal_diagnostics(walk: str, data: Any) -> tuple[Any, int]:
+        """Run a traversal and expose its actual per-invocation peak pending records."""
+        if walk == "discovery":
+            return HtmlMetadataExtractor._walk_jsonld_products(data)
+        if walk == "type":
+            return HtmlMetadataExtractor._walk_product_type(data)
+        raise ValueError(f"Unknown JSON-LD traversal: {walk}")

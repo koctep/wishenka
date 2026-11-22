@@ -301,15 +301,17 @@ precedence over a conflicting legacy meta declaration. Users can correct preview
 policy is fixed in code and has no environment settings. Offline coverage for both fetch paths
 and ambiguous or malformed inputs is in `tests/test_encoding_nested_graph.py`.
 
-### 5. Cascading HTML Metadata Extractor [`HtmlMetadataExtractor`](file:///home/src/wishenka/items/parser.py#L195-L456)
+### 5. Cascading HTML Metadata Extractor [`HtmlMetadataExtractor`](file:///home/src/wishenka/items/parser.py#L419-L868)
 
 Located in [`wishenka/items/parser.py`](file:///home/src/wishenka/items/parser.py).
 
 Parses HTML documents using `BeautifulSoup4` with a multi-level fallback cascade:
 - **1. JSON-LD Cascade (`_find_jsonld_products`)**:
-  - Traverses `<script type="application/ld+json">` elements.
-  - Iteratively searches `@graph` objects and arrays, matching `Product` and namespaced types.
-    Product discovery and nested `@type` inspection each stop at 20,000 nodes or depth 128.
+  - Traverses `<script type="application/ld+json">` elements using bounded iterator frames and
+    discovery-local `@type` memoization (see *Bounded JSON-LD traversal and type memoization*
+    below).
+  - Searches `@graph` objects and arrays first, matching `Product` and namespaced `.../Product`
+    types; discovery and `@type` inspection each stop at 20,000 visited nodes or depth 128.
     Discovery retains earlier results; invalid or over-limit data can fall through to later
     scripts and metadata sources. Remote contexts and `@id` references are not dereferenced.
   - Extracts title (`name`), description (`description`), image (`image`), and brand (`brand`).
@@ -321,12 +323,12 @@ Parses HTML documents using `BeautifulSoup4` with a multi-level fallback cascade
 - **4. Standard HTML Fallback**:
   - Scrapes `<title>`, `<meta name="description">`, and `<link rel="icon">`.
 - **Sanitization Helpers**:
-  - [`clean_title`](file:///home/src/wishenka/items/parser.py#L59-L75): Removes store advertising noise and marketing suffixes (e.g. `— купить в интернет-магазине Ozon`, `на маркетплейсе Wildberries`, `объявление на Авито`).
+  - [`clean_title`](file:///home/src/wishenka/items/parser.py#L173-L188): Removes store advertising noise and marketing suffixes (e.g. `— купить в интернет-магазине Ozon`, `на маркетплейсе Wildberries`, `объявление на Авито`).
   - `parse_decimal_price` parses localized positive prices as floats; `parse_price` is the
     legacy whole-unit helper and truncates the fraction. The preview uses the decimal helper.
   - `extract_currency` recognizes supported codes and inline labels; `normalize_currency`
     resolves the currency or falls back to `RUB`. See the pricing notes below.
-  - [`derive_store_name`](file:///home/src/wishenka/items/parser.py#L138-L167): Resolves store name via priority: OpenGraph `og:site_name` $\rightarrow$ brand $\rightarrow$ `KNOWN_STORES` domain map $\rightarrow$ [`MarketplaceRegistry.derive_store_name`](file:///home/src/wishenka/items/marketplaces.py#L210) $\rightarrow$ clean domain.
+  - [`derive_store_name`](file:///home/src/wishenka/items/parser.py#L362-L390): Resolves store name via priority: OpenGraph `og:site_name` $\rightarrow$ brand $\rightarrow$ `KNOWN_STORES` domain map $\rightarrow$ [`MarketplaceRegistry.derive_store_name`](file:///home/src/wishenka/items/marketplaces.py#L210) $\rightarrow$ clean domain.
 
 #### International prices and currency
 
@@ -379,6 +381,68 @@ source currency and supported aliases. If separators are ambiguous, compare the 
 with the deterministic rules above. Run the focused regression suite with
 `make test` or `.venv/bin/pytest tests/test_international_currency_parsing.py`; the latter covers
 localized numbers, currency labels, JSON-LD offers, and the preview path.
+
+#### Bounded JSON-LD traversal and type memoization
+
+Product discovery and `@type` checking in [`wishenka/items/parser.py`](file:///home/src/wishenka/items/parser.py)
+use lazy iterator frames so temporary traversal stack storage depends only on depth, never on
+list or object width:
+
+- **Product discovery (`_walk_jsonld_products`, `_find_jsonld_products`)**:
+  - `_find_jsonld_products(data)` delegates to `_walk_jsonld_products(data)[0]` and preserves
+    `@graph`-first order: for each `dict`, a `list` or `dict` `@graph` value is traversed first
+    (logging `jsonld_graph_traversal` at `DEBUG` with `graph_items_count`), then the `dict`
+    itself is evaluated, and finally its non-`@graph` values are traversed in insertion order.
+  - Instead of copying `dict.items()` or pushing all siblings eagerly, traversal pushes lazy
+    `("iterate", iter(...), depth)` frames and at most one deferred `("process", node, depth)`
+    record per active `dict`. Across depths `0..128` plus one depth-`129` child, pending stack
+    records are bounded at `<= 262`, independent of container width.
+  - Non-process visits consume `1` of the `20,000`-visit budget (`"iterate"` and `"process"`
+    bookkeeping consume `0`). Before every logical pop—including before a deferred `"process"`
+    action—the loop stops immediately when `visited >= 20_000`. Nodes at depth `128` remain
+    visitable and may enqueue depth-`129` children, which consume `1` visit and skip descending
+    (`depth > 128`). Earlier results (up to `20,000` matching `dict` references) are retained; if
+    `depth > 128` or pending stack frames remain at exit, `jsonld_discovery_limit` is logged at
+    `DEBUG` with `visited_nodes`.
+- **Lazy `@type` inspection (`_walk_product_type`, `_is_product_type`)**:
+  - `_is_product_type(type_val)` delegates to `_walk_product_type(type_val)[0]`, inspecting only
+    `str` values and nested `list` containers left-to-right (`dict` and other values are
+    non-matching leaves).
+  - Nested lists use lazy `("iterate", iter(value), depth + 1)` frames, bounding pending stack
+    records to `<= 131` frames regardless of list width, and stop immediately on the first `str`
+    whose stripped lowercase value is `"product"` or ends with `"/product"`.
+  - Applies the same `20,000`-visit and depth-`128` limits; hitting either limit without an
+    earlier match emits `jsonld_type_limit` at `DEBUG` with `visited_nodes` and records
+    `visited` in `_type_limit_collector` when active.
+- **Discovery-local `@type` memoization and telemetry replay**:
+  - Each `_walk_jsonld_products` invocation allocates a fresh `memo` capped at `20,000` entries
+    and never shares it across `<script>` blocks, invocations, or requests.
+  - Scalar `@type` values (`str`, `int`, `float`, `bool`, `None`) use key
+    `(type(type_val), type_val)`. `list`-valued `@type` values use `("list", id(type_val))` while
+    retaining a strong reference to `type_val` inside `memo` for the duration of the walk so
+    `id()` values cannot be recycled mid-traversal; non-scalar/non-list objects (such as `dict`)
+    bypass memoization. Because `json.loads()` creates distinct `list` instances per JSON array,
+    list-identity memoization deduplicates shared in-process `list` references rather than
+    structurally equal distinct JSON arrays, and assumes inputs do not mutate during traversal.
+  - Each uncached candidate retains its own `20,000`-visit `@type` budget so earlier wide types
+    never starve later candidates; for fetched HTML within the `2 MB` (`MAX_RESPONSE_BYTES`)
+    limit, `json.loads()` yields a strict tree whose total nodes across scripts are bounded
+    linearly by the response bytes.
+  - On a memo miss, `_walk_jsonld_products` captures limit-hit `visited_nodes` via the
+    `_type_limit_collector` `ContextVar` around `_is_product_type(type_val)`. On a memo hit whose
+    first evaluation hit a limit, it replays `jsonld_type_limit` at `DEBUG` with the recorded
+    `visited_nodes` without re-traversing `@type`.
+- **Diagnostics and verification**:
+  - `HtmlMetadataExtractor._jsonld_traversal_diagnostics(walk, data)` runs `"discovery"` or
+    `"type"` and returns `(result, peak_pending)` from the live stack length for per-invocation
+    bounds assertions.
+  - Deterministic offline checks live in
+    [`tests/test_jsonld_traversal_bounds.py`](file:///home/src/tests/test_jsonld_traversal_bounds.py)
+    (`pytestmark = pytest.mark.timeout(30)`), verifying lazy `CountingList` / `CountingDict`
+    reads, bounded `tracemalloc` traversal memory (`< 512 KiB`), exact `20,000`-visit and
+    depth-`128` boundaries, `@graph`-first ordering, `<= 262` / `<= 131` pending-record bounds,
+    discovery-local memoization, and `DEBUG` telemetry without raw payload leaks. Run with
+    `.venv/bin/pytest tests/test_jsonld_traversal_bounds.py`.
 
 ### 6. Link Preview Orchestrator & Graceful Fallback [`ItemPreviewService`](file:///home/src/wishenka/items/service.py#L38-L387)
 
@@ -934,7 +998,7 @@ assert ssrf_preview.fallback_reason == "ssrf_blocked"
 
 ### 4. Cascading Metadata Parsing with JSON-LD `@graph` and `AggregateOffer`
 
-Use [`HtmlMetadataExtractor.extract`](file:///home/src/wishenka/items/parser.py#L198-L419):
+Use [`HtmlMetadataExtractor.extract`](file:///home/src/wishenka/items/parser.py#L423-L630):
 
 ```python
 from wishenka.items.parser import HtmlMetadataExtractor
@@ -1371,10 +1435,10 @@ All events are logged via structured extra dictionaries under logger names `"wis
 | :--- | :---: | :--- | :--- |
 | `marketplace_url_cleaned` | `INFO` | `url_domain`, `removed_params_count`, `removed_keys` | Stripped marketing tracking parameters from URL before fetch. |
 | `marketplace_rule_matched` | `DEBUG` | `store_name`, `url_domain` | Target URL matched a registered marketplace rule. |
-| `jsonld_graph_traversal` | `DEBUG` | `graph_items_count` | Found and traversing JSON-LD `@graph` container. |
+| `jsonld_graph_traversal` | `DEBUG` | `graph_items_count` | Entering a `list` or `dict` JSON-LD `@graph` container during discovery (scalar item count only). |
 | `jsonld_parse_skipped` | `DEBUG` | — | Malformed or excessively nested JSON-LD was skipped. |
-| `jsonld_type_limit` | `DEBUG` | `visited_nodes` | Product type inspection reached a limit. |
-| `jsonld_discovery_limit` | `DEBUG` | `visited_nodes` | Product discovery reached a limit. |
+| `jsonld_type_limit` | `DEBUG` | `visited_nodes` | Product `@type` inspection reached `depth > 128` or `20,000` visited nodes (also replayed on discovery-local memo hits). |
+| `jsonld_discovery_limit` | `DEBUG` | `visited_nodes` | Product discovery reached `depth > 128` or `20,000` visited nodes with pending stack frames remaining. |
 | `jsonld_aggregate_offer_extracted` | `DEBUG` | `url_domain`, `offer_price`, `low_price`, `high_price` | Extracted price from Schema.org `AggregateOffer`. |
 | `metadata_extraction_started` | `DEBUG` | `url_domain`, `parser_stage="start"` | Commenced HTML parsing and metadata extraction. |
 | `metadata_stage_resolved` | `DEBUG` | `url_domain`, `parser_stage` (`json_ld`, `opengraph`) | Intermediate parsing stage successfully resolved fields. |
@@ -1450,13 +1514,18 @@ In accordance with security requirements:
 - **Symptom**: A preview contains replacement characters, incorrect Cyrillic text, or misses a
   product present in JSON-LD.
 - **Cause**: A legacy charset declaration may be wrong or an undeclared page may be ambiguous.
-  Invalid JSON-LD and products beyond the fixed traversal limits are skipped.
+  Invalid JSON-LD and products beyond the fixed traversal limits (`20,000` visited nodes or
+  depth `128` in discovery or `@type` inspection; pending dictionary processing stops once
+  `20,000` discovery visits are reached) are skipped.
 - **Resolution**: Compare the response bytes, `Content-Type` charset and early meta declarations
-  in a controlled environment; avoid logging page contents. At DEBUG level, inspect
-  `jsonld_parse_skipped`, `jsonld_type_limit` and `jsonld_discovery_limit`. Users can edit fields
-  manually. Run `pytest tests/test_encoding_nested_graph.py` for offline regressions; expanding
-  the encoding calibration corpus and bounding traversal overhead are tracked in WISHENKA-117
-  and WISHENKA-116.
+  in a controlled environment; avoid logging page contents. At `DEBUG` level, inspect
+  `jsonld_parse_skipped`, `jsonld_graph_traversal`, `jsonld_discovery_limit`, and
+  `jsonld_type_limit` (which also replays on discovery-local memo hits without logging raw
+  `@type` tokens or node values). Users can edit fields manually. Run
+  `.venv/bin/pytest tests/test_encoding_nested_graph.py tests/test_jsonld_traversal_bounds.py`
+  for offline encoding and bounded-traversal regressions (covering `_jsonld_traversal_diagnostics`
+  and `262`/`131` pending-record bounds); expanding the encoding calibration corpus remains
+  tracked in WISHENKA-117.
 
 ### 1. SSRF Blocked Targets (`fallback_reason="ssrf_blocked"`)
 - **Symptom**: `ItemPreviewDTO` returns with `is_fallback=True` and `fallback_reason="ssrf_blocked"`.
