@@ -128,6 +128,11 @@ label { display: block; margin: .5rem 0; }
 #app .list-wish-title { margin: 0; font-weight: 600; }
 #app .wishlist-settings-form { padding: 0; margin: 0; box-shadow: none; }
 #app .settings-field-label, #app .settings-field-hint { display: block; }
+#app .settings-field-error {
+  display: block; margin: .25rem 0 0; color: var(--danger); font-weight: 600;
+  font-size: .9rem; overflow-wrap: anywhere;
+}
+#app .settings-field input[aria-invalid="true"] { border-color: var(--danger); border-width: 2px; }
 #app .settings-field-hint { font-size: .85rem; }
 #app .settings-field input, #app .share-panel input { margin: .25rem 0; }
 #app .member-row {

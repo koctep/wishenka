@@ -9,8 +9,9 @@ The Mini App runs inside the Telegram WebView and is served directly by FastAPI 
 server-rendered shell with progressive client-side enhancement. It operates in tandem with the
 wishlists domain service and security middleware to satisfy four primary goals:
 
-1. **Frictionless Creation**: Allow immediate creation of active empty wishlists without forced
-   upfront metadata forms.
+1. **Explicit Creation**: Create a wishlist only after the owner confirms a short creation form
+   with a required title; leaving the form creates nothing (WISHENKA-296, replaces the former
+   automatic empty list).
 2. **Contextual Settings Management**: Let owners and administrators configure list metadata
    (title, description, event title, event date) with explicit persistence and cancellation.
 3. **Collaborative Member Administration**: Provide distinct administrative controls for
@@ -328,13 +329,19 @@ each action visible pending, success and error feedback. It adds no endpoint.
   it with its own success or error text.
 - **`pending(action, message)`** adapts it for `button()`, whose click handler now receives
   `(event, element)`.
-- **Guarded controls**: create wishlist, remove favorite (home), restore deleted wishlist (home,
+- **Guarded controls**: create wishlist (the creation form's Create button), remove favorite
+  (home), restore deleted wishlist (home,
   message `miniapp.deleted.restoring`), restore archived wishlist, favorite toggle, member
   remove, role change, revoke invite, reset public link. History clearing and the settings form
   keep their own existing pending state.
-- **Create-button scope**: the guard only prevents duplicate `POST /api/wishlists` taps in
-  today's click-time creation flow. WISHENKA-296 changes that flow; whoever lands second must
-  re-check the guard and test assertion A6 for it (follow-up WISHENKA-312).
+- **Create-button scope**: since WISHENKA-296 the home button only opens the creation form; the
+  guarded control is the form's own Create button (`withPending(createBtn, send, ...)`,
+  `miniapp.js:533`), shared by taps and Enter. Assertion A6 (a burst sends exactly one
+  `POST /api/wishlists`) is carried by `test_enter_and_tap_burst_sends_exactly_one_post` and
+  `test_real_tap_burst_sends_exactly_one_post` in `tests/test_wishlist_create_form_browser.py`
+  and by `test_create_wishlist_burst_sends_a_single_post` in
+  `tests/test_cross_screen_comfort_browser.py`. The remaining re-check and the unprotected retry
+  after a lost response are tracked in WISHENKA-312 and WISHENKA-322.
 
 #### htmx Pending and Failure Feedback (`app.js`, `base.html`)
 
@@ -431,14 +438,20 @@ capabilities. The application strictly adheres to the following token safety rul
 
 ## User Workflows & Management Views
 
-### 1. Frictionless Wishlist Creation
+### 1. Wishlist Creation
 
-- **Trigger**: User opens the Mini App and initiates wishlist creation.
-- **API Call**: `POST /api/wishlists` with an empty JSON payload `{}`.
-- **Behavior**: The server immediately creates an active personal wishlist with generated tokens.
-  Creation does not require a title, description, or event date.
-- **UI State**: The client navigates directly to the new wishlist view. If the title is empty,
-  the UI presents a localized placeholder (`Мой вишлист`) and displays an entry point to add items.
+- **Trigger**: the home button "Create wishlist" (`home-create-btn`) opens the creation form
+  (`showCreate`, `miniapp.js:378`). The button sends no request. The bot menu item "Create
+  wishlist" and the deep link `startapp=create` open the home screen, where `create` only focuses
+  this button (`miniapp.js:1158-1160`); nothing is created by them.
+- **API Call**: `POST /api/wishlists` with `name` (required), `description`, `event_title`,
+  `event_date`, sent only after the user confirms the form with a valid title.
+- **Behavior**: the server creates an active personal wishlist with generated tokens and the
+  trimmed title; a missing or invalid title is rejected with `422` and nothing is created.
+- **UI State**: on success the client opens the new wishlist (`showList`) with the add-item entry
+  point. Leaving the form (Cancel, closing the Mini App, navigating away) creates nothing.
+
+Full description: [Wishlist Creation Form](#wishlist-creation-form-wishenka-296).
 
 ### 2. Wishlist Settings Management
 
@@ -526,6 +539,103 @@ and never submits with it. API contract and events:
   (`tests/test_wishlist_delete_browser.py::test_texts_are_identical_for_lists_with_and_without_reservations`).
   Reservations may be mentioned only in `consequences` and `restore_promise`, in fixed clauses;
   see [i18n.md](i18n.md#wishlist-delete-texts-wishenka-295).
+
+### Wishlist Creation Form (WISHENKA-296)
+
+Reverses the former rule "a wishlist is created automatically when the user taps Create"
+(decision D1) and makes the title required (D2). Both decisions were taken autonomously in the
+run and still need the product owner's confirmation (reversible: relaxing `WishlistCreateInput`
+and the form is enough). Product wording: `in-docs/spec.md` 4.2 and UC-01.
+
+#### Screen and Navigation (`miniapp.js`)
+
+- **`showCreate()`** (`:378`, placed before `showHome`): increments `homeRenderToken`, clears
+  `#status`, renders `<h1 tabindex="-1">` (`miniapp.create.title`), a lead `<p
+  class="section-subtitle">` and `<form class="wishlist-settings-form wishlist-create-form"
+  novalidate>`, then focuses the `<h1>`. The first tab stop is the title input. It is built only
+  with `node()`, `textContent` and attributes (no HTML injection).
+- **Fields**, in DOM order: `name` (text, `aria-required="true"`, `autocomplete="off"`),
+  `description` (text), `event_title` (text), `event_date` (`datetime-local`). Each is wrapped
+  in `label.settings-field` with `span.settings-field-label` and a hint
+  `span.settings-field-hint#create-hint-<name>` linked by `aria-describedby`. Labels and hints
+  reuse the settings keys (see [i18n.md](i18n.md#wishlist-creation-texts-wishenka-296)).
+- **Actions** (`div.form-actions.settings-form-actions.create-form-actions`): Create
+  (`button[type=submit].btn-primary.create-submit-btn`) and Cancel
+  (`.settings-cancel-btn.create-cancel-btn`, reuses `miniapp.wishlist_settings.cancel`).
+- **`goHome()`** (`:373`): calls `showHome()` and focuses the home `<h1>` (the skeleton `<h1>` is
+  rendered synchronously before the first `await`). Used by Cancel (ignored while a request is in
+  flight) and by the failure fallback after creation. Cancel pushes no history entry, so
+  `history.back()` leaves the form on screen; nothing is created either way.
+- **`homeRenderToken`** (`:372`): module-level counter. `showHome` takes `const token =
+  ++homeRenderToken` (`:543`) and drops its result at `:566`, `:716`, `:719` and in the `catch`
+  (`:752`) when the token is stale, so a slow home load cannot overwrite the creation form, nor a
+  late failure write `miniapp.home.load_failed` over it. `showCreate` also increments it.
+
+#### Validation and Request
+
+- **Client rules** (`validate()`, `:438`): the trimmed title must not be empty
+  (`error_title_required`) and must be at most `MAX_TITLE = 255` code points (`[...title].length`,
+  `error_title_too_long`, `{max}`); the date must not be a native `badInput` and, when set,
+  parse to a year 1-9999 (`error_date_invalid`). The `datetime-local` value is treated as UTC:
+  `new Date(value + 'Z').toISOString()` (`buildPayload`, `:455`). Optional fields are trimmed
+  and sent as `null` when empty. The form is `novalidate`; errors are custom, not native bubbles.
+- **Server rules**: see [wishlists.md](wishlists.md) (`WishlistCreateInput`,
+  `wishenka/web/routes/wishlists.py:43-54`). Client and server limits are equal, so a `422` after
+  a valid client check arises only from `trim()` versus `strip()` differences on rare Unicode
+  spaces.
+- **Submit** (`form` submit handler, `:521-538`): `preventDefault`, ignored while `submitting`,
+  previous errors cleared, client validation, then
+  `withPending(createBtn, send, miniapp.create.pending)`.
+  `send()` (`:501`) calls `setBusy(true)` (Cancel disabled, inputs `readonly`), posts once and, on
+  success, `showList(list.id)`. If that list load fails it calls `goHome()` and then writes
+  `miniapp.list.load_failed` as an error (the list already exists).
+- **Errors**: `mapFailure` (`:465`) reads `err.body.detail[].loc` (last element). A `422` on
+  `name` and/or `event_date` becomes inline errors on those fields (a `422` on `name` always
+  shows `error_title_required`, even for an over-long title; follow-up WISHENKA-320). Any other
+  failure (500, network, 401, 422 without a known field) shows `miniapp.home.create_failed` in
+  `#status` as an error and keeps the form filled for retry.
+- **Inline errors**: created lazily as `span.settings-field-error#create-error-<name>`
+  (`role="alert"`), appended to the field label; the input gets `aria-invalid="true"` and
+  `aria-describedby="create-hint-<name> create-error-<name>"`. Typing in a field removes its error
+  and restores `aria-invalid="false"` and the hint-only description.
+
+#### Focus Rules
+
+| Moment | Focus |
+| --- | --- |
+| Form opened | the `<h1>` (`tabindex="-1"`), so the new context is announced |
+| Client validation fails or `422` on a field | the first invalid field in DOM order |
+| Other failure | the Create button, re-enabled |
+| Cancel | the home `<h1>` via `goHome()` |
+| Success | whatever `showList` focuses |
+
+#### Styling (`miniapp.css`)
+
+- `#app .settings-field-error` (`:131-134`): block, `var(--danger)`, bold, `.9rem`,
+  `overflow-wrap: anywhere`.
+- `#app .settings-field input[aria-invalid="true"]` (`:135`): danger border, `2px` (the state is
+  not colour-only: text, `aria-invalid`, thicker border, and "(required)" in the label).
+- The form otherwise reuses the settings form styles (`.wishlist-settings-form`,
+  `.settings-field`, `.settings-form-actions`).
+
+#### The `api()` Helper
+
+`api(path, options)` (`:111`) adds the CSRF header for non-GET requests and throws an `Error`
+with `status`. Since WISHENKA-296 it also sets `err.body` (the parsed JSON) **only for status
+422** (`:121-123`). This deviates from `20-architecture.md` (R-10: every error): parsing the body
+of a 500 delayed the failure enough to break the timing-weak wait of
+`tests/test_history_screen_browser.py::test_load_failure_shows_alert_and_retry_recovers[500]`
+(it accepts any non-empty status, including the transient loading text). The weak wait is the real
+defect (WISHENKA-321); do not extend `err.body` to other statuses until it is fixed.
+
+#### Known Limits
+
+- No idempotency key: a retry after a lost response or a proxy 502/504 can create a second list
+  (WISHENKA-322); the owner can delete it (WISHENKA-295).
+- Invisible-only titles (zero-width characters) pass the 1-255 rule; settings editing (`PATCH`)
+  does not follow the title rule (WISHENKA-320). Lists created before this change may still have
+  an empty title; the UI shows `miniapp.common.untitled_wishlist` for them.
+- Only Chromium is exercised by the browser tests (WISHENKA-313).
 
 ### Wishlist Detail Workspace (WISHENKA-290)
 
@@ -802,8 +912,8 @@ entry, and categorized direct-child `<section>` blocks styled by
   exactly two `<button>` elements):
   1. **Create wishlist (`<button class="btn-primary home-create-btn">`)**: first `<button>` in
      `#app` so `startapp=create` focuses it via `root.querySelector('button')?.focus()` without
-     auto-creating a list. Spans the full primary row on mobile (`flex: 1 1 100%`) and submits
-     `POST /api/wishlists` with `body: '{}'` (`WISHENKA-296` compatibility).
+     auto-creating a list. Spans the full primary row on mobile (`flex: 1 1 100%`) and opens the
+     creation form (`showCreate`, `miniapp.js:554`); it sends no request (WISHENKA-296).
   2. **Viewing history (`<button class="home-nav-action">`)**: secondary button (`flex: 1 1
      8.5rem`) transitioning to `showHistory()` in one tap.
   3. **Settings (`<a href="/settings" class="settings-link home-nav-action">`)**: localized
@@ -1575,7 +1685,7 @@ across three Jinja2 partials with privacy, performance, and CSP-safe broken-imag
 | `/` | `GET` | No | No | Returns the Telegram Mini App HTML shell. |
 | `/api/auth/csrf` | `GET` | Yes | No | Issues session-bound CSRF token for forms. |
 | `/api/wishlists` | `GET` | Yes | No | Lists user's wishlists (owner and member). |
-| `/api/wishlists` | `POST` | Yes | Yes | Creates an empty personal wishlist. |
+| `/api/wishlists` | `POST` | Yes | Yes | Creates a personal wishlist; `name` is required (trimmed, 1-255), otherwise `422`. |
 | `/api/wishlists/deleted` | `GET` | Yes | No | Lists owner's soft-deleted wishlists within retention window. |
 | `/api/wishlists/{id}` | `GET` | Yes | No | Returns wishlist details and item view. |
 | `/api/wishlists/{id}` | `PATCH` | Yes | Yes | Updates title, description, or event. |

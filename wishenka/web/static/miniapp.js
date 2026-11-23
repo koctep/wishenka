@@ -117,6 +117,10 @@ async function api(path, options = {}) {
   if (!response.ok) {
     const err = new Error(`Request failed (${response.status})`);
     err.status = response.status;
+    if (response.status === 422) {
+      // Only validation errors carry a body the UI maps; other statuses keep their timing.
+      try { err.body = await response.json(); } catch (_) { /* no JSON body */ }
+    }
     throw err;
   }
   return response.json();
@@ -365,7 +369,178 @@ async function showHistory() {
   }
   status('');
 }
+let homeRenderToken = 0;
+function goHome() {
+  const done = showHome();
+  root.querySelector('h1')?.focus();
+  return done;
+}
+async function showCreate() {
+  ++homeRenderToken;
+  status('');
+  const MAX_TITLE = 255;
+  root.replaceChildren(
+    node('h1', t('miniapp.create.title'), {tabindex: '-1'}),
+    node('p', t('miniapp.create.lead'), {class: 'section-subtitle'})
+  );
+  const form = node('form', '', {
+    class: 'wishlist-settings-form wishlist-create-form', novalidate: ''
+  });
+  const inputs = {};
+  const wraps = {};
+  const errors = {};
+  let submitting = false;
+  let firstInvalid = null;
+  for (const [name, label, type, hint] of [
+    ['name', 'create.field_title', 'text', 'title'],
+    ['description', 'wishlist_settings.field_description', 'text', 'description'],
+    ['event_title', 'wishlist_settings.field_event', 'text', 'event'],
+    ['event_date', 'wishlist_settings.field_date', 'datetime-local', 'date']
+  ]) {
+    const wrap = node('label', '', {class: 'settings-field'});
+    wrap.append(node('span', t(`miniapp.${label}`), {class: 'settings-field-label'}));
+    const input = node('input', '', {name, type, 'aria-describedby': `create-hint-${name}`});
+    if (name === 'name') {
+      input.setAttribute('aria-required', 'true');
+      input.setAttribute('autocomplete', 'off');
+    }
+    input.value = '';
+    inputs[name] = input;
+    wraps[name] = wrap;
+    wrap.append(input, node('span', t(`miniapp.wishlist_settings.hint_${hint}`),
+      {class: 'settings-field-hint', id: `create-hint-${name}`}));
+    form.append(wrap);
+  }
+  function clearFieldError(name) {
+    const err = errors[name];
+    if (!err) return;
+    err.textContent = '';
+    wraps[name].removeChild?.(err);
+    delete errors[name];
+    inputs[name].setAttribute('aria-invalid', 'false');
+    inputs[name].setAttribute('aria-describedby', `create-hint-${name}`);
+  }
+  function showFieldError(name, message) {
+    let err = errors[name];
+    if (!err) {
+      err = node('span', '', {
+        class: 'settings-field-error', id: `create-error-${name}`, role: 'alert'
+      });
+      errors[name] = err;
+      wraps[name].append(err);
+    }
+    err.textContent = message;
+    inputs[name].setAttribute('aria-invalid', 'true');
+    inputs[name].setAttribute('aria-describedby',
+      `create-hint-${name} create-error-${name}`);
+    if (!firstInvalid) firstInvalid = inputs[name];
+  }
+  function validate() {
+    const problems = [];
+    const title = inputs.name.value.trim();
+    if (!title) problems.push(['name', t('miniapp.create.error_title_required')]);
+    else if ([...title].length > MAX_TITLE) {
+      problems.push(['name', t('miniapp.create.error_title_too_long', {max: MAX_TITLE})]);
+    }
+    const date = inputs.event_date.value;
+    let dateOk = !inputs.event_date.validity?.badInput;
+    if (dateOk && date) {
+      const parsed = new Date(`${date}Z`);
+      const year = parsed.getUTCFullYear();
+      dateOk = !Number.isNaN(parsed.getTime()) && year >= 1 && year <= 9999;
+    }
+    if (!dateOk) problems.push(['event_date', t('miniapp.create.error_date_invalid')]);
+    return problems;
+  }
+  function buildPayload() {
+    const optional = name => inputs[name].value.trim() || null;
+    const date = inputs.event_date.value;
+    return {
+      name: inputs.name.value.trim(),
+      description: optional('description'),
+      event_title: optional('event_title'),
+      event_date: date ? new Date(`${date}Z`).toISOString() : null
+    };
+  }
+  function mapFailure(error) {
+    const detail = error?.status === 422 && Array.isArray(error.body?.detail)
+      ? error.body.detail : [];
+    const fields = new Set(detail.map(item => (
+      Array.isArray(item?.loc) ? item.loc[item.loc.length - 1] : null)));
+    const known = ['name', 'event_date'].filter(name => fields.has(name));
+    if (!known.length) {
+      status(t('miniapp.home.create_failed'), 'error');
+      return 'failed';
+    }
+    status('');
+    for (const name of known) {
+      showFieldError(name, t(name === 'name' ? 'miniapp.create.error_title_required'
+        : 'miniapp.create.error_date_invalid'));
+    }
+    return 'invalid';
+  }
+  const createBtn = node('button', t('miniapp.create.submit'), {
+    type: 'submit', class: 'btn-primary create-submit-btn'
+  });
+  const cancelBtn = button(t('miniapp.wishlist_settings.cancel'), () => {
+    if (!submitting) goHome();
+  }, 'settings-cancel-btn create-cancel-btn');
+  const actions = node('div', '', {
+    class: 'form-actions settings-form-actions create-form-actions',
+  });
+  actions.append(createBtn, cancelBtn);
+  form.append(actions);
+  function setBusy(busy) {
+    submitting = busy;
+    cancelBtn.disabled = busy;
+    for (const input of Object.values(inputs)) {
+      if (busy) input.setAttribute('readonly', '');
+      else clearAttribute(input, 'readonly');
+    }
+  }
+  async function send() {
+    setBusy(true);
+    let data;
+    try { data = buildPayload(); } catch (_) {
+      status('');
+      showFieldError('event_date', t('miniapp.create.error_date_invalid'));
+      return 'invalid';
+    }
+    let list;
+    try { list = await api('/api/wishlists', {method: 'POST', body: JSON.stringify(data)}); }
+    catch (error) { return mapFailure(error); }
+    if (!(await showList(list.id))) {
+      await goHome();
+      status(t('miniapp.list.load_failed'), 'error');
+    }
+    return 'created';
+  }
+  for (const [name, input] of Object.entries(inputs)) {
+    input.addEventListener('input', () => clearFieldError(name));
+  }
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (submitting) return;
+    for (const name of Object.keys(errors)) clearFieldError(name);
+    firstInvalid = null;
+    const problems = validate();
+    if (problems.length) {
+      status('');
+      for (const [name, message] of problems) showFieldError(name, message);
+      firstInvalid?.focus();
+      return;
+    }
+    const outcome = await withPending(createBtn, send, t('miniapp.create.pending'));
+    if (outcome === undefined || outcome === 'created') return;
+    setBusy(false);
+    if (outcome === 'invalid') firstInvalid?.focus();
+    else createBtn.focus();
+  });
+  root.append(form);
+  root.querySelector('h1')?.focus();
+}
 async function showHome() {
+  const token = ++homeRenderToken;
   root.replaceChildren(
     node('h1', t('miniapp.home.title'), {tabindex: '-1'}),
     node('p', t('miniapp.home.lead'), {class: 'home-lead'})
@@ -376,12 +551,7 @@ async function showHome() {
     class: 'settings-link home-nav-action',
   });
   nav.append(
-    button(t('miniapp.home.create_wishlist'), pending(async () => {
-      try {
-        const list = await api('/api/wishlists', {method: 'POST', body: '{}'});
-        await showList(list.id);
-      } catch (_) { status(t('miniapp.home.create_failed'), 'error'); }
-    }), 'btn-primary home-create-btn'),
+    button(t('miniapp.home.create_wishlist'), showCreate, 'btn-primary home-create-btn'),
     button(t('miniapp.home.viewing_history'), showHistory, 'home-nav-action'),
     settingsLink
   );
@@ -393,6 +563,7 @@ async function showHome() {
       api('/api/favorites').catch(() => []),
       api('/api/wishlists/deleted').catch(() => [])
     ]);
+    if (token !== homeRenderToken) return;
 
     const myLists = lists.filter(l => l.role === 'owner');
     const collabLists = lists.filter(l => ['admin', 'member'].includes(l.role));
@@ -542,9 +713,12 @@ async function showHome() {
       const cardResponse = await fetch('/web/reservations/card', {
         credentials: 'same-origin',
       });
+      if (token !== homeRenderToken) return;
       if (cardResponse.ok) {
+        const cardHtml = await cardResponse.text();
+        if (token !== homeRenderToken) return;
         const parsed = new DOMParser().parseFromString(
-          await cardResponse.text(),
+          cardHtml,
           'text/html',
         );
         const sourceLink = parsed.querySelector('a');
@@ -574,7 +748,9 @@ async function showHome() {
       // A failed card leaves the three sections in place.
     }
     status('');
-  } catch (_) { status(t('miniapp.home.load_failed'), 'error'); }
+  } catch (_) {
+    if (token === homeRenderToken) status(t('miniapp.home.load_failed'), 'error');
+  }
 }
 function deleteWishlistControls(list) {
   if (list.role !== 'owner') return null;

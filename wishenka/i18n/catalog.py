@@ -273,6 +273,17 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "miniapp.home.title": "Wishlists",
         "miniapp.home.lead": "Your lists, shared plans, and saved favorites in one place.",
         "miniapp.home.create_wishlist": "Create wishlist",
+        "miniapp.create.title": "Create wishlist",
+        "miniapp.create.lead": (
+            "Give your wishlist a title. You can add the other details now or later in its "
+            "settings."
+        ),
+        "miniapp.create.field_title": "Title (required)",
+        "miniapp.create.submit": "Create",
+        "miniapp.create.pending": "Creating...",
+        "miniapp.create.error_title_required": "Enter a title for the wishlist.",
+        "miniapp.create.error_title_too_long": "The title is too long: at most {max} characters.",
+        "miniapp.create.error_date_invalid": "Enter a valid date and time or clear the field.",
         "miniapp.home.create_failed": "Could not create wishlist. Try again.",
         "miniapp.home.viewing_history": "Viewing history",
         "miniapp.home.reservations_hint": "Active and purchased gift promises",
@@ -919,6 +930,18 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "miniapp.home.title": "Вишлисты",
         "miniapp.home.lead": "Ваши списки, совместные планы и избранное в одном месте.",
         "miniapp.home.create_wishlist": "Создать вишлист",
+        "miniapp.create.title": "Создание вишлиста",
+        "miniapp.create.lead": (
+            "Дайте вишлисту название. Остальное можно указать сейчас или позже в настройках."
+        ),
+        "miniapp.create.field_title": "Название (обязательно)",
+        "miniapp.create.submit": "Создать",
+        "miniapp.create.pending": "Создание...",
+        "miniapp.create.error_title_required": "Введите название вишлиста.",
+        "miniapp.create.error_title_too_long": (
+            "Название слишком длинное: не больше {max} символов."
+        ),
+        "miniapp.create.error_date_invalid": "Введите корректные дату и время или очистите поле.",
         "miniapp.home.create_failed": "Не удалось создать вишлист. Попробуйте ещё раз.",
         "miniapp.home.viewing_history": "История просмотров",
         "miniapp.home.reservations_hint": "Активные и купленные обещания подарков",

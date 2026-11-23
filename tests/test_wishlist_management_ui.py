@@ -77,7 +77,9 @@ def test_mini_app_shell_and_empty_wishlist_creation(setup_app: Setup) -> None:
     shell = client.get("/")
     assert shell.status_code == 200
     assert "text/html" in shell.headers["content-type"]
-    created = client.post("/api/wishlists", json={}, headers=bearer(sessions, 101))
+    created = client.post(
+        "/api/wishlists", json={"name": "Wishlist"}, headers=bearer(sessions, 101)
+    )
     assert created.status_code == 201
     assert created.json()["id"]
 

@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from wishenka.auth.dependencies import get_current_user, get_optional_current_user
 from wishenka.auth.models import AuthenticatedUser
@@ -38,6 +38,20 @@ class WishlistInput(BaseModel):
     description: str | None = None
     event_title: str | None = None
     event_date: datetime | None = None
+
+
+class WishlistCreateInput(WishlistInput):
+    """Creation payload: unlike settings edits the title is required."""
+
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def _title(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not 1 <= len(trimmed) <= 255:
+            raise ValueError("title must be 1-255 characters")
+        return trimmed
 
 
 async def execute[T](request: Request, action: Callable[[WishlistService], Awaitable[T]]) -> T:
@@ -175,14 +189,16 @@ def projection(
 
 
 @router.post("/api/wishlists", status_code=201)
-async def create_wishlist(request: Request, body: WishlistInput, user: User) -> dict[str, Any]:
+async def create_wishlist(
+    request: Request, body: WishlistCreateInput, user: User
+) -> dict[str, Any]:
     async def action(service: WishlistService) -> dict[str, Any]:
         settings = getattr(request.app.state, "settings", None)
         ttl_seconds = getattr(settings, "invite_token_ttl_seconds", None)
         expires_in = timedelta(seconds=ttl_seconds) if ttl_seconds is not None else None
         wl = await service.create_wishlist(
             owner=user,
-            title=body.name or "",
+            title=body.name,
             description=body.description,
             event_title=body.event_title,
             event_date=body.event_date,

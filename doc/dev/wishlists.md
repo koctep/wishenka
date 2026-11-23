@@ -56,7 +56,16 @@ authentication described in [Authentication](auth.md). Authenticated routes requ
 session; the public route also accepts anonymous callers. A request with an invalid session may be
 rejected by the optional authentication dependency.
 
-- `POST /api/wishlists`: Authenticated user creates a list; returns 201.
+- `POST /api/wishlists`: Authenticated user creates a list; returns 201. The body is
+  `WishlistCreateInput` (`wishenka/web/routes/wishlists.py:43-54`): `name` is required, is trimmed
+  with `str.strip()` and must be 1-255 code points after trimming; the stored title is the trimmed
+  value. `description`, `event_title` and `event_date` stay optional (inherited from
+  `WishlistInput`). A missing, `null`, blank, non-string or over-long `name` is rejected with
+  `422` and the standard pydantic body whose `detail[].loc` is `["body", "name"]` (an invalid
+  `event_date` gives `["body", "event_date"]`); nothing is created. An empty `{}` body is no
+  longer accepted (WISHENKA-296, reverses the former automatic empty list). `PATCH
+  /api/wishlists/{id}` still uses the permissive `WishlistInput` (`:34-40`, `name: str | None`),
+  so a rename to blank or to a longer title is accepted there (follow-up WISHENKA-320).
 
 - `GET /api/wishlists`: Lists the caller's active memberships. Set `include_archived=true` to
   include archived lists.
@@ -612,6 +621,8 @@ async def create_wishlist(
   - `event_date`: Optional event timestamp.
   - `invite_token_expires_in`: TTL for the invite token (defaults to 7 days).
 - **Returns**: Newly created `Wishlist` aggregate.
+- **Validation**: the service itself accepts any title (including empty); the title rule (required,
+  trimmed, 1-255) is enforced only by the HTTP layer (`WishlistCreateInput`), see the route list.
 
 #### `get_wishlist_by_public_token`
 
@@ -1508,7 +1519,8 @@ Settings in `wishenka.config.Settings` (prefixed with `WISHENKA_` in environment
 
 | Event (`event`) | Level | Trigger | Key Attributes |
 | --- | :---: | --- | --- |
-| `wishlist_created` | `INFO` | New wishlist created | `wishlist_id`, `owner_id` |
+| `wishlist_created` | `INFO` | New wishlist created. Logged twice per creation: by the service (`wishenka.wishlists.service`: `wishlist_id`, `owner_id`, `format`, `time_type`, `event_date`) and by the route (`wishenka.web.wishlists`: `wishlist_id`, `user_id`). Count creations with `wishlist_mutation_committed`, not with this event | `wishlist_id`, `owner_id` / `user_id` |
+| `wishlist_mutation_committed` | `INFO` | Single-fire signal after a committed mutation in `execute()`; for creation `operation=create_wishlist`, emitted only on success (never for a 422, 401, 403 or 500) | `operation` |
 | `wishlist_status_changed` | `INFO` | Status changed | `wishlist_id`, `to_status` |
 | `member_joined` | `INFO` | Collaborator joined | `wishlist_id`, `user_id` |
 | `member_role_assigned` | `INFO` | Role updated | `wishlist_id`, `role` |
@@ -1557,6 +1569,13 @@ Settings in `wishenka.config.Settings` (prefixed with `WISHENKA_` in environment
 | `wishlist_deleted_by_owner` | `INFO` | Owner delete succeeded (also on an idempotent repeat) | `wishlist_id`, `user_id`, `retention_days`, `outcome` (`deleted` or `already_deleted`) |
 | `public_link_rate_limited` | `WARNING` | Public share/invite link throttled (`wishenka.web.rate_limit`) | `route` (`/share/{token}`, `/invite/{token}`, `/invite/{token}/join`), `method`, `client_ip`, `retry_after` |
 | `item_missing_parent_wishlist` | `ERROR` | `WishItem.wishlist` is `None` in `_require_item_wishlist` | `item_id`, `wishlist_id` |
+
+Creation notes (WISHENKA-296): a rejected creation (`422`) has no dedicated event; it is visible
+only in the request-completed access line with `status_code=422` (pydantic rejects before the
+handler runs, and the repository has no global `RequestValidationError` handler). The service
+`wishlist_created` record logs the user-entered `event_date` (ISO value, pre-existing); titles,
+descriptions and event titles are never logged. The paths are pinned by
+`tests/test_wishlist_create_observability.py`.
 
 ---
 

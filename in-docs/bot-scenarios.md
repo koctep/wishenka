@@ -12,7 +12,7 @@ A private chat `/start` without a parameter displays the menu in the user's sele
 
 | Action | Outcome |
 | --- | --- |
-| Create wishlist | Open the Mini App at the list creation flow. |
+| Create wishlist | Open the Mini App at the home screen, where creation starts. The bot creates nothing. |
 | My wishlists | Open the Mini App at the user's list collection. |
 | How it works | Explain creating, sharing and reserving without revealing hidden reservations. |
 | Open Mini App | Open the Mini App at its normal entry point. |

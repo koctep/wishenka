@@ -473,8 +473,9 @@ make test-serial PYTEST_ARGS="tests/test_visual_identity_browser.py"
      неблокирующий fallback при HTTP 500 от `/web/reservations/card`.
   7. `test_home_navigation_startapp_create_focus_and_preserved_script_contracts` (`en`, `ru` —
      2 кейса): проверяет контракт `test_reservations_cabinet_ui.home_script_problems(js_source)`,
-     фокус на кнопке создания при `startapp=create` без `POST /api/wishlists`, отправку
-     `POST /api/wishlists` `{}` по клику на создание и переход в `showHistory()` (`GET
+     фокус на кнопке создания при `startapp=create` без `POST /api/wishlists`, что клик на создание
+     открывает форму (`form`) и не отправляет `POST /api/wishlists` (WISHENKA-296: раньше уходил
+     `{}`; заглушка теперь возвращает имя из тела запроса), и переход в `showHistory()` (`GET
      /api/history`).
 - **`tests/test_home_overview_browser.py`** (`pytestmark = [pytest.mark.timeout(45),
   pytest.mark.browser]`, 6 тест-кейсов в 3 тестовых функциях в настоящем headless Chromium через
@@ -604,6 +605,43 @@ make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_settings_switch_browser.py -q'
   `test_unmarked_error_neither_shows_notice_nor_reloads`, WISHENKA-220) и остальной список в
   `ai-tasks/WISHENKA-292/60-tech-debt.md`.
 
+### Тесты формы создания вишлиста (WISHENKA-296)
+
+Контракт и экран: [wishlists.md](wishlists.md) (`POST /api/wishlists`),
+[miniapp.md](miniapp.md#wishlist-creation-form-wishenka-296). Всего 105 тестов в четырёх модулях
+(счёт по `.venv/bin/pytest --collect-only -q -n 0`).
+
+| Модуль | Тесты | Таймаут / маркер | Что проверяет |
+| --- | --- | --- | --- |
+| `tests/test_wishlist_create_validation_api.py` | 25 | `timeout(30)` | `POST /api/wishlists`: обязательное имя, обрезка пробелов, 1-255 кодовых точек, форма `422` (стандартная FastAPI), необязательные поля, неразбираемая дата, `401` и CSRF без создания, `PATCH` остаётся мягким, одиночный сигнал `wishlist_mutation_committed`, отсутствие текста пользователя в логах |
+| `tests/test_wishlist_create_form_ui.py` | 27 | `timeout(20)` | реальный `showCreate` в Node-стенде (`_NODE_HARNESS`): поля и подписи, отмена, ошибки без запроса, один обрезанный `POST`, дата как UTC, сбой, ключи каталога (восемь `miniapp.create.*`) |
+| `tests/test_wishlist_create_form_browser.py` | 42 | `timeout(45)`, `browser` | настоящий Chromium: открытие формы без запроса, уход (перезагрузка, навигация, Назад) ничего не создаёт, ошибки в полях, `422` по полю и неизвестному `loc`, серия нажатий и Enter дают один `POST`, сбой и повтор, сбой загрузки списка после создания, медленная загрузка главного экрана и защита `homeRenderToken`, deep link, геометрия на узких экранах, фокус, дерево доступности, порядок Tab |
+| `tests/test_wishlist_create_observability.py` | 11 | `timeout(30)` | события по каждому пути (201, 422, 401, 403, 500) и отсутствие названий и токенов в логах |
+
+- Браузерный модуль подпадает под охранный тест маркеров (см. «Таймауты и маркеры»).
+- Исправлены на шаге 4 три новых теста (заведомо неверные ожидания, смысл сохранён): в UI-модуле
+  после успеха исчезает только `wishlist-create-form` (на экране владельца есть своя форма
+  настроек); в браузерном модуле для `back` не ждём главный экран (`history.back()` не меняет
+  экран, запись в историю не добавляется); в проверке порядка Tab подряд идущие остановки одного
+  `datetime-local` схлопываются.
+- Обновлены существующие тесты: `test_home_overview_ui.py` (клик на создание открывает форму,
+  без `POST`), `test_home_overview_browser.py` (безымянный список делается через `PATCH`
+  с пустым именем), `test_cross_screen_comfort_browser.py` (серия нажатий и сбой идут через кнопку
+  «Создать» формы), `test_wishlist_api.py` и `test_wishlist_management_ui.py` (создание с именем;
+  принудительная `500` сохранена).
+- Запуск: `make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_wishlist_create_validation_api.py -q'`.
+  Набор сужает только `PYTEST_ARGS`; `make test-serial ARGS=...` ничего не сужает.
+- Известные ограничения: приватный вызов `page._send("Accessibility.getFullAXTree")`
+  ([WISHENKA-319](https://pypost.atlassian.net/browse/WISHENKA-319)); только Chromium
+  ([WISHENKA-313](https://pypost.atlassian.net/browse/WISHENKA-313)); дублирующиеся помощники
+  каталога и слабое ожидание в `tests/test_history_screen_browser.py` (500), из-за которого
+  `api()` разбирает тело только для `422`
+  ([WISHENKA-321](https://pypost.atlassian.net/browse/WISHENKA-321)); правило названия для `PATCH`
+  и ошибка «слишком длинное» ([WISHENKA-320](https://pypost.atlassian.net/browse/WISHENKA-320));
+  идемпотентность ([WISHENKA-322](https://pypost.atlassian.net/browse/WISHENKA-322)).
+- Тесты с `caplog` падают при запуске с `-p no:logging`; настроенные запуски плагин не отключают.
+- Заведомо падающие тесты вне задачи: те же, что в разделе WISHENKA-295.
+
 ### Тесты экрана истории просмотров (WISHENKA-292)
 
 Архитектура, состояния и селекторы:
@@ -677,9 +715,12 @@ make test-serial PYTEST_ARGS="tests/test_unavailable_page_observability.py -q"
   test_control_opening_an_entry_moves_it_to_the_top_and_navigation_works`. Стабилизация:
   [WISHENKA-311](https://pypost.atlassian.net/browse/WISHENKA-311).
 - Ограничения набора: контрольный тест D4 пропускает неточно подобранные «подозреваемые»
-  селекторы (`D4_SUSPECTS`, WISHENKA-308); защита кнопки создания и утверждение A6 нужно
-  перепроверить после WISHENKA-296
-  ([WISHENKA-312](https://pypost.atlassian.net/browse/WISHENKA-312)); устойчивость `:has()` и
+  селекторы (`D4_SUSPECTS`, WISHENKA-308); защита кнопки создания и утверждение A6 после
+  WISHENKA-296 относятся к кнопке «Создать» формы (тесты в
+  `tests/test_wishlist_create_form_browser.py` и `test_create_wishlist_burst_sends_a_single_post`);
+  остаток (повтор после потерянного ответа) в
+  [WISHENKA-312](https://pypost.atlassian.net/browse/WISHENKA-312) и
+  [WISHENKA-322](https://pypost.atlassian.net/browse/WISHENKA-322); устойчивость `:has()` и
   скрытого `#feedback`: [WISHENKA-309](https://pypost.atlassian.net/browse/WISHENKA-309);
   дублирование логики pending: [WISHENKA-310](https://pypost.atlassian.net/browse/WISHENKA-310).
 
@@ -1199,6 +1240,9 @@ make test PYTEST_JOBS=0 PYTEST_ARGS="tests/test_wishenka_183_repro.py tests/test
 
 Тесты удаления вишлиста WISHENKA-295: см. раздел «Тесты удаления вишлиста владельцем
 (WISHENKA-295)» (WISHENKA-316..319).
+
+Тесты формы создания WISHENKA-296: см. раздел «Тесты формы создания вишлиста (WISHENKA-296)»
+(WISHENKA-312, 313, 319..322).
 
 Тесты переключателей настроек WISHENKA-307: см. раздел «Тесты переключателей экрана настроек
 (WISHENKA-307)» (WISHENKA-313..315).

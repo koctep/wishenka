@@ -280,7 +280,10 @@ const sandbox = {
     if (url === '/api/auth/csrf') return jsonRes({ csrf_token: 'csrf-test' });
     if (url === '/api/wishlists' && method === 'GET') return jsonRes(state.wishlists);
     if (url === '/api/wishlists' && method === 'POST') {
-      const created = { id: 999, name: '', role: 'owner', status: 'active', items: [] };
+      const sent = JSON.parse(opts.body || '{}');
+      const created = {
+        id: 999, name: sent.name || '', role: 'owner', status: 'active', items: [],
+      };
       state.wishlistDetail['999'] = created;
       return jsonRes(created, 201);
     }
@@ -883,10 +886,10 @@ def test_home_navigation_startapp_create_focus_and_preserved_script_contracts(
         i18n_json,
         {"locale": locale, "clickNavButtonIndex": 0},
     )
-    assert any(
-        r["method"] == "POST" and r["url"] == "/api/wishlists" and r["body"] == "{}"
-        for r in clicked_create["requests"]
-    )
+    assert not any(
+        r["method"] == "POST" and r["url"] == "/api/wishlists" for r in clicked_create["requests"]
+    ), "WISHENKA-296: Create wishlist opens a form and sends nothing"
+    assert _find_one(clicked_create["root"], tag="form") is not None
 
     clicked_history = _run_node(
         js_source,

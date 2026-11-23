@@ -461,6 +461,17 @@ def test_copy_feedback_is_visible_and_typed_on_a_long_screen(
 # --- D6: duplicate submissions and failure feedback (A6) -------------------------------------
 
 
+def _open_create_form(page: CdpPage, title: str) -> None:
+    """Open the creation form from home and type a title (nothing is sent yet)."""
+    page.click(".home-create-btn")
+    page.wait_for("creation form", "!!document.querySelector('.wishlist-create-form')")
+    page.evaluate(
+        "(() => { const i = document.querySelector('.wishlist-create-form input[name=name]');"
+        f" i.value = {json.dumps(title)};"
+        " i.dispatchEvent(new Event('input', {bubbles: true})); })()"
+    )
+
+
 @pytest.mark.parametrize("locale", LOCALES)
 def test_create_wishlist_burst_sends_a_single_post(
     locale: SupportedLocale,
@@ -470,7 +481,7 @@ def test_create_wishlist_burst_sends_a_single_post(
 ) -> None:
     """D6 (A6): three taps issued before the response resolves send one ``POST``.
 
-    Scoped to the click-time creation (WISHENKA-296 may change this flow); only "no duplicate
+    Since WISHENKA-296 the burst is sent on the creation form's Create button; only "no duplicate
     request per tap burst" is asserted, not the later state of the screen.
     """
     _seed(wishlist_server, locale)
@@ -483,8 +494,9 @@ def test_create_wishlist_burst_sends_a_single_post(
         preload_script=API_PRELOAD,
     )
     page.evaluate("window.__t.mode.create = 'hold'")
+    _open_create_form(page, "Burst list")
     page.evaluate(
-        "(() => { const b = document.querySelector('.home-create-btn');"
+        "(() => { const b = document.querySelector('.create-submit-btn');"
         " b.click(); b.click(); b.click(); })()"
     )
     sent = page.evaluate("window.__t.posts.filter(k => k === 'create').length")
@@ -515,7 +527,8 @@ def test_create_wishlist_failure_is_announced_as_an_error(
         preload_script=API_PRELOAD,
     )
     page.evaluate("window.__t.mode.create = '500'")
-    page.click(".home-create-btn")
+    _open_create_form(page, "Failing list")
+    page.click(".create-submit-btn")
     message = t("miniapp.home.create_failed", locale)
     page.wait_for(
         "create failure text",

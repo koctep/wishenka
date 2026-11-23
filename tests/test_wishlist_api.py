@@ -30,7 +30,7 @@ def test_mutation_events_only_follow_success_and_hide_capabilities(
         caplog.at_level(logging.INFO, logger="wishenka.web.wishlists"),
         TestClient(create_app(settings)) as client,
     ):
-        created = client.post("/api/wishlists", json={}, headers=owner).json()
+        created = client.post("/api/wishlists", json={"name": "Wishlist"}, headers=owner).json()
         path = f"/api/wishlists/{created['id']}"
         assert client.post(path + "/share/reset", headers=stranger).status_code == 404
         reset = client.post(path + "/share/reset", headers=owner)
@@ -77,7 +77,7 @@ def test_storage_error_traceback_does_not_expose_tokens(
         caplog.at_level(logging.ERROR, logger="wishenka.web"),
         TestClient(app, raise_server_exceptions=False) as client,
     ):
-        response = client.post("/api/wishlists", json={}, headers=owner)
+        response = client.post("/api/wishlists", json={"name": "Wishlist"}, headers=owner)
     assert response.status_code == 500
     errors = [
         record for record in caplog.records if record.name == "wishenka.web" and record.exc_info
@@ -183,7 +183,7 @@ def test_management_authorization_lifecycle_and_log_redaction(
     stranger = {"Authorization": f"Bearer {sessions.create_token(202, 'Stranger')}"}
     with TestClient(create_app(settings)) as client:
         assert client.post("/api/wishlists", json={}).status_code == 401
-        created = client.post("/api/wishlists", json={}, headers=owner).json()
+        created = client.post("/api/wishlists", json={"name": "Wishlist"}, headers=owner).json()
         ident, token = created["id"], created["share_token"]
         path = f"/api/wishlists/{ident}"
         assert client.patch(path, json={"name": "No"}, headers=stranger).status_code == 404
@@ -274,12 +274,12 @@ def test_share_token_collision_retries_and_never_revives_revoked_link(
     sessions = SessionTokenService(settings.secret_key)
     owner = {"Authorization": f"Bearer {sessions.create_token(101, 'Owner')}"}
     with TestClient(create_app(settings)) as client:
-        first = client.post("/api/wishlists", json={}, headers=owner).json()
+        first = client.post("/api/wishlists", json={"name": "Wishlist"}, headers=owner).json()
         assert first["share_token"] == "old"
         reset = client.post(f"/api/wishlists/{first['id']}/share/reset", headers=owner)
         assert reset.json()["share_token"] == "new"
     with TestClient(create_app(settings)) as client:
-        second = client.post("/api/wishlists", json={}, headers=owner)
+        second = client.post("/api/wishlists", json={"name": "Wishlist"}, headers=owner)
         assert second.status_code == 201
         assert second.json()["share_token"] == "unique"
         assert client.get("/api/public/wishlists/old").status_code == 404

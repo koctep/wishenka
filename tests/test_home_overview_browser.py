@@ -56,8 +56,14 @@ def _seed_rich_overview(server: BrowserServer, locale: SupportedLocale) -> dict[
         )
         owned_item.raise_for_status()
 
-        owned_untitled = owner_api.post("/api/wishlists", json={"name": ""})
+        # Creation requires a title (WISHENKA-296); a legacy untitled list is made by renaming.
+        owned_untitled = owner_api.post("/api/wishlists", json={"name": "Temporary"})
         owned_untitled.raise_for_status()
+        cleared = owner_api.patch(
+            f"/api/wishlists/{owned_untitled.json()['id']}", json={"name": ""}
+        )
+        cleared.raise_for_status()
+        assert cleared.json()["name"] == ""
 
     with httpx.Client(base_url=server.base_url, headers=viewer_headers, timeout=10) as viewer_api:
         # Viewer reserves an item in owner's list (must NEVER leak on owner's Home screen).
