@@ -17,6 +17,7 @@
   let csrfPending = null;
   let csrfGeneration = 0;
   const pendingGiverControls = new WeakSet();
+  const pendingLocks = new WeakMap();
 
   function refreshReservationBadge() {
     const badge = document.querySelector('.reservations-badge');
@@ -240,7 +241,27 @@
     }
   }
 
+  /**
+   * Keep `--quick-add-clearance` equal to the real height of the fixed quick-add bar, so the
+   * last content stays reachable when the bar wraps or shows a preview card.
+   *
+   * @returns {void}
+   */
+  function trackQuickAddClearance() {
+    const bar = document.getElementById('quick-add-bar');
+    if (!bar || typeof ResizeObserver !== 'function') {
+      return;
+    }
+    const root = document.documentElement;
+    const update = () => {
+      root.style.setProperty('--quick-add-clearance', `${bar.offsetHeight + 16}px`);
+    };
+    new ResizeObserver(update).observe(bar);
+    update();
+  }
+
   window.prepareCsrf = prepareCsrf;
+  document.addEventListener('DOMContentLoaded', trackQuickAddClearance);
 
   document.addEventListener('DOMContentLoaded', () => {
     if (!document.body.hasAttribute('data-viewer-identified')) {
@@ -301,8 +322,25 @@
     });
   });
 
+  /**
+   * Undo `htmx:beforeRequest` locking (busy flag, disabled submit controls) for a request.
+   *
+   * @param {Element | null} elt - Triggering element.
+   * @returns {void}
+   */
+  function releasePending(elt) {
+    const locked = elt && pendingLocks.get(elt);
+    if (!locked) {
+      return;
+    }
+    pendingLocks.delete(elt);
+    elt.removeAttribute('aria-busy');
+    locked.forEach((control) => { control.disabled = false; });
+  }
+
   document.addEventListener('htmx:afterRequest', (evt) => {
     const elt = evt.detail.elt;
+    releasePending(elt);
     if (!reservationRequestPath(elt)) {
       return;
     }
@@ -485,6 +523,82 @@
       placeholder.hidden = false;
     }
   }
+
+  /**
+   * Whether the shared htmx feedback applies to a request. Reservation, receipt and reorder
+   * flows report their own pending and failure state and are left alone.
+   *
+   * @param {Element | null} elt - Triggering element.
+   * @returns {boolean} True when the shared pending/failure feedback should handle it.
+   */
+  function sharedFeedbackApplies(elt) {
+    return !!elt && !!elt.closest && !reservationRequestPath(elt) && !elt.closest('.receipt-sheet');
+  }
+
+  /**
+   * Whether a failure of the request is worth a visible message (not a preview or a modal opener).
+   *
+   * @param {Element} elt - Triggering element.
+   * @param {{requestConfig?: {verb?: string}}} detail - htmx event detail.
+   * @returns {boolean} True for mutating requests.
+   */
+  function reportsFailure(elt, detail) {
+    const verb = String((detail.requestConfig && detail.requestConfig.verb) || '').toLowerCase();
+    return verb !== 'get' && elt.id !== 'quick-add-input';
+  }
+
+  /**
+   * Show a localized error in the shared `#feedback` region (`role="alert"`).
+   *
+   * @returns {void}
+   */
+  function showRequestFailure() {
+    const region = document.getElementById('feedback');
+    if (!region) {
+      return;
+    }
+    region.textContent =
+      document.body.getAttribute('data-i18n-request-failed') ||
+      'The request failed. Check the connection and retry.';
+    region.setAttribute('data-kind', 'error');
+  }
+
+  document.addEventListener('htmx:beforeRequest', (evt) => {
+    const elt = evt.detail && evt.detail.elt;
+    if (!sharedFeedbackApplies(elt)) {
+      return;
+    }
+    const region = document.getElementById('feedback');
+    if (region && reportsFailure(elt, evt.detail)) {
+      region.textContent = '';
+      region.removeAttribute('data-kind');
+    }
+    const locked = [];
+    elt.setAttribute('aria-busy', 'true');
+    if (reportsFailure(elt, evt.detail)) {
+      const controls = elt.tagName === 'FORM'
+        ? Array.from(elt.querySelectorAll('button[type="submit"]'))
+        : [elt];
+      controls.filter((control) => control.tagName === 'BUTTON' && !control.disabled)
+        .forEach((control) => {
+          control.disabled = true;
+          locked.push(control);
+        });
+    }
+    pendingLocks.set(elt, locked);
+  });
+
+  ['htmx:sendError', 'htmx:timeout', 'htmx:responseError'].forEach((name) => {
+    document.addEventListener(name, (evt) => {
+      const detail = evt.detail || {};
+      const xhr = detail.xhr;
+      const marked = xhr && typeof xhr.getResponseHeader === 'function' &&
+        (xhr.getResponseHeader('X-Reorder-Refusal') || xhr.getResponseHeader('X-Receipt-Refusal'));
+      if (!marked && sharedFeedbackApplies(detail.elt) && reportsFailure(detail.elt, detail)) {
+        showRequestFailure();
+      }
+    });
+  });
 
   document.addEventListener('error', handleImageError, true);
   document.addEventListener('click', handleDelegatedClick);

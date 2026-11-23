@@ -17,9 +17,11 @@
       data-i18n-busy-error="{{ t('web.common.wish_busy_error', locale|default('en')) }}"
       data-i18n-receipt-failure="{{ t('web.receipt.generic_failure', locale|default('en')) }}"
       data-i18n-receipt-summary="{{ t('web.receipt.summary_template', locale|default('en'), chosen='{chosen}', remaining='{remaining}') }}"
+      data-i18n-request-failed="{{ t('web.common.request_failed', locale|default('en')) }}"
       data-i18n-item-unavailable="{{ t('web.item.unavailable', locale|default('en')) }}"
       data-i18n-list-changed="{{ t('web.wishlist.list_changed', locale|default('en')) }}"
       {% if viewer_identified|default(false) %}data-viewer-identified="true"{% endif %}>
+    <div id="feedback" role="alert" aria-live="assertive"></div>
     {% if viewer_identified|default(false) %}
     <nav class="top-nav container mx-auto px-4 pt-3 max-w-lg">
         <a href="/settings" class="settings-link">{{ t('nav.settings', locale|default('en')) }}</a>

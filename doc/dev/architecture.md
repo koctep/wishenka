@@ -184,7 +184,8 @@ CRUD настроек `user_notification_settings` / `wl_list_notification_setti
 - [`doc/dev/auth.md`](auth.md) — Аутентификация Telegram Mini App, валидация initData и
   сессионные токены.
 - [`doc/dev/miniapp.md`](miniapp.md) — Telegram Mini App (TMA): интерфейс управления вишлистами,
-  администрирование участников, флоу инвайтов, шеринг и CSRF-защита.
+  администрирование участников, флоу инвайтов, шеринг и CSRF-защита; общий слой комфорта и
+  обратной связи и HTML-страница недоступности (WISHENKA-294).
 - [`doc/dev/infrastructure.md`](infrastructure.md) — Окружение разработки, Makefile, линтеры,
   форматирование и CI.
 - [`doc/dev/verification-matrix.md`](verification-matrix.md) — Verification

@@ -168,6 +168,13 @@ class CdpPage:
             {"width": viewport[0], "height": viewport[1], "deviceScaleFactor": 1, "mobile": False},
         )
 
+    def set_viewport(self, width: int, height: int) -> None:
+        """Resize the emulated viewport of the open tab (one page can serve every width)."""
+        self._send(
+            "Emulation.setDeviceMetricsOverride",
+            {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": False},
+        )
+
     def set_bearer(self, token: str, *, accept_language: str | None = None) -> None:
         """Send ``Authorization: Bearer <token>`` (and optional Accept-Language) on the tab."""
         self._send("Network.enable")
@@ -175,6 +182,11 @@ class CdpPage:
         if accept_language:
             headers["Accept-Language"] = accept_language
         self._send("Network.setExtraHTTPHeaders", {"headers": headers})
+
+    def clear_cookies(self) -> None:
+        """Drop every cookie of the shared browser profile (cookies ignore the server port)."""
+        self._send("Network.enable")
+        self._send("Network.clearBrowserCookies")
 
     def set_cookie(self, name: str, value: str, url: str) -> None:
         """Set a cookie (``HttpOnly``, ``SameSite=Lax``) on the tab via ``Network.setCookie``."""

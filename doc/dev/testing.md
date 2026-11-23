@@ -543,6 +543,65 @@ make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_history_screen_browser.py -q'
 make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_wishlist_sections_observability.py -q'
 ```
 
+### Сквозные тесты комфорта и надёжности экранов (WISHENKA-294)
+
+Архитектура слоя и поведение страницы недоступности:
+[miniapp.md](miniapp.md#cross-screen-comfort-and-reliability-layer-wishenka-294).
+
+- **`tests/test_cross_screen_comfort_browser.py`** (48 тестов, `timeout(45)`, `browser`; ширины 320,
+  360, 375, 390 и 412 px, RU и EN; один сервер и одна страница на тест, ширину меняет
+  `CdpPage.set_viewport`; хуки перечислены в докстринге модуля). Утверждения:
+  - **A1/A2** нет горизонтальной прокрутки, длинные значения видны целиком (детальная и публичная
+    страницы, диалоги);
+  - **A3** главные действия достижимы, последний блок выше панели быстрого добавления;
+  - **A4** все кнопки, ссылки, поля и `summary` не меньше 44 px;
+  - **A5** `#quick-add-input` не уже 10rem;
+  - **A6** `#status` виден, имеет `data-kind` и `aria-live`; один `POST` за серию нажатий на
+    создание; защита избранного и сброса публичной ссылки; ошибка создания слышна как `error`;
+  - **A7** страницы недоступности: `text/html`, код 404/401, `lang`, заголовок, ссылка на `/`,
+    одинаковый ответ для отсутствующего и удалённого списка; JSON остаётся JSON для `*/*`,
+    JSON, htmx и `/api`;
+  - **A8** контраст и фокус на всех экранах; **A9** корневой шрифт относительный и не меняется
+    по умолчанию; **A10** htmx: `aria-busy` и блокировка отправки, `#feedback` при сетевой ошибке.
+  - Контрольные `test_control_*` (параметризованы) зелёные и на исходном коде: на нём были
+    зелёными 16 из 48 тестов, красными 32 (дефекты D1-D9 из `20-architecture.md`).
+- **`tests/browser_screens.py`**: общие помощники нескольких экранов: `provision_user`,
+  `open_miniapp`, `telegram_init_data` (перенесены из `test_home_overview_browser.py`, старые
+  имена там остались псевдонимами), `GEOMETRY_JS`/`CONTRAST_JS` и `assert_*` (проверки по
+  странице), `seed_comfort_wishlist`, `open_path`, фикстура `configured_server` (сервер с
+  именем бота, чтобы панели шеринга показывали ссылку и кнопку копирования).
+- **`CdpPage.set_viewport(width, height)`** меняет эмулируемую ширину открытой вкладки;
+  **`CdpPage.clear_cookies()`** (вызывается из `open_path`) очищает cookie общего профиля Chromium:
+  cookie не различают порты, поэтому сессия предыдущего сервера делала анонимные случаи
+  авторизованными.
+- **`tests/test_unavailable_page_observability.py`** (`caplog`, 2 теста): один INFO-ивент
+  `unavailable_page_rendered` на HTML-ответ с ожидаемыми `route_kind` и `status_code`, без токена
+  и идентификатора в JSON-строке; JSON, `*/*`, htmx и `/api` событий не создают. Значение `locale`
+  пока не проверяется (WISHENKA-308).
+
+```bash
+make test-serial PYTEST_ARGS="tests/test_cross_screen_comfort_browser.py -q"
+make test-serial PYTEST_ARGS="tests/test_unavailable_page_observability.py -q"
+```
+
+Правила запуска:
+
+- Тяжёлые браузерные наборы параллельно запускайте осторожно: под нагрузкой воркеров растут
+  таймауты, а не число ошибок поведения. Эталонный прогон: `make test-serial PYTEST_ARGS="<файлы>
+  -q"`. Переменная `TESTS=` игнорируется, файлы передаёт только `PYTEST_ARGS`.
+- Известные тесты, чувствительные к нагрузке (падают только параллельно, поодиночке и
+  последовательно проходят): `test_cross_screen_comfort_browser.py::
+  test_htmx_pending_request_marks_the_form_busy` (ожидание `WAIT = 3.0` с) и
+  `test_history_screen_browser.py::
+  test_control_opening_an_entry_moves_it_to_the_top_and_navigation_works`. Стабилизация:
+  [WISHENKA-311](https://pypost.atlassian.net/browse/WISHENKA-311).
+- Ограничения набора: контрольный тест D4 пропускает неточно подобранные «подозреваемые»
+  селекторы (`D4_SUSPECTS`, WISHENKA-308); защита кнопки создания и утверждение A6 нужно
+  перепроверить после WISHENKA-296
+  ([WISHENKA-312](https://pypost.atlassian.net/browse/WISHENKA-312)); устойчивость `:has()` и
+  скрытого `#feedback`: [WISHENKA-309](https://pypost.atlassian.net/browse/WISHENKA-309);
+  дублирование логики pending: [WISHENKA-310](https://pypost.atlassian.net/browse/WISHENKA-310).
+
 ### Изолированная диагностика поддержки и единый principal приватного бота (WISHENKA-182)
 
 Модуль `tests/test_wishenka_182_repro.py` (`pytestmark = pytest.mark.timeout(30)`, 4 теста: 3 async, 1 sync)
@@ -1056,6 +1115,9 @@ make test PYTEST_JOBS=0 PYTEST_ARGS="tests/test_wishenka_183_repro.py tests/test
 ```
 
 ## Известные ограничения
+
+Сквозные тесты WISHENKA-294: см. конец раздела «Сквозные тесты комфорта и надёжности экранов
+(WISHENKA-294)» (WISHENKA-308..312).
 
 Пункты отслежены в Jira (источники: `ai-tasks/WISHENKA-124/60-tech-debt.md` и `ai-tasks/WISHENKA-110/60-tech-debt.md`):
 

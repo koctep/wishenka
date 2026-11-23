@@ -145,7 +145,7 @@ pages (`.settings-page`, wishlist views, and `invite_preview.html`):
     (`90vh`), `--layer-drag` (`10`), `--layer-quick-add` (`40`), `--layer-receipt` (`100`), and
     `--layer-modal` (`100`).
 - **Surfaces, typography, and mobile spacing**:
-  - `:root` sets `font: 16px system-ui, sans-serif; color: var(--ink); background: var(--canvas);`
+  - `:root` sets `font: 100% system-ui, sans-serif; color: var(--ink); background: var(--canvas);`
     and `body` centers `--content-width` with `1rem` padding.
   - `section, form` render light `--surface` cards (`border-radius: 1rem`, soft plum shadow
     `0 3px 12px rgba(99, 33, 60, .08)`). `.birthdate-form` resets `margin: 0; padding: 0;
@@ -163,7 +163,7 @@ pages (`.settings-page`, wishlist views, and `invite_preview.html`):
     `border: 1px solid #aa8998`, `border-radius: .5rem`, `padding: .5rem` on non-checkboxes) do
     not set `background: var(--surface)` or `color: var(--ink)`, so non-checkbox `<input>`
     elements in `.modal-sheet` keep browser defaults. Only
-    `:where(#app, .settings-page) :is(select, textarea)` sets `background: var(--surface);
+    `:where(body) :is(select, textarea)` sets `background: var(--surface);
     color: var(--ink);` alongside `box-sizing: border-box`, `max-width: 100%`,
     `min-height: var(--touch-target)`, `font: inherit`, `border: 1px solid #aa8998`,
     `border-radius: .5rem`, and `padding: .5rem`.
@@ -217,7 +217,8 @@ the fixed quick-add bar so dark Telegram themes never mix with light-shell foreg
   `.receipt-sheet .quantity-control input`, `.modal-sheet select`, and `.modal-sheet textarea`
   explicitly use `--receipt-bg` and `--receipt-text` (`.modal-sheet form` uses `background:
   transparent; color: inherit; box-shadow: none;`). Light `select`/`textarea` styling is scoped
-  to `:where(#app, .settings-page) :is(select, textarea)` so it never leaks into modal sheets.
+  to `:where(body) :is(select, textarea)`. That selector has zero specificity, so the
+  `.modal-sheet select` and `.modal-sheet textarea` rules (receipt colors) always override it.
   Non-checkbox `<input>` elements in `.modal-sheet` (`partials/item_edit_modal.html`) keep
   default field colors.
 - **Close, cancel, and modal action contrast**: `.receipt-sheet .btn-modal-close`,
@@ -277,6 +278,106 @@ using the shared CDP harness (`tests/browser_cdp.py`, `tests/browser_helpers.py`
 - Complements `tests/test_receipt_theme_browser.py` and
   `tests/test_receipt_accessibility_browser.py`; module details and run command are in
   [testing.md](testing.md#тесты-единого-визуального-стиля-wishenka-288).
+
+### Cross-Screen Comfort and Reliability Layer (WISHENKA-294)
+
+A shared layer in [`miniapp.css`](../../wishenka/web/static/miniapp.css), `miniapp.js`, `app.js` and
+`base.html` keeps every key screen usable on a phone (320-412 px, RU and EN, long text) and gives
+each action visible pending, success and error feedback. It adds no endpoint.
+
+#### Layout and Touch Rules (`miniapp.css`)
+
+- **Root font**: `:root` uses `font: 100% system-ui, sans-serif` (no `px`, no line-height), so the
+  user's text-size setting scales every `rem` value. `body` sets `overflow-wrap: anywhere`;
+  `:where(img, svg, video)` and `.badge` have `max-width: 100%`.
+- **44px fields**: the field rule is `:where(body) :is(select, textarea)` (was `#app` and
+  `.settings-page` only), so server-rendered selects (for example the giver select) get
+  `min-height: var(--touch-target)`. `:where(summary)` gets the same minimum height.
+- **Buttons from links**: the store link (`item_card.html`) and "Go to wish"
+  (`reservations_list.html`) carry `class="btn"` to get the shared 44px geometry.
+- **Quick-add row**: `.quick-add-row` wraps (`flex-wrap`); the input has `flex: 1 1 100%` below
+  480 px (at least `min(10rem, 100%)` wide) and `flex: 1 1 10rem` above it.
+- **Bar clearance**: `main:has(#quick-add-bar)` has
+  `padding-bottom: max(var(--quick-add-clearance), 9rem)`. The token defaults to
+  `calc(7.5rem + env(safe-area-inset-bottom, 0px))`; `trackQuickAddClearance()` in `app.js` sets it
+  to `bar.offsetHeight + 16` px through a `ResizeObserver`, so the last card stays above the bar
+  when the bar wraps or shows a preview. `:has()` needs Chromium 105+ (follow-up WISHENKA-309).
+
+#### Status and Feedback Regions
+
+- **`#status`** (Mini App page, `routes/miniapp.py`) and **`#feedback`** (`base.html`, first child
+  of `<body>`, `role="alert" aria-live="assertive"`, hidden while empty) are `position: sticky;
+  top: 0` under `--layer-status: 30`, so a message written while the user is lower on a long page
+  stays visible (it was off screen before).
+- `data-kind` is `pending`, `success` or `error`; CSS adds a leading icon and colors
+  (`success` uses `--notice-bg`/`--notice-text`, `error` uses `--danger`). Absent `data-kind` is a
+  neutral message.
+- **`status(message, kind = '')`** (`miniapp.js`) sets text and `data-kind` (unknown kinds and an
+  empty message clear it) and `aria-live`: `assertive` for `error`, `polite` otherwise. Every
+  failure message in the Mini App passes `'error'`, loads pass `'pending'`, and confirmations pass
+  `'success'`.
+
+#### Pending Guard in the Mini App (`withPending`)
+
+- **`withPending(control, action, message = t('nav.working'))`**: ignores a second call while the
+  control is busy (a `WeakSet`, so a burst of taps runs `action` once). While it runs, the control
+  is `disabled`, has `aria-busy="true"` and the class `is-pending` (`cursor: progress`), and
+  `#status` shows `message` as `pending`. The control state (`disabled`, `aria-busy`,
+  `is-pending`) is undone in `finally`; `#status` keeps the pending text until `action` replaces
+  it with its own success or error text.
+- **`pending(action, message)`** adapts it for `button()`, whose click handler now receives
+  `(event, element)`.
+- **Guarded controls**: create wishlist, remove favorite (home), restore deleted wishlist (home,
+  message `miniapp.deleted.restoring`), restore archived wishlist, favorite toggle, member
+  remove, role change, revoke invite, reset public link. History clearing and the settings form
+  keep their own existing pending state.
+- **Create-button scope**: the guard only prevents duplicate `POST /api/wishlists` taps in
+  today's click-time creation flow. WISHENKA-296 changes that flow; whoever lands second must
+  re-check the guard and test assertion A6 for it (follow-up WISHENKA-312).
+
+#### htmx Pending and Failure Feedback (`app.js`, `base.html`)
+
+- `htmx:beforeRequest` sets `aria-busy="true"` on the triggering element and, for non-GET
+  requests (not the quick-add preview input), disables its submit buttons (or the element itself
+  if it is a button) and clears `#feedback`. `htmx:afterRequest` restores them (`releasePending`).
+- `htmx:sendError`, `htmx:timeout` and `htmx:responseError` fill `#feedback` with
+  `web.common.request_failed` (from `data-i18n-request-failed` on `<body>`; English fallback in
+  the script) and `data-kind="error"`.
+- **Left alone**: reservation requests, `.receipt-sheet` and answers marked `X-Reorder-Refusal` or
+  `X-Receipt-Refusal` keep their own messages; GET requests report no failure.
+- The same pending/feedback logic exists in `miniapp.js` and `app.js` (WISHENKA-310).
+
+#### Unavailable Page (`wishenka/web/unavailable.py`)
+
+`install_unavailable_page(app)` (called in `create_app` after the routers) overrides the
+Starlette `HTTPException` handler. It renders `templates/unavailable.html` only when all hold:
+
+- method is `GET` and status is 404 or 401;
+- the path matches `PAGE_PATHS` exactly: `/share/<token>`, `/web/wishlists/<id>`,
+  `/web/reservations` (sub-paths, `/api/...` and unknown routes stay JSON);
+- no `HX-Request` header;
+- `prefers_html(Accept)`: `text/html` is listed with q > 0 and ranks above `application/json`
+  (higher q, or equal q and earlier position). A missing header, `*/*` and JSON stay JSON.
+
+Everything else is delegated to FastAPI's `http_exception_handler` (JSON unchanged).
+
+- **Response**: the original status code and `headers=exc.headers`, so a 401 page keeps
+  `WWW-Authenticate`. Body: `h1` (`web.unavailable.heading`), a paragraph (`web.unavailable.auth`
+  for 401, `web.unavailable.description` for 404) and `a.unavailable-home` to `/`
+  (`web.invite.go_home`, 44px button).
+- **Locale**: `get_request_locale` (profile, then `?lang`, then `Accept-Language`;
+  see [i18n.md](i18n.md#locale-resolution--precedence)); on any exception it logs a WARNING
+  and falls back to `resolve_accept_language`. The locale is stored in `request.state.locale`.
+- **Privacy**: the page is static text. It never shows the token, id, title or the reason, so a
+  missing and a deleted wishlist look identical (surprise invariant).
+- **Log**: one INFO event `unavailable_page_rendered` with `status_code` (401/404), `route_kind`
+  (`share`, `wishlist`, `reservations`) and `locale`; no token or id. Count it by
+  `extra.event`.
+- **Limits**: `PAGE_PATHS` uses `$` with `.match` (a trailing `\n` also matches), and the response
+  does not set `Vary: Accept` (WISHENKA-308).
+
+Tests and the unavailable-page log test: see the WISHENKA-294 section of
+[testing.md](testing.md#сквозные-тесты-комфорта-и-надёжности-экранов-wishenka-294).
 
 ---
 
@@ -1213,7 +1314,8 @@ of inline JavaScript and inline `on*` event handlers from SSR templates so a str
     enabling `prepareCsrf()`, `htmx:confirm` queuing, and `X-CSRF-Token` / `Idempotency-Key`
     injection in `app.js`) and localized fallback strings: `data-i18n-prepare-error`,
     `data-i18n-busy-error`, `data-i18n-receipt-failure`, `data-i18n-receipt-summary`,
-    `data-i18n-item-unavailable`, and `data-i18n-list-changed`.
+    `data-i18n-item-unavailable`, `data-i18n-list-changed`, and `data-i18n-request-failed` (see the
+    WISHENKA-294 section).
   - `.settings-page` in `settings.html` provides localized strings read by `settings.js` via
     `getI18n()`: `data-i18n-saved`, `data-i18n-birthdate-source-explicit`,
     `data-i18n-invalid-birthdate`, `data-i18n-invalid-notification`, `data-i18n-state-enabled`,
@@ -1530,3 +1632,12 @@ The following settings configure the Mini App and web security layer:
   `.modal-header h2 { color: inherit; }` and `.btn-modal-close` / `.btn-cancel` sheet overrides
   remain intact, and verify with `tests/test_visual_identity_browser.py` and
   `tests/test_receipt_theme_browser.py`.
+
+### 16. Server Page Shows JSON, or a Message Is Hidden or Silent (WISHENKA-294)
+
+- **Cause**: The client sent `Accept: */*`, JSON, `HX-Request`, or the path is not one of the
+  three page URLs (the unavailable page stays JSON there); or `#feedback` / `#status` lost
+  `position: sticky` or `data-kind`; or a control is not wrapped in `pending()`.
+- **Solution**: Check the request `Accept` header and `PAGE_PATHS` in
+  `wishenka/web/unavailable.py`; look for the `unavailable_page_rendered` log event; verify
+  `#feedback` exists in `base.html` and run `tests/test_cross_screen_comfort_browser.py`.

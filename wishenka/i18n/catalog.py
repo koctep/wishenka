@@ -15,6 +15,7 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "nav.settings": "Settings",
         "nav.back": "Back",
         "nav.loading": "Loading",
+        "nav.working": "Working...",
         # Settings page and language selector
         "settings.page_title": "Settings — Wishenka",
         "settings.title": "Settings",
@@ -416,6 +417,12 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "miniapp.auth.open_in_telegram": "Open this app in Telegram to sign in.",
         # SSR web pages, partials, and UI routes
         "web.common.request_prepare_error": "Could not prepare the request. Please try again.",
+        "web.common.request_failed": "The request failed. Check the connection and retry.",
+        "web.unavailable.heading": "This page is unavailable",
+        "web.unavailable.description": (
+            "The link is invalid, expired or the wishlist no longer exists."
+        ),
+        "web.unavailable.auth": "Sign in through Telegram to open this page.",
         "web.common.wish_busy_error": (
             "The wish is busy; the reservation was not changed. Please try again."
         ),
@@ -617,6 +624,7 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "nav.settings": "Настройки",
         "nav.back": "Назад",
         "nav.loading": "Загрузка",
+        "nav.working": "Выполняется...",
         # Settings page and language selector
         "settings.page_title": "Настройки — Вишенка",
         "settings.title": "Настройки",
@@ -1035,6 +1043,12 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "miniapp.auth.open_in_telegram": "Откройте приложение в Telegram, чтобы войти.",
         # SSR web pages, partials, and UI routes
         "web.common.request_prepare_error": "Не удалось подготовить запрос. Повторите попытку.",
+        "web.common.request_failed": "Запрос не выполнен. Проверьте соединение и повторите.",
+        "web.unavailable.heading": "Страница недоступна",
+        "web.unavailable.description": (
+            "Ссылка недействительна, устарела или списка желаний больше нет."
+        ),
+        "web.unavailable.auth": "Войдите через Telegram, чтобы открыть эту страницу.",
         "web.common.wish_busy_error": ("Желание занято, бронь не изменилась. Повторите попытку."),
         "web.common.member_fallback": "Участник #{id}",
         "web.common.owner_suffix": "{name} (Владелец)",

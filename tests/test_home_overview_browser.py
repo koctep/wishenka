@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
-import time
 from typing import Any
 
 import httpx
@@ -13,77 +10,17 @@ import pytest
 
 from tests.browser_cdp import CdpBrowser, CdpPage
 from tests.browser_helpers import assert_clean_console, scroll_to
+from tests.browser_screens import open_miniapp, provision_user, telegram_init_data
 from tests.conftest import OWNER_TELEGRAM_ID, VIEWER_TELEGRAM_ID, BrowserServer
-from wishenka.config import Settings
 from wishenka.i18n import SupportedLocale, t
 
 pytestmark = [pytest.mark.timeout(45), pytest.mark.browser]
 
 
-def _telegram_init_data(telegram_id: int, first_name: str, language: SupportedLocale) -> str:
-    """Create signed Telegram WebApp initData using default test bot token."""
-    from urllib.parse import urlencode
-
-    user = json.dumps(
-        {"id": telegram_id, "first_name": first_name, "language_code": language},
-        separators=(",", ":"),
-    )
-    fields = {"auth_date": str(int(time.time())), "user": user}
-    check = "\n".join(f"{key}={value}" for key, value in sorted(fields.items()))
-    secret = hmac.new(b"WebAppData", Settings().bot_token.encode("utf-8"), hashlib.sha256).digest()
-    fields["hash"] = hmac.new(secret, check.encode("utf-8"), hashlib.sha256).hexdigest()
-    return urlencode(fields)
-
-
-def _set_user_locale(
-    server: BrowserServer,
-    token: str,
-    telegram_id: int,
-    first_name: str,
-    language: SupportedLocale,
-) -> None:
-    """Ensure user exists in DB and persist explicit locale for Mini App shell & API."""
-    init_data = _telegram_init_data(telegram_id, first_name, language)
-    headers = {"Authorization": f"Bearer {token}"}
-    with httpx.Client(base_url=server.base_url, headers=headers, timeout=10) as api:
-        auth_resp = api.post(
-            "/api/auth/telegram",
-            json={"init_data": init_data},
-            headers={"Origin": server.base_url},
-        )
-        auth_resp.raise_for_status()
-        locale_resp = api.patch("/api/profile/locale", json={"locale": language})
-        locale_resp.raise_for_status()
-
-
-def _open_home(
-    browser: CdpBrowser,
-    pages: list[CdpPage],
-    server: BrowserServer,
-    token: str,
-    locale: SupportedLocale,
-    *,
-    viewport: tuple[int, int] = (412, 800),
-    query: str = "",
-    preload_script: str | None = None,
-) -> CdpPage:
-    """Open Mini App home with session cookie and wait until showHome settles."""
-    browser.ensure_alive()
-    page = browser.new_page(viewport)
-    pages.append(page)
-    page.set_cookie("session_id", token, server.base_url)
-    if preload_script:
-        page._send("Page.addScriptToEvaluateOnNewDocument", {"source": preload_script})
-    url = f"{server.base_url}/" if not query else f"{server.base_url}/?{query}"
-    page.navigate(url)
-    expected_title = json.dumps(t("miniapp.home.title", locale))
-    page.wait_for(
-        f"home overview settled ({locale})",
-        f"document.querySelector('#app h1')?.innerText === {expected_title} "
-        "&& document.getElementById('status')?.innerText === '' "
-        "&& document.querySelectorAll('.wishlist-section').length >= 3",
-    )
-    return page
+# The helpers moved to ``tests/browser_screens.py``; the private names stay for the older tests.
+_telegram_init_data = telegram_init_data
+_set_user_locale = provision_user
+_open_home = open_miniapp
 
 
 def _seed_rich_overview(server: BrowserServer, locale: SupportedLocale) -> dict[str, Any]:

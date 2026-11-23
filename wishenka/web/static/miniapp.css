@@ -3,7 +3,9 @@
   --content-width: 42rem;
   --receipt-height: 90vh;
   --layer-drag: 10;
+  --layer-status: 30;
   --layer-quick-add: 40;
+  --quick-add-clearance: calc(7.5rem + env(safe-area-inset-bottom, 0px));
   --layer-receipt: 100;
   --layer-modal: 100;
   --receipt-bg: var(--tg-theme-bg-color, #ffffff);
@@ -23,9 +25,12 @@
   --accent-dark: #6f173f;
   --danger: #a61335;
   --focus: #71319a;
-  font: 16px system-ui, sans-serif; color: var(--ink); background: var(--canvas);
+  font: 100% system-ui, sans-serif; color: var(--ink); background: var(--canvas);
 }
-body { margin: auto; padding: 1rem; max-width: var(--content-width); }
+body {
+  margin: auto; padding: 1rem; max-width: var(--content-width); overflow-wrap: anywhere;
+}
+:where(img, svg, video) { max-width: 100%; }
 section, form {
   margin: 1rem 0; padding: 1rem; background: var(--surface); border-radius: 1rem;
   box-shadow: 0 3px 12px rgba(99, 33, 60, .08);
@@ -57,16 +62,36 @@ button:disabled { background: #ece6e9; border-color: #a7979e; color: #5d5056; cu
 .btn-danger:hover:not(:disabled) { background: #fff0f1; }
 input { max-width: 100%; width: 100%; border: 1px solid #aa8998; border-radius: .5rem; }
 input:not([type="checkbox"]) { padding: .5rem; }
-:where(#app, .settings-page) :is(select, textarea) {
+:where(body) :is(select, textarea) {
   box-sizing: border-box; max-width: 100%; min-height: var(--touch-target); font: inherit;
   border: 1px solid #aa8998; border-radius: .5rem; padding: .5rem;
   background: var(--surface); color: var(--ink);
 }
 input[type="checkbox"] { width: auto; accent-color: var(--accent); }
 label { display: block; margin: .5rem 0; }
-#status { min-height: 1.5rem; font-weight: 600; }
+:where(summary) {
+  display: list-item; box-sizing: border-box; min-height: var(--touch-target);
+  padding-block: .8rem; cursor: pointer;
+}
+#status, #feedback {
+  position: sticky; top: 0; z-index: var(--layer-status); box-sizing: border-box;
+  margin: 0 0 .5rem; padding: .25rem .75rem; min-height: 1.5rem; font-weight: 600;
+  background: var(--surface); color: var(--ink); border: 1px solid var(--border-subtle);
+  border-radius: .5rem;
+}
+#status:empty, #feedback:empty { padding: 0; border: 0; background: transparent; }
+#feedback:empty { display: none; }
+:is(#status, #feedback)[data-kind="pending"]::before { content: "\23F3\00a0"; }
+:is(#status, #feedback)[data-kind="success"]::before { content: "\2713\00a0"; }
+:is(#status, #feedback)[data-kind="error"]::before { content: "\26A0\FE0F\00a0"; }
+:is(#status, #feedback)[data-kind="success"] {
+  background: var(--notice-bg); color: var(--notice-text);
+}
+:is(#status, #feedback)[data-kind="error"] { color: var(--danger); border-color: var(--danger); }
+:is(.is-pending, [aria-busy="true"]) { cursor: progress; }
 .badge {
   display: inline-block;
+  max-width: 100%;
   padding: .2rem .5rem;
   border-radius: .3rem;
   font-size: .8rem;
@@ -289,9 +314,16 @@ label { display: block; margin: .5rem 0; }
 }
 .quick-add-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem;
 }
+.quick-add-row > input { flex: 1 1 100%; min-width: min(10rem, 100%); margin: 0; }
+.quick-add-row > button { flex: 1 1 auto; margin: 0; }
+@media (min-width: 480px) {
+  .quick-add-row > input { flex: 1 1 10rem; }
+}
+main:has(#quick-add-bar) { padding-bottom: max(var(--quick-add-clearance), 9rem); }
 .item-preview-card {
   transition: transform 0.2s ease, opacity 0.2s ease;
 }

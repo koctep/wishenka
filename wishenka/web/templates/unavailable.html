@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block title %}{{ t('web.unavailable.heading', locale|default('en')) }}{% endblock %}
+
+{% block content %}
+<div class="invite-container flex justify-center items-center min-h-[60vh]">
+    <div class="card error-card unavailable-card p-6 border rounded-lg text-center"
+         style="width: 100%;">
+        <div class="mb-3 text-4xl" aria-hidden="true">⚠️</div>
+        <h1 class="text-xl font-bold mb-2">
+            {{ t('web.unavailable.heading', locale|default('en')) }}
+        </h1>
+        <p class="text-gray-600 mb-6">
+            {% if unauthenticated|default(false) %}
+            {{ t('web.unavailable.auth', locale|default('en')) }}
+            {% else %}
+            {{ t('web.unavailable.description', locale|default('en')) }}
+            {% endif %}
+        </p>
+        <a href="/" class="btn btn-primary unavailable-home">
+            {{ t('web.invite.go_home', locale|default('en')) }}
+        </a>
+    </div>
+</div>
+{% endblock %}

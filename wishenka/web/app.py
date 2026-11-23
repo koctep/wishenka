@@ -39,6 +39,7 @@ from wishenka.web.routes.reservations_ui import router as reservations_ui_router
 from wishenka.web.routes.sharing import router as sharing_router
 from wishenka.web.routes.wishlists import router as wishlist_router
 from wishenka.web.security import BrowserSecurityMiddleware
+from wishenka.web.unavailable import install_unavailable_page
 from wishenka.wishlists.cleanup import background_cleanup_worker
 from wishenka.wishlists.service import WishlistService
 from wishenka.wishlists.store import WishlistStore
@@ -279,6 +280,7 @@ def create_app(
     app.include_router(receipts_ui_router)
     app.include_router(wishlist_router)
     app.include_router(sharing_router)
+    install_unavailable_page(app)
 
     @app.get("/healthz")
     async def healthcheck() -> dict[str, Any]:
