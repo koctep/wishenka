@@ -367,7 +367,7 @@ async function showHistory() {
 }
 async function showHome() {
   root.replaceChildren(
-    node('h1', t('miniapp.home.title')),
+    node('h1', t('miniapp.home.title'), {tabindex: '-1'}),
     node('p', t('miniapp.home.lead'), {class: 'home-lead'})
   );
   const nav = node('nav', '', {class: 'top-nav home-top-nav'});
@@ -576,6 +576,94 @@ async function showHome() {
     status('');
   } catch (_) { status(t('miniapp.home.load_failed'), 'error'); }
 }
+function deleteWishlistControls(list) {
+  if (list.role !== 'owner') return null;
+  const days = Number(root.dataset.retentionDays);
+  if (!Number.isInteger(days) || days <= 0) return null;
+  const title = list.name || t('miniapp.common.untitled_wishlist');
+  let deleting = false;
+  const zone = node('div', '', {class: 'wishlist-delete-zone'});
+  const openBtn = button(
+    t('miniapp.wishlist_delete.open'), () => openConfirm(), 'wishlist-delete-open'
+  );
+  const cancelBtn = button(
+    t('miniapp.wishlist_delete.cancel'), () => closeConfirm(), 'history-confirm-cancel'
+  );
+  const yesBtn = button(
+    t('miniapp.wishlist_delete.confirm'),
+    pending(() => confirmDelete(), t('miniapp.wishlist_delete.pending')),
+    'history-confirm-yes btn-danger'
+  );
+  const failure = node('p', '', {class: 'history-error wishlist-delete-error', role: 'alert'});
+  const actions = node('div', '', {class: 'history-confirm-actions wishlist-delete-actions'});
+  actions.append(cancelBtn, yesBtn);
+  const panel = node('div', '', {
+    class: 'history-confirm wishlist-delete-confirm',
+    role: 'group',
+    'aria-labelledby': `wishlist-delete-title-${list.id}`,
+    'aria-describedby': `wishlist-delete-body-${list.id}`,
+  });
+  const body = node('div', '', {id: `wishlist-delete-body-${list.id}`});
+  body.append(
+    node('p', t('miniapp.wishlist_delete.consequences'), {class: 'empty-hint'}),
+    node('p', t('miniapp.wishlist_delete.restore_promise', {days}), {class: 'empty-hint'}),
+    node('p', t('miniapp.wishlist_delete.purge_promise', {days}), {class: 'empty-hint'})
+  );
+  panel.append(
+    node('p', t('miniapp.wishlist_delete.confirm_title', {title}), {
+      class: 'history-confirm-title', id: `wishlist-delete-title-${list.id}`,
+    }),
+    body,
+    actions
+  );
+  panel.addEventListener('keydown', ev => { if (ev.key === 'Escape') closeConfirm(); });
+  function openConfirm() {
+    openBtn.replaceWith(panel);
+    cancelBtn.focus();
+  }
+  function closeConfirm() {
+    if (deleting) return;
+    failure.remove();
+    panel.replaceWith(openBtn);
+    openBtn.focus();
+  }
+  async function confirmDelete() {
+    deleting = true;
+    failure.remove();
+    cancelBtn.disabled = true;
+    let result = null;
+    let expired = false;
+    try {
+      result = await api(`/api/wishlists/${list.id}`, {method: 'DELETE'});
+    } catch (err) {
+      expired = Boolean(err && err.status === 410);
+    }
+    if (result) {
+      await showHome();
+      status(t('miniapp.wishlist_delete.done', {
+        title, days: result.retention_days ?? days,
+      }), 'success');
+      root.querySelector('h1')?.focus();
+      return;
+    }
+    deleting = false;
+    cancelBtn.disabled = false;
+    if (expired) await showHome();
+    status(expired ? t('miniapp.wishlist_delete.failed') : '', expired ? 'error' : '');
+    failure.textContent = t('miniapp.wishlist_delete.failed');
+    panel.insertBefore(failure, actions);
+    // Re-enable before focusing: the pending wrapper only does so after this returns.
+    yesBtn.disabled = false;
+    yesBtn.focus();
+    yesBtn.scrollIntoView?.({block: 'nearest'});
+  }
+  zone.append(
+    node('h3', t('miniapp.wishlist_delete.heading'), {class: 'wishlist-delete-heading'}),
+    node('p', t('miniapp.wishlist_delete.hint'), {class: 'settings-field-hint'}),
+    openBtn
+  );
+  return zone;
+}
 function settingsForm(list) {
   const form = node('form', '', {class: 'wishlist-settings-form'});
   const inputs = {};
@@ -740,6 +828,8 @@ async function showList(id) {
       settings.append(node('h2', t('miniapp.wishlist_settings.heading')),
         node('p', t('miniapp.wishlist_settings.subtitle'), {class: 'section-subtitle'}),
         settingsForm(list));
+      const deleteZone = deleteWishlistControls(list);
+      if (deleteZone) settings.append(deleteZone);
       root.append(settings);
       const reset = button(t('miniapp.share.replace_public'), pending(async () => {
         try { await api(`/api/wishlists/${list.id}/share/reset`, {method: 'POST'});

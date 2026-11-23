@@ -459,6 +459,74 @@ capabilities. The application strictly adheres to the following token safety rul
   - A failed reload after a successful save reports that the save succeeded but refresh failed.
     A failed reload after cancel retains the loading error instead of claiming cancellation.
 
+#### Wishlist Delete Zone (WISHENKA-295)
+
+The owner of an `active` list can delete it from the list settings. The zone is rendered by
+`deleteWishlistControls(list)` (`wishenka/web/static/miniapp.js:579`) and appended to the
+`.list-settings-section` right after the settings form (`:831-832`), so it sits outside the `<form>`
+and never submits with it. API contract and events:
+[wishlists.md](wishlists.md#owner-delete-route-delete-apiwishlistsid).
+
+- **Visibility rule**: `deleteWishlistControls` returns `null` (nothing rendered) unless
+  `list.role === 'owner'` and `Number(root.dataset.retentionDays)` is a positive integer
+  (`:580-582`). The settings section itself exists only for `owner`/`admin` of an `active` list
+  (`:824-826`), so admins and members never see the zone, and a missing or invalid
+  `data-retention-days` hides it instead of promising a wrong number of days.
+- **Retention source**: `GET /` writes `data-retention-days="{int}"` on `<main id="app">` from
+  `settings.wishlist_retention_days` (`wishenka/web/routes/miniapp.py:24,49`; default `30`). The
+  texts use this value before the call; after a `200` the success text uses
+  `result.retention_days ?? days` (`:644`). A stale cached shell can show an outdated number
+  (WISHENKA-316).
+- **Markup**: `div.wishlist-delete-zone` with `h3.wishlist-delete-heading`
+  (`miniapp.wishlist_delete.heading`), `p.settings-field-hint` (`hint`) and the trigger
+  `button.wishlist-delete-open` (`open`, "Delete wishlist...").
+- **Confirmation panel**: the trigger is replaced in place (`openBtn.replaceWith(panel)`, `:621`)
+  by `div.history-confirm.wishlist-delete-confirm[role="group"]` with `aria-labelledby`
+  `wishlist-delete-title-{id}` and `aria-describedby` `wishlist-delete-body-{id}`. The panel
+  re-uses the `history-confirm*` classes of the history screen: `p.history-confirm-title` (the
+  exact list title as text, `confirm_title`; an empty name falls back to
+  `miniapp.common.untitled_wishlist`; the title is set through text, never parsed as HTML), the
+  body with three `p.empty-hint` (`consequences`, `restore_promise`, `purge_promise`, both
+  promises with `{days}`), and `div.history-confirm-actions.wishlist-delete-actions` holding
+  `button.history-confirm-cancel` (`cancel`) first and
+  `button.history-confirm-yes.btn-danger` (`confirm`, "Yes, delete wishlist") second.
+- **Focus**: opening focuses Cancel, never the destructive button. Cancel and Escape inside the
+  panel (`closeConfirm`, `:624-629`) send nothing, remove any error, put the trigger back and
+  focus it. They do nothing while a request is pending (`deleting`).
+- **Pending**: the confirm button runs through `pending(..., miniapp.wishlist_delete.pending)`
+  (`withPending`: `disabled`, `aria-busy="true"`, `.is-pending`, polite `#status`), so a double
+  click or Enter sends one `DELETE`. Cancel is disabled while the request runs.
+- **Success (`200`)**: `await showHome()`, then `#status` shows `done` (`{title}`, `{days}`) with
+  kind `success` and focus moves to the home `<h1>` (`:642-646`). `showHome()` now renders that
+  heading with `tabindex="-1"` (`:370`) so it can take focus, as the history heading does (`:340`).
+  The list is then under "Recently deleted" (see
+  [Recently Deleted Wishlists](#recently-deleted-wishlists-owner-restore)).
+- **Failure**: any rejected request except `410` (404, 409, 5xx, network) clears the status line,
+  keeps the panel open, inserts `p.history-error.wishlist-delete-error[role="alert"]` with
+  `failed` before the buttons, re-enables the confirm button and focuses it
+  (`:649-658`). The text is the same for every status: it never says why, so no existence or
+  reservation detail leaks.
+- **`410` (window expired)**: the code calls `showHome()` first, which re-renders the whole
+  screen, then sets the error status `failed` (`:651`). The code after that still writes into the
+  now detached panel (`failure` alert, `yesBtn.focus()`), so the alert is not announced and
+  keyboard focus falls to `body`; the visible message comes only from `#status`. This is a known
+  defect, fixed in WISHENKA-317; do not document or rely on a focus target for this path.
+- **CSS** (`wishenka/web/static/miniapp.css:282-290`): `#app .wishlist-delete-zone` (top border
+  `--border-subtle`, `min-width: 0`, `overflow-wrap: anywhere`), `.wishlist-delete-heading`,
+  `#app button.wishlist-delete-open` (transparent, `--danger` border and text, wraps long text).
+  The panel itself is styled by the existing `.history-confirm*` rules and `.btn-danger`; there is
+  no separate `.wishlist-delete-confirm` rule (removed as a duplicate in Step 5). Hooks used by
+  tests: `.wishlist-delete-zone`, `-open`, `-confirm`, `-actions`, `-error`,
+  `.history-confirm-cancel`, `.history-confirm-yes`.
+- **Known accessibility smell**: "Cancel" appears twice on the owner list screen
+  (`miniapp.wishlist_settings.cancel` and `miniapp.wishlist_delete.cancel`) with the same visible
+  text; tests select by class (WISHENKA-317).
+- **Secrecy rules for texts**: the delete texts never name a reservation count, state or person,
+  never promise immediate removal, and are identical for lists with and without reservations
+  (`tests/test_wishlist_delete_browser.py::test_texts_are_identical_for_lists_with_and_without_reservations`).
+  Reservations may be mentioned only in `consequences` and `restore_promise`, in fixed clauses;
+  see [i18n.md](i18n.md#wishlist-delete-texts-wishenka-295).
+
 ### Wishlist Detail Workspace (WISHENKA-290)
 
 `showList(id)` in `static/miniapp.js` fetches the authenticated detail and renders a header with
@@ -1511,6 +1579,7 @@ across three Jinja2 partials with privacy, performance, and CSP-safe broken-imag
 | `/api/wishlists/deleted` | `GET` | Yes | No | Lists owner's soft-deleted wishlists within retention window. |
 | `/api/wishlists/{id}` | `GET` | Yes | No | Returns wishlist details and item view. |
 | `/api/wishlists/{id}` | `PATCH` | Yes | Yes | Updates title, description, or event. |
+| `/api/wishlists/{id}` | `DELETE` | Yes | Yes | Owner soft-deletes the list (`200` idempotent in the retention window, `409` archived, `410` after the window, uniform `404` for non-owner or unknown). |
 | `/api/wishlists/{id}/restore-deleted` | `POST` | Yes | Yes | Restores owner's soft-deleted wishlist with token rotation (`410` if expired). |
 | `/api/wishlists/{id}/members` | `GET` | Yes | No | Returns list of members and roles. |
 | `/api/wishlists/{id}/members/{uid}/role` | `PATCH` | Yes | Yes | Updates role (Owner only). |
@@ -1707,3 +1776,15 @@ The following settings configure the Mini App and web security layer:
 - **Solution**: Check the request `Accept` header and `PAGE_PATHS` in
   `wishenka/web/unavailable.py`; look for the `unavailable_page_rendered` log event; verify
   `#feedback` exists in `base.html` and run `tests/test_cross_screen_comfort_browser.py`.
+
+### 17. Delete Zone Is Missing or Delete Fails (WISHENKA-295)
+
+- **No "Delete wishlist..." in the settings**: only the owner of an `active` list gets it. Check
+  `data-retention-days` on `<main id="app">`: if it is missing, zero or not an integer the zone is
+  hidden on purpose.
+- **Generic failure text after confirming**: the client never shows the reason. Check the server
+  logs for `wishlist_delete_not_found` / `wishlist_delete_denied` (404),
+  `wishlist_archived_mutation_blocked` (409, the list must be unarchived first) or `wishlist_retention_expired` (410) and the request
+  log.
+- **List stays visible after a success text**: reload the home screen; the list should be under
+  "Recently deleted" with `days_left`.

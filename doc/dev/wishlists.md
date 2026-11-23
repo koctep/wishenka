@@ -73,6 +73,9 @@ rejected by the optional authentication dependency.
 
 - `POST /api/wishlists/{id}/restore`: Owner or admin restores an archived list.
 
+- `DELETE /api/wishlists/{id}`: Owner soft-deletes a list (WISHENKA-295); see
+  [Owner delete route](#owner-delete-route-delete-apiwishlistsid).
+
 - `POST /api/wishlists/{id}/restore-deleted`: Owner restores a soft-deleted list within the
   retention window back to `active`, rotating `public_token` and `invite_token` (with a fresh
   `invite_token_expires_at`). Returns `410 Gone` (`code: "retention_expired"`) if the retention
@@ -123,7 +126,8 @@ state return 409; attempting to restore a soft-deleted list past its retention w
 `POST /api/wishlists/{id}/restore-deleted` returns 410 (`code: "retention_expired"`). Archive is
 read-only until restored. State-changing requests from browser
 sessions are protected by CSRF tokens and origin validation — see [miniapp.md](miniapp.md).
-There is no HTTP delete route in this API; domain soft deletion remains a separate operation.
+Soft deletion is exposed to the owner as `DELETE /api/wishlists/{id}` (WISHENKA-295); a repeat
+call after the retention window returns 410 as well.
 
 A sharing token is a bearer capability. Rotation invalidates the old public link, and the persistent
 issued-token registry prevents reuse. Do not put tokens in application logs, issue reports or
@@ -499,7 +503,7 @@ class UserWishlistContext:
 | Change member role (promote/demote) | Yes | No | No | No |
 | Transfer ownership | Yes | No | No | No |
 | Archive / Unarchive wishlist | Yes | Yes | No | No |
-| Delete wishlist (soft-delete) | Yes | No | No | No |
+| Delete wishlist (soft-delete, `DELETE /api/wishlists/{id}`) | Yes | No | No | No |
 | Regenerate sharing tokens | Yes | Yes | No | No |
 | Reserve item (non-recipient) | Yes | Yes | Yes | Yes |
 | Reserve item (as recipient) | **No** | **No** | **No** | **No** |
@@ -750,12 +754,46 @@ async def delete_wishlist(
     self,
     wishlist_id: int,
     actor: AuthenticatedUser,
-) -> Wishlist
+) -> None
 ```
 
-- **Permissions**: Solely the `Owner`.
-- Cancels all active reservations and invalidates tokens.
+- **Permissions**: Solely the `Owner` (`WishlistAccessPolicy.can_delete`); others get
+  `PermissionDeniedError`. An `ARCHIVED` list raises `WishlistArchivedError`
+  (`service.py:1093`).
+- **Effects** (`service.py:1086-1132`): sets `status = DELETED`, refreshes `updated_at` (the start
+  of the retention window) and cancels every `ACTIVE` and `PURCHASED` reservation of the list's
+  items. It returns `None`. It does **not** touch `public_token` or `invite_token`: the links stop
+  working because a `DELETED` list is not resolvable, and the tokens are rotated only by
+  `restore_deleted_wishlist`.
+- **Reservations are not restored**: the cancelled reservations stay cancelled after a restore.
+  No shared event or notice is recorded for the giver (product decision of WISHENKA-295, Q5; see
+  `ai-tasks/WISHENKA-295/60-tech-debt.md`, S-5). The confirmation texts say "cancelled reservations
+  stay cancelled" without counts, states or names.
 - Per `WISHENKA-154` (`FR-3` / Q8), deleting a wishlist permanently removes its «Подаренные» gifted history together with the wishlist and its wishes (no standalone long-term history is retained); archiving a wishlist preserves «Подаренные» in read-only mode.
+
+##### Owner delete route (`DELETE /api/wishlists/{id}`)
+
+`delete_wishlist` in `wishenka/web/routes/wishlists.py:495-554` (WISHENKA-295). Authenticated,
+CSRF-protected for cookie sessions like the other mutations. It classifies the list first and
+only then calls the service, in this order:
+
+| Case | Response | Notes |
+| --- | --- | --- |
+| Unknown id | `404 Wishlist not found` | event `wishlist_delete_not_found` (`:503-514`) |
+| Caller is not the owner (admin, member, viewer, favorite) | `404`, byte-identical to unknown | events `wishlist_delete_denied` and, from `execute()`, `wishlist_permission_denied` (`operation=delete_wishlist`); the client never learns the list exists |
+| Owner, status `ACTIVE` | `200` body below | `service.delete_wishlist` (`:540`) |
+| Owner, status `DELETED`, inside the window | `200`, same body | idempotent: no service call, `updated_at` is not touched, so the window does not slide |
+| Owner, status `DELETED`, `updated_at <= now - retention_days` | `410` `detail.code = "retention_expired"` | `:537`; the row still exists because the cleanup has not purged it yet |
+| Owner, status `ARCHIVED` | `409 Wishlist is archived` | raised by the service; unarchive first |
+
+The success body is constant, whatever the reservations: `{"status": "deleted", "wishlist_id":
+<id>, "retention_days": <N>}` (`:554`). `retention_days` is
+`getattr(app.state.settings, "wishlist_retention_days", 30)` (`:498-500`), the same value that the
+Mini App shell exposes as `data-retention-days` and the "Recently deleted" list uses. The route
+reads `service._wishlists` directly and duplicates the retention arithmetic of
+`restore_deleted_wishlist` (known debt, WISHENKA-316). `execute()` adds `delete_wishlist` to the
+operations that emit `wishlist_mutation_committed` (`:58`). Note that the shared 410 log text still
+says "restore" (`:68`; WISHENKA-318), distinguish by the `operation` field.
 
 #### `list_deleted_wishlists` & `restore_deleted_wishlist`
 
@@ -1514,6 +1552,9 @@ Settings in `wishenka.config.Settings` (prefixed with `WISHENKA_` in environment
 | `wishlist_restored_from_deleted` | `INFO` | Soft-deleted list restored | `wishlist_id`, `actor_id` / `user_id`, `from_status`, `to_status`, `retention_days` |
 | `wishlist_restore_retention_expired` | `WARNING` | Service restore past retention | `wishlist_id`, `actor_id`, `retention_days` |
 | `wishlist_retention_expired` | `WARNING` | HTTP 410 retention expired | `operation` |
+| `wishlist_delete_not_found` | `WARNING` | `DELETE /api/wishlists/{id}` for an unknown id (client gets 404) | `wishlist_id`, `user_id` |
+| `wishlist_delete_denied` | `WARNING` | `DELETE /api/wishlists/{id}` by a non-owner (client gets the same 404); server-side only, ids only; `execute()` also logs `wishlist_permission_denied` with `operation=delete_wishlist` | `wishlist_id`, `user_id` |
+| `wishlist_deleted_by_owner` | `INFO` | Owner delete succeeded (also on an idempotent repeat) | `wishlist_id`, `user_id`, `retention_days`, `outcome` (`deleted` or `already_deleted`) |
 | `public_link_rate_limited` | `WARNING` | Public share/invite link throttled (`wishenka.web.rate_limit`) | `route` (`/share/{token}`, `/invite/{token}`, `/invite/{token}/join`), `method`, `client_ip`, `retry_after` |
 | `item_missing_parent_wishlist` | `ERROR` | `WishItem.wishlist` is `None` in `_require_item_wishlist` | `item_id`, `wishlist_id` |
 

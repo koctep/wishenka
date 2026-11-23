@@ -577,6 +577,33 @@ make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_settings_switch_browser.py -q'
 ([WISHENKA-314](https://pypost.atlassian.net/browse/WISHENKA-314)); общие помощники вместо
 приватного импорта ([WISHENKA-315](https://pypost.atlassian.net/browse/WISHENKA-315)).
 
+### Тесты удаления вишлиста владельцем (WISHENKA-295)
+
+Контракт и экран: [wishlists.md](wishlists.md#owner-delete-route-delete-apiwishlistsid),
+[miniapp.md](miniapp.md#wishlist-delete-zone-wishenka-295). Всего 103 теста в четырёх модулях.
+
+| Модуль | Тесты | Таймаут / маркер | Что проверяет |
+| --- | --- | --- | --- |
+| `tests/test_wishlist_delete_api.py` | 31 | `timeout(30)` | маршрут `DELETE /api/wishlists/{id}`: коды и тело, идемпотентность без сдвига окна, 410 после окна, 409 архивного, одинаковый 404 для не владельца и неизвестного id, CSRF/Origin, `data-retention-days`, ключи каталога и ограничения текстов |
+| `tests/test_wishlist_delete_ui.py` | 49 | `timeout(20)` | реальный `showList` в Node-стенде (`_NODE_HARNESS` из `tests/test_miniapp_i18n_repro.py`, патчится заменой строк): зона, права, подтверждение, повтор, сбой, 410, Escape |
+| `tests/test_wishlist_delete_browser.py` | 15 | `timeout(45)`, `browser` | настоящий Chromium: геометрия на узких экранах, фокус, один запрос, восстановление из «Недавно удалённых», одинаковые тексты |
+| `tests/test_wishlist_delete_observability.py` | 8 | `timeout(30)` | события и уровни по каждому пути, отсутствие названий, токенов и данных дарителя в логах |
+
+- Браузерный модуль подпадает под охранный тест маркеров (см. «Таймауты и маркеры»).
+- Chromium нужен только модулю `browser`; остальные три модуля его не требуют (UI-модуль требует
+  `node`).
+- Запуск: `make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_wishlist_delete_api.py -q'`.
+  Набор сужает только `PYTEST_ARGS` (в `Makefile` нет переменной `ARGS`); для `make test-serial`
+  тоже `PYTEST_ARGS="tests/x.py::t"`. `make test-serial ARGS=...` ничего не сужает и запустит
+  весь набор; полный набор долгий, `make test` останавливается по `TEST_WALL_LIMIT` (`Makefile:10`, 600 с).
+- Известные ограничения: тесты используют приватные помощники (`_NODE_HARNESS`, `page._send`,
+  `service._reservations`) (WISHENKA-319); нет проверки фокуса и объявления после 410
+  (WISHENKA-317); только Chromium (WISHENKA-313).
+- Заведомо падающие тесты вне задачи: `tests/test_receipt_modal_browser.py`
+  (`test_stale_giver_card_is_neutral`, WISHENKA-265;
+  `test_unmarked_error_neither_shows_notice_nor_reloads`, WISHENKA-220) и остальной список в
+  `ai-tasks/WISHENKA-292/60-tech-debt.md`.
+
 ### Тесты экрана истории просмотров (WISHENKA-292)
 
 Архитектура, состояния и селекторы:
@@ -1169,6 +1196,9 @@ make test PYTEST_JOBS=0 PYTEST_ARGS="tests/test_wishenka_183_repro.py tests/test
 ```
 
 ## Известные ограничения
+
+Тесты удаления вишлиста WISHENKA-295: см. раздел «Тесты удаления вишлиста владельцем
+(WISHENKA-295)» (WISHENKA-316..319).
 
 Тесты переключателей настроек WISHENKA-307: см. раздел «Тесты переключателей экрана настроек
 (WISHENKA-307)» (WISHENKA-313..315).

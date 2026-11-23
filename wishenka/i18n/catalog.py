@@ -392,6 +392,35 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "miniapp.list.changed_refresh_failed": (
             "Your change was saved, but the wishlist could not be refreshed"
         ),
+        "miniapp.wishlist_delete.heading": "Delete wishlist",
+        "miniapp.wishlist_delete.hint": (
+            "Removes this wishlist from your active lists. You can restore it for a limited time."
+        ),
+        "miniapp.wishlist_delete.open": "Delete wishlist...",
+        "miniapp.wishlist_delete.confirm_title": 'Delete wishlist "{title}"?',
+        "miniapp.wishlist_delete.consequences": (
+            "The wishlist will disappear for everyone, its share and invitation links will stop "
+            "working, and any reservations on it will be cancelled."
+        ),
+        "miniapp.wishlist_delete.restore_promise": (
+            'You can restore it from "Recently deleted" on the home screen within {days} days. A '
+            'restored wishlist returns with its wishes and "Gifted" history, but with new links; '
+            "cancelled reservations stay cancelled."
+        ),
+        "miniapp.wishlist_delete.purge_promise": (
+            'After {days} days the wishlist and its "Gifted" history are deleted permanently and '
+            "cannot be restored."
+        ),
+        "miniapp.wishlist_delete.cancel": "Cancel",
+        "miniapp.wishlist_delete.confirm": "Yes, delete wishlist",
+        "miniapp.wishlist_delete.pending": "Deleting...",
+        "miniapp.wishlist_delete.done": (
+            'Wishlist "{title}" deleted. You can restore it from "Recently deleted" within '
+            "{days} days."
+        ),
+        "miniapp.wishlist_delete.failed": (
+            "Could not delete the wishlist. Nothing was changed. Try again."
+        ),
         "miniapp.deleted.heading": "Recently deleted",
         "miniapp.deleted.days_left": "{days} d. left until permanent deletion",
         "miniapp.deleted.restore": "Restore",
@@ -1017,6 +1046,36 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
         "miniapp.list.refresh_retry": "Попробовать снова",
         "miniapp.list.changed_refresh_failed": (
             "Изменение сохранено, но обновить вишлист не удалось"
+        ),
+        "miniapp.wishlist_delete.heading": "Удаление вишлиста",
+        "miniapp.wishlist_delete.hint": (
+            "Убирает вишлист из ваших активных списков. Его можно восстановить в течение "
+            "ограниченного времени."
+        ),
+        "miniapp.wishlist_delete.open": "Удалить вишлист...",
+        "miniapp.wishlist_delete.confirm_title": "Удалить вишлист «{title}»?",
+        "miniapp.wishlist_delete.consequences": (
+            "Вишлист исчезнет у всех, его ссылки для просмотра и приглашения перестанут работать, "
+            "а все резервирования в нём будут отменены."
+        ),
+        "miniapp.wishlist_delete.restore_promise": (
+            "Вы сможете восстановить его в разделе «Недавно удалённые» на главном экране в течение "
+            "{days} дн. Восстановленный вишлист вернётся с желаниями и историей «Подаренные», но с "
+            "новыми ссылками; отменённые резервирования не восстанавливаются."
+        ),
+        "miniapp.wishlist_delete.purge_promise": (
+            "Через {days} дн. вишлист и его история «Подаренные» будут удалены окончательно, и "
+            "восстановить их будет нельзя."
+        ),
+        "miniapp.wishlist_delete.cancel": "Отмена",
+        "miniapp.wishlist_delete.confirm": "Да, удалить вишлист",
+        "miniapp.wishlist_delete.pending": "Удаление...",
+        "miniapp.wishlist_delete.done": (
+            "Вишлист «{title}» удалён. Его можно восстановить в разделе «Недавно удалённые» в "
+            "течение {days} дн."
+        ),
+        "miniapp.wishlist_delete.failed": (
+            "Не удалось удалить вишлист. Ничего не изменилось. Попробуйте ещё раз."
         ),
         "miniapp.deleted.heading": "Недавно удалённые",
         "miniapp.deleted.days_left": "Осталось {days} дн. до окончательного удаления",

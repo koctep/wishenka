@@ -55,6 +55,7 @@ async def execute[T](request: Request, action: Callable[[WishlistService], Await
             "change_status",
             "reset_share",
             "restore_deleted_wishlist",
+            "delete_wishlist",
         }:
             logger.info(
                 "Wishlist mutation committed: %s",
@@ -487,6 +488,70 @@ async def update_wishlist(
             },
         )
         return projection(wl, user, False)
+
+    return await execute(request, action)
+
+
+@router.delete("/api/wishlists/{wishlist_id}")
+async def delete_wishlist(request: Request, wishlist_id: int, user: User) -> dict[str, Any]:
+    """Soft-delete a wishlist for its owner; repeats inside the retention window succeed."""
+    retention_days = getattr(
+        getattr(request.app.state, "settings", None), "wishlist_retention_days", 30
+    )
+
+    async def action(service: WishlistService) -> dict[str, Any]:
+        wl = service._wishlists.get(wishlist_id)
+        if wl is None:
+            logger.warning(
+                "Wishlist delete rejected: wishlist %s not found",
+                wishlist_id,
+                extra={
+                    "event": "wishlist_delete_not_found",
+                    "wishlist_id": wishlist_id,
+                    "user_id": user.telegram_id,
+                },
+            )
+            raise WishlistNotFoundError("Wishlist not found")
+        ctx = WishlistAccessPolicy.resolve_context(user, wl)
+        if not WishlistAccessPolicy.can_delete(ctx, wl):
+            # Server-side only: the client gets the same 404 as for an unknown id.
+            logger.warning(
+                "Wishlist delete rejected: user %s is not the owner of wishlist %s",
+                user.telegram_id,
+                wishlist_id,
+                extra={
+                    "event": "wishlist_delete_denied",
+                    "wishlist_id": wishlist_id,
+                    "user_id": user.telegram_id,
+                },
+            )
+            raise PermissionDeniedError("Only the owner can delete a wishlist")
+        outcome = "deleted"
+        if wl.status == WishlistStatus.DELETED:
+            deleted_at = (
+                wl.updated_at
+                if wl.updated_at.tzinfo is not None
+                else wl.updated_at.replace(tzinfo=UTC)
+            )
+            if deleted_at <= datetime.now(UTC) - timedelta(days=retention_days):
+                raise WishlistRetentionExpiredError("Wishlist retention window has expired")
+            outcome = "already_deleted"
+        else:
+            await service.delete_wishlist(wishlist_id, user)
+        logger.info(
+            "Wishlist %s deleted by owner %s (%s)",
+            wishlist_id,
+            user.telegram_id,
+            outcome,
+            extra={
+                "event": "wishlist_deleted_by_owner",
+                "wishlist_id": wishlist_id,
+                "user_id": user.telegram_id,
+                "retention_days": retention_days,
+                "outcome": outcome,
+            },
+        )
+        return {"status": "deleted", "wishlist_id": wishlist_id, "retention_days": retention_days}
 
     return await execute(request, action)
 

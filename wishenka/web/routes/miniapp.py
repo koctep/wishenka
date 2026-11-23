@@ -21,6 +21,7 @@ async def miniapp(request: Request, locale: LocaleDep) -> HTMLResponse:
     settings = request.app.state.settings
     bot = escape(settings.telegram_bot_username, quote=True)
     app_name = escape(settings.telegram_app_short_name, quote=True)
+    retention_days = int(getattr(settings, "wishlist_retention_days", 30))
     loading_text = escape(t("nav.loading", locale))
     catalog = miniapp_catalog()
     logger.debug(
@@ -45,7 +46,7 @@ async def miniapp(request: Request, locale: LocaleDep) -> HTMLResponse:
 <script src="/static/miniapp.js" defer></script></head>
 <body><p id="status" role="status" aria-live="polite">{loading_text}</p>
 <main id="app" data-bot="{bot}" data-miniapp="{app_name}"
- data-locale="{locale}"></main></body></html>"""
+ data-locale="{locale}" data-retention-days="{retention_days}"></main></body></html>"""
     response = HTMLResponse(html)
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; script-src 'self' https://telegram.org; "
