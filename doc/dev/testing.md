@@ -513,7 +513,10 @@ make test-serial PYTEST_ARGS="tests/test_home_overview_ui.py tests/test_home_ove
   видимые состояния on/off и бейджи inherited/override, pending, saved, error и unknown,
   сверка чтением после `5xx` и кнопка Retry, откат только после `401/403/404/422`, сериализация
   по категориям, черновик даты рождения, смена языка, предпросмотр и подтверждение удаления без
-  повторов, мобильная геометрия 320/375 px и цели не менее 44 px.
+  повторов, мобильная геометрия 320/375 px и цели не менее 44 px. Внешний вид переключателей
+  (роль `switch`, дорожка и бегунок, состояния pending/unknown/disabled) проверяет отдельный
+  модуль WISHENKA-307, см. ниже; общие помощники (`_api`, `_click`, `_intercept`, `_open`) он
+  импортирует отсюда, поэтому правка их сигнатур ломает оба модуля.
 - **`tests/test_personal_settings_observability.py`** (`caplog`, таймаут 30 с): события успеха
   вызываются один раз на мутацию, отклонённые запросы дают WARNING без события успеха, в логах нет
   дат рождения, названий списков и токенов.
@@ -522,6 +525,57 @@ make test-serial PYTEST_ARGS="tests/test_home_overview_ui.py tests/test_home_ove
 make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_personal_settings_browser.py -q'
 make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_personal_settings_observability.py -q'
 ```
+
+### Тесты переключателей экрана настроек (WISHENKA-307)
+
+Разметка, состояния и CSS: [miniapp.md](miniapp.md#settings-switches-wishenka-307).
+
+**`tests/test_settings_switch_browser.py`** (33 теста, настоящий Chromium через
+`tests/browser_cdp.py`, `pytestmark` с таймаутом 45 с и маркером `browser`). Проверки R1-R10 по
+пяти переключателям `input[data-global-category]`. Параметризация: R1, R2, R5, R7 идут по
+`CASES` (en и ru на 320 и 375 px); R3 и R4 только по `STATE_CASES` (en 375, ru 320); R6 по
+локали (en, ru); R8 и R10 в одной конфигурации (en 375; R8 pending ещё по начальному значению
+вкл/выкл); R9 на 320, 360 и 375 px:
+
+- R1 роль `switch`; R2 `appearance: none`; R3 геометрия дорожки (`::before`) и бегунка
+  (`::after`); R4 состояние по положению и цвету бегунка, контраст рамки не ниже 3:1;
+- R5 цель не менее 44 px, клик по подписи переключает; R6 кольцо фокуса и Space;
+- R7 дерево доступности: переключатель объявляется один раз, имя равно подписи, `checked`
+  совпадает с `input.checked`, `.toggle-state` скрыт через `aria-hidden`;
+- R8 pending, unknown и обычный disabled различимы по рамке, глифу, курсору и `opacity`;
+- R9 нет горизонтального переполнения при длинной русской подписи;
+- R10 переход объявлен только при `no-preference`, при `reduce` он равен `0s`, при
+  `forced-colors: active` используются системные цвета.
+
+Правила измерений:
+
+- Перед чтением геометрии и цветов псевдоэлементов включается эмуляция
+  `prefers-reduced-motion: reduce` (`Emulation.setEmulatedMedia` через `CdpPage._send`, helper
+  `_emulate`), иначе переход .15 с оставляет бегунок на полпути. Исключение: проверка объявления
+  перехода под `no-preference`.
+- Дерево доступности читается через `Accessibility.getFullAXTree` (`CdpPage._send`); учитываются
+  узлы `switch` без `ignored`.
+- `forced-colors` тоже включается эмуляцией; ожидаемые цвета берутся из проб-элементов с
+  `Highlight`, `ButtonText` и `Canvas`, токены (`--accent`, `--danger`, ...) читаются через
+  пробу `var(--name)`, а не литералами.
+
+Состояния достигаются так: pending держит ответ `PUT /api/profile/notifications/global`
+переопределением `window.fetch` (`_PENDING_OVERRIDE`, копия приёма из
+`test_personal_settings_browser.py`; перед завершением теста обязателен
+`window.releaseGlobal()`); unknown создаёт `_intercept(..., "commit", fail_read=True)` и клик,
+после чего тест ждёт `data-unknown="1"`, снятый `aria-busy`, `disabled` и скрытое сообщение
+pending; обычный disabled задаётся через `el.disabled = true`.
+
+```bash
+make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_settings_switch_browser.py -q'
+```
+
+Пределы: проверено только в Chromium
+([WISHENKA-313](https://pypost.atlassian.net/browse/WISHENKA-313): iOS Safari, Firefox,
+речевое управление); `forced-colors` для отмеченного pending/unknown и
+перенос подписи на 320 px в `ru`
+([WISHENKA-314](https://pypost.atlassian.net/browse/WISHENKA-314)); общие помощники вместо
+приватного импорта ([WISHENKA-315](https://pypost.atlassian.net/browse/WISHENKA-315)).
 
 ### Тесты экрана истории просмотров (WISHENKA-292)
 
@@ -1115,6 +1169,9 @@ make test PYTEST_JOBS=0 PYTEST_ARGS="tests/test_wishenka_183_repro.py tests/test
 ```
 
 ## Известные ограничения
+
+Тесты переключателей настроек WISHENKA-307: см. раздел «Тесты переключателей экрана настроек
+(WISHENKA-307)» (WISHENKA-313..315).
 
 Сквозные тесты WISHENKA-294: см. конец раздела «Сквозные тесты комфорта и надёжности экранов
 (WISHENKA-294)» (WISHENKA-308..312).

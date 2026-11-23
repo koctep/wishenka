@@ -104,11 +104,15 @@
         <label class="toggle-row">
             <input type="checkbox"
                    id="toggle-birthday-reminders"
+                   role="switch"
+                   aria-labelledby="label-birthday_reminders"
                    data-global-category="birthday_reminders"
                    data-feedback-target="birthday-reminders-feedback"
                    {% if birthday_reminders %}checked{% endif %}>
-            <span class="toggle-label">{{ t('settings.birthday_reminders_label', locale) }}</span>
-            <span class="toggle-state"
+            <span class="toggle-label"
+                  id="label-birthday_reminders">{{
+                t('settings.birthday_reminders_label', locale) }}</span>
+            <span class="toggle-state" aria-hidden="true"
                   id="state-birthday_reminders">{{
                 t('settings.state.enabled' if birthday_reminders
                   else 'settings.state.disabled', locale)
@@ -125,11 +129,14 @@
             {% for cat in wishlist_categories %}
             <label class="toggle-row">
                 <input type="checkbox"
+                       role="switch"
+                       aria-labelledby="label-{{ cat }}"
                        data-global-category="{{ cat }}"
                        data-feedback-target="global-notifications-feedback"
                        {% if global_notifications.get(cat) %}checked{% endif %}>
-                <span class="toggle-label">{{ t('settings.category.' ~ cat, locale) }}</span>
-                <span class="toggle-state"
+                <span class="toggle-label"
+                      id="label-{{ cat }}">{{ t('settings.category.' ~ cat, locale) }}</span>
+                <span class="toggle-state" aria-hidden="true"
                       id="state-{{ cat }}">{{
                     t('settings.state.enabled' if global_notifications.get(cat)
                       else 'settings.state.disabled', locale)

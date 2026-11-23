@@ -365,6 +365,8 @@ No Prometheus/OpenTelemetry exporter is currently wired in the codebase; these c
 - `tests/test_personal_settings_browser.py` and `tests/test_personal_settings_observability.py`
   (`WISHENKA-291`) — settings UI states, failure reconciliation and log contract of the
   `/api/profile/*` calls (see [miniapp.md](miniapp.md#personal-settings-screen-wishenka-291)).
+- `tests/test_settings_switch_browser.py` (`WISHENKA-307`) — look, accessibility and states of
+  the settings switches (see [miniapp.md](miniapp.md#settings-switches-wishenka-307)).
 
 - `tests/test_wishenka_34_repro.py` (`WISHENKA-34`, Implemented) — API availability for `/api/profile/preferences` and `/api/profile/notifications/global`, per-wishlist override priority and `null` reset, `birthday_reminders` suppression without deleting `birthday_entries`, explicit birthdate persistence across `upsert_user`, invalid date (`30 Feb`) rejection, and surprise invariant preservation.
 - `tests/test_wishenka_34_preferences.py` (`WISHENKA-34`, Implemented) — unit and integration coverage for `validate_birthdate`, `UserStore.set_birthdate` / `clear_birthdate`, `NotificationPreferencesStore`, `/settings` SSR rendering (RU/EN), and `/api/profile/*` validation/404/CSRF contracts.

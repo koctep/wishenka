@@ -133,7 +133,8 @@ pages (`.settings-page`, wishlist views, and `invite_preview.html`):
   - Light shell palette (`WISHENKA-288`): `--canvas` (`#fff7f9`, page background), `--surface`
     (`#ffffff`, card and field surface), `--ink` (`#351326`, primary plum foreground and headings),
     `--muted` (`#695663`, `.history-time`, `.section-subtitle`, and `.empty-hint`), `--accent`
-    (`#8c2551`, primary fill, button border, and checkbox `accent-color`), `--accent-dark`
+    (`#8c2551`, primary fill, button border, `accent-color` of plain checkboxes, and the on
+    track of the settings switches), `--accent-dark`
     (`#6f173f`, links, secondary button labels, and primary `:hover`), `--danger` (`#a61335`,
     `.btn-danger` border and label), and `--focus` (`#71319a`, `:focus-visible` outline).
   - Additive Home surface and border tokens (`WISHENKA-289`): `--surface-subtle` (`#fffafd`,
@@ -500,8 +501,9 @@ The browser tests require Chromium; see [testing.md](testing.md) for setup.
 #### Overview
 
 `GET /settings` shows language, birthday, birthday reminders, account-wide notification defaults,
-per-list exceptions and a separated account-deletion section. Every toggle has visible on/off
-text, per-list rows show an "inherited" or "override" badge with the effective value, and every
+per-list exceptions and a separated account-deletion section. Every toggle is a skinned switch
+(see [Settings switches](#settings-switches-wishenka-307)) with visible on/off text, per-list
+rows show an "inherited" or "override" badge with the effective value, and every
 change reports pending, saved, error or unknown state. Backend contracts, categories and
 precedence are unchanged (see [users.md](users.md) and
 [notifications.md][notification-preferences]).
@@ -516,8 +518,9 @@ Server-rendered `settings.html` plus one controller, `initController()` in
 confirmed value per control and never stores a second copy of the data.
 
 - **States** per control or feedback region: `idle` (confirmed value), `pending` (control
-  disabled, `settings.saving` note), `saved` (`settings.saved`), `error` (localized message, value
-  restored or reconciled) and `unknown` (read also failed: controls stay disabled, `Retry`).
+  disabled, `aria-busy="true"` on global switches, `settings.saving` note), `saved`
+  (`settings.saved`), `error` (localized message, value restored or reconciled) and `unknown`
+  (read also failed: controls stay disabled, `Retry`).
 - **Serialization**: `exclusive(category, task)` queues mutations per notification category,
   covering the global toggle and all list overrides of that category; an older response cannot
   overwrite a newer effective value.
@@ -545,9 +548,11 @@ confirmed value per control and never stores a second copy of the data.
   `GET|PUT /api/profile/notifications/wishlists/{id}`, `GET /api/profile/deletion-preview`,
   `POST /api/profile/delete`. No new endpoints or fields.
 - **Selectors and ids the script depends on**: root `.settings-page` (with `data-i18n-*`),
-  `input[data-global-category]`, `select[data-wishlist-override]` (`data-wishlist-id`,
-  `data-category`), badges `[data-effective-for="{wishlistId}-{category}"] strong`, state text
-  `#state-{category}`, `.locale-option` with `[data-locale-endpoint]`, `#birthdate-form`
+  `input[data-global-category]` (`role="switch"`, `aria-labelledby="label-{category}"`), label
+  `#label-{category}` (`#label-birthday_reminders` for the reminder switch),
+  `select[data-wishlist-override]` (`data-wishlist-id`, `data-category`), badges
+  `[data-effective-for="{wishlistId}-{category}"] strong`, state text `#state-{category}`
+  (`aria-hidden`), `.locale-option` with `[data-locale-endpoint]`, `#birthdate-form`
   (`#birth-day`, `#birth-month`, `#birth-year`, `#birthdate-clear-btn`, `#birthdate-current`),
   `#toggle-birthday-reminders`, `#delete-account-start-btn`, `#delete-account-confirm-panel`,
   `#delete-account-confirm-btn`, `#delete-account-cancel-btn`, `#delete-impact-summary`. Feedback
@@ -561,7 +566,8 @@ confirmed value per control and never stores a second copy of the data.
   `precedence_hint`, `birthdate_priority_hint` and `birthdate_current_label`. Strings reach the
   script as `data-i18n-*` attributes on `.settings-page`; see [i18n.md](i18n.md).
 - **Layout**: `miniapp.css` gives 44 px targets, wrapping of long list titles, a mobile card
-  layout from 320 px, state badges and a separated danger zone.
+  layout from 320 px, state badges and a separated danger zone. The switch look is described in
+  [Settings switches](#settings-switches-wishenka-307).
 
 #### Configuration
 
@@ -581,6 +587,11 @@ None: no settings, environment variables or schema changes.
   (no birthdate values, titles or tokens are logged; no client telemetry exists).
 - **Deletion outcome unknown**: reload `/settings`; a redirect or `401` means the account is gone.
   See `account_deletion_rejected`, `account_deleted`, `account_deletion_failed`.
+- **Switch looks like a plain checkbox, or a state looks wrong** (WISHENKA-307): check that the
+  input is inside `.toggle-row`, that no rule after the switch block overrides `appearance`,
+  `content` or `background` of `::before` / `::after`, and that the plain-disabled rule still
+  sets only `opacity` and `cursor`. A switch stuck in the dashed pending look means
+  `aria-busy` was not cleared: the category busy counter in `settings.js` did not return to 0.
 
 #### Tests
 
@@ -593,6 +604,61 @@ make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_personal_settings_observability.
 failures, reconciliation, locale, birthdate and deletion;
 `tests/test_personal_settings_observability.py` (`caplog`) covers the log
 contract. Details: [testing.md](testing.md).
+
+#### Settings switches (WISHENKA-307)
+
+The five switches of `/settings` (birthday reminder and four notification categories) are native
+checkboxes drawn as switches in `miniapp.css`; the defect of WISHENKA-291 was a default browser
+look. Behavior, endpoints and save logic did not change.
+
+- **Markup** (`settings.html`): the native `<input type="checkbox">` stays the source of truth
+  (`checked`, `disabled`, change events, label click, Space). It gets `role="switch"` and
+  `aria-labelledby="label-{category}"` (`label-birthday_reminders` for the reminder switch)
+  pointing at `.toggle-label`; the `.toggle-state` text keeps its `#state-{category}` id but is
+  `aria-hidden="true"`, so the state is announced once (from the switch role and `checked`).
+- **Geometry**: input 52 px wide, `var(--touch-target)` high, `appearance: none`; the track is
+  `::before` (`inset-block: 6px`, `2px` border, pill) and the thumb is `::after` (24 px circle,
+  `inset-inline-start` 4 px off, 24 px on, 14 px unknown). `inset-inline-start` makes the thumb
+  mirror in RTL. `.toggle-state` has `min-width: 5.5rem` (`0` below 360 px), `text-align: end`.
+- **States** (no hard-coded colors, only tokens `--accent`, `--surface`, `--surface-subtle`,
+  `--muted`, `--danger` and the global `--focus` outline):
+
+  | State | Hook | Look |
+  | --- | --- | --- |
+  | off | none | `--surface-subtle` track, `--muted` border and thumb |
+  | on | `:checked` | `--accent` track, `--surface` thumb with a check glyph |
+  | focus | `:focus-visible` | global 3 px `--focus` outline, offset 3 px (no switch rule) |
+  | pending | `[aria-busy="true"]` | dashed `--accent` border, ellipsis thumb, cursor `progress` |
+  | unknown | `[data-unknown="1"]` | solid `--danger` border, `?` thumb, cursor `not-allowed` |
+  | disabled | `:disabled`, no hook | `opacity: .55`, cursor `not-allowed` |
+
+  Pending and unknown never show the accent fill, also when `checked`; an unknown switch that is
+  retried (`aria-busy` again) keeps the centred thumb with a dashed border and the ellipsis.
+- **Cascade**: order is base, `:checked`, `[data-unknown]`, `[aria-busy]`, then the plain
+  disabled rule `:disabled:not([aria-busy="true"]):not([data-unknown="1"])`. It targets the
+  input itself while the state rules target `::before` / `::after`, so it may set only `opacity`
+  and `cursor` (never `content`, `background` or `border`); the `:not()` parts keep pending and
+  unknown unfaded. A checked pending switch keeps the 24 px thumb offset of `:checked::after`
+  (the busy rule sets no `inset-inline-start`); an unknown one is centred at 14 px.
+- **`aria-busy`** (`settings.js`, `refreshDisabled`): one guard,
+  `if (el.matches('[data-global-category]'))`, sets `aria-busy="true"` while the category busy
+  counter is above 0 and removes it otherwise. Per-list selects get no attribute. The unknown
+  look is left by the same path after a failed read (`data-unknown`, no `aria-busy`).
+- **Motion and contrast**: the `.15s` transition of `background-color`, `border-color` and
+  `inset-inline-start` is declared only under `prefers-reduced-motion: no-preference`. Under
+  `forced-colors: active` the track and thumb use `Canvas`, `ButtonText`, `Highlight`,
+  `HighlightText` and `GrayText` (disabled border).
+- **Known limitations**: verified only in Chromium (CDP); iOS Safari and Firefox are unchecked, and
+  the `aria-hidden` state text is not exposed to speech control
+  ([WISHENKA-313](https://pypost.atlassian.net/browse/WISHENKA-313)). In forced colors a checked
+  switch that is pending or unknown still gets the `Highlight` track (the dashed border is then
+  invisible; the glyph carries the state), and at 320 px in `ru` a long label such as
+  "Подтверждения" can break mid-word because the state text keeps 5.5 rem
+  ([WISHENKA-314](https://pypost.atlassian.net/browse/WISHENKA-314)). The test module imports
+  private helpers of `test_personal_settings_browser.py`
+  ([WISHENKA-315](https://pypost.atlassian.net/browse/WISHENKA-315)). Per-list `<select>`
+  overrides keep their native look.
+- **Tests**: `tests/test_settings_switch_browser.py`, see [testing.md](testing.md).
 
 ### 3. Member Administration
 

@@ -219,6 +219,9 @@
       const locked = (busy.get(category) || 0) > 0;
       for (const el of categoryControls(category)) {
         el.disabled = locked || el.dataset.unknown === '1';
+        if (el.matches('[data-global-category]')) {
+          if (locked) el.setAttribute('aria-busy', 'true'); else el.removeAttribute('aria-busy');
+        }
       }
     }
 
