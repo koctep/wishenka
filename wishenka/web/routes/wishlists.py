@@ -3,13 +3,15 @@
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, field_validator
+from sqlalchemy.exc import SQLAlchemyError
 
 from wishenka.auth.dependencies import get_current_user, get_optional_current_user
 from wishenka.auth.models import AuthenticatedUser
+from wishenka.web.dependencies import WishlistRepo
 from wishenka.web.idempotency import compute_request_hash, parse_idempotency_key
 from wishenka.web.routes.reservations import execute as execute_reservation
 from wishenka.wishlists.exceptions import (
@@ -22,6 +24,8 @@ from wishenka.wishlists.exceptions import (
 )
 from wishenka.wishlists.models import Wishlist, WishlistRole, WishlistStatus
 from wishenka.wishlists.policy import WishlistAccessPolicy
+from wishenka.wishlists.repo_ops import RepoWishlistOps
+from wishenka.wishlists.repository import WishlistRepository
 from wishenka.wishlists.schemas import PromiseActionDTO, ReservationQuantityDTO
 from wishenka.wishlists.service import WishlistService, project_reservation_action
 
@@ -54,15 +58,23 @@ class WishlistCreateInput(WishlistInput):
         return trimmed
 
 
-async def execute[T](request: Request, action: Callable[[WishlistService], Awaitable[T]]) -> T:
-    """Run an operation against the configured transactional or injected test service."""
+async def execute[T](
+    request: Request,
+    action: Callable[[Any], Awaitable[T]],
+    *,
+    repo: WishlistRepository | None = None,
+) -> T:
+    """Run an operation against WishlistRepository or an injected test service."""
     operation = getattr(request.scope.get("endpoint"), "__name__", "")
+    storage_failed = False
     try:
         injected = getattr(request.app.state, "wishlist_service", None)
         if injected is not None:
             result = await action(injected)
+        elif repo is not None:
+            result = await action(RepoWishlistOps(repo))
         else:
-            result = cast(T, await request.app.state.wishlist_store.execute(action))
+            raise RuntimeError("WishlistRepository dependency is required")
         if operation in {
             "create_wishlist",
             "update_wishlist",
@@ -77,6 +89,12 @@ async def execute[T](request: Request, action: Callable[[WishlistService], Await
                 extra={"event": "wishlist_mutation_committed", "operation": operation},
             )
         return result
+    except SQLAlchemyError:
+        logger.error(
+            "Wishlist storage operation failed due to database error",
+            extra={"event": "wishlist_store_error"},
+        )
+        storage_failed = True
     except WishlistRetentionExpiredError as exc:
         logger.warning(
             "Wishlist restore rejected because retention window expired: %s",
@@ -107,6 +125,9 @@ async def execute[T](request: Request, action: Callable[[WishlistService], Await
             extra={"event": "wishlist_archived_mutation_blocked", "operation": operation},
         )
         raise HTTPException(status_code=409, detail="Wishlist is archived") from exc
+    if storage_failed:
+        raise RuntimeError("Wishlist storage operation failed")
+    raise AssertionError("Unreachable")
 
 
 def require_member(wishlist: Wishlist, user: AuthenticatedUser, manager: bool = False) -> None:
@@ -190,9 +211,9 @@ def projection(
 
 @router.post("/api/wishlists", status_code=201)
 async def create_wishlist(
-    request: Request, body: WishlistCreateInput, user: User
+    request: Request, body: WishlistCreateInput, user: User, repo: WishlistRepo
 ) -> dict[str, Any]:
-    async def action(service: WishlistService) -> dict[str, Any]:
+    async def action(service: Any) -> dict[str, Any]:
         settings = getattr(request.app.state, "settings", None)
         ttl_seconds = getattr(settings, "invite_token_ttl_seconds", None)
         expires_in = timedelta(seconds=ttl_seconds) if ttl_seconds is not None else None
@@ -216,14 +237,20 @@ async def create_wishlist(
         )
         return projection(wl, user, False, is_favorite=False)
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.get("/api/wishlists")
 async def list_wishlists(
-    request: Request, user: User, include_archived: bool = False
+    request: Request, user: User, repo: WishlistRepo, include_archived: bool = False
 ) -> list[dict[str, Any]]:
-    async def action(service: WishlistService) -> list[dict[str, Any]]:
+    async def action(service: Any) -> list[dict[str, Any]]:
+        if isinstance(service, RepoWishlistOps):
+            wls = await service.repo.list_accessible_wishlists(
+                user.telegram_id, include_archived=include_archived
+            )
+            fav_ids = await service.repo.list_favorite_ids(user.telegram_id)
+            return [projection(wl, user, False, is_favorite=(wl.id in fav_ids)) for wl in wls]
         return [
             projection(
                 wl,
@@ -237,17 +264,19 @@ async def list_wishlists(
             and (include_archived or wl.status == WishlistStatus.ACTIVE)
         ]
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.get("/api/wishlists/deleted")
-async def list_deleted_wishlists(request: Request, user: User) -> list[dict[str, Any]]:
+async def list_deleted_wishlists(
+    request: Request, user: User, repo: WishlistRepo
+) -> list[dict[str, Any]]:
     """Return owner's soft-deleted wishlists still inside the retention window."""
     retention_days = getattr(
         getattr(request.app.state, "settings", None), "wishlist_retention_days", 30
     )
 
-    async def action(service: WishlistService) -> list[dict[str, Any]]:
+    async def action(service: Any) -> list[dict[str, Any]]:
         entries = await service.list_deleted_wishlists(user, retention_days=retention_days)
         logger.info(
             "Deleted wishlists listed for user %s",
@@ -273,27 +302,34 @@ async def list_deleted_wishlists(request: Request, user: User) -> list[dict[str,
             for wl, expires_at, days_remaining in entries
         ]
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.get("/api/wishlists/{wishlist_id}")
-async def get_wishlist(request: Request, wishlist_id: int, user: User) -> dict[str, Any]:
-    async def action(service: WishlistService) -> dict[str, Any]:
+async def get_wishlist(
+    request: Request, wishlist_id: int, user: User, repo: WishlistRepo
+) -> dict[str, Any]:
+    async def action(service: Any) -> dict[str, Any]:
         wl = await service.get_wishlist_by_id(wishlist_id)
         require_member(wl, user)
+        is_fav = (
+            await service.repo.is_favorite(user.telegram_id, wl.id)
+            if isinstance(service, RepoWishlistOps)
+            else service.has_favorite(user.telegram_id, wl.id)
+        )
         return projection(
             wl,
             user,
             False,
-            is_favorite=service.has_favorite(user.telegram_id, wl.id),
+            is_favorite=is_fav,
         )
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.get("/api/favorites")
-async def list_favorites(request: Request, user: User) -> list[dict[str, Any]]:
-    async def action(service: WishlistService) -> list[dict[str, Any]]:
+async def list_favorites(request: Request, user: User, repo: WishlistRepo) -> list[dict[str, Any]]:
+    async def action(service: Any) -> list[dict[str, Any]]:
         favs = await service.list_favorites(user)
         result = []
         for wl in favs:
@@ -323,13 +359,19 @@ async def list_favorites(request: Request, user: User) -> list[dict[str, Any]]:
         )
         return result
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.post("/api/favorites/{wishlist_id}")
-async def add_favorite(request: Request, wishlist_id: int, user: User) -> dict[str, Any]:
-    async def action(service: WishlistService) -> dict[str, Any]:
-        wl = service._wishlists.get(wishlist_id)
+async def add_favorite(
+    request: Request, wishlist_id: int, user: User, repo: WishlistRepo
+) -> dict[str, Any]:
+    async def action(service: Any) -> dict[str, Any]:
+        wl = (
+            await service.repo.get_wishlist_header(wishlist_id)
+            if isinstance(service, RepoWishlistOps)
+            else service._wishlists.get(wishlist_id)
+        )
         if wl is None or wl.status == WishlistStatus.DELETED:
             if wl is not None and wl.status == WishlistStatus.DELETED:
                 logger.warning(
@@ -368,12 +410,14 @@ async def add_favorite(request: Request, wishlist_id: int, user: User) -> dict[s
         )
         return {"status": "favorited", "wishlist_id": wishlist_id}
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.delete("/api/favorites/{wishlist_id}")
-async def remove_favorite(request: Request, wishlist_id: int, user: User) -> dict[str, Any]:
-    async def action(service: WishlistService) -> dict[str, Any]:
+async def remove_favorite(
+    request: Request, wishlist_id: int, user: User, repo: WishlistRepo
+) -> dict[str, Any]:
+    async def action(service: Any) -> dict[str, Any]:
         await service.remove_favorite(user, wishlist_id)
         logger.info(
             "Wishlist %s unfavorited by user %s",
@@ -387,17 +431,26 @@ async def remove_favorite(request: Request, wishlist_id: int, user: User) -> dic
         )
         return {"status": "removed", "wishlist_id": wishlist_id}
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.get("/api/history")
-async def get_history(request: Request, user: User) -> list[dict[str, Any]]:
-    async def action(service: WishlistService) -> list[dict[str, Any]]:
+async def get_history(request: Request, user: User, repo: WishlistRepo) -> list[dict[str, Any]]:
+    async def action(service: Any) -> list[dict[str, Any]]:
         history_entries = await service.get_history(user, limit=20)
+        fav_ids = (
+            await service.repo.list_favorite_ids(user.telegram_id)
+            if isinstance(service, RepoWishlistOps)
+            else None
+        )
         result = []
         for wl, viewed_at in history_entries:
             ctx = WishlistAccessPolicy.resolve_context(user, wl)
-            is_fav = service.has_favorite(user.telegram_id, wl.id)
+            is_fav = (
+                wl.id in fav_ids
+                if fav_ids is not None
+                else service.has_favorite(user.telegram_id, wl.id)
+            )
             role = ctx.role.value if ctx.role else ("favorite" if is_fav else None)
             result.append(
                 {
@@ -423,13 +476,19 @@ async def get_history(request: Request, user: User) -> list[dict[str, Any]]:
         )
         return result
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.post("/api/history/{wishlist_id}")
-async def record_view(request: Request, wishlist_id: int, user: User) -> dict[str, Any]:
-    async def action(service: WishlistService) -> dict[str, Any]:
-        wl = service._wishlists.get(wishlist_id)
+async def record_view(
+    request: Request, wishlist_id: int, user: User, repo: WishlistRepo
+) -> dict[str, Any]:
+    async def action(service: Any) -> dict[str, Any]:
+        wl = (
+            await service.repo.get_wishlist_header(wishlist_id)
+            if isinstance(service, RepoWishlistOps)
+            else service._wishlists.get(wishlist_id)
+        )
         if wl is None or wl.status == WishlistStatus.DELETED:
             if wl is not None and wl.status == WishlistStatus.DELETED:
                 logger.warning(
@@ -455,23 +514,23 @@ async def record_view(request: Request, wishlist_id: int, user: User) -> dict[st
         )
         return {"status": "recorded", "wishlist_id": wishlist_id}
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.delete("/api/history")
-async def clear_history(request: Request, user: User) -> dict[str, Any]:
-    async def action(service: WishlistService) -> dict[str, Any]:
+async def clear_history(request: Request, user: User, repo: WishlistRepo) -> dict[str, Any]:
+    async def action(service: Any) -> dict[str, Any]:
         await service.clear_history(user)
         return {"status": "cleared"}
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.patch("/api/wishlists/{wishlist_id}")
 async def update_wishlist(
-    request: Request, wishlist_id: int, body: WishlistInput, user: User
+    request: Request, wishlist_id: int, body: WishlistInput, user: User, repo: WishlistRepo
 ) -> dict[str, Any]:
-    async def action(service: WishlistService) -> dict[str, Any]:
+    async def action(service: Any) -> dict[str, Any]:
         wl = await service.get_wishlist_by_id(wishlist_id)
         require_member(wl, user, manager=True)
         if wl.status != WishlistStatus.ACTIVE:
@@ -492,7 +551,11 @@ async def update_wishlist(
             )
         if (wl.title, wl.description, wl.event_title, wl.event_date) != before:
             wl.updated_at = datetime.now(UTC)
-            service._record_shared_event("list_updated", wl, None, user.telegram_id)
+            if isinstance(service, RepoWishlistOps):
+                await service.repo.upsert_wishlist(wl)
+                await service.record_shared_event("list_updated", wl, None, user.telegram_id)
+            else:
+                service._record_shared_event("list_updated", wl, None, user.telegram_id)
         logger.info(
             "Wishlist updated: id=%s by user=%s",
             wishlist_id,
@@ -505,18 +568,24 @@ async def update_wishlist(
         )
         return projection(wl, user, False)
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.delete("/api/wishlists/{wishlist_id}")
-async def delete_wishlist(request: Request, wishlist_id: int, user: User) -> dict[str, Any]:
+async def delete_wishlist(
+    request: Request, wishlist_id: int, user: User, repo: WishlistRepo
+) -> dict[str, Any]:
     """Soft-delete a wishlist for its owner; repeats inside the retention window succeed."""
     retention_days = getattr(
         getattr(request.app.state, "settings", None), "wishlist_retention_days", 30
     )
 
-    async def action(service: WishlistService) -> dict[str, Any]:
-        wl = service._wishlists.get(wishlist_id)
+    async def action(service: Any) -> dict[str, Any]:
+        wl = (
+            await service.repo.get_wishlist(wishlist_id)
+            if isinstance(service, RepoWishlistOps)
+            else service._wishlists.get(wishlist_id)
+        )
         if wl is None:
             logger.warning(
                 "Wishlist delete rejected: wishlist %s not found",
@@ -569,19 +638,19 @@ async def delete_wishlist(request: Request, wishlist_id: int, user: User) -> dic
         )
         return {"status": "deleted", "wishlist_id": wishlist_id, "retention_days": retention_days}
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.post("/api/wishlists/{wishlist_id}/restore-deleted")
 async def restore_deleted_wishlist(
-    request: Request, wishlist_id: int, user: User
+    request: Request, wishlist_id: int, user: User, repo: WishlistRepo
 ) -> dict[str, Any]:
     """Restore owner's soft-deleted wishlist within the retention window."""
     retention_days = getattr(
         getattr(request.app.state, "settings", None), "wishlist_retention_days", 30
     )
 
-    async def action(service: WishlistService) -> dict[str, Any]:
+    async def action(service: Any) -> dict[str, Any]:
         wl = await service.restore_deleted_wishlist(
             wishlist_id,
             user,
@@ -598,21 +667,26 @@ async def restore_deleted_wishlist(
                 "retention_days": retention_days,
             },
         )
+        is_fav = (
+            await service.repo.is_favorite(user.telegram_id, wl.id)
+            if isinstance(service, RepoWishlistOps)
+            else service.has_favorite(user.telegram_id, wl.id)
+        )
         return projection(
             wl,
             user,
             False,
-            is_favorite=service.has_favorite(user.telegram_id, wl.id),
+            is_favorite=is_fav,
         )
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.post("/api/wishlists/{wishlist_id}/{operation}")
 async def change_status(
-    request: Request, wishlist_id: int, operation: str, user: User
+    request: Request, wishlist_id: int, operation: str, user: User, repo: WishlistRepo
 ) -> dict[str, Any]:
-    async def action(service: WishlistService) -> dict[str, Any]:
+    async def action(service: Any) -> dict[str, Any]:
         wl = await service.get_wishlist_by_id(wishlist_id)
         require_member(wl, user, manager=True)
         if operation == "archive" and wl.status == WishlistStatus.ACTIVE:
@@ -652,12 +726,14 @@ async def change_status(
         )
         return projection(wl, user, False)
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.post("/api/wishlists/{wishlist_id}/share/reset")
-async def reset_share(request: Request, wishlist_id: int, user: User) -> dict[str, Any]:
-    async def action(service: WishlistService) -> dict[str, Any]:
+async def reset_share(
+    request: Request, wishlist_id: int, user: User, repo: WishlistRepo
+) -> dict[str, Any]:
+    async def action(service: Any) -> dict[str, Any]:
         wl = await service.get_wishlist_by_id(wishlist_id)
         require_member(wl, user, manager=True)
         if wl.status != WishlistStatus.ACTIVE:
@@ -673,7 +749,8 @@ async def reset_share(request: Request, wishlist_id: int, user: User) -> dict[st
             raise HTTPException(status_code=409, detail="Wishlist is archived")
         old = wl.public_token
         for _ in range(5):
-            await service.regenerate_public_token(wishlist_id, user)
+            new_tok = await service.regenerate_public_token(wishlist_id, user)
+            wl.public_token = new_tok
             if wl.public_token != old:
                 break
         else:
@@ -699,14 +776,14 @@ async def reset_share(request: Request, wishlist_id: int, user: User) -> dict[st
         )
         return projection(wl, user, False)
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.get("/api/public/wishlists/{token}")
-async def public_wishlist(request: Request, token: str) -> dict[str, Any]:
+async def public_wishlist(request: Request, token: str, repo: WishlistRepo) -> dict[str, Any]:
     """Return the anonymous-safe public wishlist payload via the domain projection."""
 
-    async def action(service: WishlistService) -> dict[str, Any]:
+    async def action(service: Any) -> dict[str, Any]:
         try:
             view = await service.get_wishlist_by_public_token(token, None)
         except (WishlistNotFoundError, WishlistDeletedError):
@@ -749,14 +826,16 @@ async def public_wishlist(request: Request, token: str) -> dict[str, Any]:
             ],
         }
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.get("/api/public/wishlists/{token}/view")
-async def public_wishlist_view(request: Request, token: str, user: OptionalUser) -> dict[str, Any]:
+async def public_wishlist_view(
+    request: Request, token: str, user: OptionalUser, repo: WishlistRepo
+) -> dict[str, Any]:
     """Return the domain's role-specific view without membership or invite secrets."""
 
-    async def action(service: WishlistService) -> dict[str, Any]:
+    async def action(service: Any) -> dict[str, Any]:
         try:
             view = await service.get_wishlist_by_public_token(token, user)
         except (WishlistNotFoundError, WishlistDeletedError, PermissionDeniedError):
@@ -781,7 +860,7 @@ async def public_wishlist_view(request: Request, token: str, user: OptionalUser)
             "items": [item.model_dump(mode="json") for item in view.items],
         }
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.post(
@@ -846,20 +925,27 @@ class RoleInput(BaseModel):
 
 
 @router.get("/api/wishlists/{wishlist_id}/members")
-async def list_members(request: Request, wishlist_id: int, user: User) -> list[dict[str, Any]]:
-    async def action(service: WishlistService) -> list[dict[str, Any]]:
+async def list_members(
+    request: Request, wishlist_id: int, user: User, repo: WishlistRepo
+) -> list[dict[str, Any]]:
+    async def action(service: Any) -> list[dict[str, Any]]:
         wl = await service.get_wishlist_by_id(wishlist_id)
         require_member(wl, user)
         return member_projection(wl)
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.patch("/api/wishlists/{wishlist_id}/members/{user_id}/role")
 async def set_role(
-    request: Request, wishlist_id: int, user_id: int, body: RoleInput, user: User
+    request: Request,
+    wishlist_id: int,
+    user_id: int,
+    body: RoleInput,
+    user: User,
+    repo: WishlistRepo,
 ) -> dict[str, str]:
-    async def action(service: WishlistService) -> dict[str, str]:
+    async def action(service: Any) -> dict[str, str]:
         wl = await service.get_wishlist_by_id(wishlist_id)
         require_member(wl, user, manager=True)
         if wl.owner_id != user.telegram_id or user_id == wl.owner_id:
@@ -903,7 +989,11 @@ async def set_role(
         new_role = WishlistRole(body.role)
         if target.role != new_role:
             target.role = new_role
-            service._record_shared_event("membership_changed", wl, None, user.telegram_id)
+            if isinstance(service, RepoWishlistOps):
+                await service.record_shared_event("membership_changed", wl, None, user.telegram_id)
+                await service.repo.update_member_role(wishlist_id, user_id, new_role)
+            else:
+                service._record_shared_event("membership_changed", wl, None, user.telegram_id)
         logger.info(
             "Member role updated: member %s role changed to %s on wishlist %s by user %s",
             user_id,
@@ -920,14 +1010,14 @@ async def set_role(
         )
         return {"role": target.role.value}
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.delete("/api/wishlists/{wishlist_id}/members/{user_id}")
 async def delete_member(
-    request: Request, wishlist_id: int, user_id: int, user: User
+    request: Request, wishlist_id: int, user_id: int, user: User, repo: WishlistRepo
 ) -> dict[str, str]:
-    async def action(service: WishlistService) -> dict[str, str]:
+    async def action(service: Any) -> dict[str, str]:
         wl = await service.get_wishlist_by_id(wishlist_id)
         require_member(wl, user, manager=True)
         if wl.status != WishlistStatus.ACTIVE:
@@ -971,12 +1061,14 @@ async def delete_member(
         )
         return {"status": "removed"}
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.post("/api/wishlists/{wishlist_id}/invite/reset")
-async def reset_invite(request: Request, wishlist_id: int, user: User) -> dict[str, str]:
-    async def action(service: WishlistService) -> dict[str, str]:
+async def reset_invite(
+    request: Request, wishlist_id: int, user: User, repo: WishlistRepo
+) -> dict[str, str]:
+    async def action(service: Any) -> dict[str, str]:
         wl = await service.get_wishlist_by_id(wishlist_id)
         require_member(wl, user, manager=True)
         if wl.status != WishlistStatus.ACTIVE:
@@ -1006,10 +1098,10 @@ async def reset_invite(request: Request, wishlist_id: int, user: User) -> dict[s
         )
         return {"invite_token": token}
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
-def find_invitation(service: WishlistService, token: str) -> Wishlist:
+async def find_invitation(service: WishlistService | RepoWishlistOps, token: str) -> Wishlist:
     """Resolve an active invite without exposing whether a token previously existed."""
     if not token or len(token) > 128:
         logger.warning(
@@ -1017,7 +1109,10 @@ def find_invitation(service: WishlistService, token: str) -> Wishlist:
             extra={"event": "invitation_token_malformed"},
         )
         raise HTTPException(status_code=404, detail="Invitation not found")
-    wl = next((w for w in service._wishlists.values() if w.invite_token == token), None)
+    if isinstance(service, RepoWishlistOps):
+        wl = await service.repo.get_by_invite_token(token)
+    else:
+        wl = next((w for w in service._wishlists.values() if w.invite_token == token), None)
     if (
         wl is None
         or wl.status != WishlistStatus.ACTIVE
@@ -1032,9 +1127,9 @@ def find_invitation(service: WishlistService, token: str) -> Wishlist:
 
 
 @router.get("/api/invitations/preview")
-async def preview_invite(request: Request) -> dict[str, str]:
-    async def action(service: WishlistService) -> dict[str, str]:
-        wl = find_invitation(service, request.headers.get("x-invite-token", ""))
+async def preview_invite(request: Request, repo: WishlistRepo) -> dict[str, str]:
+    async def action(service: Any) -> dict[str, str]:
+        wl = await find_invitation(service, request.headers.get("x-invite-token", ""))
         logger.info(
             "Invitation preview accessed for wishlist %s",
             wl.id,
@@ -1042,14 +1137,14 @@ async def preview_invite(request: Request) -> dict[str, str]:
         )
         return {"name": wl.title, "access": "member"}
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.post("/api/invitations/accept")
-async def accept_invite(request: Request, user: User) -> dict[str, Any]:
-    async def action(service: WishlistService) -> dict[str, Any]:
+async def accept_invite(request: Request, user: User, repo: WishlistRepo) -> dict[str, Any]:
+    async def action(service: Any) -> dict[str, Any]:
         token = request.headers.get("x-invite-token", "")
-        wl = find_invitation(service, token)
+        wl = await find_invitation(service, token)
         ctx = WishlistAccessPolicy.resolve_context(user, wl)
         if ctx.is_member:
             logger.info(
@@ -1091,4 +1186,4 @@ async def accept_invite(request: Request, user: User) -> dict[str, Any]:
         )
         return {"wishlist_id": wl.id, "role": member.role.value}
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)

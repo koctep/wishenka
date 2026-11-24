@@ -2,13 +2,14 @@
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from wishenka.auth.dependencies import get_current_user, get_optional_current_user
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.items.schemas import CreateItemDTO, ReorderItemsDTO, UpdateItemDTO
+from wishenka.web.dependencies import WishlistRepo
 from wishenka.wishlists.exceptions import (
     CannotReduceQuantityBelowReservedError,
     InventoryBusyError,
@@ -19,6 +20,8 @@ from wishenka.wishlists.exceptions import (
     WishlistDeletedError,
     WishlistNotFoundError,
 )
+from wishenka.wishlists.repo_ops import RepoWishlistOps
+from wishenka.wishlists.repository import WishlistRepository
 from wishenka.wishlists.schemas import (
     WishItemGifterViewDTO,
     WishItemRecipientViewDTO,
@@ -34,11 +37,12 @@ OptionalUser = Annotated[AuthenticatedUser | None, Depends(get_optional_current_
 
 async def execute[T](
     request: Request,
-    action: Callable[[WishlistService], Awaitable[T]],
+    action: Callable[[Any], Awaitable[T]],
     *,
+    repo: WishlistRepository | None = None,
     item_id: int | None = None,
 ) -> T:
-    """Run an item operation against transactional storage or test-injected domain service."""
+    """Run an item operation against WishlistRepository, execute_wish, or test-injected service."""
     operation = getattr(request.scope.get("endpoint"), "__name__", "")
     try:
         injected = getattr(request.app.state, "wishlist_service", None)
@@ -53,8 +57,10 @@ async def execute[T](
                     operation_name=operation or "wish_inventory",
                 ),
             )
+        elif repo is not None:
+            result = await action(RepoWishlistOps(repo))
         else:
-            result = cast(T, await request.app.state.wishlist_store.execute(action))
+            raise RuntimeError("WishlistRepository dependency is required")
         return result
     except InventoryBusyError as exc:
         busy_context: dict[str, object] = {
@@ -119,10 +125,11 @@ async def create_item(
     payload: CreateItemDTO,
     user: User,
     request: Request,
+    repo: WishlistRepo,
 ) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
     """Create a new wish item with auto-incremented display_order."""
 
-    async def action(svc: WishlistService) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
+    async def action(svc: Any) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
         item = await svc.add_wish_item(
             wishlist_id=wishlist_id,
             actor=user,
@@ -140,7 +147,7 @@ async def create_item(
         )
         return project_wish_item(item, user)
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.get(
@@ -151,20 +158,24 @@ async def list_items(
     wishlist_id: int,
     request: Request,
     user: OptionalUser,
+    repo: WishlistRepo,
     include_archived: bool = False,
 ) -> list[WishItemRecipientViewDTO | WishItemGifterViewDTO]:
     """List wishlist items sorted by display_order adhering to Surprise Invariant."""
 
     async def action(
-        svc: WishlistService,
+        svc: Any,
     ) -> list[WishItemRecipientViewDTO | WishItemGifterViewDTO]:
-        return await svc.list_wish_items(
-            wishlist_id=wishlist_id,
-            actor=user,
-            include_archived=include_archived,
+        return cast(
+            list[WishItemRecipientViewDTO | WishItemGifterViewDTO],
+            await svc.list_wish_items(
+                wishlist_id=wishlist_id,
+                actor=user,
+                include_archived=include_archived,
+            ),
         )
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.put(
@@ -176,19 +187,23 @@ async def reorder_items(
     payload: ReorderItemsDTO,
     user: User,
     request: Request,
+    repo: WishlistRepo,
 ) -> list[WishItemRecipientViewDTO | WishItemGifterViewDTO]:
     """Atomically reorder active wishlist items."""
 
     async def action(
-        svc: WishlistService,
+        svc: Any,
     ) -> list[WishItemRecipientViewDTO | WishItemGifterViewDTO]:
-        return await svc.reorder_wish_items(
-            wishlist_id=wishlist_id,
-            actor=user,
-            item_ids=payload.item_ids,
+        return cast(
+            list[WishItemRecipientViewDTO | WishItemGifterViewDTO],
+            await svc.reorder_wish_items(
+                wishlist_id=wishlist_id,
+                actor=user,
+                item_ids=payload.item_ids,
+            ),
         )
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.get(
@@ -200,17 +215,21 @@ async def get_item(
     item_id: int,
     request: Request,
     user: OptionalUser,
+    repo: WishlistRepo,
 ) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
     """Get single wish item view projected for the caller."""
 
-    async def action(svc: WishlistService) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
-        return await svc.get_wish_item(
-            wishlist_id=wishlist_id,
-            item_id=item_id,
-            actor=user,
+    async def action(svc: Any) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
+        return cast(
+            WishItemRecipientViewDTO | WishItemGifterViewDTO,
+            await svc.get_wish_item(
+                wishlist_id=wishlist_id,
+                item_id=item_id,
+                actor=user,
+            ),
         )
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.patch(
@@ -257,17 +276,21 @@ async def archive_item(
     item_id: int,
     user: User,
     request: Request,
+    repo: WishlistRepo,
 ) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
     """Safely archive a wish item, preserving existing reservations."""
 
-    async def action(svc: WishlistService) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
-        return await svc.archive_wish_item(
-            wishlist_id=wishlist_id,
-            item_id=item_id,
-            actor=user,
+    async def action(svc: Any) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
+        return cast(
+            WishItemRecipientViewDTO | WishItemGifterViewDTO,
+            await svc.archive_wish_item(
+                wishlist_id=wishlist_id,
+                item_id=item_id,
+                actor=user,
+            ),
         )
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)
 
 
 @router.post(
@@ -279,14 +302,18 @@ async def restore_item(
     item_id: int,
     user: User,
     request: Request,
+    repo: WishlistRepo,
 ) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
     """Restore an archived wish item, appending it to the end of the active list."""
 
-    async def action(svc: WishlistService) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
-        return await svc.restore_wish_item(
-            wishlist_id=wishlist_id,
-            item_id=item_id,
-            actor=user,
+    async def action(svc: Any) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
+        return cast(
+            WishItemRecipientViewDTO | WishItemGifterViewDTO,
+            await svc.restore_wish_item(
+                wishlist_id=wishlist_id,
+                item_id=item_id,
+                actor=user,
+            ),
         )
 
-    return await execute(request, action)
+    return await execute(request, action, repo=repo)

@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from wishenka.auth.dependencies import get_current_user
 from wishenka.auth.models import AuthenticatedUser
+from wishenka.web.dependencies import WishlistRepo
 from wishenka.web.idempotency import (
     build_replay_response,
     compute_request_hash,
@@ -33,6 +34,8 @@ from wishenka.wishlists.exceptions import (
     WishlistDeletedError,
     WishlistNotFoundError,
 )
+from wishenka.wishlists.repo_ops import RepoWishlistOps
+from wishenka.wishlists.repository import WishlistRepository
 from wishenka.wishlists.schemas import GiftedItemDTO, ReceiptRequestDTO, ReceiptResultDTO
 from wishenka.wishlists.service import WishlistService, recipient_view
 
@@ -110,26 +113,29 @@ def _busy(exc: InventoryBusyError, operation: str, context: dict[str, int | None
 
 async def _run[T](
     request: Request,
-    action: Callable[[WishlistService], Awaitable[T]],
+    action: Callable[[Any], Awaitable[T]],
     user: AuthenticatedUser,
     *,
     wishlist_id: int,
     item_id: int | None = None,
+    repo: WishlistRepository | None = None,
     idempotency_key: str | None = None,
     request_hash: str | None = None,
     response_status: int = status.HTTP_201_CREATED,
     operation_name: str = "record_item_fulfillment",
 ) -> T | Response:
-    """Run one action: a single-wish transaction for a command, a full snapshot for a read."""
+    """Run one action: a single-wish transaction for a command, WishlistRepository for a read."""
     operation = getattr(request.scope.get("endpoint"), "__name__", "")
     context = {"wishlist_id": wishlist_id, "item_id": item_id, "actor_id": user.telegram_id}
     try:
         injected = getattr(request.app.state, "wishlist_service", None)
         if injected is not None:
             return await action(injected)
-        store = request.app.state.wishlist_store
         if item_id is None:
-            return cast(T, await store.execute(action))
+            if repo is None:
+                raise RuntimeError("WishlistRepository dependency is required")
+            return await action(RepoWishlistOps(repo))
+        store = request.app.state.wishlist_store
         if idempotency_key is not None:
             if request_hash is None:
                 raise ValueError("Idempotent execution requires request_hash")
@@ -237,13 +243,18 @@ async def record_receipt(
 
 
 @router.get("/gifted", response_model=list[GiftedItemDTO])
-async def list_gifted(wishlist_id: int, user: User, request: Request) -> list[GiftedItemDTO]:
+async def list_gifted(
+    wishlist_id: int, user: User, request: Request, repo: WishlistRepo
+) -> list[GiftedItemDTO]:
     """Return the received wishes of a list for its authors."""
 
-    async def action(svc: WishlistService) -> list[GiftedItemDTO]:
-        return await svc.list_gifted_items(wishlist_id, user)
+    async def action(svc: Any) -> list[GiftedItemDTO]:
+        return cast(list[GiftedItemDTO], await svc.list_gifted_items(wishlist_id, user))
 
-    return cast(list[GiftedItemDTO], await _run(request, action, user, wishlist_id=wishlist_id))
+    return cast(
+        list[GiftedItemDTO],
+        await _run(request, action, user, wishlist_id=wishlist_id, repo=repo),
+    )
 
 
 @router.delete(

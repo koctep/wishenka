@@ -23,6 +23,7 @@ from wishenka.items.classifier import UniversalInputClassifier
 from wishenka.items.models import InputType, ItemPriority
 from wishenka.items.parser import extract_domain
 from wishenka.items.service import ItemPreviewService
+from wishenka.web.dependencies import WishlistRepo
 from wishenka.web.gifted_view import (
     RECEIPT_REFUSAL_HEADER,
     GiftedRow,
@@ -44,6 +45,8 @@ from wishenka.wishlists.exceptions import (
 )
 from wishenka.wishlists.models import Wishlist, WishlistStatus
 from wishenka.wishlists.policy import WishlistAccessPolicy
+from wishenka.wishlists.repo_ops import RepoWishlistOps
+from wishenka.wishlists.repository import WishlistRepository
 from wishenka.wishlists.schemas import (
     WishItemGifterViewDTO,
     WishItemRecipientViewDTO,
@@ -58,12 +61,19 @@ User = Annotated[AuthenticatedUser, Depends(get_current_user)]
 OptionalUser = Annotated[AuthenticatedUser | None, Depends(get_optional_current_user)]
 
 
-async def _execute[T](request: Request, action: Callable[[WishlistService], Awaitable[T]]) -> T:
-    """Execute a domain operation inside transactional storage or injected test service."""
+async def _execute[T](
+    request: Request,
+    action: Callable[[Any], Awaitable[T]],
+    *,
+    repo: WishlistRepository | None = None,
+) -> T:
+    """Execute a domain operation inside WishlistRepository or injected test service."""
     injected = getattr(request.app.state, "wishlist_service", None)
     if injected is not None:
         return await action(injected)
-    return cast(T, await request.app.state.wishlist_store.execute(action))
+    if repo is None:
+        raise RuntimeError("WishlistRepository dependency is required")
+    return await action(RepoWishlistOps(repo))
 
 
 def _editor_card_flags() -> dict[str, bool]:
@@ -370,11 +380,12 @@ async def view_wishlist_detail(
     request: Request,
     current_user: OptionalUser,
     locale: LocaleDep,
+    repo: WishlistRepo,
 ) -> Response:
     """Render main TMA wishlist detail page with RBAC-gated Quick Add Bar and edit triggers."""
 
     async def action(
-        svc: WishlistService,
+        svc: Any,
     ) -> tuple[WishlistDetailViewDTO, bool, bool, bool, bool, list[GiftedRow] | None]:
         wl = await svc.get_wishlist_by_id(wishlist_id)
         dto = await svc.get_wishlist_view(wishlist_id, current_user)
@@ -403,7 +414,7 @@ async def view_wishlist_detail(
             is_member,
             can_view_gifted,
             gifted_rows,
-        ) = await _execute(request, action)
+        ) = await _execute(request, action, repo=repo)
     except (WishlistNotFoundError, WishlistDeletedError) as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -434,16 +445,17 @@ async def preview_item_input(
     request: Request,
     user: User,
     locale: LocaleDep,
+    repo: WishlistRepo,
     raw_input: Annotated[str, Form()] = "",
 ) -> Response:
     """Classify universal input and render live URL preview card or empty response."""
 
-    async def verify_access(svc: WishlistService) -> None:
+    async def verify_access(svc: Any) -> None:
         wl = await svc.get_wishlist_by_id(wishlist_id)
         _ensure_member_and_active(wl, user)
 
     try:
-        await _execute(request, verify_access)
+        await _execute(request, verify_access, repo=repo)
     except (WishlistNotFoundError, WishlistDeletedError, PermissionDeniedError) as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -517,6 +529,7 @@ async def quick_add_item(
     request: Request,
     user: User,
     locale: LocaleDep,
+    repo: WishlistRepo,
     raw_input: Annotated[str, Form()] = "",
     title: Annotated[str | None, Form()] = None,
     link: Annotated[str | None, Form()] = None,
@@ -596,7 +609,7 @@ async def quick_add_item(
         return project_wish_item(item, user)
 
     try:
-        projected_item = await _execute(request, action)
+        projected_item = await _execute(request, action, repo=repo)
     except (
         WishlistNotFoundError,
         WishlistDeletedError,
@@ -656,6 +669,7 @@ async def get_new_item_modal(
     request: Request,
     user: User,
     locale: LocaleDep,
+    repo: WishlistRepo,
     raw_input: str | None = None,
     title: str | None = None,
     link: str | None = None,
@@ -675,7 +689,7 @@ async def get_new_item_modal(
         return wl.is_collaborative, _collaborative_members(wl, locale)
 
     try:
-        is_collaborative, collaborative_members = await _execute(request, action)
+        is_collaborative, collaborative_members = await _execute(request, action, repo=repo)
     except (
         WishlistNotFoundError,
         WishlistDeletedError,
@@ -752,6 +766,7 @@ async def submit_new_item(
     request: Request,
     user: User,
     locale: LocaleDep,
+    repo: WishlistRepo,
     title: Annotated[str, Form()] = "",
     link: Annotated[str | None, Form()] = None,
     price: Annotated[str | None, Form()] = None,
@@ -814,7 +829,7 @@ async def submit_new_item(
         return project_wish_item(item, user)
 
     try:
-        projected_item = await _execute(request, action)
+        projected_item = await _execute(request, action, repo=repo)
     except (
         WishlistNotFoundError,
         WishlistDeletedError,
@@ -910,15 +925,20 @@ async def get_edit_item_modal(
     request: Request,
     user: User,
     locale: LocaleDep,
+    repo: WishlistRepo,
 ) -> Response:
     """Render detailed item edit modal enforcing received-quantity floor and Surprise Invariant."""
 
     async def action(
-        svc: WishlistService,
+        svc: Any,
     ) -> tuple[dict[str, Any], int, bool, list[dict[str, Any]]]:
         wl = await svc.get_wishlist_by_id(wishlist_id)
         _ensure_member_and_active(wl, user)
-        item = svc._items.get(item_id)
+        item = (
+            next((it for it in wl.items if it.id == item_id), None)
+            if isinstance(svc, RepoWishlistOps)
+            else svc._items.get(item_id)
+        )
         if item is None or item.wishlist_id != wishlist_id:
             raise ItemNotFoundError(f"Item {item_id} not found")
         received_qty = item.received_quantity
@@ -941,7 +961,7 @@ async def get_edit_item_modal(
 
     try:
         form_data, received_quantity, is_collaborative, collaborative_members = await _execute(
-            request, action
+            request, action, repo=repo
         )
     except _DOMAIN_ERRORS as exc:
         return _modal_domain_error_response(
@@ -1271,6 +1291,8 @@ async def _nothing_remaining_response(
     wishlist_id: int,
     user: AuthenticatedUser,
     locale: SupportedLocale = DEFAULT_LOCALE,
+    *,
+    repo: WishlistRepository | None = None,
 ) -> HTMLResponse:
     """Stale archive or restore of a fully received wish: 409 with out-of-band fragments only.
 
@@ -1295,7 +1317,7 @@ async def _nothing_remaining_response(
         oob_text("list-notice", nothing_remaining_text(locale)),
     ]
     try:
-        items, archived, gifted = await _execute(request, action)
+        items, archived, gifted = await _execute(request, action, repo=repo)
     except WishlistError:
         pass
     else:
@@ -1333,11 +1355,13 @@ async def _reordered_response(
     user: AuthenticatedUser,
     reorder: Callable[[list[int]], list[int]],
     locale: SupportedLocale = DEFAULT_LOCALE,
+    *,
+    repo: WishlistRepository | None = None,
 ) -> HTMLResponse:
     """Apply a reorder computed from the current order and render the new list."""
 
     async def action(
-        svc: WishlistService,
+        svc: Any,
     ) -> list[WishItemRecipientViewDTO | WishItemGifterViewDTO]:
         wl = await svc.get_wishlist_by_id(wishlist_id)
         _ensure_member_and_active(wl, user)
@@ -1346,10 +1370,13 @@ async def _reordered_response(
         new_ids = reorder(current_ids)
         if new_ids != current_ids:
             await svc.reorder_wish_items(wishlist_id=wishlist_id, actor=user, item_ids=new_ids)
-        return await svc.list_wish_items(wishlist_id=wishlist_id, actor=user)
+        return cast(
+            list[WishItemRecipientViewDTO | WishItemGifterViewDTO],
+            await svc.list_wish_items(wishlist_id=wishlist_id, actor=user),
+        )
 
     try:
-        items = await _execute(request, action)
+        items = await _execute(request, action, repo=repo)
     except _DOMAIN_ERRORS as exc:
         _raise_http(exc)
     except ValueError as exc:
@@ -1379,11 +1406,12 @@ async def reorder_items_ui(
     request: Request,
     user: User,
     locale: LocaleDep,
+    repo: WishlistRepo,
     item_ids: Annotated[list[int], Form()],
 ) -> Response:
     """Persist a full manual order of active items and return the re-rendered list."""
     response = await _reordered_response(
-        request, wishlist_id, user, lambda _current: item_ids, locale
+        request, wishlist_id, user, lambda _current: item_ids, locale, repo=repo
     )
     logger.info(
         "Items in wishlist %s reordered via UI by actor %s",
@@ -1407,6 +1435,7 @@ async def move_item_ui(
     request: Request,
     user: User,
     locale: LocaleDep,
+    repo: WishlistRepo,
     direction: Annotated[str, Query(pattern="^(up|down)$")],
 ) -> Response:
     """Move one item a single step up or down and return the re-rendered list."""
@@ -1421,7 +1450,7 @@ async def move_item_ui(
             result[idx], result[target] = result[target], result[idx]
         return result
 
-    response = await _reordered_response(request, wishlist_id, user, compute, locale)
+    response = await _reordered_response(request, wishlist_id, user, compute, locale, repo=repo)
     logger.info(
         "Item %s in wishlist %s moved %s via UI by actor %s",
         item_id,
@@ -1447,10 +1476,11 @@ async def archive_confirm_ui(
     request: Request,
     user: User,
     locale: LocaleDep,
+    repo: WishlistRepo,
 ) -> Response:
     """Render the archive confirmation modal without exposing gifter identities."""
 
-    async def action(svc: WishlistService) -> tuple[Any, bool, bool]:
+    async def action(svc: Any) -> tuple[Any, bool, bool]:
         wl = await svc.get_wishlist_by_id(wishlist_id)
         _ensure_member_and_active(wl, user)
         ctx = WishlistAccessPolicy.resolve_context(user, wl)
@@ -1463,7 +1493,7 @@ async def archive_confirm_ui(
         return item, has_locked, wl.warn_on_delete_reserved
 
     try:
-        item, has_locked, warn_pref = await _execute(request, action)
+        item, has_locked, warn_pref = await _execute(request, action, repo=repo)
     except _DOMAIN_ERRORS as exc:
         return _modal_domain_error_response(
             exc,
@@ -1510,6 +1540,7 @@ async def archive_item_ui(
     request: Request,
     user: User,
     locale: LocaleDep,
+    repo: WishlistRepo,
     warn_on_delete_reserved: Annotated[list[str] | None, Form()] = None,
 ) -> Response:
     """Safely archive wish item via HTMX UI, updating list, modal and archive section."""
@@ -1517,7 +1548,7 @@ async def archive_item_ui(
     if warn_on_delete_reserved:
         warn_pref = warn_on_delete_reserved[-1].strip().lower() in {"true", "1", "on", "yes"}
 
-    async def action(svc: WishlistService) -> list[WishItemRecipientViewDTO]:
+    async def action(svc: Any) -> list[WishItemRecipientViewDTO]:
         wl = await svc.get_wishlist_by_id(wishlist_id)
         _ensure_member_and_active(wl, user)
         await svc.archive_wish_item(
@@ -1527,12 +1558,12 @@ async def archive_item_ui(
             warn_on_delete_reserved=warn_pref,
         )
         view = await svc.get_wishlist_view(wishlist_id, user)
-        return view.archived_items
+        return cast(list[WishItemRecipientViewDTO], view.archived_items)
 
     try:
-        archived = await _execute(request, action)
+        archived = await _execute(request, action, repo=repo)
     except NothingRemainingError:
-        return await _nothing_remaining_response(request, wishlist_id, user, locale)
+        return await _nothing_remaining_response(request, wishlist_id, user, locale, repo=repo)
     except _DOMAIN_ERRORS as exc:
         return _modal_domain_error_response(
             exc,
@@ -1573,11 +1604,12 @@ async def restore_item_ui(
     request: Request,
     user: User,
     locale: LocaleDep,
+    repo: WishlistRepo,
 ) -> Response:
     """Restore an archived item: card appended to list, archive section updated OOB."""
 
     async def action(
-        svc: WishlistService,
+        svc: Any,
     ) -> tuple[WishItemRecipientViewDTO | WishItemGifterViewDTO, list[WishItemRecipientViewDTO]]:
         wl = await svc.get_wishlist_by_id(wishlist_id)
         _ensure_member_and_active(wl, user)
@@ -1587,12 +1619,12 @@ async def restore_item_ui(
             actor=user,
         )
         view = await svc.get_wishlist_view(wishlist_id, user)
-        return restored, view.archived_items
+        return restored, cast(list[WishItemRecipientViewDTO], view.archived_items)
 
     try:
-        restored_item, archived = await _execute(request, action)
+        restored_item, archived = await _execute(request, action, repo=repo)
     except NothingRemainingError:
-        return await _nothing_remaining_response(request, wishlist_id, user, locale)
+        return await _nothing_remaining_response(request, wishlist_id, user, locale, repo=repo)
     except _DOMAIN_ERRORS as exc:
         _raise_http(exc)
 

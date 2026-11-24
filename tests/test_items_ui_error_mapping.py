@@ -214,14 +214,22 @@ def test_invalid_permutation_gives_400_event_and_keeps_order(
 @pytest.fixture
 def reorder_spy(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """Count real ``WishlistService.reorder_wish_items`` calls while still delegating."""
+    from wishenka.wishlists.repo_ops import RepoWishlistOps
+
     calls: list[dict[str, Any]] = []
     original = WishlistService.reorder_wish_items
+    original_repo = RepoWishlistOps.reorder_wish_items
 
     async def spy(self: WishlistService, *args: Any, **kwargs: Any) -> Any:
         calls.append(kwargs)
         return await original(self, *args, **kwargs)
 
+    async def repo_spy(self: RepoWishlistOps, *args: Any, **kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return await original_repo(self, *args, **kwargs)
+
     monkeypatch.setattr(WishlistService, "reorder_wish_items", spy)
+    monkeypatch.setattr(RepoWishlistOps, "reorder_wish_items", repo_spy)
     return calls
 
 

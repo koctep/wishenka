@@ -309,7 +309,10 @@ def test_read_failure_shows_text(env: AppEnv, monkeypatch: pytest.MonkeyPatch) -
     async def failing(*_args: object, **_kwargs: object) -> None:
         raise PermissionDeniedError("gifted read failed")
 
+    from wishenka.wishlists.repo_ops import RepoWishlistOps
+
     monkeypatch.setattr(WishlistService, "list_gifted_items", failing)
+    monkeypatch.setattr(RepoWishlistOps, "list_gifted_items", failing)
 
     response = _page(env, wishlist_id)
 

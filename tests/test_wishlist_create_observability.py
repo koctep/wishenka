@@ -204,7 +204,10 @@ def test_unexpected_error_is_logged_by_request_middleware_without_text(
     async def boom(self: WishlistService, *args: object, **kwargs: object) -> None:
         raise RuntimeError("storage failure")
 
+    from wishenka.wishlists.repo_ops import RepoWishlistOps
+
     monkeypatch.setattr(WishlistService, "create_wishlist", boom)
+    monkeypatch.setattr(RepoWishlistOps, "create_wishlist", boom)
 
     with caplog.at_level(logging.DEBUG, logger="wishenka"):
         caplog.clear()

@@ -136,3 +136,7 @@ class IdempotencyConflictError(WishlistError):
         message: str = "Idempotency-Key was already used with a different request payload",
     ) -> None:
         super().__init__(message)
+
+
+class TokenCollision(Exception):
+    """A generated capability was previously used for either access purpose."""

@@ -13,6 +13,7 @@ from wishenka.auth.dependencies import get_current_user, get_optional_current_us
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.i18n import t
 from wishenka.i18n.dependencies import LocaleDep
+from wishenka.web.dependencies import WishlistRepo
 from wishenka.web.templates import templates
 from wishenka.wishlists.exceptions import (
     InvalidInviteTokenError,
@@ -23,6 +24,8 @@ from wishenka.wishlists.exceptions import (
 )
 from wishenka.wishlists.models import WishlistRole, WishlistStatus
 from wishenka.wishlists.policy import WishlistAccessPolicy
+from wishenka.wishlists.repo_ops import RepoWishlistOps
+from wishenka.wishlists.repository import WishlistRepository
 from wishenka.wishlists.schemas import WishItemGifterViewDTO
 from wishenka.wishlists.service import WishlistService
 
@@ -33,13 +36,11 @@ CurrentUser = Annotated[AuthenticatedUser, Depends(get_current_user)]
 OptionalUser = Annotated[AuthenticatedUser | None, Depends(get_optional_current_user)]
 
 
-def _get_service(request: Request) -> WishlistService:
-    service = getattr(request.app.state, "wishlist_service", None)
-    if service is None:
-        service = getattr(request.app.state, "domain_service", None)
-    if service is None:
-        raise RuntimeError("Wishlist service not initialized")
-    return cast(WishlistService, service)
+def _get_service(request: Request, repo: WishlistRepository) -> WishlistService | RepoWishlistOps:
+    injected = getattr(request.app.state, "wishlist_service", None)
+    if injected is not None:
+        return cast(WishlistService, injected)
+    return RepoWishlistOps(repo)
 
 
 @router.get("/share/{public_token}", response_class=HTMLResponse)
@@ -48,9 +49,10 @@ async def view_public_share(
     public_token: str,
     current_user: OptionalUser,
     locale: LocaleDep,
+    repo: WishlistRepo,
 ) -> Response:
     """Render public wishlist page with Surprise Invariant enforcement."""
-    service = _get_service(request)
+    service = _get_service(request, repo)
     try:
         dto = await service.get_wishlist_by_public_token(public_token, current_user)
     except (WishlistNotFoundError, WishlistDeletedError) as exc:
@@ -64,8 +66,9 @@ async def view_public_share(
             detail="Wishlist not found",
         ) from exc
 
-    is_recipient = any(getattr(item, "is_recipient", False) for item in dto.items) or (
-        not dto.is_collaborative and dto.user_role == WishlistRole.OWNER
+    is_recipient = current_user is not None and (
+        any(getattr(item, "is_recipient", False) for item in dto.items)
+        or (not dto.is_collaborative and dto.user_role == WishlistRole.OWNER)
     )
 
     logger.info(
@@ -101,12 +104,13 @@ async def get_item_card_partial(
     item_id: int,
     current_user: OptionalUser,
     locale: LocaleDep,
+    repo: WishlistRepo,
     notice: Annotated[str | None, Query()] = None,
     is_first: bool = False,
     is_last: bool = False,
 ) -> Response:
     """Render single item card HTMX partial adhering to Surprise Invariant."""
-    service = _get_service(request)
+    service = _get_service(request, repo)
     try:
         wishlist = await service.get_wishlist_by_id(wishlist_id)
         dto = await service.get_wishlist_view(wishlist_id, current_user)
@@ -149,9 +153,10 @@ async def preview_invite(
     request: Request,
     invite_token: str,
     locale: LocaleDep,
+    repo: WishlistRepo,
 ) -> Response:
     """Render collaborator invitation preview or friendly error card."""
-    service = _get_service(request)
+    service = _get_service(request, repo)
     wl = await service.get_wishlist_by_invite_token(invite_token)
     now = datetime.now(UTC)
 
@@ -228,9 +233,10 @@ async def join_invite(
     invite_token: str,
     user: CurrentUser,
     locale: LocaleDep,
+    repo: WishlistRepo,
 ) -> Response:
     """Accept invitation to join collaborative wishlist."""
-    service = _get_service(request)
+    service = _get_service(request, repo)
     try:
         member = await service.join_by_invite(invite_token, user)
     except (InvalidInviteTokenError, WishlistDeletedError, WishlistArchivedError) as exc:
@@ -287,9 +293,10 @@ async def get_members_partial(
     wishlist_id: int,
     user: CurrentUser,
     locale: LocaleDep,
+    repo: WishlistRepo,
 ) -> Response:
     """Render collaborator member list partial."""
-    service = _get_service(request)
+    service = _get_service(request, repo)
     try:
         wl = await service.get_wishlist_by_id(wishlist_id)
         members = await service.get_members(wishlist_id, user)
@@ -326,9 +333,10 @@ async def remove_member_partial(
     user_id: int,
     user: CurrentUser,
     locale: LocaleDep,
+    repo: WishlistRepo,
 ) -> Response:
     """Remove collaborator and return updated member list partial."""
-    service = _get_service(request)
+    service = _get_service(request, repo)
     try:
         wl = await service.get_wishlist_by_id(wishlist_id)
     except (WishlistNotFoundError, WishlistDeletedError) as exc:
@@ -385,9 +393,10 @@ async def get_share_modal(
     wishlist_id: int,
     user: CurrentUser,
     locale: LocaleDep,
+    repo: WishlistRepo,
 ) -> Response:
     """Render share modal partial for owner."""
-    service = _get_service(request)
+    service = _get_service(request, repo)
     try:
         wl = await service.get_wishlist_by_id(wishlist_id)
     except (WishlistNotFoundError, WishlistDeletedError) as exc:
@@ -420,9 +429,10 @@ async def regenerate_invite_token(
     wishlist_id: int,
     user: CurrentUser,
     locale: LocaleDep,
+    repo: WishlistRepo,
 ) -> Response:
     """Regenerate invite token and return updated share modal partial."""
-    service = _get_service(request)
+    service = _get_service(request, repo)
     try:
         wl = await service.get_wishlist_by_id(wishlist_id)
     except (WishlistNotFoundError, WishlistDeletedError) as exc:

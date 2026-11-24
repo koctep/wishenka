@@ -158,8 +158,12 @@ The application factory creates one `WishlistStore` and exposes a store-backed `
 enforces an explicit persistent `WishlistStore` boundary: passing `store=None` (or calling bare
 `WishlistService()`) logs `wishlist_service_store_required` and raises `ValueError`. For isolated
 unit tests or transient `WishlistStore` hydration, construct the service explicitly via
-`WishlistService.in_memory()`. The HTTP router uses the same store. For tests only,
-`app.state.wishlist_service` can override the router's service.
+`WishlistService.in_memory()`. Web routes (`wishenka/web/routes/wishlists.py`, `items.py`,
+`sharing.py`, `receipts.py`, `items_ui.py`, `receipts_ui.py`) inject a transaction-scoped
+`WishlistRepo` via `wishenka.web.dependencies.get_wishlist_repository` and execute targeted
+queries and non-inventory mutations through `RepoWishlistOps` (single-wish inventory, reservation,
+and receipt mutations continue to use `WishlistStore.execute_wish` / `execute_wish_idempotent`). For
+tests only, `app.state.wishlist_service` can override the router's service.
 
 `WISHENKA_DATABASE_URL` selects the SQLite database and defaults to
 `sqlite+aiosqlite:///data/wishenka.db`. The application initializes the normalized relational
@@ -1245,6 +1249,50 @@ Bidirectional entity converters decouple database row representations from pure 
 - `_row_to_reservation(row: Row[Any]) -> Reservation`
 - Datetime conversions parse ISO strings to timezone-aware UTC `datetime` objects via `_parse_dt`
   and serialize them to ISO format via `_format_dt`.
+
+### Web Route DI & `RepoWishlistOps` (WISHENKA-80)
+
+To avoid full-database snapshot hydration (`WishlistStore.execute(...)` / `WishlistStore._read()`)
+on web requests, FastAPI routes use a dedicated dependency-injection layer and targeted domain
+adapter:
+
+#### 1. FastAPI Dependencies (`wishenka/web/dependencies.py`)
+- `get_wishlist_store(request: Request) -> WishlistStore`: retrieves `request.app.state.wishlist_store`.
+  If uninitialized, logs `wishlist_store_uninitialized` and raises
+  `RuntimeError("WishlistStore is not initialized on app.state")`.
+- `get_wishlist_repository(store: Annotated[WishlistStore, Depends(get_wishlist_store)]) -> AsyncIterator[WishlistRepository]`:
+  opens a connection from `store.engine.connect()`, calls `await conn.begin()`, and yields
+  `WishlistRepository(conn)`.
+  - On clean exit: commits any active transaction (`await conn.commit()`).
+  - On `SQLAlchemyError`: rolls back, logs `wishlist_store_error` (`error_type` only, no SQL
+    parameters or tokens), and raises a sanitized `RuntimeError("Wishlist storage operation failed")`.
+  - On any other `BaseException`: rolls back and re-raises.
+- `WishlistRepo = Annotated[WishlistRepository, Depends(get_wishlist_repository)]`: type alias used
+  by route handlers.
+
+#### 2. Targeted Operations Adapter (`wishenka/wishlists/repo_ops.py`)
+`RepoWishlistOps(repo: WishlistRepository)` implements wishlist domain operations directly over
+targeted `WishlistRepository` queries without loading unrelated wishlists:
+- **Wishlist & Sharing**: `get_wishlist_by_id`, `create_wishlist`, `get_wishlist_view`,
+  `get_wishlist_by_public_token`, `get_wishlist_by_invite_token`, `archive_wishlist`,
+  `unarchive_wishlist`, `delete_wishlist`, `list_deleted_wishlists`, `restore_deleted_wishlist`,
+  `regenerate_public_token`, `regenerate_invite_token`.
+- **Members & Invites**: `add_member`, `remove_member`, `get_members`, `join_by_invite`.
+- **Items & Gifted View**: `add_wish_item`, `get_wish_item`, `list_wish_items`,
+  `list_gifted_items`, `reorder_wish_items`, `archive_wish_item`, `restore_wish_item`.
+- **Favorites & History**: `add_favorite`, `remove_favorite`, `list_favorites`, `record_view`,
+  `get_history`, `clear_history`.
+- **Outbox Integration**: `record_shared_event(...)` writes `SharedEvent` notifications via
+  `EventProducer().record(self.repo.conn, ...)` inside the same repository transaction.
+
+#### 3. Route Usage (`wishenka/web/routes/`)
+- `wishlists.py`, `items.py`, `sharing.py`, `receipts.py`, `items_ui.py`, and `receipts_ui.py`
+  declare `repo: WishlistRepo` and execute targeted reads/mutations via `RepoWishlistOps(repo)`
+  (preserving `app.state.wishlist_service` fallback for unit tests).
+- Wish-scoped inventory, reservation, and receipt mutations continue to use
+  `WishlistStore.execute_wish` / `execute_wish_idempotent` (`BEGIN IMMEDIATE` serialization); in
+  `receipts_ui.py`, single-item mutations (`_execute_receipt_mutation_ui`, `correct_receipt_ui`,
+  `cancel_receipt_ui`) are separated from full-wishlist UI reads (`WishlistRepo` / `RepoWishlistOps`).
 
 ### 4. Concurrency & Transaction Management
 

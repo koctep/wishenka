@@ -59,6 +59,8 @@ def test_storage_error_traceback_does_not_expose_tokens(
     """A database failure with secret parameters cannot expose them in server logs."""
     from sqlalchemy.exc import IntegrityError
 
+    from wishenka.wishlists.repository import WishlistRepository
+
     url = f"sqlite+aiosqlite:///{tmp_path / 'storage-error.db'}"
     settings = Settings(database_url=url, secret_key="secret")
     sessions = SessionTokenService(settings.secret_key)
@@ -69,10 +71,10 @@ def test_storage_error_traceback_does_not_expose_tokens(
         secrets, "token_urlsafe", lambda size: token if size == 16 else token + "-invite"
     )
 
-    async def fail_write(*args: object) -> None:
+    async def fail_write(*args: object, **kwargs: object) -> None:
         raise IntegrityError("INSERT", {"token": token}, ValueError(f"sensitive {token}"))
 
-    monkeypatch.setattr(app.state.wishlist_store, "_write", fail_write)
+    monkeypatch.setattr(WishlistRepository, "create_wishlist", fail_write)
     with (
         caplog.at_level(logging.ERROR, logger="wishenka.web"),
         TestClient(app, raise_server_exceptions=False) as client,

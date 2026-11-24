@@ -5,11 +5,14 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import Row, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from wishenka.currency import DEFAULT_CURRENCY
 from wishenka.items.models import ItemPriority
+from wishenka.wishlists.exceptions import TokenCollision
 from wishenka.wishlists.models import (
+    ReceiptRecord,
     Reservation,
     ReservationStatus,
     ViewHistoryEntry,
@@ -126,6 +129,162 @@ class WishlistRepository:
     def __init__(self, conn: AsyncConnection) -> None:
         self.conn = conn
 
+    async def _allocate_id(self, counter_name: str, table_name: str) -> int:
+        """Allocate the next sequential integer primary key using wl_counters."""
+        current = await self.conn.scalar(
+            text("SELECT value FROM wl_counters WHERE name = :name"),
+            {"name": counter_name},
+        )
+        max_existing = await self.conn.scalar(
+            text(f"SELECT COALESCE(MAX(id), 0) FROM {table_name}")
+        )
+        next_val = max(int(current or 0), int(max_existing or 0)) + 1
+        await self.conn.execute(
+            text(
+                "INSERT INTO wl_counters (name, value) VALUES (:name, :value) "
+                "ON CONFLICT(name) DO UPDATE SET value = excluded.value"
+            ),
+            {"name": counter_name, "value": next_val},
+        )
+        return next_val
+
+    async def _ensure_tokens_available(
+        self,
+        *,
+        public_token: str | None = None,
+        invite_token: str | None = None,
+    ) -> None:
+        """Raise TokenCollision if either token already exists in wl_tokens or wl_invite_tokens."""
+        if public_token is not None:
+            in_public = await self.conn.scalar(
+                text("SELECT 1 FROM wl_tokens WHERE token = :token"),
+                {"token": public_token},
+            )
+            in_invite = await self.conn.scalar(
+                text("SELECT 1 FROM wl_invite_tokens WHERE token = :token"),
+                {"token": public_token},
+            )
+            if in_public or in_invite:
+                raise TokenCollision
+        if invite_token is not None:
+            in_public = await self.conn.scalar(
+                text("SELECT 1 FROM wl_tokens WHERE token = :token"),
+                {"token": invite_token},
+            )
+            in_invite = await self.conn.scalar(
+                text("SELECT 1 FROM wl_invite_tokens WHERE token = :token"),
+                {"token": invite_token},
+            )
+            if in_public or in_invite:
+                raise TokenCollision
+
+    async def create_wishlist(self, wishlist: Wishlist) -> Wishlist:
+        """Allocate an ID, register capability tokens, and insert a new wishlist."""
+        if wishlist.public_token == wishlist.invite_token:
+            raise TokenCollision
+        await self._ensure_tokens_available(
+            public_token=wishlist.public_token,
+            invite_token=wishlist.invite_token,
+        )
+        if wishlist.id <= 0:
+            wishlist.id = await self._allocate_id("wishlist", "wl_lists")
+        try:
+            await self.upsert_wishlist(wishlist)
+            await self.conn.execute(
+                text("INSERT INTO wl_tokens (token, wishlist_id, active) VALUES (:token, :id, 1)"),
+                {"token": wishlist.public_token, "id": wishlist.id},
+            )
+            await self.conn.execute(
+                text("INSERT INTO wl_invite_tokens (token) VALUES (:token)"),
+                {"token": wishlist.invite_token},
+            )
+        except IntegrityError as exc:
+            if any(name in str(exc.orig) for name in ("wl_tokens.token", "wl_invite_tokens.token")):
+                raise TokenCollision from exc
+            raise
+        for member in wishlist.members:
+            member.wishlist_id = wishlist.id
+            await self.upsert_member(member)
+        return wishlist
+
+    async def rotate_public_token(
+        self, wishlist_id: int, new_token: str, updated_at: datetime
+    ) -> None:
+        """Deactivate previous public tokens and record a new unique public token."""
+        await self._ensure_tokens_available(public_token=new_token)
+        try:
+            await self.conn.execute(
+                text("UPDATE wl_tokens SET active = 0 WHERE wishlist_id = :id"),
+                {"id": wishlist_id},
+            )
+            await self.conn.execute(
+                text("INSERT INTO wl_tokens (token, wishlist_id, active) VALUES (:token, :id, 1)"),
+                {"token": new_token, "id": wishlist_id},
+            )
+        except IntegrityError as exc:
+            if "wl_tokens.token" in str(exc.orig):
+                raise TokenCollision from exc
+            raise
+        await self.conn.execute(
+            text(
+                "UPDATE wl_lists SET public_token = :token, updated_at = :updated_at WHERE id = :id"
+            ),
+            {"token": new_token, "updated_at": _format_dt(updated_at), "id": wishlist_id},
+        )
+        logger.info(
+            "Wishlist repository mutation: rotate public_token for wishlist %s",
+            wishlist_id,
+            extra={
+                "event": "wishlist_repo_mutation",
+                "entity": "wishlist_public_token",
+                "operation": "rotate",
+                "entity_id": wishlist_id,
+            },
+        )
+
+    async def rotate_invite_token(
+        self,
+        wishlist_id: int,
+        new_token: str,
+        expires_at: datetime | None,
+        updated_at: datetime,
+    ) -> None:
+        """Register and set a new unique invite token for a wishlist."""
+        await self._ensure_tokens_available(invite_token=new_token)
+        try:
+            await self.conn.execute(
+                text("INSERT INTO wl_invite_tokens (token) VALUES (:token)"),
+                {"token": new_token},
+            )
+        except IntegrityError as exc:
+            if "wl_invite_tokens.token" in str(exc.orig):
+                raise TokenCollision from exc
+            raise
+        await self.conn.execute(
+            text(
+                "UPDATE wl_lists SET invite_token = :token, "
+                "invite_token_expires_at = :expires_at, updated_at = :updated_at "
+                "WHERE id = :id"
+            ),
+            {
+                "token": new_token,
+                "expires_at": _format_dt(expires_at),
+                "updated_at": _format_dt(updated_at),
+                "id": wishlist_id,
+            },
+        )
+        logger.info(
+            "Wishlist repository mutation: rotate invite_token for wishlist %s",
+            wishlist_id,
+            extra={
+                "event": "wishlist_repo_mutation",
+                "entity": "wishlist_invite_token",
+                "operation": "rotate",
+                "entity_id": wishlist_id,
+                "has_expiry": expires_at is not None,
+            },
+        )
+
     async def get_wishlist_header(self, wishlist_id: int) -> Wishlist | None:
         """Load only the list metadata required for a cabinet row."""
         stmt = text(
@@ -230,6 +389,132 @@ class WishlistRepository:
     async def list_user_wishlists(self, owner_id: int) -> list[Wishlist]:
         """Alias for list_by_owner."""
         return await self.list_by_owner(owner_id)
+
+    async def list_accessible_wishlists(
+        self, user_id: int, *, include_archived: bool = False
+    ) -> list[Wishlist]:
+        """List non-deleted wishlists where the user is owner or member."""
+        status_clause = "l.status != 'deleted'" if include_archived else "l.status = 'active'"
+        stmt = text(
+            "SELECT DISTINCT l.id FROM wl_lists l "
+            "LEFT JOIN wl_members m ON m.wishlist_id = l.id AND m.user_id = :user_id "
+            f"WHERE (l.owner_id = :user_id OR m.user_id IS NOT NULL) AND {status_clause} "
+            "ORDER BY l.id ASC"
+        )
+        ids = (await self.conn.execute(stmt, {"user_id": user_id})).scalars().all()
+        results: list[Wishlist] = []
+        for wl_id in ids:
+            wl = await self.get_wishlist(wl_id)
+            if wl is not None:
+                results.append(wl)
+        return results
+
+    async def list_deleted_by_owner(self, owner_id: int) -> list[Wishlist]:
+        """List soft-deleted wishlists owned by the specified user."""
+        stmt = text(
+            "SELECT id FROM wl_lists WHERE owner_id = :owner_id AND status = 'deleted' "
+            "ORDER BY updated_at DESC, id ASC"
+        )
+        ids = (await self.conn.execute(stmt, {"owner_id": owner_id})).scalars().all()
+        results: list[Wishlist] = []
+        for wl_id in ids:
+            wl = await self.get_wishlist(wl_id)
+            if wl is not None:
+                results.append(wl)
+        return results
+
+    async def upsert_member(self, member: WishlistMember) -> WishlistMember:
+        """Insert or update a wishlist membership row."""
+        existing_id = await self.conn.scalar(
+            text(
+                "SELECT id FROM wl_members WHERE wishlist_id = :wishlist_id AND user_id = :user_id"
+            ),
+            {"wishlist_id": member.wishlist_id, "user_id": member.user_id},
+        )
+        if existing_id is not None:
+            member.id = int(existing_id)
+            await self.conn.execute(
+                text("UPDATE wl_members SET role = :role, joined_at = :joined_at WHERE id = :id"),
+                {
+                    "id": member.id,
+                    "role": member.role.value,
+                    "joined_at": _format_dt(member.joined_at),
+                },
+            )
+        else:
+            if member.id <= 0:
+                member.id = await self._allocate_id("member", "wl_members")
+            await self.conn.execute(
+                text(
+                    "INSERT INTO wl_members (id, wishlist_id, user_id, role, joined_at) "
+                    "VALUES (:id, :wishlist_id, :user_id, :role, :joined_at)"
+                ),
+                {
+                    "id": member.id,
+                    "wishlist_id": member.wishlist_id,
+                    "user_id": member.user_id,
+                    "role": member.role.value,
+                    "joined_at": _format_dt(member.joined_at),
+                },
+            )
+        logger.info(
+            "Wishlist repository mutation: upsert member user %s wishlist %s",
+            member.user_id,
+            member.wishlist_id,
+            extra={
+                "event": "wishlist_repo_mutation",
+                "entity": "member",
+                "operation": "upsert",
+                "entity_id": member.id,
+                "wishlist_id": member.wishlist_id,
+                "user_id": member.user_id,
+                "role": member.role.value,
+            },
+        )
+        return member
+
+    async def delete_member(self, wishlist_id: int, user_id: int) -> None:
+        """Remove a member from a wishlist."""
+        await self.conn.execute(
+            text("DELETE FROM wl_members WHERE wishlist_id = :wishlist_id AND user_id = :user_id"),
+            {"wishlist_id": wishlist_id, "user_id": user_id},
+        )
+        logger.info(
+            "Wishlist repository mutation: delete member user %s wishlist %s",
+            user_id,
+            wishlist_id,
+            extra={
+                "event": "wishlist_repo_mutation",
+                "entity": "member",
+                "operation": "delete",
+                "wishlist_id": wishlist_id,
+                "user_id": user_id,
+            },
+        )
+
+    async def update_member_role(self, wishlist_id: int, user_id: int, role: WishlistRole) -> None:
+        """Update an existing member's role in a wishlist."""
+        await self.conn.execute(
+            text(
+                "UPDATE wl_members SET role = :role "
+                "WHERE wishlist_id = :wishlist_id AND user_id = :user_id"
+            ),
+            {"wishlist_id": wishlist_id, "user_id": user_id, "role": role.value},
+        )
+        logger.info(
+            "Wishlist repository mutation: update member role user %s wishlist %s -> %s",
+            user_id,
+            wishlist_id,
+            role.value,
+            extra={
+                "event": "wishlist_repo_mutation",
+                "entity": "member",
+                "operation": "update_role",
+                "wishlist_id": wishlist_id,
+                "user_id": user_id,
+                "role": role.value,
+            },
+        )
 
     async def list_collaborative(self, user_id: int) -> list[Wishlist]:
         """List collaborative wishlists where the specified user is a member."""
@@ -416,6 +701,120 @@ class WishlistRepository:
             },
         )
 
+    async def create_item(self, item: WishItem) -> WishItem:
+        """Allocate an item ID if needed and insert the wish item."""
+        if item.id <= 0:
+            item.id = await self._allocate_id("item", "wl_items")
+        await self.upsert_item(item)
+        return item
+
+    async def reorder_items(
+        self, wishlist_id: int, order_map: dict[int, int], updated_at: datetime
+    ) -> None:
+        """Update display_order for items in a wishlist."""
+        updated_str = _format_dt(updated_at)
+        for item_id, display_order in order_map.items():
+            await self.conn.execute(
+                text(
+                    "UPDATE wl_items SET display_order = :display_order, updated_at = :updated_at "
+                    "WHERE id = :id AND wishlist_id = :wishlist_id"
+                ),
+                {
+                    "id": item_id,
+                    "wishlist_id": wishlist_id,
+                    "display_order": display_order,
+                    "updated_at": updated_str,
+                },
+            )
+        logger.info(
+            "Wishlist repository mutation: reorder %d items in wishlist %s",
+            len(order_map),
+            wishlist_id,
+            extra={
+                "event": "wishlist_repo_mutation",
+                "entity": "item",
+                "operation": "reorder",
+                "wishlist_id": wishlist_id,
+                "count": len(order_map),
+            },
+        )
+
+    async def list_item_receipts(self, item_id: int) -> list[ReceiptRecord]:
+        """List receipt records for a single wish item."""
+        stmt = text(
+            "SELECT id, wish_item_id, quantity, received_at, is_approximate "
+            "FROM wl_receipts WHERE wish_item_id = :item_id ORDER BY received_at ASC, id ASC"
+        )
+        rows = (await self.conn.execute(stmt, {"item_id": item_id})).all()
+        return [
+            ReceiptRecord(
+                id=int(r.id),
+                wish_item_id=int(r.wish_item_id),
+                quantity=int(r.quantity),
+                received_at=_parse_dt(r.received_at) or datetime.now(UTC),
+                is_approximate=bool(r.is_approximate),
+            )
+            for r in rows
+        ]
+
+    async def list_receipts_for_wishlist(self, wishlist_id: int) -> dict[int, list[ReceiptRecord]]:
+        """List receipt records grouped by wish_item_id for all items in a wishlist."""
+        stmt = text(
+            "SELECT r.id, r.wish_item_id, r.quantity, r.received_at, r.is_approximate "
+            "FROM wl_receipts r JOIN wl_items i ON i.id = r.wish_item_id "
+            "WHERE i.wishlist_id = :wishlist_id ORDER BY r.received_at ASC, r.id ASC"
+        )
+        rows = (await self.conn.execute(stmt, {"wishlist_id": wishlist_id})).all()
+        grouped: dict[int, list[ReceiptRecord]] = {}
+        for r in rows:
+            rec = ReceiptRecord(
+                id=int(r.id),
+                wish_item_id=int(r.wish_item_id),
+                quantity=int(r.quantity),
+                received_at=_parse_dt(r.received_at) or datetime.now(UTC),
+                is_approximate=bool(r.is_approximate),
+            )
+            grouped.setdefault(rec.wish_item_id, []).append(rec)
+        return grouped
+
+    async def is_favorite(self, user_id: int, wishlist_id: int) -> bool:
+        """Return True if the user has bookmarked the wishlist."""
+        row = await self.conn.scalar(
+            text("SELECT 1 FROM wl_favorites WHERE user_id = :uid AND wishlist_id = :wlid"),
+            {"uid": user_id, "wlid": wishlist_id},
+        )
+        return row is not None
+
+    async def list_favorite_ids(self, user_id: int) -> set[int]:
+        """Return the set of wishlist IDs bookmarked by the user."""
+        rows = (
+            (
+                await self.conn.execute(
+                    text("SELECT wishlist_id FROM wl_favorites WHERE user_id = :uid"),
+                    {"uid": user_id},
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return {int(wl_id) for wl_id in rows}
+
+    async def list_favorite_wishlists(self, user_id: int) -> list[Wishlist]:
+        """List non-deleted wishlists bookmarked by the user in most-recent order."""
+        stmt = text(
+            "SELECT f.wishlist_id FROM wl_favorites f "
+            "JOIN wl_lists l ON l.id = f.wishlist_id "
+            "WHERE f.user_id = :uid AND l.status != 'deleted' "
+            "ORDER BY f.created_at DESC"
+        )
+        ids = (await self.conn.execute(stmt, {"uid": user_id})).scalars().all()
+        results: list[Wishlist] = []
+        for wl_id in ids:
+            wl = await self.get_wishlist(wl_id)
+            if wl is not None:
+                results.append(wl)
+        return results
+
     async def save_item(self, item: WishItem) -> None:
         """Alias for upsert_item."""
         await self.upsert_item(item)
@@ -482,6 +881,31 @@ class WishlistRepository:
     async def create_reservation(self, res: Reservation) -> None:
         """Alias for upsert_reservation."""
         await self.upsert_reservation(res)
+
+    async def cancel_wishlist_reservations(self, wishlist_id: int, updated_at: datetime) -> int:
+        """Cancel all active or purchased reservations for items in a wishlist."""
+        res = await self.conn.execute(
+            text(
+                "UPDATE wl_reservations SET status = 'cancelled', updated_at = :updated_at "
+                "WHERE wish_item_id IN (SELECT id FROM wl_items WHERE wishlist_id = :wishlist_id) "
+                "AND status IN ('active', 'purchased')"
+            ),
+            {"wishlist_id": wishlist_id, "updated_at": _format_dt(updated_at)},
+        )
+        cancelled_count = int(res.rowcount or 0)
+        logger.info(
+            "Wishlist repository mutation: cancel reservations for wishlist %s (count=%s)",
+            wishlist_id,
+            cancelled_count,
+            extra={
+                "event": "wishlist_repo_mutation",
+                "entity": "reservation",
+                "operation": "cancel_for_wishlist",
+                "wishlist_id": wishlist_id,
+                "cancelled_count": cancelled_count,
+            },
+        )
+        return cancelled_count
 
     async def delete_reservation(self, res_id: int) -> None:
         """Delete a single reservation row."""
@@ -619,11 +1043,12 @@ class WishlistRepository:
             for r in rows
         ]
 
-    async def clear_view_history(self, user_id: int) -> None:
+    async def clear_view_history(self, user_id: int) -> int:
         """Clear all viewing history entries for the specified user."""
-        await self.conn.execute(
+        res = await self.conn.execute(
             text("DELETE FROM wl_view_history WHERE user_id = :uid"), {"uid": user_id}
         )
+        removed_count = int(res.rowcount) if res.rowcount is not None and res.rowcount >= 0 else 0
         logger.info(
             "Wishlist repository mutation: clear view history user %s",
             user_id,
@@ -632,8 +1057,10 @@ class WishlistRepository:
                 "entity": "view_history",
                 "operation": "clear",
                 "user_id": user_id,
+                "removed_count": removed_count,
             },
         )
+        return removed_count
 
     async def cleanup_expired_tokens(self, now: datetime | None = None) -> int:
         """Revoke expired invite tokens and remove them from wl_invite_tokens."""

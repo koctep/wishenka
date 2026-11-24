@@ -35,6 +35,7 @@ from wishenka.wishlists.exceptions import (
     PermissionDeniedError,
     ReservationNotFoundError,
     SelfReservationError,
+    TokenCollision,
     WishlistDeletedError,
     WishlistError,
     WishlistNotFoundError,
@@ -237,10 +238,6 @@ def _raise_for_storage_error(
             extra={"event": "wishlist_store_error"},
         )
     raise RuntimeError("Wishlist storage operation failed") from exc
-
-
-class TokenCollision(Exception):
-    """A generated capability was previously used for either access purpose."""
 
 
 def _parse_dt(val: str | datetime | None) -> datetime | None:
