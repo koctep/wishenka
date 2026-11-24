@@ -16,7 +16,10 @@
   - `PRAGMA journal_mode = WAL;` (параллельное чтение без блокировки писателей) — постоянное состояние файла БД: выбирается один раз при старте миграций вишлистов, а не на каждом соединении
   - `PRAGMA foreign_keys = ON;` (каскадная целостность; задаётся на каждом соединении)
   - `PRAGMA busy_timeout = 5000;` (на каждом соединении)
-  - запись инвентаря одного желания стартует с `Connection.begin()`; слушатель `begin` выполняет `BEGIN IMMEDIATE` при `isolation_level = None`
+  - общая настройка транзакций вынесена в `wishenka/sqlite.py`:
+    - `configure_immediate_transactions(sync_engine, *, busy_timeout_ms=5000)` выставляет `isolation_level = None`, `PRAGMA foreign_keys=ON` и `PRAGMA busy_timeout` на `connect`, а на `begin` пропускает `AUTOCOMMIT`, применяет `PRAGMA busy_timeout` и открывает `BEGIN` при `execution_options(read_only=True)` либо `BEGIN IMMEDIATE` для записи; используется в `WishlistStore` и `UserStore`
+    - `is_sqlite_busy(exc)` рекурсивно проверяет `exc`, `.orig` и `.__cause__` на `SQLITE_BUSY` (`sqlite_errorcode` или сообщение `database is locked` / `database is busy`)
+  - запись инвентаря одного желания и операции записи `UserStore` стартуют с `Connection.begin()`; слушатель `begin` выполняет `BEGIN IMMEDIATE` при `isolation_level = None`
 - **ORM и миграции:** SQLAlchemy 2.0 (Async) + Alembic
   - Схема таблиц `wl_*` хранилища вишлистов создаётся и меняется только версионными ревизиями Alembic (`wishenka/wishlists/alembic/versions/`); ad-hoc `ALTER TABLE` в коде хранилища нет.
   - Таблица `users` в текущем baseline создаётся императивно в `UserStore.initialize()` вне цепочки Alembic; в согласованной целевой архитектуре `WISHENKA-32` (к реализации в `WISHENKA-33`/`WISHENKA-35`) эволюция `users` и таблица `deleted_session_revocations` переводятся на линейную ревизию Alembic (от `add_idempotency_records`) при сохранении строго согласованного DDL в `UserStore.initialize()`.
@@ -41,7 +44,7 @@
 
 ### 2.2. Предотвращение овербукинга и штучный учет
 
-Несколько копий сервиса пишут один файл SQLite. Исключение записи инвентаря одного желания — wish-scoped транзакция WAL на движке вишлистов: `Connection.begin()`, слушатель `begin` выполняет `BEGIN IMMEDIATE`, у соединения `isolation_level = None`. `busy_timeout` равен 5000 мс. Redis в этом пути нет. `asyncio.Lock` внутри `ItemConcurrencyCoordinator` остаётся внутрипроцессным координатором и не виден другой копии процесса.
+Несколько копий сервиса пишут один файл SQLite. Исключение записи инвентаря одного желания — wish-scoped транзакция WAL на движке вишлистов: `Connection.begin()`, слушатель `begin` выполняет `BEGIN IMMEDIATE`, у соединения `isolation_level = None`. `busy_timeout` равен 5000 мс. Redis в этом пути нет. `asyncio.Lock` внутри `ItemConcurrencyCoordinator` остаётся внутрипроцессным координатором и не виден другой копии процесса. Аналогично `UserStore` (`wishenka/users/store.py`) использует `configure_immediate_transactions`: мутации выполняются через `_immediate` (`BEGIN IMMEDIATE` с отображением `SQLITE_BUSY` в `UserStoreBusyError` → HTTP 503), а чтения `get_by_telegram_id` и `get_by_id` — через `_read` (`execution_options(read_only=True)`), не блокируясь на пишущей транзакции (см. [`doc/dev/users.md`](users.md)).
 
 Занятые штуки (`occupied`) — сумма `quantity` броней в статусах `ACTIVE` и `PURCHASED`. Правила одного желания считаются внутри этой транзакции:
 

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from sqlalchemy import Row, text
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from wishenka.i18n.locale import (
     LocaleSource,
@@ -16,11 +18,13 @@ from wishenka.i18n.locale import (
     resolve_telegram_locale,
     validate_locale,
 )
+from wishenka.sqlite import configure_immediate_transactions, is_sqlite_busy
 from wishenka.users.models import BirthdateSource, UserRecord
 
 if TYPE_CHECKING:
     from wishenka.auth.models import TelegramUser
 
+T = TypeVar("T")
 logger = logging.getLogger("wishenka.users")
 
 _USERS_TABLE_DDL = """
@@ -99,29 +103,100 @@ class UserNotFoundError(LookupError):
     """Raised when an operation targets a non-existent user record."""
 
 
+class UserStoreBusyError(RuntimeError):
+    """Retryable error raised when a user write transaction exceeds SQLite busy_timeout."""
+
+
 class UserStore:
     """Async transactional SQLite storage for user entities."""
 
-    def __init__(self, database_url: str) -> None:
-        prefix = "sqlite+aiosqlite:///"
-        if not database_url.startswith(prefix):
-            raise ValueError("UserStore requires SQLite database URL")
-        path = database_url[len(prefix) :]
-        if path != ":memory:":
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.engine: AsyncEngine = create_async_engine(
-            database_url,
-            connect_args={"timeout": 5},
-            hide_parameters=True,
-        )
+    def __init__(self, database_url: str, *, engine: AsyncEngine | None = None) -> None:
+        if engine is not None:
+            self.engine: AsyncEngine = engine
+        else:
+            prefix = "sqlite+aiosqlite:///"
+            if not database_url.startswith(prefix):
+                raise ValueError("UserStore requires SQLite database URL")
+            path = database_url[len(prefix) :]
+            if path != ":memory:":
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+            self.engine = create_async_engine(
+                database_url,
+                connect_args={"timeout": 5},
+                hide_parameters=True,
+            )
+            configure_immediate_transactions(self.engine.sync_engine)
         self._initialized = False
+
+    async def _immediate(
+        self,
+        work: Callable[[AsyncConnection], Awaitable[T]],
+        *,
+        operation: str,
+    ) -> T:
+        """Run work inside a BEGIN IMMEDIATE transaction and map SQLite busy errors."""
+        async with self.engine.connect() as conn:
+            try:
+                await conn.begin()
+                result = await work(conn)
+                await conn.commit()
+                return result
+            except SQLAlchemyError as exc:
+                if conn.in_transaction():
+                    await conn.rollback()
+                if is_sqlite_busy(exc):
+                    logger.warning(
+                        "User store operation rolled back because the database was busy",
+                        extra={"event": "user_store_busy", "operation": operation},
+                    )
+                    raise UserStoreBusyError(
+                        "User service is temporarily busy; please retry"
+                    ) from exc
+                logger.error(
+                    "User store operation failed due to database error",
+                    extra={"event": "user_store_error", "operation": operation},
+                )
+                raise RuntimeError("User storage operation failed") from exc
+            except BaseException:
+                if conn.in_transaction():
+                    await conn.rollback()
+                raise
+
+    async def _read(self, work: Callable[[AsyncConnection], Awaitable[T]]) -> T:
+        """Run work in a read-only deferred transaction without BEGIN IMMEDIATE."""
+        async with self.engine.connect() as raw_conn:
+            conn = await raw_conn.execution_options(read_only=True)
+            try:
+                await conn.begin()
+                return await work(conn)
+            finally:
+                if conn.in_transaction():
+                    await conn.rollback()
 
     async def initialize(self) -> None:
         """Initialize table schema, locale columns, and WAL mode idempotently."""
-        async with self.engine.begin() as conn:
-            await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
-            await conn.exec_driver_sql("PRAGMA foreign_keys=ON")
-            await conn.exec_driver_sql("PRAGMA busy_timeout=5000")
+        async with self.engine.connect() as raw_conn:
+            autocommit_conn = await raw_conn.execution_options(isolation_level="AUTOCOMMIT")
+            try:
+                await autocommit_conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+                await autocommit_conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
+                await autocommit_conn.exec_driver_sql("PRAGMA busy_timeout=5000")
+            except SQLAlchemyError as exc:
+                if is_sqlite_busy(exc):
+                    logger.warning(
+                        "User store initialization busy while configuring WAL mode",
+                        extra={"event": "user_store_busy", "operation": "initialize"},
+                    )
+                    raise UserStoreBusyError(
+                        "User service is temporarily busy; please retry"
+                    ) from exc
+                logger.error(
+                    "User store initialization failed due to database error",
+                    extra={"event": "user_store_error", "operation": "initialize"},
+                )
+                raise RuntimeError("User storage operation failed") from exc
+
+        async def _init_schema(conn: AsyncConnection) -> None:
             await conn.exec_driver_sql(_USERS_TABLE_DDL)
             await conn.exec_driver_sql(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id)"
@@ -159,6 +234,8 @@ class UserStore:
                     "ALTER TABLE users ADD COLUMN birthdate_source TEXT NOT NULL DEFAULT 'auto' "
                     "CHECK (birthdate_source IN ('auto', 'explicit'))"
                 )
+
+        await self._immediate(_init_schema, operation="initialize")
         self._initialized = True
 
     async def _ensure_initialized(self) -> None:
@@ -246,7 +323,8 @@ class UserStore:
             "created_at": now_iso,
             "updated_at": now_iso,
         }
-        async with self.engine.begin() as conn:
+
+        async def _work(conn: AsyncConnection) -> tuple[UserRecord, bool, str | None]:
             existing = (
                 await conn.execute(
                     text("SELECT id, locale FROM users WHERE telegram_id = :telegram_id"),
@@ -254,47 +332,50 @@ class UserStore:
                 )
             ).first()
             is_new = existing is None
+            existing_locale = str(existing.locale) if existing is not None else None
             result = await conn.execute(stmt, params)
             row = result.one()
-            record = self._row_to_record(row)
-            if is_new:
-                logger.info(
-                    "User %s created with telegram_id %s",
-                    record.id,
-                    record.telegram_id,
-                    extra={
-                        "event": "user_created",
-                        "user_id": record.id,
-                        "telegram_id": record.telegram_id,
-                    },
-                )
-            else:
-                logger.info(
-                    "User %s updated with telegram_id %s",
-                    record.id,
-                    record.telegram_id,
-                    extra={
-                        "event": "user_updated",
-                        "user_id": record.id,
-                        "telegram_id": record.telegram_id,
-                    },
-                )
-            changed = is_new or (existing is not None and existing.locale != record.locale)
-            logger.debug(
-                "User locale resolved on %s: locale=%s source=%s",
-                channel,
-                record.locale,
-                record.locale_source,
+            return self._row_to_record(row), is_new, existing_locale
+
+        record, is_new, existing_locale = await self._immediate(_work, operation="upsert_user")
+        if is_new:
+            logger.info(
+                "User %s created with telegram_id %s",
+                record.id,
+                record.telegram_id,
                 extra={
-                    "event": "locale_auto_resolved",
-                    "channel": channel,
-                    "resolved_locale": record.locale,
-                    "locale_source": record.locale_source,
-                    "changed": changed,
-                    "fallback_used": fallback_used,
+                    "event": "user_created",
+                    "user_id": record.id,
+                    "telegram_id": record.telegram_id,
                 },
             )
-            return record
+        else:
+            logger.info(
+                "User %s updated with telegram_id %s",
+                record.id,
+                record.telegram_id,
+                extra={
+                    "event": "user_updated",
+                    "user_id": record.id,
+                    "telegram_id": record.telegram_id,
+                },
+            )
+        changed = is_new or (existing_locale is not None and existing_locale != record.locale)
+        logger.debug(
+            "User locale resolved on %s: locale=%s source=%s",
+            channel,
+            record.locale,
+            record.locale_source,
+            extra={
+                "event": "locale_auto_resolved",
+                "channel": channel,
+                "resolved_locale": record.locale,
+                "locale_source": record.locale_source,
+                "changed": changed,
+                "fallback_used": fallback_used,
+            },
+        )
+        return record
 
     async def upsert_from_bot(self, tg_user: Any) -> UserRecord:
         """Upsert a user profile from an aiogram User object."""
@@ -315,7 +396,8 @@ class UserStore:
         await self._ensure_initialized()
         validated = validate_locale(locale)
         now_iso = datetime.now(UTC).isoformat()
-        async with self.engine.begin() as conn:
+
+        async def _work(conn: AsyncConnection) -> tuple[UserRecord, str, str]:
             existing = (
                 await conn.execute(
                     text(
@@ -344,20 +426,28 @@ class UserStore:
                     "telegram_id": telegram_id,
                 },
             )
-            record = self._row_to_record(result.one())
-            logger.info(
-                "User locale explicitly updated to %s",
-                record.locale,
-                extra={
-                    "event": "locale_explicit_updated",
-                    "user_id": record.id,
-                    "previous_locale": str(existing.locale),
-                    "new_locale": record.locale,
-                    "previous_source": str(existing.locale_source),
-                    "locale_source": record.locale_source,
-                },
+            return (
+                self._row_to_record(result.one()),
+                str(existing.locale),
+                str(existing.locale_source),
             )
-            return record
+
+        record, previous_locale, previous_source = await self._immediate(
+            _work, operation="set_locale"
+        )
+        logger.info(
+            "User locale explicitly updated to %s",
+            record.locale,
+            extra={
+                "event": "locale_explicit_updated",
+                "user_id": record.id,
+                "previous_locale": previous_locale,
+                "new_locale": record.locale,
+                "previous_source": previous_source,
+                "locale_source": record.locale_source,
+            },
+        )
+        return record
 
     set_explicit_locale = set_locale
 
@@ -373,7 +463,8 @@ class UserStore:
         await self._ensure_initialized()
         valid_day, valid_month, valid_year = validate_birthdate(day, month, year)
         now_iso = datetime.now(UTC).isoformat()
-        async with self.engine.begin() as conn:
+
+        async def _work(conn: AsyncConnection) -> UserRecord:
             result = await conn.execute(
                 text(
                     f"""
@@ -398,23 +489,26 @@ class UserStore:
             row = result.first()
             if row is None:
                 raise UserNotFoundError(f"User with telegram_id {telegram_id} not found")
-            record = self._row_to_record(row)
-            logger.info(
-                "User birthdate explicitly updated",
-                extra={
-                    "event": "birthdate_explicit_updated",
-                    "user_id": record.id,
-                    "has_year": record.birth_year is not None,
-                    "birthdate_source": record.birthdate_source,
-                },
-            )
-            return record
+            return self._row_to_record(row)
+
+        record = await self._immediate(_work, operation="set_birthdate")
+        logger.info(
+            "User birthdate explicitly updated",
+            extra={
+                "event": "birthdate_explicit_updated",
+                "user_id": record.id,
+                "has_year": record.birth_year is not None,
+                "birthdate_source": record.birthdate_source,
+            },
+        )
+        return record
 
     async def clear_birthdate(self, telegram_id: int) -> UserRecord:
         """Explicitly clear user birthdate while marking source='explicit'."""
         await self._ensure_initialized()
         now_iso = datetime.now(UTC).isoformat()
-        async with self.engine.begin() as conn:
+
+        async def _work(conn: AsyncConnection) -> UserRecord:
             result = await conn.execute(
                 text(
                     f"""
@@ -433,34 +527,42 @@ class UserStore:
             row = result.first()
             if row is None:
                 raise UserNotFoundError(f"User with telegram_id {telegram_id} not found")
-            record = self._row_to_record(row)
-            logger.info(
-                "User birthdate explicitly cleared",
-                extra={
-                    "event": "birthdate_explicit_cleared",
-                    "user_id": record.id,
-                    "birthdate_source": record.birthdate_source,
-                },
-            )
-            return record
+            return self._row_to_record(row)
+
+        record = await self._immediate(_work, operation="clear_birthdate")
+        logger.info(
+            "User birthdate explicitly cleared",
+            extra={
+                "event": "birthdate_explicit_cleared",
+                "user_id": record.id,
+                "birthdate_source": record.birthdate_source,
+            },
+        )
+        return record
 
     async def get_by_telegram_id(self, telegram_id: int) -> UserRecord | None:
         """Find user by numeric Telegram ID."""
         await self._ensure_initialized()
         stmt = text(f"SELECT {_USER_COLUMNS} FROM users WHERE telegram_id = :telegram_id")
-        async with self.engine.connect() as conn:
+
+        async def _work(conn: AsyncConnection) -> UserRecord | None:
             result = await conn.execute(stmt, {"telegram_id": telegram_id})
             row = result.first()
             return self._row_to_record(row) if row is not None else None
+
+        return await self._read(_work)
 
     async def get_by_id(self, user_id: int) -> UserRecord | None:
         """Find user by internal database primary key."""
         await self._ensure_initialized()
         stmt = text(f"SELECT {_USER_COLUMNS} FROM users WHERE id = :id")
-        async with self.engine.connect() as conn:
+
+        async def _work(conn: AsyncConnection) -> UserRecord | None:
             result = await conn.execute(stmt, {"id": user_id})
             row = result.first()
             return self._row_to_record(row) if row is not None else None
+
+        return await self._read(_work)
 
     async def dispose(self) -> None:
         """Cleanly close connection pools."""

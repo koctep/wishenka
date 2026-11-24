@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import sqlite3
 import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -12,9 +11,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn, TypeVar
 
-from sqlalchemy import event, text
-from sqlalchemy.engine import Connection as SyncConnection
-from sqlalchemy.engine import Engine
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
@@ -28,6 +25,7 @@ from wishenka.notices.models import (
     FlushedNotice,
     NoticeSettings,
 )
+from wishenka.sqlite import configure_immediate_transactions, is_sqlite_busy
 from wishenka.wishlists.exceptions import (
     IdempotencyConflictError,
     InventoryBusyError,
@@ -63,62 +61,6 @@ T = TypeVar("T")
 logging.getLogger("aiosqlite").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 notice_logger = logging.getLogger("wishenka.wishlists.notices")
-
-
-def _configure_immediate_transactions(sync_engine: Engine) -> None:
-    """Take the SQLite reserved lock with BEGIN IMMEDIATE on Connection.begin()."""
-
-    @event.listens_for(sync_engine, "connect")
-    def _sqlite_connect(dbapi_connection: Any, _connection_record: Any) -> None:
-        # isolation_level None stops sqlite3 from emitting its own BEGIN.
-        dbapi_connection.isolation_level = None
-        cursor = dbapi_connection.cursor()
-        try:
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.execute("PRAGMA busy_timeout=5000")
-        finally:
-            cursor.close()
-
-    @event.listens_for(sync_engine, "begin")
-    def _sqlite_begin_immediate(conn: SyncConnection) -> None:
-        # busy_timeout is applied before BEGIN IMMEDIATE, while __in_begin
-        # prevents SQLAlchemy from opening a second transaction for the pragma.
-        conn.exec_driver_sql("PRAGMA busy_timeout=5000")
-        if conn.get_execution_options().get("read_only"):
-            conn.exec_driver_sql("BEGIN")
-        else:
-            conn.exec_driver_sql("BEGIN IMMEDIATE")
-
-
-def _sqlite_error_is_busy(exc: BaseException) -> bool:
-    if isinstance(exc, sqlite3.Error):
-        code = getattr(exc, "sqlite_errorcode", None)
-        if isinstance(code, int) and (code & 0xFF) == sqlite3.SQLITE_BUSY:
-            return True
-    if isinstance(exc, sqlite3.Error | SQLAlchemyError):
-        message = str(exc).casefold()
-        return "database is locked" in message or "database is busy" in message
-    return False
-
-
-def _is_sqlite_busy(exc: BaseException) -> bool:
-    pending: list[BaseException] = [exc]
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        marker = id(current)
-        if marker in seen:
-            continue
-        seen.add(marker)
-        if _sqlite_error_is_busy(current):
-            return True
-        orig = getattr(current, "orig", None)
-        if isinstance(orig, BaseException):
-            pending.append(orig)
-        cause = current.__cause__
-        if isinstance(cause, BaseException):
-            pending.append(cause)
-    return False
 
 
 def _wish_scope(
@@ -196,7 +138,7 @@ def _raise_for_storage_error(
 ) -> NoReturn:
     """Map a timed-out write lock before the generic storage failure."""
     if cabinet_operation is not None:
-        if _is_sqlite_busy(exc):
+        if is_sqlite_busy(exc):
             logger.warning(
                 "Reservation cabinet read failed because the database was busy",
                 extra={"event": "reservation_cabinet_busy", "operation": cabinet_operation},
@@ -209,7 +151,7 @@ def _raise_for_storage_error(
         raise RuntimeError("Wishlist storage operation failed") from exc
     scope = _wish_scope(item_id, reservation_id, operation)
     target = _wish_target(item_id, reservation_id)
-    if _is_sqlite_busy(exc):
+    if is_sqlite_busy(exc):
         extra = {"event": "wishlist_inventory_busy", **scope}
         if target is None:
             logger.warning(
@@ -446,7 +388,7 @@ class WishlistStore:
         self.engine = create_async_engine(
             database_url, connect_args={"timeout": 5}, hide_parameters=True
         )
-        _configure_immediate_transactions(self.engine.sync_engine)
+        configure_immediate_transactions(self.engine.sync_engine)
 
     async def initialize(self) -> None:
         """Bring the wishlist database to Alembic head before it is used."""

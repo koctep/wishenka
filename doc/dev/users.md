@@ -226,7 +226,15 @@ At transaction start, the service computes `subject_hash = compute_revocation_su
 
 ### Python Interfaces
 
-- **`UserStore` (`wishenka/users/store.py`)**:
+- **`wishenka/sqlite.py` (Shared SQLite Helpers, `WISHENKA-121`)**:
+  - `configure_immediate_transactions(sync_engine: Engine, *, busy_timeout_ms: int = 5000) -> None` — attaches `connect` (sets `isolation_level = None`, `PRAGMA foreign_keys=ON`, `PRAGMA busy_timeout=<ms>`) and `begin` (skips `AUTOCOMMIT`, applies `PRAGMA busy_timeout`, issues `BEGIN` when `execution_options(read_only=True)` or `BEGIN IMMEDIATE` otherwise). Shared by `UserStore` and `WishlistStore`.
+  - `is_sqlite_busy(exc: BaseException) -> bool` — inspects `exc`, `.orig`, and `.__cause__` for `SQLITE_BUSY` (`sqlite_errorcode & 0xFF == sqlite3.SQLITE_BUSY` or `"database is locked"` / `"database is busy"`).
+- **`UserStore` & `UserStoreBusyError` (`wishenka/users/store.py`, re-exported in `wishenka/users/__init__.py`)**:
+  - **Transaction & locking contract (`WISHENKA-121`)**:
+    - When `UserStore` creates its own `AsyncEngine` (`connect_args={"timeout": 5}`), it registers `configure_immediate_transactions(self.engine.sync_engine)`.
+    - `initialize()` configures `PRAGMA journal_mode=WAL`, `PRAGMA synchronous=NORMAL`, and `PRAGMA busy_timeout=5000` on an `isolation_level="AUTOCOMMIT"` connection (mapping `SQLITE_BUSY` to `UserStoreBusyError` and other `SQLAlchemyError`s to `RuntimeError`), then runs DDL/column checks inside `_immediate(..., operation="initialize")`.
+    - Write methods (`upsert_user`, `upsert_from_bot`, `set_locale`, `set_birthdate`, `clear_birthdate`) execute inside `_immediate(work, operation=...)` (`BEGIN IMMEDIATE`); on `SQLITE_BUSY` after `busy_timeout`, the transaction rolls back, logs `user_store_busy`, and raises retryable `UserStoreBusyError` (other `SQLAlchemyError`s log `user_store_error` and raise `RuntimeError`).
+    - Read methods (`get_by_telegram_id`, `get_by_id`) execute inside `_read(work)` with `execution_options(read_only=True)` (deferred `BEGIN`, rolled back on exit) so lookups do not acquire a write lock or block behind `BEGIN IMMEDIATE` writers.
   - `upsert_user(user: TelegramUser, *, channel: str = "miniapp") -> UserRecord` (`WISHENKA-33/34`; preserves `explicit` `locale` and `birthdate`)
   - `upsert_from_bot(tg_user: Any) -> UserRecord` (`WISHENKA-33`)
   - `set_locale(telegram_id: int, locale: SupportedLocale) -> UserRecord` (`WISHENKA-33`)
@@ -253,6 +261,9 @@ At transaction start, the service computes `subject_hash = compute_revocation_su
 The settings screen client behavior (pending, restore vs reconcile, unknown state, deletion
 without retries) is documented in
 [miniapp.md](miniapp.md#personal-settings-screen-wishenka-291); endpoint contracts are unchanged.
+Write endpoints backed by `UserStore` (`POST /api/auth/telegram` in `wishenka/web/routes/auth.py`,
+`PATCH /api/profile/locale` and `PATCH /api/profile/birthdate` in `wishenka/web/routes/profile.py`)
+catch `UserStoreBusyError` and return **HTTP `503 Service Unavailable`**.
 
 | Method & Path | Task | Purpose |
 | --- | --- | --- |
@@ -323,6 +334,11 @@ Structured logging uses [`wishenka/logging.py`](../../wishenka/logging.py) (`con
 | `WISHENKA-35` | `WARNING` | `wishenka.auth` | `session_rejected_revoked_or_deleted` | `subject_hash_prefix`, `auth_method` |
 | `WISHENKA-35` | `INFO` | `wishenka.wishlists.store` | `session_revocations_purged` | `purged_count` |
 | `WISHENKA-35` | `INFO` | `wishenka.wishlists.cleanup` | `background_cleanup_completed` | `expired_tokens_cleaned`, `wishlists_purged`, `idempotency_records_cleaned`, `session_revocations_cleaned`, `duration_ms` |
+| `WISHENKA-121` | `WARNING` | `wishenka.users` | `user_store_busy` | `operation` |
+| `WISHENKA-121` | `ERROR` | `wishenka.users` | `user_store_error` | `operation` |
+| `WISHENKA-121` | `WARNING` | `wishenka.auth` | `auth_user_store_busy` | `status_code` (`503`) |
+| `WISHENKA-121` | `WARNING` | `wishenka.web.profile` | `locale_user_store_busy` | `user_id`, `status_code` (`503`) |
+| `WISHENKA-121` | `WARNING` | `wishenka.web.profile` | `birthdate_user_store_busy` | `user_id`, `status_code` (`503`) |
 
 ### Target Metrics Contract (Low-Cardinality Labels)
 
@@ -372,3 +388,4 @@ No Prometheus/OpenTelemetry exporter is currently wired in the codebase; these c
 - `tests/test_wishenka_34_preferences.py` (`WISHENKA-34`, Implemented) — unit and integration coverage for `validate_birthdate`, `UserStore.set_birthdate` / `clear_birthdate`, `NotificationPreferencesStore`, `/settings` SSR rendering (RU/EN), and `/api/profile/*` validation/404/CSRF contracts.
 - `tests/test_account_deletion_repro.py` (`WISHENKA-35`, Implemented) — end-to-end repro covering `/api/profile/deletion-preview`, `/api/profile/delete`, `AccountDeletionService` cascade, ownership transfer, reservation cleanup, PII removal, and session token revocation.
 - `tests/test_account_deletion.py` (`WISHENKA-35`, Implemented) — personal list cascade & Surprise Invariant, deterministic collaborative transfer tie-breakers & `is_collaborative=1`, member exit anonymization, full PII purge, token revocation across devices & re-registration, `BEGIN IMMEDIATE` rollback atomicity, idempotency, expired revocation cleanup, and PII-free log verification.
+- `tests/test_user_store_concurrency_repro.py` (`WISHENKA-121`, Implemented) — `UserStore` `BEGIN IMMEDIATE` write serialization, `SQLITE_BUSY` → `UserStoreBusyError` mapping, non-blocking `read_only=True` lookups, HTTP `503` mapping on `/api/auth/telegram`, `/api/profile/locale`, and `/api/profile/birthdate`, and `user_store_busy` / `user_store_error` / route busy structured log verification.

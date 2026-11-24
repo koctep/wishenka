@@ -24,7 +24,7 @@ from wishenka.auth.session import (
 )
 from wishenka.config import Settings
 from wishenka.i18n.dependencies import LocaleDep
-from wishenka.users.store import UserStore
+from wishenka.users.store import UserStore, UserStoreBusyError
 from wishenka.web.security import csrf_value
 
 logger = logging.getLogger("wishenka.auth")
@@ -52,7 +52,20 @@ async def auth_telegram(
             detail=f"Invalid initData: {err}",
         ) from err
 
-    user_record = await user_store.upsert_user(user)
+    try:
+        user_record = await user_store.upsert_user(user)
+    except UserStoreBusyError as err:
+        logger.warning(
+            "Telegram auth busy while persisting user",
+            extra={
+                "event": "auth_user_store_busy",
+                "status_code": status.HTTP_503_SERVICE_UNAVAILABLE,
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(err),
+        ) from err
 
     service = SessionTokenService(
         secret_key=settings.secret_key,

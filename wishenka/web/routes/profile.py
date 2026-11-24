@@ -24,7 +24,7 @@ from wishenka.notices.preferences import (
 )
 from wishenka.notices.sender import PLACEHOLDER_TOKEN
 from wishenka.users.models import UserRecord
-from wishenka.users.store import UserNotFoundError, UserStore
+from wishenka.users.store import UserNotFoundError, UserStore, UserStoreBusyError
 from wishenka.web.templates import templates
 from wishenka.wishlists.deletion import AccountDeletionService
 from wishenka.wishlists.store import WishlistStore
@@ -218,7 +218,28 @@ async def update_profile_locale(
 
     try:
         updated = await user_store.set_locale(current_user.telegram_id, target_locale)
+    except UserStoreBusyError as err:
+        logger.warning(
+            "Locale update busy while persisting user",
+            extra={
+                "event": "locale_user_store_busy",
+                "user_id": current_user.user_id,
+                "status_code": status.HTTP_503_SERVICE_UNAVAILABLE,
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(err),
+        ) from err
     except UserNotFoundError as err:
+        logger.warning(
+            "Locale update failed: user profile not found",
+            extra={
+                "event": "locale_user_not_found",
+                "user_id": current_user.user_id,
+                "status_code": status.HTTP_404_NOT_FOUND,
+            },
+        )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User profile not found",
@@ -313,6 +334,19 @@ async def update_profile_birthdate(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=t("settings.invalid_birthdate", locale),
+        ) from err
+    except UserStoreBusyError as err:
+        logger.warning(
+            "Birthdate update busy while persisting user",
+            extra={
+                "event": "birthdate_user_store_busy",
+                "user_id": current_user.user_id,
+                "status_code": status.HTTP_503_SERVICE_UNAVAILABLE,
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(err),
         ) from err
     except UserNotFoundError as err:
         logger.warning(
