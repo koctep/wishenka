@@ -146,7 +146,11 @@ def _raise_for_storage_error(
             raise InventoryBusyError from exc
         logger.error(
             "Reservation cabinet read failed due to database error",
-            extra={"event": "reservation_cabinet_error", "operation": cabinet_operation},
+            extra={
+                "event": "reservation_cabinet_error",
+                "operation": cabinet_operation,
+                "error_type": type(exc).__name__,
+            },
         )
         raise RuntimeError("Wishlist storage operation failed") from exc
     scope = _wish_scope(item_id, reservation_id, operation)
@@ -1531,18 +1535,29 @@ class WishlistStore:
         reservations = await repository.list_user_reservations(user_id)
         for reservation in reservations:
             service._register_reservation(reservation)
-        if include_items:
-            wishlists: dict[int, Wishlist | None] = {}
-            for item_id in dict.fromkeys(res.wish_item_id for res in reservations):
-                item = await repository.get_item(item_id)
-                if item is None:
-                    continue
-                if item.wishlist_id not in wishlists:
-                    wishlists[item.wishlist_id] = await repository.get_wishlist_header(
-                        item.wishlist_id
-                    )
-                item.wishlist = wishlists[item.wishlist_id]
+        wishlists_count = 0
+        if include_items and reservations:
+            item_ids = list(dict.fromkeys(res.wish_item_id for res in reservations))
+            items_by_id = await repository.get_items_by_ids(item_ids)
+            wishlist_ids = list(dict.fromkeys(item.wishlist_id for item in items_by_id.values()))
+            wishlists_by_id = await repository.get_wishlist_headers_by_ids(wishlist_ids)
+            wishlists_count = len(wishlists_by_id)
+            for item in items_by_id.values():
+                item.wishlist = wishlists_by_id.get(item.wishlist_id)
                 service._items[item.id] = item
+        logger.debug(
+            "Reservation cabinet hydrated: %d reservations, %d items, %d wishlists",
+            len(reservations),
+            len(service._items),
+            wishlists_count,
+            extra={
+                "event": "reservation_cabinet_read",
+                "include_items": include_items,
+                "reservations_count": len(reservations),
+                "items_count": len(service._items),
+                "wishlists_count": wishlists_count,
+            },
+        )
         return service
 
     async def get_user_reservations(self, user_id: int) -> list[MyReservationItemDTO]:
@@ -1553,7 +1568,7 @@ class WishlistStore:
             return await service.get_user_reservations(user_id)
 
         try:
-            return await self._immediate(work)
+            return await self.execute_read(work)
         except SQLAlchemyError as exc:
             _raise_for_storage_error(exc, cabinet_operation="reservations_list")
 
@@ -1565,7 +1580,7 @@ class WishlistStore:
             return await service.get_user_reservations_summary(user_id)
 
         try:
-            return await self._immediate(work)
+            return await self.execute_read(work)
         except SQLAlchemyError as exc:
             _raise_for_storage_error(exc, cabinet_operation="reservations_summary")
 

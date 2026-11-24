@@ -1,6 +1,7 @@
 """Async repository providing granular queries and mutations for wishlist entities."""
 
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -25,6 +26,21 @@ from wishenka.wishlists.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+_ID_BATCH_SIZE = 500
+
+
+def _chunked_unique_ids(ids: Sequence[int], chunk_size: int = _ID_BATCH_SIZE) -> list[list[int]]:
+    """Deduplicate IDs preserving order and split into bounded chunks."""
+    unique_ids = list(dict.fromkeys(ids))
+    return [unique_ids[i : i + chunk_size] for i in range(0, len(unique_ids), chunk_size)]
+
+
+def _in_clause_params(ids: Sequence[int], prefix: str = "id") -> tuple[str, dict[str, int]]:
+    """Build parameterized IN-clause placeholders and bind dict."""
+    placeholders = ", ".join(f":{prefix}_{idx}" for idx in range(len(ids)))
+    params = {f"{prefix}_{idx}": value for idx, value in enumerate(ids)}
+    return placeholders, params
 
 
 def _parse_dt(val: str | datetime | None) -> datetime | None:
@@ -295,6 +311,39 @@ class WishlistRepository:
         )
         row = (await self.conn.execute(stmt, {"id": wishlist_id})).one_or_none()
         return _row_to_wishlist(row) if row is not None else None
+
+    async def get_wishlist_headers_by_ids(self, wishlist_ids: Sequence[int]) -> dict[int, Wishlist]:
+        """Batch-load wishlist headers for the given IDs, chunked to bound bind variables."""
+        if not wishlist_ids:
+            return {}
+        chunks = _chunked_unique_ids(wishlist_ids)
+        wishlists: dict[int, Wishlist] = {}
+        for chunk in chunks:
+            placeholders, params = _in_clause_params(chunk, "wl")
+            stmt = text(
+                "SELECT id, owner_id, owner_name, title, description, event_title, "
+                "event_date, is_collaborative, warn_on_delete_reserved, status, "
+                "public_token, invite_token, invite_token_expires_at, "
+                f"created_at, updated_at FROM wl_lists WHERE id IN ({placeholders})"
+            )
+            rows = (await self.conn.execute(stmt, params)).all()
+            for row in rows:
+                wl = _row_to_wishlist(row)
+                wishlists[wl.id] = wl
+        logger.debug(
+            "Wishlist repository batch read: %d/%d wishlist headers (%d chunks)",
+            len(wishlists),
+            len(wishlist_ids),
+            len(chunks),
+            extra={
+                "event": "wishlist_repo_batch_read",
+                "entity": "wishlist_header",
+                "requested_count": len(wishlist_ids),
+                "chunks_count": len(chunks),
+                "found_count": len(wishlists),
+            },
+        )
+        return wishlists
 
     async def get_wishlist(self, wishlist_id: int) -> Wishlist | None:
         """Fetch a single wishlist aggregate with members, items, and reservations."""
@@ -634,6 +683,56 @@ class WishlistRepository:
             res.wish_item = item
             item.reservations.append(res)
         return item
+
+    async def get_items_by_ids(self, item_ids: Sequence[int]) -> dict[int, WishItem]:
+        """Batch-load wish items and their reservations, chunked to bound bind variables."""
+        if not item_ids:
+            return {}
+        item_chunks = _chunked_unique_ids(item_ids)
+        items_map: dict[int, WishItem] = {}
+        for chunk in item_chunks:
+            placeholders, params = _in_clause_params(chunk, "item")
+            stmt = text(
+                "SELECT id, wishlist_id, recipient_user_id, recipient_name, title, "
+                "description, link, price, currency, quantity, received_quantity, "
+                "image_url, store_name, store_icon_url, priority, category, "
+                "display_order, is_archived, created_at, updated_at "
+                f"FROM wl_items WHERE id IN ({placeholders})"
+            )
+            rows = (await self.conn.execute(stmt, params)).all()
+            for row in rows:
+                item = _row_to_item(row)
+                items_map[item.id] = item
+
+        if items_map:
+            for chunk in _chunked_unique_ids(list(items_map.keys())):
+                placeholders, params = _in_clause_params(chunk, "item")
+                r_stmt = text(
+                    "SELECT id, wish_item_id, user_id, quantity, status, created_at, updated_at "
+                    f"FROM wl_reservations WHERE wish_item_id IN ({placeholders}) ORDER BY id ASC"
+                )
+                r_rows = (await self.conn.execute(r_stmt, params)).all()
+                for r_row in r_rows:
+                    res = _row_to_reservation(r_row)
+                    target_item = items_map.get(res.wish_item_id)
+                    if target_item is not None:
+                        res.wish_item = target_item
+                        target_item.reservations.append(res)
+
+        logger.debug(
+            "Wishlist repository batch read: %d/%d items (%d chunks)",
+            len(items_map),
+            len(item_ids),
+            len(item_chunks),
+            extra={
+                "event": "wishlist_repo_batch_read",
+                "entity": "item",
+                "requested_count": len(item_ids),
+                "chunks_count": len(item_chunks),
+                "found_count": len(items_map),
+            },
+        )
+        return items_map
 
     async def upsert_item(self, item: WishItem) -> None:
         """Insert or update a wish item row."""

@@ -1201,6 +1201,12 @@ granular async operations over an active SQLAlchemy `AsyncConnection`.
 - `list_collaborative(user_id: int) -> list[Wishlist]`: Joined query on `wl_members` returning
   only collaborative lists where caller is an active member.
 - `get_item(item_id: int) -> WishItem | None`: Single-item fetch with its reservations.
+- `get_items_by_ids(item_ids: Sequence[int]) -> dict[int, WishItem]`: Batch-loads `WishItem`
+  records and their `wl_reservations` (`ORDER BY id ASC`) via `IN (...)` queries. Deduplicates
+  IDs while preserving order and chunks into batches of `_ID_BATCH_SIZE = 500`
+  (`_chunked_unique_ids`) to stay within SQLite bind-parameter limits.
+- `get_wishlist_headers_by_ids(wishlist_ids: Sequence[int]) -> dict[int, Wishlist]`: Batch-loads
+  `Wishlist` header rows from `wl_lists` via chunked `IN (...)` queries (`_ID_BATCH_SIZE = 500`).
 - `list_user_reservations(user_id: int) -> list[Reservation]`: Fetches active/purchased reservations
   created by the specified user.
 - `list_favorites(user_id: int) -> list[WishlistFavorite]`: Ordered bookmarks for caller.
@@ -1346,10 +1352,21 @@ relational architecture, `WishlistStore` coordinates atomic row-level persistenc
 - **Read-Only Deferred Transactions (`WishlistStore.execute_read`)**:
   `execute_read(work)` accepts `Callable[[AsyncConnection], Awaitable[T]]`, binds
   `execution_options(read_only=True)` on the connection, and runs `work(conn)` inside a deferred
-  `BEGIN` transaction (rolling back on exit). `_configure_immediate_transactions` checks
+  `BEGIN` transaction (rolling back on exit). `configure_immediate_transactions` checks
   `conn.get_execution_options().get("read_only")` in the `begin` event listener and emits `BEGIN`
   instead of `BEGIN IMMEDIATE`, allowing read-only paths (such as `wishenka.bot.support`
-  rate-limit checks and diagnostic collection) to read without acquiring a SQLite write lock.
+  rate-limit checks, diagnostic collection, and the gifter reservation cabinet) to read without
+  acquiring a SQLite write lock.
+- **Batched Reservation Cabinet Loading (`WishlistStore._cabinet_service`)**:
+  `WishlistStore.get_user_reservations` and `WishlistStore.get_user_reservations_summary` run
+  inside `WishlistStore.execute_read`, pinning a consistent WAL snapshot on the first `SELECT`
+  (`repository.list_user_reservations(user_id)`) without blocking concurrent writers.
+  `_cabinet_service(conn, user_id, *, include_items)` hydrates a transient
+  `WishlistService.in_memory()` instance: when `include_items=False` (summary), it skips item and
+  wishlist queries; when `include_items=True` and reservations exist, it batch-loads distinct items
+  and their reservations via `WishlistRepository.get_items_by_ids` and distinct wishlist headers via
+  `WishlistRepository.get_wishlist_headers_by_ids` (chunked at `_ID_BATCH_SIZE = 500`), keeping
+  typical cabinet hydration to 4 `SELECT` queries instead of $1 + 2K + L$ per-entity round trips.
 
 ### 5. Observability & Security Guarantees
 
@@ -1361,9 +1378,16 @@ Database operations emit structured audit logs under the `wishenka.wishlists` lo
 | `wishlist_store_read` | `INFO` | State read into service | `wishlists_count`, `items_count` |
 | `wishlist_store_write` | `INFO` | Differential committed | `wishlists_count`, `items_count` |
 | `wishlist_repo_mutation` | `INFO` | Repository mutation | `entity`, `operation`, `entity_id` |
+| `wishlist_repo_batch_read` | `DEBUG` | Batched `IN (...)` read (`get_items_by_ids`, `get_wishlist_headers_by_ids`) | `entity`, `requested_count`, `chunks_count`, `found_count` |
+| `reservation_cabinet_read` | `DEBUG` | Cabinet hydrated in `_cabinet_service` | `include_items`, `reservations_count`, `items_count`, `wishlists_count` |
+| `reservation_cabinet_busy` | `WARNING` | `SQLITE_BUSY` on cabinet read | `operation` |
+| `reservation_cabinet_error` | `ERROR` | Non-busy `SQLAlchemyError` on cabinet read | `operation`, `error_type` |
 | `wishlist_token_collision_retry` | `WARNING` | Collision retry | `attempt` |
 | `wishlist_store_error` | `ERROR` | Database error | `event` |
 | `wishlist_store_integrity_error` | `ERROR` | Constraint failure | `event` |
+
+All cabinet and batch-read logs omit `user_id`, item/wishlist titles, raw SQL parameters, and
+capability tokens (`public_token`, `invite_token`).
 
 #### Zero Parameter & Token Leakage Guarantees
 - **SQLAlchemy Parameter Redaction**: Engines are initialized with `hide_parameters=True`,

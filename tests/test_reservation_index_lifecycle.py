@@ -33,7 +33,7 @@ async def test_cabinet_storage_error_logs_read_context_without_user_data(
 ) -> None:
     store = WishlistStore("sqlite+aiosqlite:///:memory:")
     detail = "database is locked" if busy else "private database detail"
-    store._immediate = AsyncMock(  # type: ignore[method-assign]
+    store.execute_read = AsyncMock(  # type: ignore[method-assign]
         side_effect=OperationalError(
             "private SQL", {"user": 987654321}, sqlite3.OperationalError(detail)
         )
@@ -211,14 +211,16 @@ async def test_sqlite_read_is_consistent_with_concurrent_write(
     try:
         reservation_id = await store.execute(seed)
         entered, release = asyncio.Event(), asyncio.Event()
-        original = WishlistRepository.get_item
+        original = WishlistRepository.get_items_by_ids
 
-        async def paused_get_item(self: WishlistRepository, item_id: int) -> WishItem | None:
+        async def paused_get_items_by_ids(
+            self: WishlistRepository, item_ids: list[int]
+        ) -> dict[int, WishItem]:
             entered.set()
             await asyncio.wait_for(release.wait(), 5)
-            return await original(self, item_id)
+            return await original(self, item_ids)
 
-        monkeypatch.setattr(WishlistRepository, "get_item", paused_get_item)
+        monkeypatch.setattr(WishlistRepository, "get_items_by_ids", paused_get_items_by_ids)
         read_task = asyncio.create_task(store.get_user_reservations(2))
         await asyncio.wait_for(entered.wait(), 5)
 
