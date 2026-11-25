@@ -7,8 +7,10 @@ from html import escape
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
+from wishenka.auth.dependencies import get_settings
 from wishenka.i18n import miniapp_catalog, t
 from wishenka.i18n.dependencies import LocaleDep
+from wishenka.wishlists.retention import wishlist_retention_days
 
 router = APIRouter()
 logger = logging.getLogger("wishenka.web.miniapp")
@@ -18,10 +20,10 @@ logger = logging.getLogger("wishenka.web.miniapp")
 async def miniapp(request: Request, locale: LocaleDep) -> HTMLResponse:
     """Return an accessible shell with configured Telegram link destinations."""
     logger.info("Mini App shell requested", extra={"event": "miniapp_shell_requested"})
-    settings = request.app.state.settings
+    settings = get_settings(request)
     bot = escape(settings.telegram_bot_username, quote=True)
     app_name = escape(settings.telegram_app_short_name, quote=True)
-    retention_days = int(getattr(settings, "wishlist_retention_days", 30))
+    retention_days = wishlist_retention_days(settings)
     loading_text = escape(t("nav.loading", locale))
     catalog = miniapp_catalog()
     logger.debug(

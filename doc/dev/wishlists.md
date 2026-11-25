@@ -81,9 +81,10 @@ rejected by the optional authentication dependency.
 - `GET /api/wishlists`: Lists the caller's active memberships. Set `include_archived=true` to
   include archived lists.
 
-- `GET /api/wishlists/deleted`: Lists the caller's own soft-deleted wishlists that are still
-  within the retention window (`wishlist_retention_days`, default `30` days), sorted by
-  `updated_at` descending with `deleted_at`, `expires_at`, and `days_remaining`.
+- `GET /api/wishlists/deleted`: Lists the caller's own soft-deleted wishlists that
+  `is_retention_expired` still treats as restorable. The period is the shared
+  `wishlist_retention_days` (usual value 30). Sorted by `updated_at` descending
+  with `deleted_at`, `expires_at`, and `days_remaining`.
 
 - `GET /api/wishlists/{id}`: Reads a list for a member, including archived lists.
 
@@ -96,10 +97,10 @@ rejected by the optional authentication dependency.
 - `DELETE /api/wishlists/{id}`: Owner soft-deletes a list (WISHENKA-295); see
   [Owner delete route](#owner-delete-route-delete-apiwishlistsid).
 
-- `POST /api/wishlists/{id}/restore-deleted`: Owner restores a soft-deleted list within the
-  retention window back to `active`, rotating `public_token` and `invite_token` (with a fresh
-  `invite_token_expires_at`). Returns `410 Gone` (`code: "retention_expired"`) if the retention
-  window has expired.
+- `POST /api/wishlists/{id}/restore-deleted`: Owner restores a soft-deleted list that
+  is still inside the shared retention window, back to `active`, rotating
+  `public_token` and `invite_token` (with a fresh `invite_token_expires_at`).
+  An ended window is `410 Gone` (`code: "retention_expired"`).
 
 - `POST /api/wishlists/{id}/share/reset`: Owner or admin rotates the public link on an active list.
 
@@ -149,12 +150,13 @@ Projections for `/api/favorites` and `/api/history` strictly enforce the Surpris
 return sanitized list metadata with roles and omit all reservation records, item availability
 counts, and buyer details.
 Unknown, deleted or inaccessible lists return 404; operations incompatible with the archived
-state return 409; attempting to restore a soft-deleted list past its retention window via
-`POST /api/wishlists/{id}/restore-deleted` returns 410 (`code: "retention_expired"`). Archive is
+state return 409. An ended retention window is 410 with `code` `retention_expired` on
+`POST /api/wishlists/{id}/restore-deleted` and on a repeat `DELETE /api/wishlists/{id}`.
+Delete, recently deleted, and restore share one period and one comparison; see
+[Owner delete route](#owner-delete-route-delete-apiwishlistsid). Archive is
 read-only until restored. State-changing requests from browser
 sessions are protected by CSRF tokens and origin validation — see [miniapp.md](miniapp.md).
-Soft deletion is exposed to the owner as `DELETE /api/wishlists/{id}` (WISHENKA-295); a repeat
-call after the retention window returns 410 as well.
+Soft deletion is exposed to the owner as `DELETE /api/wishlists/{id}` (WISHENKA-295).
 
 A sharing token is a bearer capability. Rotation invalidates the old public link, and the persistent
 issued-token registry prevents reuse. Do not put tokens in application logs, issue reports or
@@ -1020,38 +1022,70 @@ async def delete_wishlist(
 
 ##### Owner delete route (`DELETE /api/wishlists/{id}`)
 
-`delete_wishlist` in `wishenka/web/routes/wishlists.py:495-554` (WISHENKA-295). Authenticated,
-CSRF-protected for cookie sessions like the other mutations. It classifies the list first and
-only then calls the service, in this order:
+`delete_wishlist` in `wishenka/web/routes/wishlists.py` (WISHENKA-295, WISHENKA-316).
+Authenticated and CSRF-protected for cookie sessions, like the other mutations.
 
-| Case | Response | Notes |
-| --- | --- | --- |
-| Unknown id | `404 Wishlist not found` | event `wishlist_delete_not_found` (`:503-514`) |
-| Caller is not the owner (admin, member, viewer, favorite) | `404`, byte-identical to unknown | events `wishlist_delete_denied` and, from `execute()`, `wishlist_permission_denied` (`operation=delete_wishlist`); the client never learns the list exists |
-| Owner, status `ACTIVE` | `200` body below | `service.delete_wishlist` (`:540`) |
-| Owner, status `DELETED`, inside the window | `200`, same body | idempotent: no service call, `updated_at` is not touched, so the window does not slide |
-| Owner, status `DELETED`, `updated_at <= now - retention_days` | `410` `detail.code = "retention_expired"` | `:537`; the row still exists because the cleanup has not purged it yet |
-| Owner, status `ARCHIVED` | `409 Wishlist is archived` | raised by the service; unarchive first |
+One period and one comparison decide whether a deleted list can still be
+restored. The period is `wishlist_retention_days(settings)` in
+`wishenka/wishlists/retention.py`. It reads `Settings.wishlist_retention_days`.
+The field default is `DEFAULT_WISHLIST_RETENTION_DAYS` (30). The comparison is
+`is_retention_expired`: the deletion moment is on or before
+`now - timedelta(days=retention_days)`. The deletion moment is `updated_at`,
+and a naive value is UTC. Delete, recently deleted, and restore look
+`is_retention_expired` up on the `retention` module when they call it. Purge
+does not call that function. It calls `purge_threshold` with the same period
+and passes that cutoff to the repository. The cutoff is the same boundary.
 
-The success body is constant, whatever the reservations: `{"status": "deleted", "wishlist_id":
-<id>, "retention_days": <N>}` (`:554`). `retention_days` is
-`getattr(app.state.settings, "wishlist_retention_days", 30)` (`:498-500`), the same value that the
-Mini App shell exposes as `data-retention-days` and the "Recently deleted" list uses. The route
-reads `service._wishlists` directly and duplicates the retention arithmetic of
-`restore_deleted_wishlist` (known debt, WISHENKA-316). `execute()` adds `delete_wishlist` to the
-operations that emit `wishlist_mutation_committed` (`:58`). Note that the shared 410 log text still
-says "restore" (`:68`; WISHENKA-318), distinguish by the `operation` field.
+Delete classifies before it writes. `classify_owner_delete` on `WishlistService`
+and on `RepoWishlistOps` returns `OwnerDeleteDecision`. It does not mutate and
+it does not log. The route maps `kind`:
+
+- `missing`: `404 Wishlist not found`. The route logs `wishlist_delete_not_found`.
+- `forbidden`: `404`, the same body as an unknown id. The route logs
+  `wishlist_delete_denied`. `execute()` then logs `wishlist_permission_denied`
+  with `operation` `delete_wishlist`. The client does not learn that the list
+  exists.
+- `expired`: `410` with `detail.code` `retention_expired`. The route raises
+  `WishlistRetentionExpiredError` before any success log. The row stays until
+  purge.
+- `repeat`: `200` and the body below. The route does not call `delete_wishlist`.
+  `updated_at` stays the original deletion moment. `outcome` is
+  `already_deleted`.
+- `apply`: `200` and the same body. The route calls `delete_wishlist`, then
+  logs `outcome` `deleted`.
+
+An archived list is `apply`. `delete_wishlist` still raises
+`WishlistArchivedError`, and the client gets `409 Wishlist is archived`.
+
+An ended window is HTTP 410 with `detail.code` `retention_expired`. Restore
+uses that same status and code. `execute()` logs `wishlist_retention_expired`
+with `operation` set to the handler name. The warning text still says
+"restore" (WISHENKA-318). Read `operation` to tell delete from restore.
+
+The success body does not depend on reservations:
+`{"status": "deleted", "wishlist_id": <id>, "retention_days": <N>}`.
+`N` is the period from the accessor. The Mini App shell writes that same int
+as `data-retention-days`. Recently deleted and restore receive it too.
+
+`execute()` writes `wishlist_mutation_committed` with `operation`
+`delete_wishlist` when the handler action returns. A `repeat` emits it and
+writes no row. The record is written before the repository commit. The
+repository commits when `get_wishlist_repository()` resumes, after the
+handler has returned. The event means the action returned. It is not evidence
+that the commit succeeded. A later commit failure is `wishlist_store_error`
+from that dependency. Paths that raise before the action returns (`404`,
+`409`, `410`) do not emit the event.
 
 #### `list_deleted_wishlists` & `restore_deleted_wishlist`
 
-Lists and restores an owner's soft-deleted wishlists while they remain inside the retention
-window (`wishlist_retention_days`, default `30` days).
+Lists and restores an owner's soft-deleted wishlists while the shared comparison
+still treats them as restorable. HTTP passes `wishlist_retention_days(settings)`.
 
 ```python
 async def list_deleted_wishlists(
     self,
     actor: AuthenticatedUser,
-    retention_days: int = 30,
+    retention_days: int = DEFAULT_WISHLIST_RETENTION_DAYS,
     now: datetime | None = None,
 ) -> list[tuple[Wishlist, datetime, int]]
 
@@ -1059,7 +1093,7 @@ async def restore_deleted_wishlist(
     self,
     wishlist_id: int,
     actor: AuthenticatedUser,
-    retention_days: int = 30,
+    retention_days: int = DEFAULT_WISHLIST_RETENTION_DAYS,
     now: datetime | None = None,
 ) -> Wishlist
 ```
@@ -1067,10 +1101,12 @@ async def restore_deleted_wishlist(
 - **Permissions**: Solely the `Owner` via `WishlistAccessPolicy.can_restore_deleted`. Non-owners
   are excluded from `list_deleted_wishlists` and receive `PermissionDeniedError` (HTTP `404`)
   from `restore_deleted_wishlist`.
-- **Retention boundary**: A list is restorable only when
-  `deleted_at > effective_now - timedelta(days=retention_days)`. Once `deleted_at <= threshold`,
-  `list_deleted_wishlists` omits it and `restore_deleted_wishlist` raises
-  `WishlistRetentionExpiredError` (HTTP `410 Gone` with `detail.code = "retention_expired"`).
+- **Retention boundary**: `is_retention_expired(updated_at, retention_days, now)`
+  is the only comparison. A list is restorable while it returns false. When it
+  returns true, `list_deleted_wishlists` omits the list and
+  `restore_deleted_wishlist` raises `WishlistRetentionExpiredError` (HTTP `410`
+  with `detail.code` `retention_expired`). The method default is
+  `DEFAULT_WISHLIST_RETENTION_DAYS` (30) when a caller omits the period.
 - **Listing output**: Returns `(wishlist, expires_at, days_remaining)` sorted by `updated_at`
   descending, with `days_remaining = max(1, math.ceil(remaining_seconds / 86400))`.
 - **Token rotation & state**: Restoring a `DELETED` list transitions it to `WishlistStatus.ACTIVE`,
@@ -1577,7 +1613,8 @@ adapter:
 targeted `WishlistRepository` queries without loading unrelated wishlists:
 - **Wishlist & Sharing**: `get_wishlist_by_id`, `create_wishlist`, `get_wishlist_view`,
   `get_wishlist_by_public_token`, `get_wishlist_by_invite_token`, `archive_wishlist`,
-  `unarchive_wishlist`, `delete_wishlist`, `list_deleted_wishlists`, `restore_deleted_wishlist`,
+  `unarchive_wishlist`, `get_wishlist_or_none`, `classify_owner_delete`,
+  `delete_wishlist`, `list_deleted_wishlists`, `restore_deleted_wishlist`,
   `regenerate_public_token`, `regenerate_invite_token`.
 - **Members & Invites**: `add_member`, `remove_member`, `get_members`, `join_by_invite`.
 - **Items & Gifted View**: `add_wish_item`, `get_wish_item`, `list_wish_items`,
@@ -1788,7 +1825,7 @@ regular web request handling.
 +-----------------------------------------------------------------------------------------+
 |                Cleanup Cycle Runner: run_cleanup_cycle                                  |
 |  1. store.cleanup_expired_tokens(now) -> revokes expired collaborator invite tokens     |
-|  2. cutoff = now - timedelta(days=settings.wishlist_retention_days)                     |
+|  2. cutoff = purge_threshold(now, wishlist_retention_days(settings))                    |
 |  3. store.purge_archived_wishlists(cutoff) -> permanently cascades soft-deleted lists   |
 |  4. store.cleanup_expired_idempotency_records(now) -> purges expired idempotency keys   |
 |  5. store.cleanup_expired_session_revocations(now) -> purges expired revocation markers |
@@ -1822,8 +1859,9 @@ async def run_cleanup_cycle(
     notice_store: NoticeStore | None = None,
 ) -> CleanupStats
 ```
-- Performs a complete cleanup cycle: revokes expired tokens and purges deleted wishlists older
-  than `settings.wishlist_retention_days`. When `notice_store` is given (the application always
+- Performs a complete cleanup cycle: revokes expired tokens and purges deleted wishlists at
+  `purge_threshold(now, wishlist_retention_days(settings))`. That cutoff is the same boundary
+  as `is_retention_expired`. When `notice_store` is given (the application always
   passes it) it also deletes finished `notification_outbox` rows older than
   `settings.receipt_notice_retention_days`, finished `reminder_outbox` rows older than
   `settings.reminder_retention_days` (preserving active-cycle `list`/`birthday` reminders), and
@@ -1890,8 +1928,11 @@ Settings in `wishenka.config.Settings` (prefixed with `WISHENKA_` in environment
 - **`invite_token_ttl_seconds`** (`int`, default: `604800` / 7 days):
   Colleague invite token lifetime. Environment: `WISHENKA_INVITE_TOKEN_TTL_SECONDS`.
 - **`wishlist_retention_days`** (`int`, default: `30` days):
-  Retention window before permanently purging soft-deleted wishlists.
-  Environment: `WISHENKA_WISHLIST_RETENTION_DAYS`.
+  The one retention period for owner delete, recently deleted, restore, the
+  Mini App shell, and purge. `wishlist_retention_days()` in
+  `wishenka/wishlists/retention.py` is the typed read. The field default is
+  `DEFAULT_WISHLIST_RETENTION_DAYS`. Environment:
+  `WISHENKA_WISHLIST_RETENTION_DAYS`.
 - **`background_cleanup_interval_seconds`** (`int`, default: `3600` / 1 hour):
   Sleep interval between background cleanup runs.
   Environment: `WISHENKA_BACKGROUND_CLEANUP_INTERVAL_SECONDS`.
@@ -1929,19 +1970,21 @@ Settings in `wishenka.config.Settings` (prefixed with `WISHENKA_` in environment
 `event_date`) and the route (`wishenka.web.wishlists`, `wishlist_id`,
 `user_id`). Do not count creations with it.
 
-`wishlist_mutation_committed` (`INFO`, logger `wishenka.web.wishlists`) is
-logged in `execute()` (`wishenka/web/routes/wishlists.py`) after the handler
-returns and before `get_wishlist_repository()` commits. For creation the field
-is `operation=create_wishlist`. That record is not proof the commit succeeded.
-A storage error inside the handler does not emit it. A 422 or a missing session
-before the handler does not emit it. A later commit failure is
-`wishlist_store_error` from the repository dependency and can follow this
-record.
+`wishlist_mutation_committed` (`INFO`, logger `wishenka.web.wishlists`) means
+the handler action returned. `execute()` writes it before it returns that
+result, and before the repository commit. `get_wishlist_repository()` commits
+when its yield resumes, after the handler has returned. The event is not
+evidence that the commit succeeded. For creation the field is
+`operation=create_wishlist`. For owner delete it is `operation=delete_wishlist`,
+including a repeat inside the window that writes no row. A storage error
+inside the handler does not emit it. A 422 or a missing session before the
+handler does not emit it. A later commit failure is `wishlist_store_error`
+from the repository dependency and can follow this record.
 
 | Event (`event`) | Level | Trigger | Key Attributes |
 | --- | :---: | --- | --- |
 | `wishlist_created` | `INFO` | Service, then route. Do not count it | `wishlist_id` |
-| `wishlist_mutation_committed` | `INFO` | After handler, before commit | `operation` |
+| `wishlist_mutation_committed` | `INFO` | Handler action returned | `operation` |
 | `wishlist_status_changed` | `INFO` | Status changed | `wishlist_id`, `to_status` |
 | `member_joined` | `INFO` | Collaborator joined | `wishlist_id`, `user_id` |
 | `member_role_assigned` | `INFO` | Role updated | `wishlist_id`, `role` |
@@ -2062,10 +2105,12 @@ WishlistError
   otherwise create a new wishlist.
 
 #### `WishlistRetentionExpiredError`
-- **Root Cause**: Attempted to restore a soft-deleted wishlist after its retention window
-  (`WISHENKA_WISHLIST_RETENTION_DAYS`, default `30` days) expired.
-- **Resolution**: HTTP routes return `410 Gone` (`code: "retention_expired"`). The list is
-  eligible for permanent purge and can no longer be restored; create a new wishlist instead.
+- **Root Cause**: Delete or restore of a soft-deleted wishlist after the shared
+  window ended (`is_retention_expired` is true). The period is
+  `WISHENKA_WISHLIST_RETENTION_DAYS` (usual value 30).
+- **Resolution**: HTTP routes return `410 Gone` with `code` `retention_expired`.
+  The list can no longer be restored. Purge removes the row later. Create a
+  new wishlist.
 
 #### `InvalidInviteTokenError`
 - **Root Cause**: Invite link has expired, was rotated via `regenerate_invite_token`, or token is

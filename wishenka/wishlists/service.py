@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import math
 import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -13,6 +12,7 @@ from functools import wraps
 from inspect import iscoroutinefunction, signature
 from typing import TYPE_CHECKING, Any
 
+import wishenka.wishlists.retention as retention
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.currency import DEFAULT_CURRENCY
 from wishenka.items.models import ItemPriority
@@ -124,6 +124,8 @@ _SINGLE_WISHLIST_METHODS = frozenset(
         "update_wishlist_settings",
         "archive_wishlist",
         "unarchive_wishlist",
+        "get_wishlist_or_none",
+        "classify_owner_delete",
         "delete_wishlist",
         "restore_deleted_wishlist",
         "transfer_ownership",
@@ -1197,6 +1199,40 @@ class WishlistService:
         )
         return wl
 
+    async def get_wishlist_or_none(self, wishlist_id: int) -> Wishlist | None:
+        """Return the row in any status, including deleted, and write no log."""
+        return self._wishlists.get(wishlist_id)
+
+    async def classify_owner_delete(
+        self,
+        wishlist_id: int,
+        actor: AuthenticatedUser,
+        retention_days: int,
+        now: datetime | None = None,
+    ) -> retention.OwnerDeleteDecision:
+        """Classify an owner delete. Does not mutate and does not log."""
+        wishlist = await self.get_wishlist_or_none(wishlist_id)
+        if wishlist is None:
+            return retention.OwnerDeleteDecision(
+                kind=retention.OwnerDeleteKind.MISSING,
+                retention_days=retention_days,
+            )
+        ctx = WishlistAccessPolicy.resolve_context(actor, wishlist)
+        if not WishlistAccessPolicy.can_delete(ctx, wishlist):
+            return retention.OwnerDeleteDecision(
+                kind=retention.OwnerDeleteKind.FORBIDDEN,
+                retention_days=retention_days,
+            )
+        if wishlist.status != WishlistStatus.DELETED:
+            return retention.OwnerDeleteDecision(
+                kind=retention.OwnerDeleteKind.APPLY,
+                retention_days=retention_days,
+            )
+        effective_now = now if now is not None else datetime.now(UTC)
+        expired = retention.is_retention_expired(wishlist.updated_at, retention_days, effective_now)
+        kind = retention.OwnerDeleteKind.EXPIRED if expired else retention.OwnerDeleteKind.REPEAT
+        return retention.OwnerDeleteDecision(kind=kind, retention_days=retention_days)
+
     async def delete_wishlist(
         self,
         wishlist_id: int,
@@ -1246,12 +1282,11 @@ class WishlistService:
     async def list_deleted_wishlists(
         self,
         actor: AuthenticatedUser,
-        retention_days: int = 30,
+        retention_days: int = retention.DEFAULT_WISHLIST_RETENTION_DAYS,
         now: datetime | None = None,
     ) -> list[tuple[Wishlist, datetime, int]]:
         """List owner's soft-deleted wishlists that are still within the retention window."""
         effective_now = now if now is not None else datetime.now(UTC)
-        threshold = effective_now - timedelta(days=retention_days)
         results: list[tuple[Wishlist, datetime, int]] = []
         for wl in self._wishlists.values():
             if wl.status != WishlistStatus.DELETED:
@@ -1259,17 +1294,12 @@ class WishlistService:
             ctx = WishlistAccessPolicy.resolve_context(actor, wl)
             if not WishlistAccessPolicy.can_restore_deleted(ctx, wl):
                 continue
-            deleted_at = (
-                wl.updated_at
-                if wl.updated_at.tzinfo is not None
-                else wl.updated_at.replace(tzinfo=UTC)
-            )
-            if deleted_at <= threshold:
+            if retention.is_retention_expired(wl.updated_at, retention_days, effective_now):
                 continue
+            deleted_at = retention.deletion_moment(wl.updated_at)
             expires_at = deleted_at + timedelta(days=retention_days)
-            remaining_seconds = (expires_at - effective_now).total_seconds()
-            days_remaining = max(1, math.ceil(remaining_seconds / 86400))
-            results.append((wl, expires_at, days_remaining))
+            days_left = retention.days_remaining(wl.updated_at, retention_days, effective_now)
+            results.append((wl, expires_at, days_left))
         results.sort(key=lambda entry: entry[0].updated_at, reverse=True)
         logger.info(
             "Listed %s deleted wishlists for actor %s",
@@ -1288,7 +1318,7 @@ class WishlistService:
         self,
         wishlist_id: int,
         actor: AuthenticatedUser,
-        retention_days: int = 30,
+        retention_days: int = retention.DEFAULT_WISHLIST_RETENTION_DAYS,
         now: datetime | None = None,
     ) -> Wishlist:
         """Restore owner's soft-deleted wishlist within the retention window with token rotation."""
@@ -1317,11 +1347,7 @@ class WishlistService:
             raise WishlistArchivedError("Wishlist is archived and cannot be restored as deleted")
 
         effective_now = now if now is not None else datetime.now(UTC)
-        deleted_at = (
-            wl.updated_at if wl.updated_at.tzinfo is not None else wl.updated_at.replace(tzinfo=UTC)
-        )
-        threshold = effective_now - timedelta(days=retention_days)
-        if deleted_at <= threshold:
+        if retention.is_retention_expired(wl.updated_at, retention_days, effective_now):
             logger.warning(
                 "Restore rejected for deleted wishlist %s: retention window (%s days) expired",
                 wishlist_id,

@@ -8,6 +8,8 @@ from typing import Annotated, Any
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from wishenka.wishlists.retention import DEFAULT_WISHLIST_RETENTION_DAYS
+
 DEFAULT_SSRF_MAX_RESPONSE_BYTES: int = 2 * 1024 * 1024  # 2 MiB (2,097,152 bytes)
 DEFAULT_SSRF_ALLOWED_SCHEMES: tuple[str, ...] = ("http", "https")
 SUPPORTED_SSRF_SCHEMES: frozenset[str] = frozenset({"http", "https"})
@@ -90,7 +92,7 @@ class Settings(BaseSettings):
     telegram_bot_username: str = ""
     telegram_app_short_name: str = ""
     invite_token_ttl_seconds: int = 7 * 86400
-    wishlist_retention_days: int = 30
+    wishlist_retention_days: int = DEFAULT_WISHLIST_RETENTION_DAYS
     idempotency_retention_hours: int = Field(default=24, ge=1)
     background_cleanup_interval_seconds: int = 3600
     background_cleanup_enabled: bool = True

@@ -491,11 +491,13 @@ and never submits with it. API contract and events:
   (`:580-582`). The settings section itself exists only for `owner`/`admin` of an `active` list
   (`:824-826`), so admins and members never see the zone, and a missing or invalid
   `data-retention-days` hides it instead of promising a wrong number of days.
-- **Retention source**: `GET /` writes `data-retention-days="{int}"` on `<main id="app">` from
-  `settings.wishlist_retention_days` (`wishenka/web/routes/miniapp.py:24,49`; default `30`). The
-  texts use this value before the call; after a `200` the success text uses
-  `result.retention_days ?? days` (`:644`). A stale cached shell can show an outdated number
-  (WISHENKA-316).
+- **Retention source**: `GET /` writes `data-retention-days="{int}"` on `<main id="app">`
+  from `wishlist_retention_days(settings)` (`wishenka/web/routes/miniapp.py`). That
+  is the same period delete, recently deleted, and restore use. The usual value
+  is 30. Confirmation copy uses this value before the call; after a `200` the
+  success text uses `result.retention_days ?? days` (`:644`). The next document
+  load follows a changed setting. A shell already open keeps the number from
+  that load.
 - **Markup**: `div.wishlist-delete-zone` with `h3.wishlist-delete-heading`
   (`miniapp.wishlist_delete.heading`), `p.settings-field-hint` (`hint`) and the trigger
   `button.wishlist-delete-open` (`open`, "Delete wishlist...").
@@ -1032,10 +1034,13 @@ class="wishlist-card">` (`flex-direction: column` under `#app .wishlist-card`):
 
 #### Recently Deleted Wishlists (Owner Restore)
 
-When the authenticated caller owns soft-deleted wishlists still inside the retention window
-(`WISHENKA_WISHLIST_RETENTION_DAYS`, default `30` days), `showHome()` renders
+When the authenticated caller owns soft-deleted wishlists that the shared
+retention comparison still treats as restorable, `showHome()` renders
 `.wishlist-section.deleted-section.wishlist-section--deleted` (`miniapp.deleted.heading`,
-`miniapp.home.deleted_sub`):
+`miniapp.home.deleted_sub`). `GET /api/wishlists/deleted` uses the same period
+and the same `is_retention_expired` comparison as delete and restore. The usual
+period is 30 days (`WISHENKA_WISHLIST_RETENTION_DAYS`). An ended window is
+`410` with `detail.code` `retention_expired`:
 
 - Each `.wishlist-card.deleted-wishlist-card` renders `.wishlist-card-header` with
   `<h3 class="wishlist-card-title">` (`l.name || t('miniapp.common.untitled_wishlist')`) and
@@ -1045,9 +1050,9 @@ When the authenticated caller owns soft-deleted wishlists still inside the reten
 - Clicking restore disables the button, announces `miniapp.deleted.restoring`, sends
   `POST /api/wishlists/{id}/restore-deleted` with the session CSRF token, refreshes `showHome()`,
   and announces `miniapp.deleted.restored`.
-- If the retention window expired before submission (`410 Gone`), `showHome()` refreshes and
-  announces `miniapp.deleted.expired`; on other errors the button re-enables and announces
-  `miniapp.deleted.restore_failed`.
+- If the window has ended before submission (`410` `retention_expired`),
+  `showHome()` refreshes and announces `miniapp.deleted.expired`; on other errors
+  the button re-enables and announces `miniapp.deleted.restore_failed`.
 
 #### Home Overview Localization Keys (`wishenka/i18n/catalog.py`)
 
@@ -1702,11 +1707,11 @@ across three Jinja2 partials with privacy, performance, and CSP-safe broken-imag
 | `/api/auth/csrf` | `GET` | Yes | No | Issues session-bound CSRF token for forms. |
 | `/api/wishlists` | `GET` | Yes | No | Lists user's wishlists (owner and member). |
 | `/api/wishlists` | `POST` | Yes | Yes | Creates a personal wishlist; `name` is required (trimmed, 1-255), otherwise `422`. |
-| `/api/wishlists/deleted` | `GET` | Yes | No | Lists owner's soft-deleted wishlists within retention window. |
+| `/api/wishlists/deleted` | `GET` | Yes | No | Restorable soft-deleted lists, one shared window. |
 | `/api/wishlists/{id}` | `GET` | Yes | No | Returns wishlist details and item view. |
 | `/api/wishlists/{id}` | `PATCH` | Yes | Yes | Updates title, description, or event. |
-| `/api/wishlists/{id}` | `DELETE` | Yes | Yes | Owner soft-deletes the list (`200` idempotent in the retention window, `409` archived, `410` after the window, uniform `404` for non-owner or unknown). |
-| `/api/wishlists/{id}/restore-deleted` | `POST` | Yes | Yes | Restores owner's soft-deleted wishlist with token rotation (`410` if expired). |
+| `/api/wishlists/{id}` | `DELETE` | Yes | Yes | Classifies first. 410 `retention_expired`. |
+| `/api/wishlists/{id}/restore-deleted` | `POST` | Yes | Yes | 410 `retention_expired` if ended. |
 | `/api/wishlists/{id}/members` | `GET` | Yes | No | Returns list of members and roles. |
 | `/api/wishlists/{id}/members/{uid}/role` | `PATCH` | Yes | Yes | Updates role (Owner only). |
 | `/api/wishlists/{id}/members/{uid}` | `DELETE` | Yes | Yes | Removes member from wishlist. |
@@ -1910,7 +1915,10 @@ The following settings configure the Mini App and web security layer:
   hidden on purpose.
 - **Generic failure text after confirming**: the client never shows the reason. Check the server
   logs for `wishlist_delete_not_found` / `wishlist_delete_denied` (404),
-  `wishlist_archived_mutation_blocked` (409, the list must be unarchived first) or `wishlist_retention_expired` (410) and the request
-  log.
+  `wishlist_archived_mutation_blocked` (409, the list must be unarchived first) or
+  `wishlist_retention_expired` (410 `retention_expired`; the shared window has ended)
+  and the request log. `wishlist_mutation_committed` means the handler action
+  returned. It is written before the repository commit and is not evidence that
+  the commit succeeded.
 - **List stays visible after a success text**: reload the home screen; the list should be under
   "Recently deleted" with `days_left`.

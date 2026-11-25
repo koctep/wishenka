@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 from wishenka.config import Settings
 from wishenka.notices.store import NoticeStore
+from wishenka.wishlists.retention import purge_threshold, wishlist_retention_days
 from wishenka.wishlists.store import WishlistStore
 
 logger = logging.getLogger(__name__)
@@ -79,7 +80,7 @@ async def run_cleanup_cycle(
 
     try:
         expired_count = await store.cleanup_expired_tokens(effective_now)
-        retention_threshold = effective_now - timedelta(days=settings.wishlist_retention_days)
+        retention_threshold = purge_threshold(effective_now, wishlist_retention_days(settings))
         purged_count = await store.purge_archived_wishlists(retention_threshold)
         idempotency_cleaned = await store.cleanup_expired_idempotency_records(effective_now)
         revocations_cleaned = await store.cleanup_expired_session_revocations(effective_now)

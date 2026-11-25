@@ -9,8 +9,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, field_validator
 from sqlalchemy.exc import SQLAlchemyError
 
-from wishenka.auth.dependencies import get_current_user, get_optional_current_user
+from wishenka.auth.dependencies import get_current_user, get_optional_current_user, get_settings
 from wishenka.auth.models import AuthenticatedUser
+from wishenka.config import Settings
 from wishenka.web.dependencies import WishlistRepo
 from wishenka.web.idempotency import compute_request_hash, parse_idempotency_key
 from wishenka.web.routes.reservations import execute as execute_reservation
@@ -26,6 +27,7 @@ from wishenka.wishlists.models import Wishlist, WishlistRole, WishlistStatus
 from wishenka.wishlists.policy import WishlistAccessPolicy
 from wishenka.wishlists.repo_ops import RepoWishlistOps
 from wishenka.wishlists.repository import WishlistRepository
+from wishenka.wishlists.retention import OwnerDeleteKind, wishlist_retention_days
 from wishenka.wishlists.schemas import PromiseActionDTO, ReservationQuantityDTO
 from wishenka.wishlists.service import (
     WishlistService,
@@ -37,6 +39,14 @@ router = APIRouter()
 logger = logging.getLogger("wishenka.web.wishlists")
 User = Annotated[AuthenticatedUser, Depends(get_current_user)]
 OptionalUser = Annotated[AuthenticatedUser | None, Depends(get_optional_current_user)]
+
+
+def get_retention_days(settings: Annotated[Settings, Depends(get_settings)]) -> int:
+    """Period the wishlist routes pass into the shared retention rule."""
+    return wishlist_retention_days(settings)
+
+
+RetentionDays = Annotated[int, Depends(get_retention_days)]
 
 
 class WishlistInput(BaseModel):
@@ -273,12 +283,9 @@ async def list_wishlists(
 
 @router.get("/api/wishlists/deleted")
 async def list_deleted_wishlists(
-    request: Request, user: User, repo: WishlistRepo
+    request: Request, user: User, repo: WishlistRepo, retention_days: RetentionDays
 ) -> list[dict[str, Any]]:
     """Return owner's soft-deleted wishlists still inside the retention window."""
-    retention_days = getattr(
-        getattr(request.app.state, "settings", None), "wishlist_retention_days", 30
-    )
 
     async def action(service: Any) -> list[dict[str, Any]]:
         entries = await service.list_deleted_wishlists(user, retention_days=retention_days)
@@ -530,20 +537,17 @@ async def update_wishlist(
 
 @router.delete("/api/wishlists/{wishlist_id}")
 async def delete_wishlist(
-    request: Request, wishlist_id: int, user: User, repo: WishlistRepo
+    request: Request,
+    wishlist_id: int,
+    user: User,
+    repo: WishlistRepo,
+    retention_days: RetentionDays,
 ) -> dict[str, Any]:
     """Soft-delete a wishlist for its owner; repeats inside the retention window succeed."""
-    retention_days = getattr(
-        getattr(request.app.state, "settings", None), "wishlist_retention_days", 30
-    )
 
     async def action(service: Any) -> dict[str, Any]:
-        wl = (
-            await service.repo.get_wishlist(wishlist_id)
-            if isinstance(service, RepoWishlistOps)
-            else service._wishlists.get(wishlist_id)
-        )
-        if wl is None:
+        decision = await service.classify_owner_delete(wishlist_id, user, retention_days)
+        if decision.kind == OwnerDeleteKind.MISSING:
             logger.warning(
                 "Wishlist delete rejected: wishlist %s not found",
                 wishlist_id,
@@ -554,8 +558,7 @@ async def delete_wishlist(
                 },
             )
             raise WishlistNotFoundError("Wishlist not found")
-        ctx = WishlistAccessPolicy.resolve_context(user, wl)
-        if not WishlistAccessPolicy.can_delete(ctx, wl):
+        if decision.kind == OwnerDeleteKind.FORBIDDEN:
             # Server-side only: the client gets the same 404 as for an unknown id.
             logger.warning(
                 "Wishlist delete rejected: user %s is not the owner of wishlist %s",
@@ -568,15 +571,10 @@ async def delete_wishlist(
                 },
             )
             raise PermissionDeniedError("Only the owner can delete a wishlist")
+        if decision.kind == OwnerDeleteKind.EXPIRED:
+            raise WishlistRetentionExpiredError("Wishlist retention window has expired")
         outcome = "deleted"
-        if wl.status == WishlistStatus.DELETED:
-            deleted_at = (
-                wl.updated_at
-                if wl.updated_at.tzinfo is not None
-                else wl.updated_at.replace(tzinfo=UTC)
-            )
-            if deleted_at <= datetime.now(UTC) - timedelta(days=retention_days):
-                raise WishlistRetentionExpiredError("Wishlist retention window has expired")
+        if decision.kind == OwnerDeleteKind.REPEAT:
             outcome = "already_deleted"
         else:
             await service.delete_wishlist(wishlist_id, user)
@@ -600,12 +598,13 @@ async def delete_wishlist(
 
 @router.post("/api/wishlists/{wishlist_id}/restore-deleted")
 async def restore_deleted_wishlist(
-    request: Request, wishlist_id: int, user: User, repo: WishlistRepo
+    request: Request,
+    wishlist_id: int,
+    user: User,
+    repo: WishlistRepo,
+    retention_days: RetentionDays,
 ) -> dict[str, Any]:
     """Restore owner's soft-deleted wishlist within the retention window."""
-    retention_days = getattr(
-        getattr(request.app.state, "settings", None), "wishlist_retention_days", 30
-    )
 
     async def action(service: Any) -> dict[str, Any]:
         wl = await service.restore_deleted_wishlist(
