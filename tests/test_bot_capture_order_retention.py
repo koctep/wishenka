@@ -244,7 +244,7 @@ def test_alembic_bot_capture_order_retention_downgrade(tmp_path: Path) -> None:
     cfg.set_main_option("script_location", "wishenka/wishlists/alembic")
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_file}")
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "add_bot_capture_order_retention")
     command.downgrade(cfg, "add_user_fk_cascades")
 
     with sqlite3.connect(str(db_file)) as conn:

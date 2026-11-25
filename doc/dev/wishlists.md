@@ -45,6 +45,10 @@ secure sharing tokens.
    preventing mutation or reservation on archived and deleted wishlists.
 5. **Structured Audit Logging**: Comprehensive security and operational event logging with
    zero leakage of sensitive raw tokens.
+6. **Viewing History Access**: A view is recorded and listed only for the owner, a
+   collaborative member, or a user with a share grant for the current `public_token`.
+   Strangers receive the same not-found response as a missing list. See
+   [Viewing History Access](#viewing-history-access-wishenka-303).
 
 ---
 
@@ -106,7 +110,7 @@ rejected by the optional authentication dependency.
 
 - `GET /api/public/wishlists/{token}`: Reads the anonymous-safe public projection, including archived lists.
 
-- `GET /api/public/wishlists/{token}/view`: Reads the role-specific public projection (`anonymous_safe` for unauthenticated callers, `recipient_safe` for recipients, `gifter` for authenticated non-recipients) without membership or invite secrets.
+- `GET /api/public/wishlists/{token}/view`: Reads the role-specific public projection (`anonymous_safe` for unauthenticated callers, `recipient_safe` for recipients, `gifter` for authenticated non-recipients) without membership or invite secrets. An authenticated caller also records Viewing History for that list (`record_share_view_if_authenticated`). Anonymous callers do not.
 
 - `GET /api/favorites`: Lists the caller's favorited wishlists in reverse-chronological order, filtered to non-deleted, non-owned lists where the caller is an active collaborator (`wl_members`) or holds an active share-link grant (`wl_share_access` matching `public_token`).
 
@@ -114,11 +118,17 @@ rejected by the optional authentication dependency.
 
 - `DELETE /api/favorites/{id}`: Removes a wishlist from caller's favorites.
 
-- `GET /api/history`: Lists up to 20 recently viewed wishlists in reverse-chronological order.
+- `GET /api/history`: Lists up to 20 recently viewed wishlists the caller may still
+  access (owner, member, or current share grant), newest first. Deleted lists and
+  revoked rows are omitted. Each item is list metadata only: `id`, `name`,
+  `description`, `event_title`, `event_date`, `viewed_at`, `is_favorite`, `role`.
+  Reservation counts and buyer identities are not included.
 
-- `POST /api/history/{id}`: Records or updates a wishlist view event for caller.
+- `POST /api/history/{id}`: Records or updates a view when `can_view_history` allows
+  it. A missing, deleted, or inaccessible id returns `404` with
+  `detail` `"Wishlist not found"`.
 
-- `DELETE /api/history`: Clears all viewing history for caller.
+- `DELETE /api/history`: Clears all viewing history rows for the caller.
 
 - `Wish Items API` (`/api/wishlists/{wishlist_id}/items`): Full REST CRUD lifecycle suite for wish items, including atomic reordering (`PUT /reorder`), safe archiving (`POST /{item_id}/archive`), end-of-list restore (`POST /{item_id}/restore`), piece accounting ($1 \le Q \le 1000$), Reduction Lock invariant, collaborative member addressing, and zero-leak Surprise Invariant projections. Detailed specification, request/response models, and telemetry events are documented in [Items Domain Documentation](items.md).
 
@@ -169,9 +179,10 @@ tests only, `app.state.wishlist_service` can override the router's service.
 `WISHENKA_DATABASE_URL` selects the SQLite database and defaults to
 `sqlite+aiosqlite:///data/wishenka.db`. The application initializes the normalized relational
 schema during lifespan startup by running Alembic migrations to head (a recognized legacy database
-is adopted without data loss, except for the explicit security remediation in
-`add_share_access_and_purge_favorites` that irreversibly purges legacy non-member `wl_favorites`
-rows without verified share-link access; see [migrations.md](migrations.md)), selects WAL mode in that
+is adopted without data loss, except two security remediations:
+`add_share_access_and_purge_favorites` purges legacy non-member `wl_favorites` rows, and
+`purge_legacy_non_member_view_history` purges unverified non-member `wl_view_history`
+rows; see [migrations.md](migrations.md)), selects WAL mode in that
 migration startup, creates parent directories for a file database, and disposes the engine at
 shutdown (`WishlistStore.dispose()`). `WISHENKA_SQLITE_DB_PATH` is a separate setting and does not
 configure this store. All workers must point to the same database file to share state. The store
@@ -511,7 +522,7 @@ and pure access policies in [`wishenka.wishlists.policy`](../../wishenka/wishlis
 - **`WishlistMember`**: Association between user (`user_id`) and wishlist with `WishlistRole`.
 - **`WishlistFavorite`**: Association tracking a user's favorite (`user_id`, `wishlist_id`).
 - **`ShareAccessGrant`**: Capability-bound access record (`user_id`, `wishlist_id`, `public_token`, `granted_at`) representing an authenticated non-owner's verified share-link visit.
-- **`ViewHistoryEntry`**: Record of a wishlist view event (`id`, `user_id`, `wishlist_id`).
+- **`ViewHistoryEntry`**: One visit (`id`, `user_id`, `wishlist_id`, `viewed_at`). At most one row per user and wishlist.
 - **`WishItem`**: An item desired by a recipient, with quantity and optional price.
 - **`Reservation`**: Active allocation of a `WishItem`'s quantity created by a gifter.
 
@@ -544,8 +555,11 @@ class UserWishlistContext:
 | Regenerate sharing tokens | Yes | Yes | No | No |
 | Reserve item (non-recipient) | Yes | Yes | Yes | Yes |
 | Reserve item (as recipient) | **No** | **No** | **No** | **No** |
+| Record and list Viewing History | Yes | Yes | Yes | Current share grant only |
 
 *Note: Item recipients are strictly prohibited from reserving items designated for themselves. Per `WISHENKA-154` (`FR-1.2`, `FR-4` / Q11), a co-author (`Admin` or `Member`) who is also the recipient of a wish retains full author rights on that wish (edit, archive/restore, record/undo/correct receipt) with strict surprise protection, while acting as a normal gifter on other wishes in the same list.*
+
+*Viewing History for the gifter column requires an authenticated user and a `wl_share_access` row whose `public_token` matches the list. An anonymous public viewer is not recorded and cannot list the wishlist. Strangers receive `404`.*
 
 #### Role Precedence & Favorite Evaluation
 
@@ -565,6 +579,179 @@ owner > admin > member > favorite
   soft-deleted lists, enforces the self-favoriting guard (`wishlist.owner_id != user.telegram_id`),
   and requires either active collaborative membership (`ctx.is_member`) or a verified active
   share-link grant (`has_share_access=True` from `wl_share_access` matching `wishlist.public_token`).
+
+### Viewing History Access (WISHENKA-303)
+
+Viewing History is a personal index of wishlists the caller is still allowed to open.
+It is not a directory of every list id they have guessed.
+
+#### Overview
+
+Recording (`POST /api/history/{id}` and authenticated share-link visits) and listing
+(`GET /api/history`) succeed only when all of the following hold:
+
+- The caller is authenticated.
+- The wishlist is not `deleted`.
+- The caller is the owner, a current collaborative member (`wl_members`), or holds
+  `wl_share_access` whose `public_token` equals `wl_lists.public_token`.
+
+Owners may record their own lists. Favorites reject self-favoriting; history does not.
+A stranger (no membership and no matching grant) gets the same HTTP `404` as a missing
+id, and no row is written. Listing never returns that wishlist's title or event fields.
+Membership removal and share-link rotation delete history when no other valid path
+remains. A one-way Alembic upgrade deletes legacy rows that fail the same test.
+
+The history payload stays inside the Surprise Invariant: list title, description,
+event fields, visit time, favorite flag, and role. No reservation rows, quantities,
+or buyer identities.
+
+#### Architecture
+
+```mermaid
+flowchart TD
+    shareGet["GET /share/{token}"] --> recordHelper["record_share_view_if_authenticated"]
+    publicView["GET /api/public/wishlists/{token}/view"] --> recordHelper
+    postHist["POST /api/history/{id}"] --> recordView["record_view"]
+    getHist["GET /api/history"] --> getHistory["get_history"]
+    recordHelper --> recordView
+    recordView --> policy["WishlistAccessPolicy.can_view_history"]
+    getHistory --> policy
+    recordView --> repo["WishlistRepository.record_view"]
+    getHistory --> listSql["WishlistRepository.list_view_history"]
+    removeMember["remove_member"] --> dropOne["delete_history_if_no_share_access"]
+    rotate["regenerate_public_token / restore / transfer"] --> dropMany["delete_non_member_history"]
+    policy --> grants["wl_share_access matches public_token"]
+    listSql --> db[("wl_view_history")]
+    repo --> db
+    dropOne --> db
+    dropMany --> db
+```
+
+- **`WishlistAccessPolicy.can_view_history`** (`wishenka/wishlists/policy.py`): pure
+  check. `False` when `user` is `None` or `wishlist.status` is `DELETED`. Otherwise
+  `ctx.is_owner or ctx.is_member or has_share_access`. No I/O.
+- **`RepoWishlistOps` and `WishlistService`**: both enforce the policy in `record_view`
+  and `get_history`. HTTP routes use `RepoWishlistOps` unless a test injects
+  `app.state.wishlist_service`.
+- **`WishlistRepository.list_view_history`**: SQL join keeps non-deleted lists where
+  the user is owner, member, or grant holder, then `ORDER BY viewed_at DESC LIMIT`.
+  The limit applies to accessible rows, not to stale rows that would be dropped later.
+- **`delete_history_if_no_share_access`**: used by `remove_member`. Deletes the user's
+  row unless they are the owner, still a member, or still hold a grant for the
+  current token.
+- **`delete_non_member_history`**: used after share grants are revoked. Deletes rows
+  whose user is neither `wl_lists.owner_id` nor in `wl_members`. Called from
+  `RepoWishlistOps._revoke_share_access_and_favorites` (`regenerate_public_token`,
+  `restore_deleted_wishlist`) and `WishlistService._revoke_share_access_for_wishlist`
+  (those two plus `transfer_ownership`). `transfer_ownership` exists on
+  `WishlistService` only. It demotes the previous owner to `admin` before the purge,
+  so both the new owner and the former owner keep their rows.
+- **Routes**: `POST /api/history/{wishlist_id}` delegates existence and access to
+  `service.record_view`. `GET /share/{public_token}` (`sharing.py`) and
+  `GET /api/public/wishlists/{token}/view` call `record_share_view_if_authenticated`
+  after a successful resolve. That helper no-ops when `current_user` is `None` and
+  swallows `WishlistNotFoundError`. Anonymous `GET /api/public/wishlists/{token}`
+  passes `current_user=None` into token resolution and does not record a view.
+  Opening the share link as a non-owner still writes `wl_share_access` first
+  (WISHENKA-302), so the following `record_view` sees a valid grant.
+- **Migration** `purge_legacy_non_member_view_history`: deletes `wl_view_history`
+  rows that are not owner, member, or current-grant. `ROLLBACK_POLICY = "one-way"`.
+
+#### Usage
+
+```python
+@staticmethod
+def can_view_history(
+    user: AuthenticatedUser | None,
+    wishlist: Wishlist,
+    *,
+    has_share_access: bool = False,
+) -> bool:
+    """True when this user may record or see the wishlist in Viewing History."""
+```
+
+```python
+async def record_view(
+    self, user: AuthenticatedUser, wishlist_id: int
+) -> ViewHistoryEntry: ...
+
+async def get_history(
+    self, user: AuthenticatedUser, limit: int = 20
+) -> list[tuple[Wishlist, datetime]]: ...
+
+async def delete_non_member_history(self, wishlist_id: int) -> int: ...
+
+async def delete_history_if_no_share_access(
+    self, user_id: int, wishlist_id: int, public_token: str
+) -> int: ...
+
+async def list_view_history(
+    self, user_id: int, limit: int = 20
+) -> list[ViewHistoryEntry]: ...
+```
+
+- `record_view` upserts `(user_id, wishlist_id)` and refreshes `viewed_at`.
+- `get_history` returns accessible non-deleted lists, newest first, at most `limit`.
+- `clear_history` / `DELETE /api/history` deletes every row for that user, including
+  lists they can no longer open.
+- A removed member who still holds the current share grant keeps the history row
+  until the token rotates. After rotation they must open the new link while
+  authenticated before the list appears again.
+- `POST /api/public/wishlists/{token}/items/{item_id}/reservations` records a share
+  grant for the booker. It does not by itself call `record_view`. History for that
+  visit comes from the view or share page, or from `POST /api/history/{id}` once
+  the grant exists.
+
+#### Configuration
+
+No new setting or environment variable. Access uses the existing `public_token` and
+`wl_share_access` rows. Startup still runs Alembic to head, which applies
+`purge_legacy_non_member_view_history` once. Database URL and WAL settings are in
+[Storage and configuration](#storage-and-configuration) and
+[migrations.md](migrations.md).
+
+#### Troubleshooting
+
+- **`404` on `POST /api/history/{id}` with an id the caller believes is real.**
+  The body is always `{"detail": "Wishlist not found"}` for a missing id, a deleted
+  list, and a stranger. Check `view_history_access_denied` (`WARNING`, non-member
+  without a current grant) or `view_history_deleted_wishlist_denied` (`WARNING`,
+  soft-deleted). Neither event includes the title or `public_token`. A missing id
+  raises `WishlistNotFoundError` without `view_history_access_denied`.
+- **Share visit did not create a history row.** Anonymous
+  `GET /api/public/wishlists/{token}` never records history. The caller must be
+  authenticated on `GET /share/{public_token}` or
+  `GET /api/public/wishlists/{token}/view`. Those routes call
+  `record_share_view_if_authenticated`, which calls `record_view` and does not
+  log success. Production `RepoWishlistOps.record_view` does not emit
+  `view_history_recorded` either. The HTML share route logs
+  `wishlist_shared_view` (`INFO`, `wishlist_id`) before it builds the template
+  response. The JSON route logs `public_entry_viewed` (`INFO`, `wishlist_id`,
+  `identified` true) inside the action, before `execute` finishes. Those events
+  establish that the route reached that success log. They do not establish that
+  the HTTP response was sent or that the transaction completed. Confirm the history
+  row with `GET /api/history`. `view_history_recorded` (`INFO`, `wishlist_id`,
+  `user_id`) is emitted by the `POST /api/history/{id}` route and by
+  `WishlistService.record_view` when that in-memory service is injected.
+  Its absence after a share visit does not mean the write failed. A refused
+  write still logs `view_history_access_denied` or
+  `view_history_deleted_wishlist_denied`. The helper swallows
+  `WishlistNotFoundError`, so the page can render without a history row.
+- **List vanished from `GET /api/history` after a membership or share change.**
+  `remove_member` deletes the row when the user is not the owner and has no grant
+  for the current token (`view_history_access_revoked`, `reason="member_removed"`,
+  after commit). Token rotation, restore, and ownership transfer delete non-member
+  rows and log `share_access_revoked` with `revoked_history`. Those events are
+  deferred until commit; a rolled-back transaction does not emit them. Re-open the
+  current share link while authenticated, or rejoin via invite.
+- **Old stranger rows still in the database.** Confirm Alembic head is
+  `purge_legacy_non_member_view_history` and that startup logged
+  `legacy_non_member_view_history_purged` (`rows`). Listing also hides inaccessible
+  rows if a purge was skipped. Do not downgrade this revision; restore a backup.
+  See [migrations.md](migrations.md).
+- **History shows reservation or buyer data.** It must not. `GET /api/history`
+  builds the allowlist in `get_history` (`wishenka/web/routes/wishlists.py`). Gift
+  details stay on item and reservation endpoints, behind `is_recipient`.
 
 ### Surprise Invariant: Zero-Leak Projection Design
 
@@ -924,15 +1111,17 @@ async def remove_favorite(
     at `WARNING` with `wishlist_id` and `user_id` only). Returning `404` matches missing/deleted
     wishlists to prevent wishlist ID enumeration.
 - **Revocation Hooks**:
-  - `remove_member`: After removing membership, deletes the user's `wl_favorites` row if they hold
-    no valid `wl_share_access` grant for the current `public_token` (logs `favorite_access_revoked`
-    with `reason="member_removed"`).
+  - `remove_member`: After removing membership, deletes the user's `wl_favorites` row and
+    `wl_view_history` row if they hold no valid `wl_share_access` grant for the current
+    `public_token` (logs `favorite_access_revoked` and, when a history row was removed,
+    `view_history_access_revoked`, both with `reason="member_removed"`).
   - `regenerate_public_token` and `restore_deleted_wishlist` (both `RepoWishlistOps` and
     `WishlistService` / `WishlistStore` paths), and `transfer_ownership` (`WishlistService` only):
     Rotating `public_token` deletes all `wl_share_access` grants for the wishlist and purges
-    non-member `wl_favorites` rows (logs `share_access_revoked` with `reason`
-    `"public_token_rotated"`, `"wishlist_restored"`, or `"ownership_transferred"`), preventing stale
-    non-member rows from leaking to downstream notification consumers.
+    non-member `wl_favorites` and non-member `wl_view_history` rows (logs `share_access_revoked`
+    with `reason` `"public_token_rotated"`, `"wishlist_restored"`, or `"ownership_transferred"`,
+    plus `revoked_history`), preventing stale non-member rows from leaking.
+    History rules: [Viewing History Access](#viewing-history-access-wishenka-303).
 - **Idempotency**: Adding an existing favorite is an idempotent no-op.
 - Synchronous `has_favorite(user_id, wishlist_id)` and async `is_favorite(user, wishlist_id)`
   allow quick lookups.
@@ -965,11 +1154,12 @@ async def record_view(
 ) -> ViewHistoryEntry
 ```
 
-- **Deduplication**: If the user previously viewed this wishlist, updates its `viewed_at` timestamp
-  and moves it to the most recent position.
-- **20-Entry Bound**: Enforces a strict 20-entry ceiling per user by pruning the oldest records
-  whenever a 21st unique entry is recorded.
-- **Validation**: Raises `WishlistNotFoundError` if the wishlist is non-existent or soft-deleted.
+- **Access**: Same rule as [Viewing History Access](#viewing-history-access-wishenka-303).
+  Denied calls raise `WishlistNotFoundError` and do not upsert.
+- **Deduplication**: A previous row for this user and wishlist updates `viewed_at`.
+- **Bound**: `GET /api/history` uses `limit=20`. SQL listing applies that limit after the
+  access filter. `WishlistService.record_view` (in-memory) also drops that user's oldest
+  rows past 20. `RepoWishlistOps.record_view` keeps older stored rows.
 
 #### `get_history` & `clear_history`
 
@@ -988,8 +1178,11 @@ async def clear_history(
 ) -> None
 ```
 
-- `get_history`: Returns up to `limit` entries as `(Wishlist, datetime)` tuples in reverse
-  chronological order of viewing. Excludes soft-deleted wishlists.
+- `get_history`: Returns up to `limit` entries as `(Wishlist, datetime)` tuples, newest
+  first. Omits soft-deleted lists and lists that fail `can_view_history` (not owner,
+  not member, no current share grant). `RepoWishlistOps` loads the SQL-filtered page
+  and checks the policy again. `WishlistService` filters in memory and logs
+  `view_history_listed`. The HTTP route also logs `view_history_listed` with `count`.
 - `clear_history`: Removes all viewing history entries for the authenticated user and logs
   `view_history_cleared` with `user_id` and `removed_count`. This is the only emitter: the
   `DELETE /api/history` route does not log it (WISHENKA-292). Screen:
@@ -1276,8 +1469,10 @@ granular async operations over an active SQLAlchemy `AsyncConnection`.
 - `list_user_reservations(user_id: int) -> list[Reservation]`: Fetches active/purchased reservations
   created by the specified user.
 - `list_favorites(user_id: int) -> list[WishlistFavorite]`: Ordered bookmarks for caller.
-- `list_view_history(user_id: int, limit: int = 20) -> list[ViewHistoryEntry]`: Chronologically
-  ordered history entries up to the bounded limit.
+- `list_view_history(user_id: int, limit: int = 20) -> list[ViewHistoryEntry]`: Newest
+  accessible visits. Joins `wl_lists`, skips `status = deleted`, and keeps rows where
+  the user is owner, a `wl_members` row, or a `wl_share_access` grant matching
+  `l.public_token`. `LIMIT` applies after that filter.
 
 #### Row-Level Mutation Methods
 - `upsert_wishlist(wishlist: Wishlist)`: Checks existence by ID and executes row-level `UPDATE`
@@ -1301,6 +1496,11 @@ granular async operations over an active SQLAlchemy `AsyncConnection`.
 - `delete_favorite_if_no_share_access(user_id: int, wishlist_id: int, public_token: str) -> int`:
   Deletes a single `wl_favorites` row when no matching `wl_share_access` grant exists and returns
   the deleted row count.
+- `delete_non_member_history(wishlist_id: int) -> int`: Deletes `wl_view_history` rows
+  for the list when the user is neither `wl_lists.owner_id` nor in `wl_members`.
+- `delete_history_if_no_share_access(user_id, wishlist_id, public_token) -> int`:
+  Deletes that user's row unless they are the owner, a member, or hold
+  `wl_share_access` for `public_token`.
 - `record_view(entry)`: Uses `INSERT ... ON CONFLICT DO UPDATE SET viewed_at = excluded.viewed_at`.
 - `clear_view_history(user_id: int)`: Deletes viewing history for a single user.
 
@@ -1720,7 +1920,7 @@ Settings in `wishenka.config.Settings` (prefixed with `WISHENKA_` in environment
 | `access_denied` | `WARNING` | Action blocked | `wishlist_id`, `action` |
 | `surprise_invariant_violation_attempt` | `WARNING` | Self-booking blocked | `item_id` |
 | `invalid_invite_token` | `WARNING` | Bad invite token | None (token withheld) |
-| `wishlist_shared_view` | `INFO` | Public share rendered | `wishlist_id`, `is_recipient` |
+| `wishlist_shared_view` | `INFO` | Logged before the HTML template response is built; rendering may still fail | `wishlist_id`, `is_recipient` |
 | `wishlist_shared_view_failed` | `WARNING` | Public view failed | None (token withheld) |
 | `public_wishlist_resolved` | `INFO` | Public token resolved | `wishlist_id`, `identified`, `user_id`, `projection_mode`, `items_count` |
 | `wishlist_service_store_required` | `ERROR` | `WishlistService` created without store | None (`ValueError` raised) |
@@ -1737,10 +1937,14 @@ Settings in `wishenka.config.Settings` (prefixed with `WISHENKA_` in environment
 | `favorite_access_denied` | `WARNING` | Non-owner lacks membership or valid `wl_share_access` grant (HTTP 404 returned) | `wishlist_id`, `user_id` |
 | `share_access_granted` | `INFO` | Authenticated non-owner resolved active share link (committed) | `wishlist_id`, `user_id` |
 | `favorite_access_revoked` | `INFO` | Removed member's favorite deleted due to no active share grant (committed) | `wishlist_id`, `user_id`, `actor_id`, `reason` (`member_removed`) |
-| `share_access_revoked` | `INFO` | Share grants / non-member favorites revoked on token rotation (committed) | `wishlist_id`, `actor_id`, `reason` (`public_token_rotated` / `wishlist_restored` / `ownership_transferred`), `revoked_grants`, `revoked_favorites` |
+| `share_access_revoked` | `INFO` | Share grants, non-member favorites, and non-member view history revoked on token rotation (committed) | `wishlist_id`, `actor_id`, `reason` (`public_token_rotated` / `wishlist_restored` / `ownership_transferred`), `revoked_grants`, `revoked_favorites`, `revoked_history` |
 | `legacy_non_member_favorites_purged` | `INFO` | Legacy non-member `wl_favorites` rows purged in `add_share_access_and_purge_favorites` migration | `rows` |
+| `legacy_non_member_view_history_purged` | `INFO` | Legacy unverified non-member `wl_view_history` rows purged by `purge_legacy_non_member_view_history` | `rows` |
 | `view_history_listed` | `INFO` | History fetched | `user_id`, `count` |
-| `view_history_recorded` | `INFO` | View recorded | `wishlist_id`, `user_id` |
+| `view_history_recorded` | `INFO` | View recorded by `POST /api/history/{id}` or `WishlistService.record_view`. Share routes and `RepoWishlistOps.record_view` do not emit it | `wishlist_id`, `user_id` |
+| `view_history_access_denied` | `WARNING` | Non-member without a current share grant tried to record a view (HTTP 404) | `wishlist_id`, `user_id` |
+| `view_history_deleted_wishlist_denied` | `WARNING` | Record attempted on a soft-deleted list (HTTP 404) | `wishlist_id`, `user_id` |
+| `view_history_access_revoked` | `INFO` | Member removal deleted history because no current share grant remained (committed) | `wishlist_id`, `user_id`, `actor_id`, `reason` (`member_removed`) |
 | `view_history_cleared` | `INFO` | History cleared (once per delete) | `user_id`, `removed_count` |
 | `wishlist_store_read` | `INFO` | State read | `scoped`, `wishlist_id`, `wishlists_count`, `items_count` |
 | `wishlist_store_write` | `INFO` | Changes committed | `scoped`, `wishlist_id`, `wishlists_count`, `items_count` |
@@ -1851,6 +2055,17 @@ WishlistError
   - **Legacy non-member favorite purge**: The `add_share_access_and_purge_favorites` migration purged pre-existing non-member `wl_favorites` rows that lacked a `wl_share_access` grant (`legacy_non_member_favorites_purged`).
   - **Direct `POST /api/favorites/{id}` without prior share visit**: Non-members who have not visited the current active share link lack a `wl_share_access` grant, so `POST /api/favorites/{id}` raises `WishlistNotFoundError` (`404`, anti-enumeration).
 - **Resolution**: For non-members who should still have access, ask the wishlist owner or admin for the current active share link and visit `/share/{public_token}` or `GET /api/public/wishlists/{token}/view` while authenticated to record a fresh `wl_share_access` grant, then re-favorite via `POST /api/favorites/{id}` (or re-join as a collaborator via a valid invite link). If the list was soft-deleted, only the owner can restore it within the retention window.
+
+#### `404` on `POST /api/history/{id}` or a list missing from `GET /api/history`
+
+- **Root Cause**: Recording and listing require the caller to be the owner, a current
+  member, or the holder of `wl_share_access` for the list's current `public_token`,
+  and the list must not be deleted. Removal without a remaining grant, and share-link
+  rotation, restore, or ownership transfer, delete the history row. The migration
+  `purge_legacy_non_member_view_history` already removed legacy stranger rows.
+- **Resolution**: Open the current share link while authenticated, or rejoin by invite.
+  Compare `view_history_access_denied` with a truly missing id (no such event).
+  Details: [Viewing History Access](#viewing-history-access-wishenka-303).
 
 #### `RuntimeError` ("Wishlist storage operation failed")
 - **Root Cause**: A locked or busy database is `InventoryBusyError`; any other storage

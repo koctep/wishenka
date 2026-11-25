@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import secrets
@@ -367,6 +368,18 @@ def project_reservation_action(
         available_quantity=item.available_quantity,
         item=projected,
     )
+
+
+async def record_share_view_if_authenticated(
+    service: Any,
+    current_user: AuthenticatedUser | None,
+    wishlist_id: int,
+) -> None:
+    """Record viewing history for an authenticated share-link visitor when permitted."""
+    if current_user is None:
+        return
+    with contextlib.suppress(WishlistNotFoundError):
+        await service.record_view(current_user, wishlist_id)
 
 
 class WishlistService:
@@ -983,6 +996,28 @@ class WishlistService:
                     "actor_id": actor.telegram_id,
                 },
             )
+        if user_id != wl.owner_id and not self._has_valid_share_access(user_id, wl):
+            before_count = len(self._view_history)
+            self._view_history = [
+                e
+                for e in self._view_history
+                if not (e.user_id == user_id and e.wishlist_id == wl.id)
+            ]
+            if len(self._view_history) < before_count:
+                self._emit_or_defer_commit_log(
+                    logging.INFO,
+                    "View history revoked on member removal: wishlist_id=%s user_id=%s actor_id=%s",
+                    wl.id,
+                    user_id,
+                    actor.telegram_id,
+                    extra={
+                        "event": "view_history_access_revoked",
+                        "reason": "member_removed",
+                        "wishlist_id": wl.id,
+                        "user_id": user_id,
+                        "actor_id": actor.telegram_id,
+                    },
+                )
         logger.info(
             "Member %s removed from wishlist %s by actor %s",
             user_id,
@@ -3234,7 +3269,7 @@ class WishlistService:
         reason: str = "public_token_rotated",
         actor_id: int | None = None,
     ) -> None:
-        """Revoke all share-access grants and purge non-member favorites for a wishlist."""
+        """Revoke share-access grants, non-member favorites, and non-member view history."""
         stale_sa_keys = [key for key in self._share_access if key[1] == wishlist.id]
         for key in stale_sa_keys:
             del self._share_access[key]
@@ -3244,14 +3279,26 @@ class WishlistService:
         ]
         for key in stale_fav_keys:
             del self._favorites[key]
-        if stale_sa_keys or stale_fav_keys:
+        before_hist = len(self._view_history)
+        self._view_history = [
+            e
+            for e in self._view_history
+            if not (
+                e.wishlist_id == wishlist.id
+                and e.user_id != wishlist.owner_id
+                and e.user_id not in member_ids
+            )
+        ]
+        revoked_history = before_hist - len(self._view_history)
+        if stale_sa_keys or stale_fav_keys or revoked_history > 0:
             self._emit_or_defer_commit_log(
                 logging.INFO,
-                "Share access revoked: wishlist_id=%s reason=%s grants=%s favorites=%s",
+                "Share access revoked: wishlist_id=%s reason=%s grants=%s favorites=%s history=%s",
                 wishlist.id,
                 reason,
                 len(stale_sa_keys),
                 len(stale_fav_keys),
+                revoked_history,
                 extra={
                     "event": "share_access_revoked",
                     "reason": reason,
@@ -3259,6 +3306,7 @@ class WishlistService:
                     "actor_id": actor_id,
                     "revoked_grants": len(stale_sa_keys),
                     "revoked_favorites": len(stale_fav_keys),
+                    "revoked_history": revoked_history,
                 },
             )
 
@@ -3379,11 +3427,24 @@ class WishlistService:
                     "View history record denied: wishlist %s is deleted",
                     wishlist_id,
                     extra={
-                        "event": "favorite_deleted_wishlist_denied",
+                        "event": "view_history_deleted_wishlist_denied",
                         "wishlist_id": wishlist_id,
                         "user_id": user.telegram_id,
                     },
                 )
+            raise WishlistNotFoundError(f"Wishlist {wishlist_id} not found")
+        has_share = self._has_valid_share_access(user.telegram_id, wl)
+        if not WishlistAccessPolicy.can_view_history(user, wl, has_share_access=has_share):
+            logger.warning(
+                "Unauthorized view history attempt on wishlist %s by user %s denied",
+                wishlist_id,
+                user.telegram_id,
+                extra={
+                    "event": "view_history_access_denied",
+                    "wishlist_id": wishlist_id,
+                    "user_id": user.telegram_id,
+                },
+            )
             raise WishlistNotFoundError(f"Wishlist {wishlist_id} not found")
 
         now = datetime.now(UTC)
@@ -3437,7 +3498,9 @@ class WishlistService:
         result: list[tuple[Wishlist, datetime]] = []
         for e in user_entries:
             wl = self._wishlists.get(e.wishlist_id)
-            if wl is not None and wl.status != WishlistStatus.DELETED:
+            if wl is not None and WishlistAccessPolicy.can_view_history(
+                user, wl, has_share_access=self._has_valid_share_access(user.telegram_id, wl)
+            ):
                 result.append((wl, e.viewed_at))
                 if len(result) >= limit:
                     break

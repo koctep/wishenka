@@ -1120,7 +1120,7 @@ only (`wishenka/web/static/miniapp.js`, `wishenka/web/static/miniapp.css`).
 - **Automatic View Recording**: When an authenticated user opens any wishlist (`showList`), the
   client dispatches a background `POST /api/history/{id}`.
 - **Deduplication**: Re-visiting a recorded wishlist updates `viewed_at`, no duplicate row.
-- **20-Entry Bound**: At most 20 entries per user; the oldest is pruned on the 21st.
+- **20-Entry Bound**: `GET /api/history` returns at most 20 entries. Production `RepoWishlistOps` keeps older stored rows; only the in-memory `WishlistService` prunes storage to 20.
 - **Zero-Leak Guarantees**: `GET /api/history` projects only sanitized list metadata and omits
   reservation records and buyer details; the screen renders only title, time and role badge.
 - Entry point: the "Viewing history" button in the home top navigation.
@@ -1164,9 +1164,12 @@ only (`wishenka/web/static/miniapp.js`, `wishenka/web/static/miniapp.css`).
 
 #### Usage
 
-- **Endpoints** (unchanged): `GET /api/history` (up to 20, newest first), `POST /api/history/{id}`
-  (404 for missing or deleted lists), `DELETE /api/history` (clears the caller's history only).
-  Service details: [wishlists.md](wishlists.md#get_history--clear_history).
+- **Endpoints**: `GET /api/history` (up to 20 accessible lists, newest first),
+  `POST /api/history/{id}` (404 when the list is missing, deleted, or the caller is
+  not owner, member, or current share-grant holder), `DELETE /api/history` (clears the
+  caller's history only). Authenticated `GET /share/{token}` and
+  `GET /api/public/wishlists/{token}/view` record the visit. Anonymous public GET does
+  not. Service details: [wishlists.md](wishlists.md#viewing-history-access-wishenka-303).
 - **Element hooks** used by `tests/test_history_screen_browser.py`: `ul.history-list`,
   `li.history-card`, `h2.history-title`, `.history-meta`, `time.history-time[datetime][title]`,
   `.badge` (role), `.history-open` (aria-label `miniapp.home.open_wishlist_named`),
@@ -1177,25 +1180,31 @@ only (`wishenka/web/static/miniapp.js`, `wishenka/web/static/miniapp.css`).
   `empty`, `empty_hint`, `open_home`, `viewed_at`, `load_failed`, `retry`, `just_now`,
   `clear_confirm_title`, `clear_confirm_body` (`{count}`), `clear_confirm_yes`,
   `clear_confirm_cancel`, `clearing`. Family notes: [i18n.md](i18n.md#architecture).
-- **Known access-model limitation (pre-existing, tracked)**: `POST /api/history/{id}` and
-  `POST /api/favorites/{id}` check only that the list exists and is not deleted, not membership,
-  so a user can record a guessable id and read its title and event fields back from
-  `GET /api/history`. The redesign changed no contract and renders no extra fields. Decision and
-  options: [60-tech-debt.md](../../ai-tasks/WISHENKA-292/60-tech-debt.md); Jira
-  WISHENKA-303 (history) and WISHENKA-302 (favorites).
+- **Access model (WISHENKA-303)**: the screen renders only what `GET /api/history`
+  returns. That list is limited to non-deleted wishlists the caller owns, belongs to,
+  or reached through the current share link. A stranger `POST /api/history/{id}` is
+  `404` with `detail` `"Wishlist not found"` and adds no card. The screen still shows
+  no reservation counts or buyer names. Rules:
+  [wishlists.md](wishlists.md#viewing-history-access-wishenka-303). Favorites use the
+  same share-grant idea (WISHENKA-302) but still reject self-favoriting.
 
 #### Configuration
 
-None: no settings, environment variables or schema changes.
+The history screen has no settings or environment variables. Server access rules and
+the `purge_legacy_non_member_view_history` migration are in
+[wishlists.md](wishlists.md#viewing-history-access-wishenka-303).
 
 #### Troubleshooting
 
 - **Empty vs error**: the empty state (`.history-empty`, no alert) means `GET /api/history`
-  returned `[]` (nothing recorded, cleared, or lists deleted). The error state
+  returned `[]` (nothing recorded, cleared, deleted, or access revoked). The error state
   (`.history-error` with Retry) means the request failed; check the request log for
   `GET /api/history` and the event `view_history_listed` (`count`).
-- **Entry missing after opening a list**: the background `POST /api/history/{id}` failed or got
-  `404` (deleted list); look for `view_history_recorded`.
+- **Entry missing after opening a list**: the background `POST /api/history/{id}` failed,
+  or the open was anonymous, or the caller is not a member and has not opened the
+  current share link while signed in (`404`). Look for `view_history_recorded` on
+  success and `view_history_access_denied` when access was refused. A deleted list
+  logs `view_history_deleted_wishlist_denied`.
 - **Clear stuck in "clearing"**: the `DELETE` never settled (slow or dropped connection). The
   buttons stay disabled by design to prevent duplicates; reload the screen. A failed request
   shows `miniapp.history.clear_failed` and re-enables the buttons.

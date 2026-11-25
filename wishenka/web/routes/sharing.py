@@ -27,7 +27,7 @@ from wishenka.wishlists.policy import WishlistAccessPolicy
 from wishenka.wishlists.repo_ops import RepoWishlistOps
 from wishenka.wishlists.repository import WishlistRepository
 from wishenka.wishlists.schemas import WishItemGifterViewDTO
-from wishenka.wishlists.service import WishlistService
+from wishenka.wishlists.service import WishlistService, record_share_view_if_authenticated
 
 router = APIRouter()
 logger = logging.getLogger("wishenka.web.sharing")
@@ -65,6 +65,8 @@ async def view_public_share(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Wishlist not found",
         ) from exc
+
+    await record_share_view_if_authenticated(service, current_user, dto.id)
 
     is_recipient = current_user is not None and (
         any(getattr(item, "is_recipient", False) for item in dto.items)

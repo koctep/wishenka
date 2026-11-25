@@ -72,7 +72,7 @@ def test_retention_migration_upgrade_backfills_and_downgrade_reverts(tmp_path: P
         )
         conn.execute("INSERT INTO bot_destinations(user_id,chat_id,active) VALUES (1,101,1)")
 
-    upgrade_to_head_sync(url)
+    command.upgrade(_configured(url), "add_share_access_and_purge_favorites")
     with sqlite3.connect(path) as conn:
         bdays = conn.execute(
             "SELECT id,label,month,day,deleted,deleted_at FROM birthday_entries ORDER BY id"

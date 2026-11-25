@@ -348,7 +348,7 @@ def test_migration_upgrade_purges_non_member_favorites_and_downgrade_drops_table
         )
         conn.commit()
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "add_share_access_and_purge_favorites")
     with sqlite3.connect(db_path) as conn:
         tables = {
             row[0]

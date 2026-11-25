@@ -45,7 +45,7 @@ from wishenka.notices.reminders import (
 from wishenka.notices.worker import notice_text
 from wishenka.users import UserNotFoundError, UserStore
 from wishenka.web.app import create_app
-from wishenka.wishlists.migrations import _configured, upgrade_to_head_sync
+from wishenka.wishlists.migrations import _configured
 from wishenka.wishlists.service import WishlistService
 from wishenka.wishlists.store import WishlistStore
 
@@ -238,7 +238,7 @@ def test_alembic_add_user_locale_upgrade_backfill_and_downgrade(tmp_path: Path) 
             """
         )
 
-    upgrade_to_head_sync(url)
+    command.upgrade(_configured(url), "add_user_locale")
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(
             "SELECT telegram_id, locale, locale_source FROM users ORDER BY telegram_id"
@@ -251,7 +251,7 @@ def test_alembic_add_user_locale_upgrade_backfill_and_downgrade(tmp_path: Path) 
     assert "locale" not in cols_down
     assert "locale_source" not in cols_down
 
-    upgrade_to_head_sync(url)
+    command.upgrade(_configured(url), "add_user_locale")
     with sqlite3.connect(db_path) as conn:
         rows_reup = conn.execute(
             "SELECT telegram_id, locale, locale_source FROM users ORDER BY telegram_id"

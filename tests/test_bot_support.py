@@ -31,7 +31,7 @@ from wishenka.bot.support import (
 )
 from wishenka.config import Settings
 from wishenka.logging import JsonFormatter
-from wishenka.wishlists.migrations import _configured, upgrade_to_head_sync
+from wishenka.wishlists.migrations import _configured
 
 pytestmark = pytest.mark.timeout(30)
 
@@ -89,7 +89,7 @@ def test_support_unit_helpers_redaction_formatting_and_settings() -> None:
 def test_add_support_channel_migration_upgrade_and_downgrade(tmp_path: Path) -> None:
     db_path = tmp_path / "migration.db"
     url = f"sqlite+aiosqlite:///{db_path}"
-    upgrade_to_head_sync(url)
+    command.upgrade(_configured(url), "add_support_channel")
 
     with sqlite3.connect(db_path) as conn:
         tables = {
@@ -110,7 +110,7 @@ def test_add_support_channel_migration_upgrade_and_downgrade(tmp_path: Path) -> 
     assert "support_input" not in tables_after_down
     assert "support_tickets" not in tables_after_down
 
-    upgrade_to_head_sync(url)
+    command.upgrade(_configured(url), "add_support_channel")
     with sqlite3.connect(db_path) as conn:
         tables_after_up = {
             row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")

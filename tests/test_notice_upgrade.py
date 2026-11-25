@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 
-from wishenka.wishlists.migrations import _configured, upgrade_to_head_sync
+from wishenka.wishlists.migrations import _configured
 
 pytestmark = pytest.mark.timeout(60)
 
@@ -37,7 +37,7 @@ def test_legacy_queue_upgrade_preserves_receipts_and_quarantines_ambiguity(tmp_p
                 "VALUES (?,'gift_received',1,1,1,?,?,?,10,'2026-01-01','2026-01-01')",
                 (ident, ident + 200, status, ambiguous),
             )
-    upgrade_to_head_sync(url)
+    command.upgrade(_configured(url), "add_notice_uncertain")
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT id,status FROM notification_outbox ORDER BY id").fetchall() == [
             (1, "pending"),

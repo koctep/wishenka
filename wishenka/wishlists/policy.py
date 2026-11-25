@@ -170,3 +170,18 @@ class WishlistAccessPolicy:
             return False
         ctx = WishlistAccessPolicy.resolve_context(user, wishlist)
         return ctx.is_member or has_share_access
+
+    @staticmethod
+    def can_view_history(
+        user: AuthenticatedUser | None,
+        wishlist: Wishlist,
+        *,
+        has_share_access: bool = False,
+    ) -> bool:
+        """Check if user can record or view the wishlist in Viewing History."""
+        if user is None:
+            return False
+        if wishlist.status == WishlistStatus.DELETED:
+            return False
+        ctx = WishlistAccessPolicy.resolve_context(user, wishlist)
+        return ctx.is_owner or ctx.is_member or has_share_access

@@ -27,7 +27,11 @@ from wishenka.wishlists.policy import WishlistAccessPolicy
 from wishenka.wishlists.repo_ops import RepoWishlistOps
 from wishenka.wishlists.repository import WishlistRepository
 from wishenka.wishlists.schemas import PromiseActionDTO, ReservationQuantityDTO
-from wishenka.wishlists.service import WishlistService, project_reservation_action
+from wishenka.wishlists.service import (
+    WishlistService,
+    project_reservation_action,
+    record_share_view_if_authenticated,
+)
 
 router = APIRouter()
 logger = logging.getLogger("wishenka.web.wishlists")
@@ -454,23 +458,6 @@ async def record_view(
     request: Request, wishlist_id: int, user: User, repo: WishlistRepo
 ) -> dict[str, Any]:
     async def action(service: Any) -> dict[str, Any]:
-        wl = (
-            await service.repo.get_wishlist_header(wishlist_id)
-            if isinstance(service, RepoWishlistOps)
-            else service._wishlists.get(wishlist_id)
-        )
-        if wl is None or wl.status == WishlistStatus.DELETED:
-            if wl is not None and wl.status == WishlistStatus.DELETED:
-                logger.warning(
-                    "View history record denied: wishlist %s is deleted",
-                    wishlist_id,
-                    extra={
-                        "event": "favorite_deleted_wishlist_denied",
-                        "wishlist_id": wishlist_id,
-                        "user_id": user.telegram_id,
-                    },
-                )
-            raise WishlistNotFoundError(f"Wishlist {wishlist_id} not found")
         await service.record_view(user, wishlist_id)
         logger.info(
             "Wishlist %s view recorded for user %s",
@@ -813,6 +800,7 @@ async def public_wishlist_view(
                 "Public wishlist entry unavailable", extra={"event": "public_entry_unavailable"}
             )
             raise
+        await record_share_view_if_authenticated(service, user, view.id)
         logger.info(
             "Public wishlist entry viewed",
             extra={

@@ -374,6 +374,24 @@ class RepoWishlistOps:
                     "actor_id": actor.telegram_id,
                 },
             )
+        removed_history = await self.repo.delete_history_if_no_share_access(
+            user_id, wl.id, wl.public_token
+        )
+        if removed_history > 0:
+            self.repo.defer_commit_log(
+                logging.INFO,
+                "View history revoked on member removal: wishlist_id=%s user_id=%s actor_id=%s",
+                wl.id,
+                user_id,
+                actor.telegram_id,
+                extra={
+                    "event": "view_history_access_revoked",
+                    "reason": "member_removed",
+                    "wishlist_id": wl.id,
+                    "user_id": user_id,
+                    "actor_id": actor.telegram_id,
+                },
+            )
         new_collab = len(wl.members) > 0
         if wl.is_collaborative != new_collab:
             wl.is_collaborative = new_collab
@@ -1000,17 +1018,19 @@ class RepoWishlistOps:
     async def _revoke_share_access_and_favorites(
         self, wishlist_id: int, *, reason: str, actor_id: int
     ) -> None:
-        """Revoke share-access grants and non-member favorites for a wishlist and log summary."""
+        """Revoke share-access grants, non-member favorites, and non-member view history."""
         revoked_grants = await self.repo.revoke_share_access_for_wishlist(wishlist_id)
         revoked_favorites = await self.repo.delete_non_member_favorites(wishlist_id)
-        if revoked_grants > 0 or revoked_favorites > 0:
+        revoked_history = await self.repo.delete_non_member_history(wishlist_id)
+        if revoked_grants > 0 or revoked_favorites > 0 or revoked_history > 0:
             self.repo.defer_commit_log(
                 logging.INFO,
-                "Share access revoked: wishlist_id=%s reason=%s grants=%s favorites=%s",
+                "Share access revoked: wishlist_id=%s reason=%s grants=%s favorites=%s history=%s",
                 wishlist_id,
                 reason,
                 revoked_grants,
                 revoked_favorites,
+                revoked_history,
                 extra={
                     "event": "share_access_revoked",
                     "reason": reason,
@@ -1018,6 +1038,7 @@ class RepoWishlistOps:
                     "actor_id": actor_id,
                     "revoked_grants": revoked_grants,
                     "revoked_favorites": revoked_favorites,
+                    "revoked_history": revoked_history,
                 },
             )
 
@@ -1175,18 +1196,33 @@ class RepoWishlistOps:
 
     async def record_view(self, user: AuthenticatedUser, wishlist_id: int) -> ViewHistoryEntry:
         """Record or update a wishlist view event for user."""
-        wl = await self.repo.get_wishlist_header(wishlist_id)
+        wl = await self.repo.get_wishlist(wishlist_id)
         if wl is None or wl.status == WishlistStatus.DELETED:
             if wl is not None and wl.status == WishlistStatus.DELETED:
                 logger.warning(
                     "View history record denied: wishlist %s is deleted",
                     wishlist_id,
                     extra={
-                        "event": "favorite_deleted_wishlist_denied",
+                        "event": "view_history_deleted_wishlist_denied",
                         "wishlist_id": wishlist_id,
                         "user_id": user.telegram_id,
                     },
                 )
+            raise WishlistNotFoundError(f"Wishlist {wishlist_id} not found")
+        has_share = await self.repo.has_valid_share_access(
+            user.telegram_id, wishlist_id, wl.public_token
+        )
+        if not WishlistAccessPolicy.can_view_history(user, wl, has_share_access=has_share):
+            logger.warning(
+                "Unauthorized view history attempt on wishlist %s by user %s denied",
+                wishlist_id,
+                user.telegram_id,
+                extra={
+                    "event": "view_history_access_denied",
+                    "wishlist_id": wishlist_id,
+                    "user_id": user.telegram_id,
+                },
+            )
             raise WishlistNotFoundError(f"Wishlist {wishlist_id} not found")
         entry = ViewHistoryEntry(
             id=0,
@@ -1205,7 +1241,17 @@ class RepoWishlistOps:
         results: list[tuple[Wishlist, datetime]] = []
         for entry in entries:
             wl = await self.repo.get_wishlist(entry.wishlist_id)
-            if wl is not None and wl.status != WishlistStatus.DELETED:
+            if wl is None:
+                continue
+            ctx = WishlistAccessPolicy.resolve_context(user, wl)
+            has_share = (
+                False
+                if (ctx.is_owner or ctx.is_member)
+                else await self.repo.has_valid_share_access(
+                    user.telegram_id, wl.id, wl.public_token
+                )
+            )
+            if WishlistAccessPolicy.can_view_history(user, wl, has_share_access=has_share):
                 results.append((wl, entry.viewed_at))
         return results
 

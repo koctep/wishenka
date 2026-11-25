@@ -1179,6 +1179,14 @@ class WishlistRepository:
         )
         return row is not None
 
+    async def user_exists(self, user_id: int) -> bool:
+        """Return True if a user row exists in users for the given telegram_id."""
+        row = await self.conn.scalar(
+            text("SELECT 1 FROM users WHERE telegram_id = :uid"),
+            {"uid": user_id},
+        )
+        return row is not None
+
     async def revoke_share_access_for_wishlist(self, wishlist_id: int) -> int:
         """Delete all share-link access grants for a wishlist and return the deleted count."""
         result = await self.conn.execute(
@@ -1221,6 +1229,53 @@ class WishlistRepository:
         )
         return int(result.rowcount or 0)
 
+    async def delete_non_member_history(self, wishlist_id: int) -> int:
+        """Delete view history rows for non-owners/non-members of a wishlist."""
+        result = await self.conn.execute(
+            text(
+                "DELETE FROM wl_view_history "
+                "WHERE wishlist_id = :wlid "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM wl_lists l "
+                "  WHERE l.id = wl_view_history.wishlist_id "
+                "    AND l.owner_id = wl_view_history.user_id"
+                ") "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM wl_members m "
+                "  WHERE m.wishlist_id = wl_view_history.wishlist_id "
+                "    AND m.user_id = wl_view_history.user_id"
+                ")"
+            ),
+            {"wlid": wishlist_id},
+        )
+        return int(result.rowcount or 0)
+
+    async def delete_history_if_no_share_access(
+        self, user_id: int, wishlist_id: int, public_token: str
+    ) -> int:
+        """Delete a user's view history row unless owner/member or holding a valid grant."""
+        result = await self.conn.execute(
+            text(
+                "DELETE FROM wl_view_history "
+                "WHERE user_id = :uid AND wishlist_id = :wlid "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM wl_lists l "
+                "  WHERE l.id = :wlid AND l.owner_id = :uid"
+                ") "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM wl_members m "
+                "  WHERE m.wishlist_id = :wlid AND m.user_id = :uid"
+                ") "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM wl_share_access sa "
+                "  WHERE sa.user_id = :uid AND sa.wishlist_id = :wlid "
+                "    AND sa.public_token = :tok"
+                ")"
+            ),
+            {"uid": user_id, "wlid": wishlist_id, "tok": public_token},
+        )
+        return int(result.rowcount or 0)
+
     async def record_view(self, entry: ViewHistoryEntry) -> None:
         """Record or update viewing timestamp for a user and wishlist."""
         stmt = text(
@@ -1250,12 +1305,38 @@ class WishlistRepository:
         )
 
     async def list_view_history(self, user_id: int, limit: int = 20) -> list[ViewHistoryEntry]:
-        """List recent viewing history for user up to limit."""
+        """List recent accessible viewing history for user up to limit."""
         stmt = text(
-            "SELECT id, user_id, wishlist_id, viewed_at FROM wl_view_history "
-            "WHERE user_id = :uid ORDER BY viewed_at DESC LIMIT :lim"
+            "SELECT vh.id, vh.user_id, vh.wishlist_id, vh.viewed_at "
+            "FROM wl_view_history vh "
+            "JOIN wl_lists l ON l.id = vh.wishlist_id "
+            "WHERE vh.user_id = :uid "
+            "  AND l.status != :deleted_status "
+            "  AND ("
+            "    l.owner_id = :uid "
+            "    OR EXISTS ("
+            "      SELECT 1 FROM wl_members m "
+            "      WHERE m.wishlist_id = l.id AND m.user_id = :uid"
+            "    ) "
+            "    OR EXISTS ("
+            "      SELECT 1 FROM wl_share_access sa "
+            "      WHERE sa.wishlist_id = l.id "
+            "        AND sa.user_id = :uid "
+            "        AND sa.public_token = l.public_token"
+            "    )"
+            "  ) "
+            "ORDER BY vh.viewed_at DESC LIMIT :lim"
         )
-        rows = (await self.conn.execute(stmt, {"uid": user_id, "lim": limit})).all()
+        rows = (
+            await self.conn.execute(
+                stmt,
+                {
+                    "uid": user_id,
+                    "deleted_status": WishlistStatus.DELETED.value,
+                    "lim": limit,
+                },
+            )
+        ).all()
         return [
             ViewHistoryEntry(
                 id=int(r.id),

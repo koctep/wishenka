@@ -22,6 +22,7 @@ from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
 from wishenka.web.app import create_app
 from wishenka.wishlists.exceptions import WishlistNotFoundError
+from wishenka.wishlists.models import WishlistRole
 from wishenka.wishlists.service import WishlistService
 
 pytestmark = pytest.mark.timeout(30)
@@ -131,6 +132,7 @@ def test_view_history_lifecycle_observability(
     async def seed() -> int:
         await app.state.user_store.upsert_user(TelegramUser(id=202, first_name="User"))
         wl = await service.create_wishlist(owner, title="History Obs Wishlist")
+        await service.add_member(wl.id, owner, user_id=202, role=WishlistRole.MEMBER)
         return wl.id
 
     wl_id = asyncio.run(seed())
@@ -236,18 +238,18 @@ def test_warning_on_self_favoriting_and_deleted_wishlists(
     assert len(del_warn) >= 1
     assert getattr(del_warn[0], "wishlist_id", None) == deleted_wl_id
 
-    # 3. Bob tries to record view for deleted wishlist -> WARNING favorite_deleted_wishlist_denied
+    # 3. Bob records view on deleted wishlist -> WARNING view_history_deleted_wishlist_denied
     caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="wishenka.web.wishlists"):
+    with caplog.at_level(logging.WARNING, logger="wishenka.wishlists"):
         resp_view_del = client.post(f"/api/history/{deleted_wl_id}", headers=bob_headers)
         assert resp_view_del.status_code == 404
 
     view_del_warn = [
         r
         for r in caplog.records
-        if r.name == "wishenka.web.wishlists"
+        if r.name == "wishenka.wishlists"
         and r.levelname == "WARNING"
-        and getattr(r, "event", None) == "favorite_deleted_wishlist_denied"
+        and getattr(r, "event", None) == "view_history_deleted_wishlist_denied"
     ]
     assert len(view_del_warn) >= 1
     assert getattr(view_del_warn[0], "wishlist_id", None) == deleted_wl_id
@@ -384,4 +386,5 @@ async def test_domain_service_warnings_on_violations(
 
     events = [getattr(r, "event", None) for r in caplog.records if r.name == "wishenka.wishlists"]
     assert "favorite_own_wishlist_denied" in events
-    assert events.count("favorite_deleted_wishlist_denied") == 2
+    assert events.count("favorite_deleted_wishlist_denied") == 1
+    assert events.count("view_history_deleted_wishlist_denied") == 1

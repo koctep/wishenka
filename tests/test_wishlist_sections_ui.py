@@ -143,6 +143,7 @@ def test_viewing_history_recording_ordering_deduplication_and_bounds(
         ids = []
         for i in range(25):
             wl = await service.create_wishlist(owner, title=f"List {i + 1}")
+            await service.add_member(wl.id, owner, user_id=202, role=WishlistRole.MEMBER)
             ids.append(wl.id)
         return ids
 
@@ -191,6 +192,7 @@ def test_viewing_history_clear_endpoint(
 
     async def seed() -> int:
         wl = await service.create_wishlist(owner, title="History Clear Test List")
+        await service.add_member(wl.id, owner, user_id=202, role=WishlistRole.MEMBER)
         return wl.id
 
     wl_id = asyncio.run(seed())

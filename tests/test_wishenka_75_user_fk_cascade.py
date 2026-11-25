@@ -60,10 +60,12 @@ async def test_rejects_wishlist_user_links_for_nonexistent_user(
                 with pytest.raises(RuntimeError, match="Wishlist storage operation failed"):
                     await store.execute(fav_ghost)
 
+                async def view_ghost(svc: WishlistService) -> None:
+                    await svc.get_wishlist_by_public_token(wl.public_token, ghost_user)
+                    await svc.record_view(user=ghost_user, wishlist_id=wl.id)
+
                 with pytest.raises(RuntimeError, match="Wishlist storage operation failed"):
-                    await store.execute(
-                        lambda svc: svc.record_view(user=ghost_user, wishlist_id=wl.id)
-                    )
+                    await store.execute(view_ghost)
 
                 with pytest.raises(RuntimeError, match="Wishlist storage operation failed"):
                     await store.execute(
@@ -339,7 +341,7 @@ def test_migration_downgrade_removes_user_fks_and_preserves_data_and_indexes(
     """Downgrading from add_user_fk_cascades removes user FKs while keeping data and indexes."""
     db_path = tmp_path / "downgrade_mig.db"
     url = f"sqlite+aiosqlite:///{db_path}"
-    upgrade_to_head_sync(url)
+    command.upgrade(_configured(url), "add_user_fk_cascades")
 
     now = "2026-01-01T00:00:00+00:00"
     with sqlite3.connect(db_path) as conn:

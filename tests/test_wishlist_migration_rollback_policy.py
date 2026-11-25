@@ -23,6 +23,7 @@ _EXPECTED_ONE_WAY = {
     "add_warn_on_delete_reserved",
     "add_display_order",
     "add_gift_receipts",
+    "purge_legacy_non_member_view_history",
 }
 
 
@@ -123,6 +124,7 @@ def test_baseline_downgrade_succeeds_with_explicit_opt_in(
         ("add_warn_on_delete_reserved", "base_normalized"),
         ("add_display_order", "add_warn_on_delete_reserved"),
         ("add_gift_receipts", "add_item_order_index"),
+        ("purge_legacy_non_member_view_history", "add_share_access_and_purge_favorites"),
     ],
 )
 def test_one_way_revisions_refuse_downgrade_with_backup_guidance(
@@ -148,10 +150,10 @@ def test_one_way_revisions_refuse_downgrade_with_backup_guidance(
 
 
 def test_reversible_tail_downgrades_cleanly_to_gift_receipts(tmp_path: Path) -> None:
-    """All reversible revisions from head down to add_gift_receipts downgrade cleanly."""
+    """Reversible revisions from add_share_access_and_purge_favorites downgrade cleanly."""
     db_path = tmp_path / "reversible_tail.db"
     cfg = _alembic_config(db_path)
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "add_share_access_and_purge_favorites")
 
     command.downgrade(cfg, "add_gift_receipts")
 
