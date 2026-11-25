@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from wishenka.config import Settings
-from wishenka.logging import JsonFormatter, configure_logging
+from wishenka.logging import JsonFormatter, TextFormatter, configure_logging
 from wishenka.web.app import create_app
 
 pytestmark = pytest.mark.timeout(10)
@@ -43,6 +43,30 @@ def test_configure_logging() -> None:
     root = logging.getLogger()
     assert root.level == logging.DEBUG
     assert len(root.handlers) > 0
+
+
+def test_text_formatter_preserves_extras() -> None:
+    """TextFormatter must append structured extra key=value pairs when present."""
+    formatter = TextFormatter(
+        fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    record = logging.LogRecord(
+        name="test_logger",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=10,
+        msg="Test message with extra",
+        args=(),
+        exc_info=None,
+    )
+    record.__dict__["event"] = "share_access_revoked"
+    record.__dict__["wishlist_id"] = 42
+
+    output = formatter.format(record)
+    assert "[INFO] test_logger: Test message with extra" in output
+    assert "event=share_access_revoked" in output
+    assert "wishlist_id=42" in output
 
 
 def test_request_logging_and_lifespan(caplog: pytest.LogCaptureFixture) -> None:

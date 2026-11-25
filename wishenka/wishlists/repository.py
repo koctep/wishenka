@@ -16,6 +16,7 @@ from wishenka.wishlists.models import (
     ReceiptRecord,
     Reservation,
     ReservationStatus,
+    ShareAccessGrant,
     ViewHistoryEntry,
     WishItem,
     Wishlist,
@@ -24,6 +25,7 @@ from wishenka.wishlists.models import (
     WishlistRole,
     WishlistStatus,
 )
+from wishenka.wishlists.service import PendingCommitLog, flush_pending_commit_logs
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +146,31 @@ class WishlistRepository:
 
     def __init__(self, conn: AsyncConnection) -> None:
         self.conn = conn
+        self._pending_commit_logs: list[PendingCommitLog] = []
+
+    def defer_commit_log(
+        self,
+        level: int,
+        message: str,
+        *args: Any,
+        extra: dict[str, Any],
+    ) -> None:
+        """Queue a domain log record to be emitted only after the transaction commits."""
+        self._pending_commit_logs.append(
+            PendingCommitLog(level=level, message=message, args=args, extra=extra)
+        )
+
+    def flush_commit_logs(self) -> None:
+        """Emit and clear all queued post-commit log records."""
+        if not self._pending_commit_logs:
+            return
+        pending = list(self._pending_commit_logs)
+        self._pending_commit_logs.clear()
+        flush_pending_commit_logs(pending)
+
+    def clear_commit_logs(self) -> None:
+        """Discard queued post-commit log records (e.g. on transaction rollback)."""
+        self._pending_commit_logs.clear()
 
     async def _allocate_id(self, counter_name: str, table_name: str) -> int:
         """Allocate the next sequential integer primary key using wl_counters."""
@@ -885,11 +912,24 @@ class WishlistRepository:
         return row is not None
 
     async def list_favorite_ids(self, user_id: int) -> set[int]:
-        """Return the set of wishlist IDs bookmarked by the user."""
+        """Return the set of accessible non-deleted wishlist IDs bookmarked by the user."""
         rows = (
             (
                 await self.conn.execute(
-                    text("SELECT wishlist_id FROM wl_favorites WHERE user_id = :uid"),
+                    text(
+                        "SELECT f.wishlist_id FROM wl_favorites f "
+                        "JOIN wl_lists l ON l.id = f.wishlist_id "
+                        "WHERE f.user_id = :uid AND l.status != 'deleted' "
+                        "AND l.owner_id != :uid "
+                        "AND ("
+                        "  EXISTS (SELECT 1 FROM wl_members m "
+                        "          WHERE m.wishlist_id = f.wishlist_id AND m.user_id = :uid) "
+                        "  OR EXISTS (SELECT 1 FROM wl_share_access sa "
+                        "             WHERE sa.wishlist_id = f.wishlist_id "
+                        "               AND sa.user_id = :uid "
+                        "               AND sa.public_token = l.public_token)"
+                        ")"
+                    ),
                     {"uid": user_id},
                 )
             )
@@ -899,11 +939,20 @@ class WishlistRepository:
         return {int(wl_id) for wl_id in rows}
 
     async def list_favorite_wishlists(self, user_id: int) -> list[Wishlist]:
-        """List non-deleted wishlists bookmarked by the user in most-recent order."""
+        """List accessible non-deleted wishlists bookmarked by the user in most-recent order."""
         stmt = text(
             "SELECT f.wishlist_id FROM wl_favorites f "
             "JOIN wl_lists l ON l.id = f.wishlist_id "
             "WHERE f.user_id = :uid AND l.status != 'deleted' "
+            "AND l.owner_id != :uid "
+            "AND ("
+            "  EXISTS (SELECT 1 FROM wl_members m "
+            "          WHERE m.wishlist_id = f.wishlist_id AND m.user_id = :uid) "
+            "  OR EXISTS (SELECT 1 FROM wl_share_access sa "
+            "             WHERE sa.wishlist_id = f.wishlist_id "
+            "               AND sa.user_id = :uid "
+            "               AND sa.public_token = l.public_token)"
+            ") "
             "ORDER BY f.created_at DESC"
         )
         ids = (await self.conn.execute(stmt, {"uid": user_id})).scalars().all()
@@ -1096,6 +1145,81 @@ class WishlistRepository:
             )
             for r in rows
         ]
+
+    async def upsert_share_access(self, grant: ShareAccessGrant) -> bool:
+        """Record or refresh a verified share-link access grant; return True if persisted."""
+        stmt = text(
+            "INSERT INTO wl_share_access (user_id, wishlist_id, public_token, granted_at) "
+            "SELECT :user_id, :wishlist_id, :public_token, :granted_at "
+            "WHERE EXISTS (SELECT 1 FROM users WHERE telegram_id = :user_id) "
+            "ON CONFLICT(user_id, wishlist_id) DO UPDATE SET "
+            "public_token = excluded.public_token, granted_at = excluded.granted_at"
+        )
+        result = await self.conn.execute(
+            stmt,
+            {
+                "user_id": grant.user_id,
+                "wishlist_id": grant.wishlist_id,
+                "public_token": grant.public_token,
+                "granted_at": _format_dt(grant.granted_at),
+            },
+        )
+        return int(result.rowcount or 0) > 0
+
+    async def has_valid_share_access(
+        self, user_id: int, wishlist_id: int, public_token: str
+    ) -> bool:
+        """Return True if the user has a share-access grant matching the active public_token."""
+        row = await self.conn.scalar(
+            text(
+                "SELECT 1 FROM wl_share_access "
+                "WHERE user_id = :uid AND wishlist_id = :wlid AND public_token = :tok"
+            ),
+            {"uid": user_id, "wlid": wishlist_id, "tok": public_token},
+        )
+        return row is not None
+
+    async def revoke_share_access_for_wishlist(self, wishlist_id: int) -> int:
+        """Delete all share-link access grants for a wishlist and return the deleted count."""
+        result = await self.conn.execute(
+            text("DELETE FROM wl_share_access WHERE wishlist_id = :wlid"),
+            {"wlid": wishlist_id},
+        )
+        return int(result.rowcount or 0)
+
+    async def delete_non_member_favorites(self, wishlist_id: int) -> int:
+        """Delete favorite rows for non-members of a wishlist and return the deleted count."""
+        result = await self.conn.execute(
+            text(
+                "DELETE FROM wl_favorites "
+                "WHERE wishlist_id = :wlid "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM wl_members m "
+                "  WHERE m.wishlist_id = wl_favorites.wishlist_id "
+                "    AND m.user_id = wl_favorites.user_id"
+                ")"
+            ),
+            {"wlid": wishlist_id},
+        )
+        return int(result.rowcount or 0)
+
+    async def delete_favorite_if_no_share_access(
+        self, user_id: int, wishlist_id: int, public_token: str
+    ) -> int:
+        """Delete a user's favorite row unless they hold a valid grant; return deleted count."""
+        result = await self.conn.execute(
+            text(
+                "DELETE FROM wl_favorites "
+                "WHERE user_id = :uid AND wishlist_id = :wlid "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM wl_share_access sa "
+                "  WHERE sa.user_id = :uid AND sa.wishlist_id = :wlid "
+                "    AND sa.public_token = :tok"
+                ")"
+            ),
+            {"uid": user_id, "wlid": wishlist_id, "tok": public_token},
+        )
+        return int(result.rowcount or 0)
 
     async def record_view(self, entry: ViewHistoryEntry) -> None:
         """Record or update viewing timestamp for a user and wishlist."""

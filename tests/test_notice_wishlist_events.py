@@ -235,10 +235,12 @@ async def test_favorite_tracking_reminder_respects_current_favorite(
             wl = await service.create_wishlist(
                 owner=OWNER, title="Favorite occasion", event_date=datetime(2030, 3, 8, tzinfo=UTC)
             )
+            await service.get_wishlist_by_public_token(wl.public_token, GIFTER)
             await service.add_favorite(GIFTER, wl.id)
             revoked = await service.create_wishlist(
                 owner=OWNER, title="Revoked occasion", event_date=datetime(2030, 3, 8, tzinfo=UTC)
             )
+            await service.get_wishlist_by_public_token(revoked.public_token, GIFTER)
             await service.add_favorite(GIFTER, revoked.id)
             return wl.id, revoked.id
 

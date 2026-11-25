@@ -155,10 +155,18 @@ class WishlistAccessPolicy:
         return not WishlistAccessPolicy.is_recipient(user, item)
 
     @staticmethod
-    def can_favorite(user: AuthenticatedUser | None, wishlist: Wishlist) -> bool:
-        """Check if user can favorite the wishlist (not owner, active and non-deleted)."""
+    def can_favorite(
+        user: AuthenticatedUser | None,
+        wishlist: Wishlist,
+        *,
+        has_share_access: bool = False,
+    ) -> bool:
+        """Check if user can favorite the wishlist (non-owner, non-deleted, member or share)."""
         if user is None:
             return False
         if wishlist.status == WishlistStatus.DELETED:
             return False
-        return wishlist.owner_id != user.telegram_id
+        if wishlist.owner_id == user.telegram_id:
+            return False
+        ctx = WishlistAccessPolicy.resolve_context(user, wishlist)
+        return ctx.is_member or has_share_access

@@ -77,12 +77,12 @@ def test_favorites_endpoints_lifecycle_and_own_wishlist_guard(
     alice = AuthenticatedUser(telegram_id=101, first_name="Alice", auth_method="session_token")
     bob = AuthenticatedUser(telegram_id=202, first_name="Bob", auth_method="session_token")
 
-    async def seed() -> tuple[int, int]:
+    async def seed() -> tuple[int, str]:
         wl_alice = await service.create_wishlist(alice, title="Alice's Wishlist")
-        wl_bob = await service.create_wishlist(bob, title="Bob's Wishlist")
-        return wl_alice.id, wl_bob.id
+        await service.create_wishlist(bob, title="Bob's Wishlist")
+        return wl_alice.id, wl_alice.public_token
 
-    alice_wl_id, _ = asyncio.run(seed())
+    alice_wl_id, alice_public_token = asyncio.run(seed())
 
     alice_headers = bearer(sessions, 101)
     bob_headers = bearer(sessions, 202)
@@ -92,7 +92,9 @@ def test_favorites_endpoints_lifecycle_and_own_wishlist_guard(
     assert own_fav.status_code == 400, f"Expected 400 for own wishlist, got {own_fav.status_code}"
     assert "own" in own_fav.json().get("detail", "").lower()
 
-    # 2. Bob favorites Alice's wishlist -> 200 OK
+    # 2. Bob opens Alice's share link, then favorites Alice's wishlist -> 200 OK
+    view_resp = client.get(f"/api/public/wishlists/{alice_public_token}/view", headers=bob_headers)
+    assert view_resp.status_code == 200
     fav_resp = client.post(f"/api/favorites/{alice_wl_id}", headers=bob_headers)
     assert fav_resp.status_code == 200, f"Expected 200, got {fav_resp.status_code}"
     fav_data = fav_resp.json()
@@ -232,16 +234,20 @@ def test_surprise_invariant_in_favorites_and_history_projections(
     asyncio.run(seed_with_reservation())
 
     # Gifter creates another wishlist for Alice to favorite & view
-    async def seed_gifter_wl() -> int:
+    async def seed_gifter_wl() -> tuple[int, str]:
         wl2 = await service.create_wishlist(gifter, title="Gifter Wishlist")
         item2 = await service.add_wish_item(wl2.id, actor=gifter, title="Gifter Item")
         # Alice reserves item in Gifter's list
         await service.create_reservation(item_id=item2.id, user=recipient, quantity=1)
-        return wl2.id
+        return wl2.id, wl2.public_token
 
-    wl2_id = asyncio.run(seed_gifter_wl())
+    wl2_id, wl2_token = asyncio.run(seed_gifter_wl())
 
-    # Alice favorites wl2 and views wl2
+    # Alice opens share link, favorites wl2 and views wl2
+    assert (
+        client.get(f"/api/public/wishlists/{wl2_token}/view", headers=recipient_headers).status_code
+        == 200
+    )
     client.post(f"/api/favorites/{wl2_id}", headers=recipient_headers)
     client.post(f"/api/history/{wl2_id}", headers=recipient_headers)
 
@@ -291,7 +297,7 @@ def test_home_sections_api_and_role_badge_precedence(
     bob = AuthenticatedUser(telegram_id=202, first_name="Bob", auth_method="session_token")
     alice_headers = bearer(sessions, 101)
 
-    async def seed() -> tuple[int, int, int]:
+    async def seed() -> tuple[int, int, int, str]:
         from wishenka.auth.models import TelegramUser
 
         await app.state.user_store.upsert_user(TelegramUser(id=101, first_name="Alice"))
@@ -302,11 +308,17 @@ def test_home_sections_api_and_role_badge_precedence(
         await service.add_member(wl_collab.id, bob, 101, WishlistRole.MEMBER)
         # 3. Bob is owner, Alice is pure favorite
         wl_pure_fav = await service.create_wishlist(bob, title="Pure Favorite Wishlist")
-        return wl_owner.id, wl_collab.id, wl_pure_fav.id
+        return wl_owner.id, wl_collab.id, wl_pure_fav.id, wl_pure_fav.public_token
 
-    owner_id, collab_id, pure_fav_id = asyncio.run(seed())
+    owner_id, collab_id, pure_fav_id, pure_fav_token = asyncio.run(seed())
 
-    # Alice favorites both the collab wishlist and the pure favorite wishlist
+    # Alice opens share link for the pure favorite wishlist, then favorites both
+    assert (
+        client.get(
+            f"/api/public/wishlists/{pure_fav_token}/view", headers=alice_headers
+        ).status_code
+        == 200
+    )
     client.post(f"/api/favorites/{collab_id}", headers=alice_headers)
     client.post(f"/api/favorites/{pure_fav_id}", headers=alice_headers)
 

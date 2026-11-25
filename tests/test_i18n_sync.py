@@ -431,6 +431,11 @@ def test_miniapp_switch_immediately_updates_ssr_bot_and_pending_notices(
         assert item_resp.status_code == 201
         item_id = int(item_resp.json()["id"])
 
+        view_resp = client.get(
+            f"/api/public/wishlists/{public_token}/view", headers=giver_csrf_headers
+        )
+        assert view_resp.status_code == 200
+
         fav_resp = client.post(f"/api/favorites/{wishlist_id}", headers=giver_csrf_headers)
         assert fav_resp.status_code == 200
 

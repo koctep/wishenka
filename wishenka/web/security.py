@@ -18,6 +18,18 @@ def csrf_value(secret: str, session: str) -> str:
     ).hexdigest()
 
 
+def sanitize_log_path(path: str) -> str:
+    """Redact capability tokens and query strings from request paths for safe logging."""
+    raw_path = path.split("?", 1)[0]
+    if raw_path.startswith("/api/public/wishlists/"):
+        return "/api/public/wishlists/{token}"
+    if raw_path.startswith("/share/"):
+        return "/share/{token}"
+    if raw_path.startswith("/invite/"):
+        return "/invite/{token}/join" if raw_path.endswith("/join") else "/invite/{token}"
+    return raw_path
+
+
 class BrowserSecurityMiddleware(BaseHTTPMiddleware):
     """Require origin and session-bound token for browser credential mutations."""
 
@@ -50,15 +62,16 @@ class BrowserSecurityMiddleware(BaseHTTPMiddleware):
         elif unsafe and cookie and not bearer:
             token = request.headers.get("x-csrf-token", "")
             expected = csrf_value(settings.csrf_secret_key, cookie)
+            safe_path = sanitize_log_path(request.url.path)
             if origin != settings.application_origin:
                 logger.warning(
                     "CSRF check failed: origin mismatch %s (expected %s) on %s",
                     origin,
                     settings.application_origin,
-                    request.url.path,
+                    safe_path,
                     extra={
                         "event": "csrf_origin_mismatch",
-                        "path": request.url.path,
+                        "path": safe_path,
                         "origin": origin,
                     },
                 )
@@ -66,10 +79,10 @@ class BrowserSecurityMiddleware(BaseHTTPMiddleware):
             if not hmac.compare_digest(token, expected):
                 logger.warning(
                     "CSRF check failed: invalid token on %s",
-                    request.url.path,
+                    safe_path,
                     extra={
                         "event": "csrf_token_invalid",
-                        "path": request.url.path,
+                        "path": safe_path,
                     },
                 )
                 return JSONResponse({"detail": "Invalid CSRF token"}, status_code=403)

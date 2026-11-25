@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import text
@@ -69,6 +71,7 @@ async def test_single_wishlist_mutations_scope_store_hydration(
                 user=gifter,
                 quantity=1,
             )
+            await service.get_wishlist_by_public_token(bg_wl.public_token, gifter)
             await service.add_favorite(user=gifter, wishlist_id=bg_wl.id)
             await service.record_view(user=gifter, wishlist_id=bg_wl.id)
 
@@ -92,7 +95,7 @@ async def test_single_wishlist_mutations_scope_store_hydration(
             quantity=1,
         )
 
-        mutations = [
+        mutations: list[tuple[str, Callable[[], Awaitable[Any]]]] = [
             (
                 "reorder_wish_items",
                 lambda: service.reorder_wish_items(
@@ -129,7 +132,7 @@ async def test_single_wishlist_mutations_scope_store_hydration(
             ),
             (
                 "add_favorite",
-                lambda: service.add_favorite(user=gifter, wishlist_id=target_wishlist_id),
+                lambda: service.add_favorite(user=extra_member, wishlist_id=target_wishlist_id),
             ),
         ]
 

@@ -44,6 +44,7 @@ from wishenka.wishlists.models import (
     ReceiptRecord,
     Reservation,
     ReservationStatus,
+    ShareAccessGrant,
     ViewHistoryEntry,
     WishItem,
     Wishlist,
@@ -341,12 +342,85 @@ def _notice_settings_from_rows(user_rows: Any, list_rows: Any) -> NoticeSettings
     )
 
 
+async def _load_share_access_into_service(
+    conn: AsyncConnection,
+    service: WishlistService,
+    where_clause: str,
+    params: dict[str, object],
+) -> dict[tuple[int, int], tuple[str, str]]:
+    """Load ``wl_share_access`` rows into ``service._share_access`` and return snapshot state."""
+    sa_rows = (
+        await conn.execute(
+            text(
+                "SELECT user_id, wishlist_id, public_token, granted_at "
+                f"FROM wl_share_access{where_clause}"
+            ),
+            params,
+        )
+    ).all()
+    for sa_row in sa_rows:
+        grant = ShareAccessGrant(
+            user_id=int(sa_row[0]),
+            wishlist_id=int(sa_row[1]),
+            public_token=str(sa_row[2]),
+            granted_at=_parse_dt(sa_row[3]) or datetime.now(UTC),
+        )
+        service._share_access[(grant.user_id, grant.wishlist_id)] = grant
+    return {
+        key: (g.public_token, _format_dt(g.granted_at) or "")
+        for key, g in service._share_access.items()
+    }
+
+
+async def _upsert_dirty_share_access(
+    conn: AsyncConnection,
+    service: WishlistService,
+    snapshot_share_access: dict[tuple[int, int], tuple[str, str]],
+    allowed_wishlist_ids: set[int],
+) -> None:
+    """Persist new or updated share-access grants for the specified wishlists."""
+    skipped_keys: set[tuple[int, int]] = set()
+    for (uid, wid), grant in service._share_access.items():
+        if wid not in allowed_wishlist_ids:
+            continue
+        grant_state = (grant.public_token, _format_dt(grant.granted_at) or "")
+        if snapshot_share_access.get((uid, wid)) != grant_state:
+            result = await conn.execute(
+                text(
+                    "INSERT INTO wl_share_access "
+                    "(user_id, wishlist_id, public_token, granted_at) "
+                    "SELECT :user_id, :wishlist_id, :public_token, :granted_at "
+                    "WHERE EXISTS (SELECT 1 FROM users WHERE telegram_id = :user_id) "
+                    "ON CONFLICT(user_id, wishlist_id) DO UPDATE SET "
+                    "public_token = excluded.public_token, granted_at = excluded.granted_at"
+                ),
+                {
+                    "user_id": grant.user_id,
+                    "wishlist_id": grant.wishlist_id,
+                    "public_token": grant.public_token,
+                    "granted_at": grant_state[1],
+                },
+            )
+            if int(result.rowcount or 0) == 0:
+                skipped_keys.add((uid, wid))
+    if skipped_keys and service._pending_commit_logs:
+        service._pending_commit_logs = [
+            entry
+            for entry in service._pending_commit_logs
+            if not (
+                entry.extra.get("event") == "share_access_granted"
+                and (entry.extra.get("user_id"), entry.extra.get("wishlist_id")) in skipped_keys
+            )
+        ]
+
+
 @dataclass
 class _WishSnapshot:
     item_id: int
     item_state: tuple[object, ...]
     reservations: dict[int, tuple[object, ...]]
     reservation_counter: int
+    share_access: dict[tuple[int, int], tuple[str, str]]
 
 
 @dataclass
@@ -357,6 +431,7 @@ class _StorageSnapshot:
     reservations: set[int]
     favorites: set[tuple[int, int]]
     history_ids: set[int]
+    share_access: dict[tuple[int, int], tuple[str, str]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -617,6 +692,10 @@ class WishlistStore:
             )
             service._favorites[(fav.user_id, fav.wishlist_id)] = fav
 
+        share_access_snapshot = await _load_share_access_into_service(
+            conn, service, fav_where, dict(scope_params)
+        )
+
         history_ids: set[int] = set()
         if wishlist_id is None:
             hist_rows = (
@@ -650,6 +729,7 @@ class WishlistStore:
             reservations=set(service._reservations.keys()),
             favorites=set(service._favorites.keys()),
             history_ids=history_ids,
+            share_access=share_access_snapshot,
         )
         logger.info(
             "Wishlist store snapshot loaded: %d wishlists, %d items",
@@ -853,6 +933,15 @@ class WishlistStore:
                         "created_at": _format_dt(fav.created_at),
                     },
                 )
+
+        current_sa = set(service._share_access.keys())
+        deleted_sa = set(snapshot.share_access.keys()) - current_sa
+        for uid, wid in deleted_sa:
+            await conn.execute(
+                text("DELETE FROM wl_share_access WHERE user_id = :uid AND wishlist_id = :wid"),
+                {"uid": uid, "wid": wid},
+            )
+        await _upsert_dirty_share_access(conn, service, snapshot.share_access, set(current_wls))
 
         if wishlist_id is None:
             current_hist_ids = {e.id for e in service._view_history if e.id > 0}
@@ -1475,6 +1564,10 @@ class WishlistStore:
             ).all(),
         )
 
+        share_access_snapshot = await _load_share_access_into_service(
+            conn, service, " WHERE wishlist_id = :wishlist_id", {"wishlist_id": wishlist.id}
+        )
+
         counter = await conn.scalar(
             text("SELECT value FROM wl_counters WHERE name = 'reservation'")
         )
@@ -1487,6 +1580,7 @@ class WishlistStore:
                 for reservation in service._reservations.values()
             },
             reservation_counter=service._next_reservation_id,
+            share_access=share_access_snapshot,
         )
         return service, snapshot
 
@@ -1589,6 +1683,11 @@ class WishlistStore:
                     "ON CONFLICT(name) DO UPDATE SET value = excluded.value"
                 ),
                 {"value": service._next_reservation_id},
+            )
+
+        if item is not None:
+            await _upsert_dirty_share_access(
+                conn, service, snapshot.share_access, {item.wishlist_id}
             )
         return written, await self._flush_receipt_effects(conn, service)
 

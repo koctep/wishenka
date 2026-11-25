@@ -165,10 +165,12 @@ make check
 | `WISHENKA_ENVIRONMENT` | `environment` | `str` | `"development"` | Окружение запуска (`development`, `production`, `test`). |
 | `WISHENKA_DEBUG` | `debug` | `bool` | `False` | Флаг отладочного режима. |
 | `WISHENKA_LOG_LEVEL` | `log_level` | `str` | `"INFO"` | Уровень логирования (`DEBUG`, `INFO`, `WARNING`, `ERROR`). |
-| `WISHENKA_LOG_JSON` | `log_json` | `bool` | `False` | Формат логов: `True` для structured JSON, `False` для plain text. |
+| `WISHENKA_LOG_JSON` | `log_json` | `bool` | `False` | Формат логов: `True` для structured JSON (`JsonFormatter`), `False` для plain text (`TextFormatter`, сохраняющий структурированные `extra`-поля в формате `key=value`). |
 | `WISHENKA_SQLITE_DB_PATH` | `sqlite_db_path` | `str` | `"data/wishenka.db"` | Путь к файлу базы данных SQLite. |
 | `WISHENKA_DATABASE_URL` | `database_url` | `str` | `"sqlite+aiosqlite:///data/wishenka.db"` | URL подключения SQLAlchemy/aiosqlite. |
 | `WISHENKA_BOT_TOKEN` | `bot_token` | `str` | `""` | Секретный токен Telegram Bot API. |
+
+Форматтеры `TextFormatter` и `JsonFormatter` определены в `wishenka/logging.py`. При логировании HTTP-путей (`ShareTokenAccessFilter`, `RequestLoggingMiddleware`, `BrowserSecurityMiddleware`) используется общая функция `sanitize_log_path` (`wishenka/web/security.py`), маскирующая capability-токены в `/api/public/wishlists/{token}`, `/share/{token}`, `/invite/{token}` и `/invite/{token}/join`.
 
 ---
 

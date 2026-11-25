@@ -57,6 +57,16 @@ class WishlistFavorite:
 
 
 @dataclass
+class ShareAccessGrant:
+    """Verified share-link access grant bound to a wishlist's active public token."""
+
+    user_id: int
+    wishlist_id: int
+    public_token: str
+    granted_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+
+@dataclass
 class ViewHistoryEntry:
     """Record of a user viewing a wishlist in the Mini App."""
 

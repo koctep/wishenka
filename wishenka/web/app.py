@@ -38,7 +38,7 @@ from wishenka.web.routes.reservations import router as reservations_router
 from wishenka.web.routes.reservations_ui import router as reservations_ui_router
 from wishenka.web.routes.sharing import router as sharing_router
 from wishenka.web.routes.wishlists import router as wishlist_router
-from wishenka.web.security import BrowserSecurityMiddleware
+from wishenka.web.security import BrowserSecurityMiddleware, sanitize_log_path
 from wishenka.web.unavailable import install_unavailable_page
 from wishenka.wishlists.cleanup import background_cleanup_worker
 from wishenka.wishlists.service import WishlistService
@@ -54,18 +54,10 @@ class ShareTokenAccessFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if isinstance(record.args, tuple) and len(record.args) == 5:
             client, method, path, version, status = record.args
-            if isinstance(path, str) and path.startswith("/api/public/wishlists/"):
-                record.args = (client, method, "/api/public/wishlists/{token}", version, status)
-            elif isinstance(path, str) and path.startswith("/share/"):
-                record.args = (client, method, "/share/{token}", version, status)
-            elif isinstance(path, str) and path.startswith("/invite/"):
-                raw_path = path.split("?", 1)[0]
-                sanitized = (
-                    "/invite/{token}/join" if raw_path.endswith("/join") else "/invite/{token}"
-                )
-                record.args = (client, method, sanitized, version, status)
-            elif isinstance(path, str) and "?" in path:
-                record.args = (client, method, path.split("?", 1)[0], version, status)
+            if isinstance(path, str):
+                sanitized = sanitize_log_path(path)
+                if sanitized != path:
+                    record.args = (client, method, sanitized, version, status)
         return True
 
 
@@ -74,13 +66,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         start_time = time.perf_counter()
-        path = request.url.path
-        if path.startswith("/api/public/wishlists/"):
-            path = "/api/public/wishlists/{token}"
-        elif path.startswith("/share/"):
-            path = "/share/{token}"
-        elif path.startswith("/invite/"):
-            path = "/invite/{token}/join" if path.endswith("/join") else "/invite/{token}"
+        path = sanitize_log_path(request.url.path)
         logger.debug(
             "HTTP request started: %s %s",
             request.method,

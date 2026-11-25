@@ -1,6 +1,6 @@
 """SQLAlchemy 2.0 declarative database models for wishlists."""
 
-from sqlalchemy import ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from wishenka.currency import DEFAULT_CURRENCY
@@ -131,6 +131,22 @@ class WishlistFavoriteRow(Base):
         ForeignKey("wl_lists.id", ondelete="CASCADE"), primary_key=True
     )
     created_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class ShareAccessRow(Base):
+    """Relational row for verified share-link access grants bound to active public_token."""
+
+    __tablename__ = "wl_share_access"
+    __table_args__ = (Index("idx_wl_share_access_wishlist", "wishlist_id"),)
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.telegram_id", ondelete="CASCADE"), primary_key=True
+    )
+    wishlist_id: Mapped[int] = mapped_column(
+        ForeignKey("wl_lists.id", ondelete="CASCADE"), primary_key=True
+    )
+    public_token: Mapped[str] = mapped_column(String, nullable=False)
+    granted_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
 class ViewHistoryRow(Base):

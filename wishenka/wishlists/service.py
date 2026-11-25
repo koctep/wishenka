@@ -42,13 +42,16 @@ from wishenka.wishlists.exceptions import (
     WishArchivedError,
     WishlistArchivedError,
     WishlistDeletedError,
-    WishlistNotFoundError,
     WishlistRetentionExpiredError,
+)
+from wishenka.wishlists.exceptions import (
+    WishlistNotFoundError as WishlistNotFoundError,
 )
 from wishenka.wishlists.models import (
     ReceiptRecord,
     Reservation,
     ReservationStatus,
+    ShareAccessGrant,
     ViewHistoryEntry,
     WishItem,
     Wishlist,
@@ -397,6 +400,7 @@ class WishlistService:
         self._next_item_id: int = 0
         self._next_reservation_id: int = 0
         self._favorites: dict[tuple[int, int], WishlistFavorite] = {}
+        self._share_access: dict[tuple[int, int], ShareAccessGrant] = {}
         self._view_history: list[ViewHistoryEntry] = []
         self._next_view_history_id: int = 0
         # Effects of the current unit of work; the store flushes them with the transaction.
@@ -738,6 +742,23 @@ class WishlistService:
                 },
             )
             raise WishlistDeletedError(f"Wishlist {wl.id} has been deleted")
+        if current_user is not None and wl.owner_id != current_user.telegram_id:
+            self._share_access[(current_user.telegram_id, wl.id)] = ShareAccessGrant(
+                user_id=current_user.telegram_id,
+                wishlist_id=wl.id,
+                public_token=wl.public_token,
+            )
+            self._emit_or_defer_commit_log(
+                logging.INFO,
+                "Share access granted: wishlist_id=%s user_id=%s",
+                wl.id,
+                current_user.telegram_id,
+                extra={
+                    "event": "share_access_granted",
+                    "wishlist_id": wl.id,
+                    "user_id": current_user.telegram_id,
+                },
+            )
         view = await self.get_wishlist_view(wl.id, current_user)
         has_gifter_view = any(isinstance(item, WishItemGifterViewDTO) for item in view.items) or (
             not view.items and view.user_role is None
@@ -944,6 +965,24 @@ class WishlistService:
             self._record_shared_event("membership_changed", wl, None, actor.telegram_id)
         wl.members = [m for m in wl.members if m.user_id != user_id]
         wl.is_collaborative = len(wl.members) > 0
+        if (
+            not self._has_valid_share_access(user_id, wl)
+            and self._favorites.pop((user_id, wl.id), None) is not None
+        ):
+            self._emit_or_defer_commit_log(
+                logging.INFO,
+                "Favorite revoked on member removal: wishlist_id=%s user_id=%s actor_id=%s",
+                wl.id,
+                user_id,
+                actor.telegram_id,
+                extra={
+                    "event": "favorite_access_revoked",
+                    "reason": "member_removed",
+                    "wishlist_id": wl.id,
+                    "user_id": user_id,
+                    "actor_id": actor.telegram_id,
+                },
+            )
         logger.info(
             "Member %s removed from wishlist %s by actor %s",
             user_id,
@@ -1261,13 +1300,7 @@ class WishlistService:
             )
             raise WishlistRetentionExpiredError("Wishlist retention window has expired")
 
-        new_public_token = secrets.token_urlsafe(16)
-        for _ in range(4):
-            if new_public_token not in {wl.public_token, wl.invite_token}:
-                break
-            new_public_token = secrets.token_urlsafe(16)
-        if new_public_token in {wl.public_token, wl.invite_token}:
-            raise RuntimeError("Unable to generate a new public token")
+        new_public_token = self._generate_new_public_token(wl)
 
         new_invite_token = secrets.token_urlsafe(24)
         for _ in range(4):
@@ -1282,6 +1315,9 @@ class WishlistService:
         wl.invite_token_expires_at = effective_now + self._default_invite_ttl
         wl.status = WishlistStatus.ACTIVE
         wl.updated_at = effective_now
+        self._revoke_share_access_for_wishlist(
+            wl, reason="wishlist_restored", actor_id=actor.telegram_id
+        )
         logger.info(
             "Deleted wishlist %s restored to %s by actor %s",
             wishlist_id,
@@ -1333,6 +1369,10 @@ class WishlistService:
                 role=WishlistRole.ADMIN,
                 wishlist=wl,
             )
+        )
+        wl.public_token = self._generate_new_public_token(wl)
+        self._revoke_share_access_for_wishlist(
+            wl, reason="ownership_transferred", actor_id=actor.telegram_id
         )
         wl.updated_at = datetime.now(UTC)
         self._record_shared_event("membership_changed", wl, None, actor.telegram_id)
@@ -3106,15 +3146,12 @@ class WishlistService:
             )
             raise PermissionDeniedError("Actor cannot regenerate public token")
 
-        new_token = secrets.token_urlsafe(16)
-        for _ in range(4):
-            if new_token != wl.public_token:
-                break
-            new_token = secrets.token_urlsafe(16)
-        if new_token == wl.public_token:
-            raise RuntimeError("Unable to generate a new public token")
+        new_token = self._generate_new_public_token(wl)
         wl.public_token = new_token
         wl.updated_at = datetime.now(UTC)
+        self._revoke_share_access_for_wishlist(
+            wl, reason="public_token_rotated", actor_id=actor.telegram_id
+        )
         logger.info(
             "Public token regenerated for wishlist %s by actor %s",
             wishlist_id,
@@ -3176,6 +3213,55 @@ class WishlistService:
         )
         return new_token
 
+    def _generate_new_public_token(self, wishlist: Wishlist) -> str:
+        """Generate a fresh public_token distinct from the current public and invite tokens."""
+        new_token = secrets.token_urlsafe(16)
+        for _ in range(4):
+            if new_token not in {wishlist.public_token, wishlist.invite_token}:
+                return new_token
+            new_token = secrets.token_urlsafe(16)
+        raise RuntimeError("Unable to generate a new public token")
+
+    def _has_valid_share_access(self, user_id: int, wishlist: Wishlist) -> bool:
+        """Return True if the user holds a share-access grant matching the active public_token."""
+        grant = self._share_access.get((user_id, wishlist.id))
+        return grant is not None and grant.public_token == wishlist.public_token
+
+    def _revoke_share_access_for_wishlist(
+        self,
+        wishlist: Wishlist,
+        *,
+        reason: str = "public_token_rotated",
+        actor_id: int | None = None,
+    ) -> None:
+        """Revoke all share-access grants and purge non-member favorites for a wishlist."""
+        stale_sa_keys = [key for key in self._share_access if key[1] == wishlist.id]
+        for key in stale_sa_keys:
+            del self._share_access[key]
+        member_ids = {m.user_id for m in wishlist.members}
+        stale_fav_keys = [
+            key for key in self._favorites if key[1] == wishlist.id and key[0] not in member_ids
+        ]
+        for key in stale_fav_keys:
+            del self._favorites[key]
+        if stale_sa_keys or stale_fav_keys:
+            self._emit_or_defer_commit_log(
+                logging.INFO,
+                "Share access revoked: wishlist_id=%s reason=%s grants=%s favorites=%s",
+                wishlist.id,
+                reason,
+                len(stale_sa_keys),
+                len(stale_fav_keys),
+                extra={
+                    "event": "share_access_revoked",
+                    "reason": reason,
+                    "wishlist_id": wishlist.id,
+                    "actor_id": actor_id,
+                    "revoked_grants": len(stale_sa_keys),
+                    "revoked_favorites": len(stale_fav_keys),
+                },
+            )
+
     def has_favorite(self, user_id: int, wishlist_id: int) -> bool:
         """Check synchronously if a user has favorited a wishlist."""
         return (user_id, wishlist_id) in self._favorites
@@ -3214,6 +3300,20 @@ class WishlistService:
                 },
             )
             raise ValueError("Cannot favorite own wishlist")
+
+        has_share = self._has_valid_share_access(user.telegram_id, wl)
+        if not WishlistAccessPolicy.can_favorite(user, wl, has_share_access=has_share):
+            logger.warning(
+                "Unauthorized favorite attempt on wishlist %s by user %s denied",
+                wishlist_id,
+                user.telegram_id,
+                extra={
+                    "event": "favorite_access_denied",
+                    "wishlist_id": wishlist_id,
+                    "user_id": user.telegram_id,
+                },
+            )
+            raise WishlistNotFoundError(f"Wishlist {wishlist_id} not found")
 
         key = (user.telegram_id, wishlist_id)
         fav = self._favorites.get(key)
@@ -3254,7 +3354,9 @@ class WishlistService:
         result: list[Wishlist] = []
         for f in user_favs:
             wl = self._wishlists.get(f.wishlist_id)
-            if wl is not None and wl.status != WishlistStatus.DELETED:
+            if wl is not None and WishlistAccessPolicy.can_favorite(
+                user, wl, has_share_access=self._has_valid_share_access(user.telegram_id, wl)
+            ):
                 result.append(wl)
         logger.info(
             "Favorites listed for user %s (count=%s)",

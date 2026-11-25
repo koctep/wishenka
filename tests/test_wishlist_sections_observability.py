@@ -56,12 +56,15 @@ def test_favorites_lifecycle_observability(
     owner = AuthenticatedUser(telegram_id=101, first_name="Owner", auth_method="session_token")
     headers = bearer(sessions, 202)
 
-    async def seed() -> int:
+    async def seed() -> tuple[int, str]:
         await app.state.user_store.upsert_user(TelegramUser(id=202, first_name="User"))
         wl = await service.create_wishlist(owner, title="Observability Wishlist")
-        return wl.id
+        return wl.id, wl.public_token
 
-    wl_id = asyncio.run(seed())
+    wl_id, public_token = asyncio.run(seed())
+    assert (
+        client.get(f"/api/public/wishlists/{public_token}/view", headers=headers).status_code == 200
+    )
 
     # 1. Add favorite -> favorite_added
     with caplog.at_level(logging.INFO, logger="wishenka.web.wishlists"):
@@ -202,14 +205,14 @@ def test_warning_on_self_favoriting_and_deleted_wishlists(
     alice_wl_id, deleted_wl_id = asyncio.run(seed())
 
     # 1. Alice tries to favorite her own wishlist -> WARNING favorite_own_wishlist_denied
-    with caplog.at_level(logging.WARNING, logger="wishenka.web.wishlists"):
+    with caplog.at_level(logging.WARNING, logger="wishenka.wishlists"):
         resp = client.post(f"/api/favorites/{alice_wl_id}", headers=alice_headers)
         assert resp.status_code == 400
 
     own_warn = [
         r
         for r in caplog.records
-        if r.name == "wishenka.web.wishlists"
+        if r.name == "wishenka.wishlists"
         and r.levelname == "WARNING"
         and getattr(r, "event", None) == "favorite_own_wishlist_denied"
     ]
@@ -219,14 +222,14 @@ def test_warning_on_self_favoriting_and_deleted_wishlists(
 
     # 2. Bob tries to favorite deleted wishlist -> WARNING favorite_deleted_wishlist_denied
     caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="wishenka.web.wishlists"):
+    with caplog.at_level(logging.WARNING, logger="wishenka.wishlists"):
         resp_del = client.post(f"/api/favorites/{deleted_wl_id}", headers=bob_headers)
         assert resp_del.status_code == 404
 
     del_warn = [
         r
         for r in caplog.records
-        if r.name == "wishenka.web.wishlists"
+        if r.name == "wishenka.wishlists"
         and r.levelname == "WARNING"
         and getattr(r, "event", None) == "favorite_deleted_wishlist_denied"
     ]
@@ -302,6 +305,13 @@ def test_redaction_zero_leak_in_observability(
 
     wl_id, invite_token, public_token = asyncio.run(seed())
 
+    # Grant share-link access before capturing debug logs so httpx request URL is not in caplog
+    assert (
+        client.get(f"/api/public/wishlists/{public_token}/view", headers=gifter_headers).status_code
+        == 200
+    )
+    caplog.clear()
+
     with caplog.at_level(logging.DEBUG):
         # Favorite the list
         client.post(f"/api/favorites/{wl_id}", headers=gifter_headers)
@@ -331,6 +341,7 @@ async def test_domain_service_favorites_and_history_logging(
     user = AuthenticatedUser(telegram_id=2002, first_name="User", auth_method="session_token")
 
     wl = await service.create_wishlist(owner=owner, title="Domain List")
+    await service.get_wishlist_by_public_token(wl.public_token, user)
 
     with caplog.at_level(logging.INFO, logger="wishenka.wishlists"):
         await service.add_favorite(user, wl.id)
@@ -359,6 +370,7 @@ async def test_domain_service_warnings_on_violations(
     user = AuthenticatedUser(telegram_id=2002, first_name="User", auth_method="session_token")
 
     wl = await service.create_wishlist(owner=owner, title="Domain List")
+    await service.get_wishlist_by_public_token(wl.public_token, user)
     del_wl = await service.create_wishlist(owner=owner, title="Deleted List")
     await service.delete_wishlist(del_wl.id, actor=owner)
 

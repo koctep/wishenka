@@ -34,11 +34,14 @@ async def get_wishlist_repository(
     storage_failed = False
     async with store.engine.connect() as conn:
         await conn.begin()
+        repo = WishlistRepository(conn)
         try:
-            yield WishlistRepository(conn)
+            yield repo
             if conn.in_transaction():
                 await conn.commit()
+            repo.flush_commit_logs()
         except SQLAlchemyError as exc:
+            repo.clear_commit_logs()
             if conn.in_transaction():
                 await conn.rollback()
             logger.error(
@@ -47,6 +50,7 @@ async def get_wishlist_repository(
             )
             storage_failed = True
         except BaseException:
+            repo.clear_commit_logs()
             if conn.in_transaction():
                 await conn.rollback()
             raise

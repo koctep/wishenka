@@ -392,6 +392,11 @@ def test_non_owner_gets_the_same_404_as_unknown_id_and_nothing_changes(
 
 def test_favorite_viewer_gets_the_same_404_as_unknown_id(env: Env) -> None:
     created = _create(env)
+    view_resp = env.client.get(
+        f"/api/public/wishlists/{created['share_token']}/view",
+        headers=env.headers(STRANGER_ID),
+    )
+    assert view_resp.status_code == 200, view_resp.text
     favorite = env.client.post(f"/api/favorites/{created['id']}", headers=env.headers(STRANGER_ID))
     assert favorite.status_code in {200, 201}, favorite.text
     unknown = _delete(env, UNKNOWN_ID, STRANGER_ID)

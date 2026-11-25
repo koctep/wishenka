@@ -367,36 +367,6 @@ async def add_favorite(
     request: Request, wishlist_id: int, user: User, repo: WishlistRepo
 ) -> dict[str, Any]:
     async def action(service: Any) -> dict[str, Any]:
-        wl = (
-            await service.repo.get_wishlist_header(wishlist_id)
-            if isinstance(service, RepoWishlistOps)
-            else service._wishlists.get(wishlist_id)
-        )
-        if wl is None or wl.status == WishlistStatus.DELETED:
-            if wl is not None and wl.status == WishlistStatus.DELETED:
-                logger.warning(
-                    "Favorite attempt on deleted wishlist %s by user %s denied",
-                    wishlist_id,
-                    user.telegram_id,
-                    extra={
-                        "event": "favorite_deleted_wishlist_denied",
-                        "wishlist_id": wishlist_id,
-                        "user_id": user.telegram_id,
-                    },
-                )
-            raise WishlistNotFoundError(f"Wishlist {wishlist_id} not found")
-        if wl.owner_id == user.telegram_id:
-            logger.warning(
-                "Self-favoriting attempt by user %s on wishlist %s denied",
-                user.telegram_id,
-                wishlist_id,
-                extra={
-                    "event": "favorite_own_wishlist_denied",
-                    "wishlist_id": wishlist_id,
-                    "user_id": user.telegram_id,
-                },
-            )
-            raise ValueError("Cannot favorite own wishlist")
         await service.add_favorite(user, wishlist_id)
         logger.info(
             "Wishlist %s favorited by user %s",

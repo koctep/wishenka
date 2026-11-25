@@ -101,6 +101,9 @@ async def test_preferences_store_validation_roles_and_isolation(tmp_path: Path) 
         wl_other = await wl_store.execute(
             lambda svc: svc.create_wishlist(owner=GIFTER, title="Gifter List")
         )
+        await wl_store.execute(
+            lambda svc: svc.get_wishlist_by_public_token(wl_other.public_token, OWNER)
+        )
         await wl_store.execute(lambda svc: svc.add_favorite(OWNER, wl_other.id))
 
         prefs = NotificationPreferencesStore(wl_store.engine)

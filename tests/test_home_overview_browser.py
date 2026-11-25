@@ -102,6 +102,7 @@ def _seed_rich_overview(server: BrowserServer, locale: SupportedLocale) -> dict[
             fav_join = owner_api.post(f"/api/favorites/{wl_data['id']}")
             fav_join.raise_for_status()
 
+        owner_api.get(f"/api/public/wishlists/{fav_wl_data['share_token']}/view").raise_for_status()
         fav_pure = owner_api.post(f"/api/favorites/{fav_wl_data['id']}")
         fav_pure.raise_for_status()
 
@@ -653,6 +654,12 @@ def test_home_overview_favorites_remove_and_open_wishlist_browser(
     ) as owner_api:
         owned_wl = owner_api.post("/api/wishlists", json={"name": "Owner Open Target"})
         owned_wl.raise_for_status()
+        owner_api.get(
+            f"/api/public/wishlists/{wl_one.json()['share_token']}/view"
+        ).raise_for_status()
+        owner_api.get(
+            f"/api/public/wishlists/{wl_two.json()['share_token']}/view"
+        ).raise_for_status()
         owner_api.post(f"/api/favorites/{wl_one.json()['id']}").raise_for_status()
         owner_api.post(f"/api/favorites/{wl_two.json()['id']}").raise_for_status()
 

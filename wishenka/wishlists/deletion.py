@@ -394,6 +394,9 @@ class AccountDeletionService:
                 conn, "wl_favorites", "user_id = :uid", {"uid": telegram_id}
             )
             await _delete_if_table_exists(
+                conn, "wl_share_access", "user_id = :uid", {"uid": telegram_id}
+            )
+            await _delete_if_table_exists(
                 conn, "wl_view_history", "user_id = :uid", {"uid": telegram_id}
             )
             await _delete_if_table_exists(

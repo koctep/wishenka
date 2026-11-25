@@ -24,6 +24,7 @@ from wishenka.wishlists.exceptions import (
 )
 from wishenka.wishlists.models import (
     ReservationStatus,
+    ShareAccessGrant,
     ViewHistoryEntry,
     WishItem,
     Wishlist,
@@ -247,6 +248,26 @@ class RepoWishlistOps:
                 extra={"event": "deleted_wishlist_access_attempt", "wishlist_id": wl.id},
             )
             raise WishlistDeletedError(f"Wishlist {wl.id} has been deleted")
+        if current_user is not None and wl.owner_id != current_user.telegram_id:
+            persisted = await self.repo.upsert_share_access(
+                ShareAccessGrant(
+                    user_id=current_user.telegram_id,
+                    wishlist_id=wl.id,
+                    public_token=wl.public_token,
+                )
+            )
+            if persisted:
+                self.repo.defer_commit_log(
+                    logging.INFO,
+                    "Share access granted: wishlist_id=%s user_id=%s",
+                    wl.id,
+                    current_user.telegram_id,
+                    extra={
+                        "event": "share_access_granted",
+                        "wishlist_id": wl.id,
+                        "user_id": current_user.telegram_id,
+                    },
+                )
         view = self.project_wishlist_view(wl, current_user)
         has_gifter_view = any(isinstance(item, WishItemGifterViewDTO) for item in view.items) or (
             not view.items and view.user_role is None
@@ -335,6 +356,24 @@ class RepoWishlistOps:
             await self.record_shared_event("membership_changed", wl, None, actor.telegram_id)
             await self.repo.delete_member(wl.id, user_id)
         wl.members = [m for m in wl.members if m.user_id != user_id]
+        removed_favs = await self.repo.delete_favorite_if_no_share_access(
+            user_id, wl.id, wl.public_token
+        )
+        if removed_favs > 0:
+            self.repo.defer_commit_log(
+                logging.INFO,
+                "Favorite revoked on member removal: wishlist_id=%s user_id=%s actor_id=%s",
+                wl.id,
+                user_id,
+                actor.telegram_id,
+                extra={
+                    "event": "favorite_access_revoked",
+                    "reason": "member_removed",
+                    "wishlist_id": wl.id,
+                    "user_id": user_id,
+                    "actor_id": actor.telegram_id,
+                },
+            )
         new_collab = len(wl.members) > 0
         if wl.is_collaborative != new_collab:
             wl.is_collaborative = new_collab
@@ -528,6 +567,9 @@ class RepoWishlistOps:
                 continue
             try:
                 await self.repo.rotate_public_token(wl.id, new_public_token, effective_now)
+                await self._revoke_share_access_and_favorites(
+                    wl.id, reason="wishlist_restored", actor_id=actor.telegram_id
+                )
                 await self.repo.rotate_invite_token(
                     wl.id, new_invite_token, effective_now + DEFAULT_INVITE_TTL, effective_now
                 )
@@ -955,6 +997,30 @@ class RepoWishlistOps:
         )
         return member
 
+    async def _revoke_share_access_and_favorites(
+        self, wishlist_id: int, *, reason: str, actor_id: int
+    ) -> None:
+        """Revoke share-access grants and non-member favorites for a wishlist and log summary."""
+        revoked_grants = await self.repo.revoke_share_access_for_wishlist(wishlist_id)
+        revoked_favorites = await self.repo.delete_non_member_favorites(wishlist_id)
+        if revoked_grants > 0 or revoked_favorites > 0:
+            self.repo.defer_commit_log(
+                logging.INFO,
+                "Share access revoked: wishlist_id=%s reason=%s grants=%s favorites=%s",
+                wishlist_id,
+                reason,
+                revoked_grants,
+                revoked_favorites,
+                extra={
+                    "event": "share_access_revoked",
+                    "reason": reason,
+                    "wishlist_id": wishlist_id,
+                    "actor_id": actor_id,
+                    "revoked_grants": revoked_grants,
+                    "revoked_favorites": revoked_favorites,
+                },
+            )
+
     async def regenerate_public_token(self, wishlist_id: int, actor: AuthenticatedUser) -> str:
         """Revoke existing public token and generate a new one."""
         wl = await self.get_wishlist_by_id(wishlist_id)
@@ -980,6 +1046,9 @@ class RepoWishlistOps:
                 continue
             try:
                 await self.repo.rotate_public_token(wl.id, new_token, now)
+                await self._revoke_share_access_and_favorites(
+                    wl.id, reason="public_token_rotated", actor_id=actor.telegram_id
+                )
                 wl.public_token = new_token
                 wl.updated_at = now
                 logger.info(
@@ -1051,7 +1120,7 @@ class RepoWishlistOps:
 
     async def add_favorite(self, user: AuthenticatedUser, wishlist_id: int) -> WishlistFavorite:
         """Add a wishlist to user's favorites."""
-        wl = await self.repo.get_wishlist_header(wishlist_id)
+        wl = await self.repo.get_wishlist(wishlist_id)
         if wl is None or wl.status == WishlistStatus.DELETED:
             if wl is not None and wl.status == WishlistStatus.DELETED:
                 logger.warning(
@@ -1077,6 +1146,21 @@ class RepoWishlistOps:
                 },
             )
             raise ValueError("Cannot favorite own wishlist")
+        has_share = await self.repo.has_valid_share_access(
+            user.telegram_id, wishlist_id, wl.public_token
+        )
+        if not WishlistAccessPolicy.can_favorite(user, wl, has_share_access=has_share):
+            logger.warning(
+                "Unauthorized favorite attempt on wishlist %s by user %s denied",
+                wishlist_id,
+                user.telegram_id,
+                extra={
+                    "event": "favorite_access_denied",
+                    "wishlist_id": wishlist_id,
+                    "user_id": user.telegram_id,
+                },
+            )
+            raise WishlistNotFoundError(f"Wishlist {wishlist_id} not found")
         fav = WishlistFavorite(user_id=user.telegram_id, wishlist_id=wishlist_id)
         await self.repo.upsert_favorite(fav)
         return fav

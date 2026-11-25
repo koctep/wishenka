@@ -868,6 +868,8 @@ def test_control_clear_scope_api_contract_and_payload_shape(
     _set_user_locale(wishlist_server, viewer, VIEWER_TELEGRAM_ID, "Viewer", "en")
     own = _seed_history(wishlist_server, owner, ["Owner list"])
     theirs = _seed_history(wishlist_server, viewer, ["Viewer list"])
+    viewer_wl = _api(wishlist_server, viewer, "GET", f"/api/wishlists/{theirs[0]}")
+    _api(wishlist_server, owner, "GET", f"/api/public/wishlists/{viewer_wl['share_token']}/view")
     _api(wishlist_server, owner, "POST", f"/api/favorites/{theirs[0]}")
     _api(wishlist_server, owner, "POST", f"/api/history/{theirs[0]}")
     entry = _history(wishlist_server, owner)[0]

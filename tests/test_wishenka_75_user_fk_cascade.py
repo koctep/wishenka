@@ -25,6 +25,7 @@ from wishenka.users.store import UserStore
 from wishenka.wishlists.deletion import AccountDeletionService
 from wishenka.wishlists.migrations import _configured, upgrade_to_head_sync
 from wishenka.wishlists.models import WishlistRole
+from wishenka.wishlists.service import WishlistService
 
 pytestmark = pytest.mark.timeout(30)
 
@@ -50,12 +51,14 @@ async def test_rejects_wishlist_user_links_for_nonexistent_user(
                 lambda svc: svc.create_wishlist(owner=OWNER, title="Collab List")
             )
 
+            async def fav_ghost(svc: WishlistService) -> None:
+                await svc.get_wishlist_by_public_token(wl.public_token, ghost_user)
+                await svc.add_favorite(user=ghost_user, wishlist_id=wl.id)
+
             caplog.clear()
             with caplog.at_level(logging.ERROR, logger="wishenka.wishlists.store"):
                 with pytest.raises(RuntimeError, match="Wishlist storage operation failed"):
-                    await store.execute(
-                        lambda svc: svc.add_favorite(user=ghost_user, wishlist_id=wl.id)
-                    )
+                    await store.execute(fav_ghost)
 
                 with pytest.raises(RuntimeError, match="Wishlist storage operation failed"):
                     await store.execute(
@@ -446,6 +449,9 @@ async def test_account_deletion_service_end_to_end_cascade(
             )
             await store.execute(lambda svc: svc.add_favorite(user=member_a, wishlist_id=shared.id))
             await store.execute(lambda svc: svc.record_view(user=member_a, wishlist_id=shared.id))
+            await store.execute(
+                lambda svc: svc.get_wishlist_by_public_token(shared.public_token, GIFTER)
+            )
             await store.execute(lambda svc: svc.add_favorite(user=GIFTER, wishlist_id=shared.id))
             await store.execute(lambda svc: svc.record_view(user=GIFTER, wishlist_id=shared.id))
             await store.execute(

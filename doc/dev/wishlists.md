@@ -10,7 +10,7 @@ It manages personal and collaborative wishlists, enforces role-based access cont
 **Surprise Invariant** (zero-leak projections of reservations), and provides cryptographically
 secure sharing tokens.
 
-```
+```text
 +-----------------------------------------------------------------------------------------+
 |                                Wishlist Aggregate Root                                  |
 |  - id, owner_id, title, status (ACTIVE | ARCHIVED | DELETED)                            |
@@ -108,9 +108,9 @@ rejected by the optional authentication dependency.
 
 - `GET /api/public/wishlists/{token}/view`: Reads the role-specific public projection (`anonymous_safe` for unauthenticated callers, `recipient_safe` for recipients, `gifter` for authenticated non-recipients) without membership or invite secrets.
 
-- `GET /api/favorites`: Lists the caller's favorited wishlists in reverse-chronological order.
+- `GET /api/favorites`: Lists the caller's favorited wishlists in reverse-chronological order, filtered to non-deleted, non-owned lists where the caller is an active collaborator (`wl_members`) or holds an active share-link grant (`wl_share_access` matching `public_token`).
 
-- `POST /api/favorites/{id}`: Adds a wishlist to caller's favorites (rejects self-favoriting).
+- `POST /api/favorites/{id}`: Adds a wishlist to caller's favorites (requires non-owner, non-deleted list, and either active membership or valid `wl_share_access` grant; unauthorized or inaccessible non-owner lists return uniform `404` (`WishlistNotFoundError`, anti-enumeration), whereas attempting to favorite one's own wishlist raises `ValueError` and the route maps it to `400 Bad Request` so API consumers can distinguish self-favoriting from non-owner anti-enumeration).
 
 - `DELETE /api/favorites/{id}`: Removes a wishlist from caller's favorites.
 
@@ -122,8 +122,9 @@ rejected by the optional authentication dependency.
 
 - `Wish Items API` (`/api/wishlists/{wishlist_id}/items`): Full REST CRUD lifecycle suite for wish items, including atomic reordering (`PUT /reorder`), safe archiving (`POST /{item_id}/archive`), end-of-list restore (`POST /{item_id}/restore`), piece accounting ($1 \le Q \le 1000$), Reduction Lock invariant, collaborative member addressing, and zero-leak Surprise Invariant projections. Detailed specification, request/response models, and telemetry events are documented in [Items Domain Documentation](items.md).
 
-Create and patch accept a JSON object with optional `name`, `description`, `event_title`, and
-`event_date`. The HTTP representation includes list details and items; member responses include
+Create requires a non-empty `name` (trimmed, 1-255 code points via `WishlistCreateInput`) with
+optional `description`, `event_title`, and `event_date`; patch accepts optional `name`,
+`description`, `event_title`, and `event_date`. The HTTP representation includes list details and items; member responses include
 `role` and `members`, and owner/admin responses also include `share_token` and `invite_token`.
 The public projection uses an explicit allowlist and omits membership, tokens and
 reservation-derived fields. It is returned even when an authenticated caller uses the public URL.
@@ -168,7 +169,9 @@ tests only, `app.state.wishlist_service` can override the router's service.
 `WISHENKA_DATABASE_URL` selects the SQLite database and defaults to
 `sqlite+aiosqlite:///data/wishenka.db`. The application initializes the normalized relational
 schema during lifespan startup by running Alembic migrations to head (a recognized legacy database
-is adopted without data loss; see [migrations.md](migrations.md)), selects WAL mode in that
+is adopted without data loss, except for the explicit security remediation in
+`add_share_access_and_purge_favorites` that irreversibly purges legacy non-member `wl_favorites`
+rows without verified share-link access; see [migrations.md](migrations.md)), selects WAL mode in that
 migration startup, creates parent directories for a file database, and disposes the engine at
 shutdown (`WishlistStore.dispose()`). `WISHENKA_SQLITE_DB_PATH` is a separate setting and does not
 configure this store. All workers must point to the same database file to share state. The store
@@ -190,7 +193,7 @@ never unlinked).
 
 As implemented in [WISHENKA-48](https://pypost.atlassian.net/browse/WISHENKA-48), persistence uses
 a fully normalized relational schema (`wl_lists`, `wl_members`, `wl_items`, `wl_reservations`,
-`wl_favorites`, `wl_view_history`, `wl_tokens`, `wl_invite_tokens`, `wl_counters`) mapped via
+`wl_favorites`, `wl_share_access`, `wl_view_history`, `wl_tokens`, `wl_invite_tokens`, `wl_counters`) mapped via
 SQLAlchemy 2.0 declarative models and queried through `WishlistRepository`. Destructive prototype
 mass table truncations (`DELETE FROM <table>`) are replaced with snapshot diffing and row-level
 mutations (`UPDATE`, `INSERT`, `DELETE WHERE id = :id`). See
@@ -352,7 +355,7 @@ Template rendering is configured in
 `fastapi.templating.Jinja2Templates` pointing to `wishenka/web/templates/`. The template
 directory structure follows a modular component layout:
 
-```
+```text
 wishenka/web/templates/
 ├── base.html             # Master layout with viewport, CSS, Telegram SDK, HTMX, deferred static JS
 ├── share_wishlist.html   # Full page public view for gifters and recipients
@@ -474,9 +477,16 @@ layer, providing defense-in-depth against data leakage:
      render `invite_token`, preventing accidental elevation of gifters to collaborators.
 
 4. **Access Log and URL Masking**:
-   - Both `ShareTokenAccessFilter` (logging filter) and `RequestLoggingMiddleware` redact raw
-     sharing and invite tokens in log streams to `/share/{token}` and `/invite/{token}`,
-     ensuring bearer tokens are not leaked into disk logs or terminal outputs.
+   - Shared path sanitization helper `sanitize_log_path` (`wishenka/web/security.py`) redacts
+     capability tokens and query strings from `/api/public/wishlists/{token}`, `/share/{token}`,
+     `/invite/{token}`, and `/invite/{token}/join`.
+   - `ShareTokenAccessFilter` (logging filter on `uvicorn.access`), `RequestLoggingMiddleware`,
+     and `BrowserSecurityMiddleware` (CSRF rejection logs `csrf_origin_mismatch` /
+     `csrf_token_invalid`) all use `sanitize_log_path` so raw bearer tokens are never leaked into
+     disk logs or terminal outputs.
+   - Both `TextFormatter` (default when `log_json=False`, appending structured `extra` fields as
+     `key=value` pairs) and `JsonFormatter` (`log_json=True`, in `wishenka/logging.py`) preserve
+     structured `extra` fields on emitted log records.
 
 ---
 
@@ -500,6 +510,7 @@ and pure access policies in [`wishenka.wishlists.policy`](../../wishenka/wishlis
 - **`Wishlist`**: Aggregate root entity holding metadata, tokens, member list, and items.
 - **`WishlistMember`**: Association between user (`user_id`) and wishlist with `WishlistRole`.
 - **`WishlistFavorite`**: Association tracking a user's favorite (`user_id`, `wishlist_id`).
+- **`ShareAccessGrant`**: Capability-bound access record (`user_id`, `wishlist_id`, `public_token`, `granted_at`) representing an authenticated non-owner's verified share-link visit.
 - **`ViewHistoryEntry`**: Record of a wishlist view event (`id`, `user_id`, `wishlist_id`).
 - **`WishItem`**: An item desired by a recipient, with quantity and optional price.
 - **`Reservation`**: Active allocation of a `WishItem`'s quantity created by a gifter.
@@ -549,9 +560,11 @@ owner > admin > member > favorite
   the system retains their operational collaborator role (`admin` or `member`) in all projections.
 - **Pure Favorites**: If the user holds no collaborator membership on the wishlist but has
   favorited it, the projection assigns `role: "favorite"` and sets `is_favorite: true`.
-- **Policy Rule**: `WishlistAccessPolicy.can_favorite(user, wishlist)` controls favoriting
-  eligibility: it requires an authenticated user (`user is not None`), rejects soft-deleted lists,
-  and enforces the self-favoriting guard (`wishlist.owner_id != user.telegram_id`).
+- **Policy Rule**: `WishlistAccessPolicy.can_favorite(user, wishlist, *, has_share_access: bool = False)`
+  controls favoriting eligibility: it requires an authenticated user (`user is not None`), rejects
+  soft-deleted lists, enforces the self-favoriting guard (`wishlist.owner_id != user.telegram_id`),
+  and requires either active collaborative membership (`ctx.is_member`) or a verified active
+  share-link grant (`has_share_access=True` from `wl_share_access` matching `wishlist.public_token`).
 
 ### Surprise Invariant: Zero-Leak Projection Design
 
@@ -879,7 +892,7 @@ async def create_reservation(
 
 #### `add_favorite` & `remove_favorite`
 
-Adds or removes a wishlist from the user's favorites.
+Adds or removes a wishlist from the user's favorites, enforcing the Favorites access model.
 
 ```python
 async def add_favorite(
@@ -895,9 +908,31 @@ async def remove_favorite(
 ) -> None
 ```
 
-- **Self-Favoriting Guard**: Raises `ValueError("Cannot favorite own wishlist")` if
-  `wishlist.owner_id == user.telegram_id`.
-- **Validation**: Raises `WishlistNotFoundError` if wishlist does not exist or has been deleted.
+- **Share-Link Grant (`wl_share_access`)**: When an authenticated non-owner resolves a non-deleted
+  wishlist via `get_wishlist_by_public_token(public_token, current_user)` (`GET /share/{token}`,
+  `GET /api/public/wishlists/{token}/view`, or `POST /api/public/wishlists/{token}/items/{item_id}/reservations`),
+  the service upserts a `wl_share_access` grant bound to `(user.telegram_id, wl.id, wl.public_token)`
+  (including within scoped `WishlistStore.execute_wish` / `execute_wish_idempotent` transactions via
+  `_load_wish` and `_persist_wish`). Anonymous `GET /api/public/wishlists/{token}` passes
+  `current_user=None` and never records a grant.
+- **Access & Anti-Enumeration**: Evaluates `WishlistAccessPolicy.can_favorite(user, wl, has_share_access=...)`:
+  - Raises `ValueError("Cannot favorite own wishlist")` if `wishlist.owner_id == user.telegram_id`
+    (logs `favorite_own_wishlist_denied`).
+  - Raises `WishlistNotFoundError` (HTTP `404`) if the wishlist does not exist, is soft-deleted
+    (logs `favorite_deleted_wishlist_denied`), or the non-owner lacks both `wl_members` membership
+    and a valid `wl_share_access` grant matching `wl.public_token` (logs `favorite_access_denied`
+    at `WARNING` with `wishlist_id` and `user_id` only). Returning `404` matches missing/deleted
+    wishlists to prevent wishlist ID enumeration.
+- **Revocation Hooks**:
+  - `remove_member`: After removing membership, deletes the user's `wl_favorites` row if they hold
+    no valid `wl_share_access` grant for the current `public_token` (logs `favorite_access_revoked`
+    with `reason="member_removed"`).
+  - `regenerate_public_token` and `restore_deleted_wishlist` (both `RepoWishlistOps` and
+    `WishlistService` / `WishlistStore` paths), and `transfer_ownership` (`WishlistService` only):
+    Rotating `public_token` deletes all `wl_share_access` grants for the wishlist and purges
+    non-member `wl_favorites` rows (logs `share_access_revoked` with `reason`
+    `"public_token_rotated"`, `"wishlist_restored"`, or `"ownership_transferred"`), preventing stale
+    non-member rows from leaking to downstream notification consumers.
 - **Idempotency**: Adding an existing favorite is an idempotent no-op.
 - Synchronous `has_favorite(user_id, wishlist_id)` and async `is_favorite(user, wishlist_id)`
   allow quick lookups.
@@ -914,7 +949,9 @@ async def list_favorites(
 ```
 
 - Returns active and archived wishlists favorited by the user, ordered reverse-chronologically by
-  when they were added. Soft-deleted lists are automatically filtered out.
+  when they were added. Soft-deleted lists, owned lists, and any legacy rows lacking active
+  membership (`wl_members`) or a token-matched `wl_share_access` grant (`sa.public_token = l.public_token`)
+  are automatically filtered out.
 
 #### `record_view`
 
@@ -967,7 +1004,7 @@ the SQLAlchemy 2.0 async engine (`sqlite+aiosqlite`). Prototype JSON blobs and d
 table overwrites (`DELETE FROM <table>`) have been replaced with atomic, row-level persistence,
 granular async queries, and relationship cascade deletion.
 
-```
+```text
 +-----------------------------------------------------------------------------------------+
 |                        WishlistStore (Unit of Work Boundary)                           |
 |  - Manages SQLite connection lifecycle, foreign keys, and busy timeout (WAL: migrations)|
@@ -1083,6 +1120,16 @@ CREATE TABLE IF NOT EXISTS wl_favorites (
 );
 CREATE INDEX IF NOT EXISTS idx_wl_favorites_user ON wl_favorites(user_id);
 
+-- 5b. Verified Share-Link Access Grants
+CREATE TABLE IF NOT EXISTS wl_share_access (
+    user_id INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+    wishlist_id INTEGER NOT NULL REFERENCES wl_lists(id) ON DELETE CASCADE,
+    public_token TEXT NOT NULL,
+    granted_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, wishlist_id)
+);
+CREATE INDEX IF NOT EXISTS idx_wl_share_access_wishlist ON wl_share_access(wishlist_id);
+
 -- 6. User Viewing History
 CREATE TABLE IF NOT EXISTS wl_view_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1122,17 +1169,17 @@ CREATE TABLE IF NOT EXISTS wl_counters (
 - Deleting a user from `users` cascades (`ON DELETE CASCADE` on `user_id` / `owner_id` / `telegram_id` → `users(telegram_id)`,
   added in Alembic revisions `add_user_fk_cascades` and `unify_user_keys_and_cascades`; see [migrations.md](migrations.md)) to:
   - All collaborative memberships in `wl_members`.
-  - All user bookmark entries in `wl_favorites`.
+  - All user bookmark entries in `wl_favorites` and share-access grants in `wl_share_access`.
   - All user viewing history records in `wl_view_history`.
   - Bot delivery, birthday, support, and reminder rows (`bot_destinations`, `birthday_entries`, `birthday_input`, `support_input`, `support_tickets`, `reminder_outbox`).
   - Inserting rows into these tables with a user key not present in `users(telegram_id)` fails with `IntegrityError` when `PRAGMA foreign_keys = ON` is active.
   - `AccountDeletionService` (`wishenka/wishlists/deletion.py`) executes within `BEGIN IMMEDIATE`
     and `PRAGMA foreign_keys = ON`, transferring/deleting owned lists and deleting the `users` row
-    so both explicit cleanup and `ON DELETE CASCADE` remove all user-linked records.
+    so both explicit cleanup and `ON DELETE CASCADE` remove all user-linked records (including `wl_share_access`).
 - Deleting a wishlist from `wl_lists` cascades (`ON DELETE CASCADE`) to:
   - All associated members in `wl_members`.
   - All contained items in `wl_items` (and subsequently all reservations in `wl_reservations`).
-  - All user bookmark entries in `wl_favorites`.
+  - All user bookmark entries in `wl_favorites` and share-access grants in `wl_share_access`.
   - All user viewing history records in `wl_view_history`.
   - Capability token registry entries in `wl_tokens` and `wl_invite_tokens` (added in `unify_user_keys_and_cascades`).
   - Queued reminders in `reminder_outbox` (`list_id`, plus `item_id` on `wl_items` and `birthday_id` on `birthday_entries`).
@@ -1194,6 +1241,9 @@ to typed Python structures using SQLAlchemy 2.0 `Mapped` and `mapped_column` con
 - **`WishlistFavoriteRow`**: Represents `wl_favorites` with composite key `(user_id, wishlist_id)`
   and `ForeignKey("users.telegram_id", ondelete="CASCADE")` /
   `ForeignKey("wl_lists.id", ondelete="CASCADE")`.
+- **`ShareAccessRow`**: Represents `wl_share_access` with composite key `(user_id, wishlist_id)`,
+  `public_token`, `granted_at`, and `ON DELETE CASCADE` foreign keys to `users.telegram_id` and
+  `wl_lists.id`.
 - **`ViewHistoryRow`**: Represents `wl_view_history` with autoincrement integer primary key `id`,
   `ForeignKey("users.telegram_id", ondelete="CASCADE")`, and
   `ForeignKey("wl_lists.id", ondelete="CASCADE")`.
@@ -1240,6 +1290,17 @@ granular async operations over an active SQLAlchemy `AsyncConnection`.
 - `delete_reservation(res_id: int)`: Targeted `DELETE FROM wl_reservations WHERE id = :id`.
 - `upsert_favorite(fav)`: Uses `INSERT ... ON CONFLICT(user_id, wishlist_id) DO NOTHING`.
 - `delete_favorite(user_id: int, wishlist_id: int)`: Targeted `DELETE FROM wl_favorites`.
+- `upsert_share_access(grant: ShareAccessGrant) -> bool`: Upserts `wl_share_access` bound to
+  `public_token` and returns `True` when a row was written.
+- `has_valid_share_access(user_id: int, wishlist_id: int, public_token: str) -> bool`: Verifies an
+  active `wl_share_access` row matching `public_token`.
+- `revoke_share_access_for_wishlist(wishlist_id: int) -> int`: Deletes all `wl_share_access` grants
+  for `wishlist_id` and returns the deleted row count.
+- `delete_non_member_favorites(wishlist_id: int) -> int`: Deletes `wl_favorites` rows for
+  `wishlist_id` where `user_id` is not in `wl_members` and returns the deleted row count.
+- `delete_favorite_if_no_share_access(user_id: int, wishlist_id: int, public_token: str) -> int`:
+  Deletes a single `wl_favorites` row when no matching `wl_share_access` grant exists and returns
+  the deleted row count.
 - `record_view(entry)`: Uses `INSERT ... ON CONFLICT DO UPDATE SET viewed_at = excluded.viewed_at`.
 - `clear_view_history(user_id: int)`: Deletes viewing history for a single user.
 
@@ -1464,7 +1525,7 @@ capability tokens (`public_token`, `invite_token`).
 
 Wishlists use two cryptographic token schemas generated via Python's `secrets.token_urlsafe`:
 
-```
+```text
 1. Public Sharing Token (Gifter Access)
    - Generation: secrets.token_urlsafe(16)
    - Entropy: 128 bits (~22 URL-safe characters)
@@ -1490,7 +1551,7 @@ regular web request handling.
 
 ### Architecture & Components
 
-```
+```text
 +-----------------------------------------------------------------------------------------+
 |                  FastAPI Lifespan (wishenka.web.app.create_app)                         |
 |  - Checks settings.background_cleanup_enabled                                           |
@@ -1673,6 +1734,11 @@ Settings in `wishenka.config.Settings` (prefixed with `WISHENKA_` in environment
 | `favorite_removed` | `INFO` | Favorite removed | `wishlist_id`, `user_id` |
 | `favorite_own_wishlist_denied` | `WARNING` | Self-favorite blocked | `wishlist_id`, `user_id` |
 | `favorite_deleted_wishlist_denied` | `WARNING` | Deleted list blocked | `wishlist_id`, `user_id` |
+| `favorite_access_denied` | `WARNING` | Non-owner lacks membership or valid `wl_share_access` grant (HTTP 404 returned) | `wishlist_id`, `user_id` |
+| `share_access_granted` | `INFO` | Authenticated non-owner resolved active share link (committed) | `wishlist_id`, `user_id` |
+| `favorite_access_revoked` | `INFO` | Removed member's favorite deleted due to no active share grant (committed) | `wishlist_id`, `user_id`, `actor_id`, `reason` (`member_removed`) |
+| `share_access_revoked` | `INFO` | Share grants / non-member favorites revoked on token rotation (committed) | `wishlist_id`, `actor_id`, `reason` (`public_token_rotated` / `wishlist_restored` / `ownership_transferred`), `revoked_grants`, `revoked_favorites` |
+| `legacy_non_member_favorites_purged` | `INFO` | Legacy non-member `wl_favorites` rows purged in `add_share_access_and_purge_favorites` migration | `rows` |
 | `view_history_listed` | `INFO` | History fetched | `user_id`, `count` |
 | `view_history_recorded` | `INFO` | View recorded | `wishlist_id`, `user_id` |
 | `view_history_cleared` | `INFO` | History cleared (once per delete) | `user_id`, `removed_count` |
@@ -1711,7 +1777,7 @@ descriptions and event titles are never logged. The paths are pinned by
 All domain exceptions inherit from `WishlistError` in
 [`wishenka.wishlists.exceptions`](../../wishenka/wishlists/exceptions.py).
 
-```
+```text
 WishlistError
 ├── PermissionDeniedError
 ├── WishlistNotFoundError
@@ -1774,8 +1840,17 @@ WishlistError
 - **Resolution**: Reduce reservation quantity or select another wish item.
 
 #### `ValueError` ("Cannot favorite own wishlist")
-- **Root Cause**: Owner attempted self-favoriting.
+- **Root Cause**: Owner attempted self-favoriting (`POST /api/favorites/{id}` maps this `ValueError` to `400 Bad Request`).
 - **Resolution**: Rejected by domain policy; owners already have access to their own lists.
+
+#### `404` on `POST /api/favorites/{id}` or Wishlist Missing from `GET /api/favorites`
+
+- **Root Cause**: A user's ability to favorite or retain a favorite requires either active membership (`wl_members`) or a valid `wl_share_access` grant matching the wishlist's current `public_token` on a non-deleted, non-owned list. Non-owner favorites or access grants are invalidated when:
+  - **Membership removal**: Removing a collaborator without an active `wl_share_access` grant deletes their `wl_favorites` row (`delete_favorite_if_no_share_access`).
+  - **Share-token rotation, restore, or ownership transfer**: Rotating the public token, restoring a soft-deleted wishlist, or transferring ownership revokes all `wl_share_access` grants and purges non-member `wl_favorites` rows (`share_access_revoked` with reason `public_token_rotated`, `wishlist_restored`, or `ownership_transferred`).
+  - **Legacy non-member favorite purge**: The `add_share_access_and_purge_favorites` migration purged pre-existing non-member `wl_favorites` rows that lacked a `wl_share_access` grant (`legacy_non_member_favorites_purged`).
+  - **Direct `POST /api/favorites/{id}` without prior share visit**: Non-members who have not visited the current active share link lack a `wl_share_access` grant, so `POST /api/favorites/{id}` raises `WishlistNotFoundError` (`404`, anti-enumeration).
+- **Resolution**: For non-members who should still have access, ask the wishlist owner or admin for the current active share link and visit `/share/{public_token}` or `GET /api/public/wishlists/{token}/view` while authenticated to record a fresh `wl_share_access` grant, then re-favorite via `POST /api/favorites/{id}` (or re-join as a collaborator via a valid invite link). If the list was soft-deleted, only the owner can restore it within the retention window.
 
 #### `RuntimeError` ("Wishlist storage operation failed")
 - **Root Cause**: A locked or busy database is `InventoryBusyError`; any other storage
