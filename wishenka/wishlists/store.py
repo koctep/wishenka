@@ -411,17 +411,23 @@ class WishlistStore:
             finally:
                 self._temporary_database_path = None
 
-    async def _read(self, conn: AsyncConnection) -> tuple[WishlistService, _StorageSnapshot]:
+    async def _read(
+        self, conn: AsyncConnection, *, wishlist_id: int | None = None
+    ) -> tuple[WishlistService, _StorageSnapshot]:
         service = WishlistService.in_memory()
         service._defer_commit_logs = True
+        scope_params: dict[str, Any] = (
+            {"wishlist_id": wishlist_id} if wishlist_id is not None else {}
+        )
 
+        l_where = " WHERE id = :wishlist_id" if wishlist_id is not None else ""
         l_stmt = text(
             "SELECT id, owner_id, owner_name, title, description, event_title, "
             "event_date, is_collaborative, warn_on_delete_reserved, status, "
             "public_token, invite_token, invite_token_expires_at, "
-            "created_at, updated_at FROM wl_lists ORDER BY id ASC"
+            f"created_at, updated_at FROM wl_lists{l_where} ORDER BY id ASC"
         )
-        l_rows = (await conn.execute(l_stmt)).all()
+        l_rows = (await conn.execute(l_stmt, scope_params)).all()
         for r in l_rows:
             warn_pref = (
                 bool(r.warn_on_delete_reserved) if r.warn_on_delete_reserved is not None else True
@@ -447,10 +453,12 @@ class WishlistStore:
             )
             service._wishlists[wl.id] = wl
 
+        m_where = " WHERE wishlist_id = :wishlist_id" if wishlist_id is not None else ""
         m_stmt = text(
-            "SELECT id, wishlist_id, user_id, role, joined_at FROM wl_members ORDER BY id ASC"
+            "SELECT id, wishlist_id, user_id, role, joined_at "
+            f"FROM wl_members{m_where} ORDER BY id ASC"
         )
-        m_rows = (await conn.execute(m_stmt)).all()
+        m_rows = (await conn.execute(m_stmt, scope_params)).all()
         member_ids: set[int] = set()
         for mr in m_rows:
             member = WishlistMember(
@@ -465,14 +473,15 @@ class WishlistStore:
                 member.wishlist = service._wishlists[member.wishlist_id]
                 member.wishlist.members.append(member)
 
+        i_where = " WHERE wishlist_id = :wishlist_id" if wishlist_id is not None else ""
         i_stmt = text(
             "SELECT id, wishlist_id, recipient_user_id, recipient_name, title, "
             "description, link, price, currency, quantity, received_quantity, "
             "image_url, store_name, store_icon_url, priority, category, "
             "display_order, is_archived, created_at, updated_at "
-            "FROM wl_items ORDER BY display_order ASC, id ASC"
+            f"FROM wl_items{i_where} ORDER BY display_order ASC, id ASC"
         )
-        i_rows = (await conn.execute(i_stmt)).all()
+        i_rows = (await conn.execute(i_stmt, scope_params)).all()
         for ir in i_rows:
             rec_uid = int(ir.recipient_user_id) if ir.recipient_user_id is not None else None
             price = ir.price if ir.price is not None else None
@@ -505,11 +514,16 @@ class WishlistStore:
                 item.wishlist = service._wishlists[item.wishlist_id]
                 item.wishlist.items.append(item)
 
+        item_subquery = (
+            " WHERE wish_item_id IN (SELECT id FROM wl_items WHERE wishlist_id = :wishlist_id)"
+            if wishlist_id is not None
+            else ""
+        )
         r_stmt = text(
             "SELECT id, wish_item_id, user_id, quantity, status, created_at, updated_at "
-            "FROM wl_reservations ORDER BY id ASC"
+            f"FROM wl_reservations{item_subquery} ORDER BY id ASC"
         )
-        r_rows = (await conn.execute(r_stmt)).all()
+        r_rows = (await conn.execute(r_stmt, scope_params)).all()
         for rr in r_rows:
             res = Reservation(
                 id=int(rr.id),
@@ -527,31 +541,53 @@ class WishlistStore:
 
         receipt_rows = (
             await conn.execute(
-                text(f"SELECT {_RECEIPT_COLUMNS} FROM wl_receipts ORDER BY received_at ASC, id ASC")
+                text(
+                    f"SELECT {_RECEIPT_COLUMNS} FROM wl_receipts{item_subquery} "
+                    "ORDER BY received_at ASC, id ASC"
+                ),
+                scope_params,
             )
         ).all()
         for receipt_row in receipt_rows:
             receipt = _receipt_from_row(receipt_row)
             if receipt.wish_item_id in service._items:
                 service._items[receipt.wish_item_id].receipts.append(receipt)
+        if wishlist_id is None:
+            user_notice_stmt = text(
+                "SELECT user_id, event_type, enabled FROM user_notification_settings"
+            )
+            list_notice_stmt = text(
+                "SELECT user_id, wishlist_id, event_type, enabled "
+                "FROM wl_list_notification_settings"
+            )
+        else:
+            user_notice_stmt = text(
+                "SELECT user_id, event_type, enabled FROM user_notification_settings "
+                "WHERE user_id IN ("
+                "  SELECT owner_id FROM wl_lists WHERE id = :wishlist_id "
+                "  UNION "
+                "  SELECT user_id FROM wl_members WHERE wishlist_id = :wishlist_id "
+                "  UNION "
+                "  SELECT r.user_id FROM wl_reservations r "
+                "  JOIN wl_items i ON i.id = r.wish_item_id "
+                "  WHERE i.wishlist_id = :wishlist_id"
+                ")"
+            )
+            list_notice_stmt = text(
+                "SELECT user_id, wishlist_id, event_type, enabled "
+                "FROM wl_list_notification_settings WHERE wishlist_id = :wishlist_id"
+            )
         service._notice_settings = _notice_settings_from_rows(
-            (
-                await conn.execute(
-                    text("SELECT user_id, event_type, enabled FROM user_notification_settings")
-                )
-            ).all(),
-            (
-                await conn.execute(
-                    text(
-                        "SELECT user_id, wishlist_id, event_type, enabled "
-                        "FROM wl_list_notification_settings"
-                    )
-                )
-            ).all(),
+            (await conn.execute(user_notice_stmt, scope_params)).all(),
+            (await conn.execute(list_notice_stmt, scope_params)).all(),
         )
 
+        fav_where = " WHERE wishlist_id = :wishlist_id" if wishlist_id is not None else ""
         fav_rows = (
-            await conn.execute(text("SELECT user_id, wishlist_id, created_at FROM wl_favorites"))
+            await conn.execute(
+                text(f"SELECT user_id, wishlist_id, created_at FROM wl_favorites{fav_where}"),
+                scope_params,
+            )
         ).all()
         for f_row in fav_rows:
             fav = WishlistFavorite(
@@ -561,24 +597,25 @@ class WishlistStore:
             )
             service._favorites[(fav.user_id, fav.wishlist_id)] = fav
 
-        hist_rows = (
-            await conn.execute(
-                text(
-                    "SELECT id, user_id, wishlist_id, viewed_at "
-                    "FROM wl_view_history ORDER BY id ASC"
-                )
-            )
-        ).all()
         history_ids: set[int] = set()
-        for h_row in hist_rows:
-            entry = ViewHistoryEntry(
-                id=int(h_row[0]),
-                user_id=int(h_row[1]),
-                wishlist_id=int(h_row[2]),
-                viewed_at=_parse_dt(h_row[3]) or datetime.now(UTC),
-            )
-            history_ids.add(entry.id)
-            service._view_history.append(entry)
+        if wishlist_id is None:
+            hist_rows = (
+                await conn.execute(
+                    text(
+                        "SELECT id, user_id, wishlist_id, viewed_at "
+                        "FROM wl_view_history ORDER BY id ASC"
+                    )
+                )
+            ).all()
+            for h_row in hist_rows:
+                entry = ViewHistoryEntry(
+                    id=int(h_row[0]),
+                    user_id=int(h_row[1]),
+                    wishlist_id=int(h_row[2]),
+                    viewed_at=_parse_dt(h_row[3]) or datetime.now(UTC),
+                )
+                history_ids.add(entry.id)
+                service._view_history.append(entry)
 
         counters: dict[str, int] = dict(
             (await conn.execute(text("SELECT name, value FROM wl_counters"))).all()
@@ -600,6 +637,8 @@ class WishlistStore:
             len(service._items),
             extra={
                 "event": "wishlist_store_read",
+                "scoped": wishlist_id is not None,
+                "wishlist_id": wishlist_id,
                 "wishlists_count": len(service._wishlists),
                 "items_count": len(service._items),
                 "reservations_count": len(service._reservations),
@@ -615,6 +654,8 @@ class WishlistStore:
         conn: AsyncConnection,
         service: WishlistService,
         snapshot: _StorageSnapshot,
+        *,
+        wishlist_id: int | None = None,
     ) -> list[FlushedNotice]:
         current_wls = service._wishlists
         deleted_wls = snapshot.wishlists - set(current_wls.keys())
@@ -793,34 +834,37 @@ class WishlistStore:
                     },
                 )
 
-        current_hist_ids = {e.id for e in service._view_history if e.id > 0}
-        deleted_hist = snapshot.history_ids - current_hist_ids
-        for hid in deleted_hist:
-            await conn.execute(text("DELETE FROM wl_view_history WHERE id = :id"), {"id": hid})
+        if wishlist_id is None:
+            current_hist_ids = {e.id for e in service._view_history if e.id > 0}
+            deleted_hist = snapshot.history_ids - current_hist_ids
+            for hid in deleted_hist:
+                await conn.execute(text("DELETE FROM wl_view_history WHERE id = :id"), {"id": hid})
 
-        for entry in service._view_history:
-            if entry.wishlist_id in current_wls:
-                h_params = {
-                    "id": entry.id if entry.id > 0 else None,
-                    "user_id": entry.user_id,
-                    "wishlist_id": entry.wishlist_id,
-                    "viewed_at": _format_dt(entry.viewed_at),
-                }
-                if entry.id in snapshot.history_ids:
-                    await conn.execute(
-                        text("UPDATE wl_view_history SET viewed_at = :viewed_at WHERE id = :id"),
-                        h_params,
-                    )
-                else:
-                    await conn.execute(
-                        text(
-                            "INSERT INTO wl_view_history (id, user_id, wishlist_id, viewed_at) "
-                            "VALUES (:id, :user_id, :wishlist_id, :viewed_at) "
-                            "ON CONFLICT(user_id, wishlist_id) "
-                            "DO UPDATE SET viewed_at = excluded.viewed_at"
-                        ),
-                        h_params,
-                    )
+            for entry in service._view_history:
+                if entry.wishlist_id in current_wls:
+                    h_params = {
+                        "id": entry.id if entry.id > 0 else None,
+                        "user_id": entry.user_id,
+                        "wishlist_id": entry.wishlist_id,
+                        "viewed_at": _format_dt(entry.viewed_at),
+                    }
+                    if entry.id in snapshot.history_ids:
+                        await conn.execute(
+                            text(
+                                "UPDATE wl_view_history SET viewed_at = :viewed_at WHERE id = :id"
+                            ),
+                            h_params,
+                        )
+                    else:
+                        await conn.execute(
+                            text(
+                                "INSERT INTO wl_view_history (id, user_id, wishlist_id, viewed_at) "
+                                "VALUES (:id, :user_id, :wishlist_id, :viewed_at) "
+                                "ON CONFLICT(user_id, wishlist_id) "
+                                "DO UPDATE SET viewed_at = excluded.viewed_at"
+                            ),
+                            h_params,
+                        )
 
         for name in ("wishlist", "member", "item", "reservation", "view_history"):
             await conn.execute(
@@ -837,6 +881,8 @@ class WishlistStore:
             len(current_items),
             extra={
                 "event": "wishlist_store_write",
+                "scoped": wishlist_id is not None,
+                "wishlist_id": wishlist_id,
                 "wishlists_count": len(current_wls),
                 "members_count": len(current_members),
                 "items_count": len(current_items),
@@ -1584,22 +1630,29 @@ class WishlistStore:
         except SQLAlchemyError as exc:
             _raise_for_storage_error(exc, cabinet_operation="reservations_summary")
 
-    async def execute(self, operation: Callable[[WishlistService], Awaitable[T]]) -> T:
+    async def execute(
+        self,
+        operation: Callable[[WishlistService], Awaitable[T]],
+        *,
+        wishlist_id: int | None = None,
+    ) -> T:
         """Serialize reads and writes across workers and commit state atomically."""
 
         async def adapter(service: WishlistService, _conn: AsyncConnection) -> T:
             return await operation(service)
 
-        return await self.execute_with_connection(adapter)
+        return await self.execute_with_connection(adapter, wishlist_id=wishlist_id)
 
     async def execute_with_connection(
         self,
         operation: Callable[[WishlistService, AsyncConnection], Awaitable[T]],
+        *,
+        wishlist_id: int | None = None,
     ) -> T:
         """Serialize domain reads/writes and caller-scoped SQL in one atomic transaction."""
         for attempt in range(5):
             try:
-                return await self._execute_once(operation)
+                return await self._execute_once(operation, wishlist_id=wishlist_id)
             except TokenCollision:
                 logger.warning(
                     "Capability token collision encountered, retrying operation",
@@ -1677,6 +1730,8 @@ class WishlistStore:
     async def _execute_once(
         self,
         operation: Callable[[WishlistService, AsyncConnection], Awaitable[T]],
+        *,
+        wishlist_id: int | None = None,
     ) -> T:
         flushed: list[FlushedNotice] = []
         flushed_shared: list[tuple[str, int]] = []
@@ -1684,7 +1739,7 @@ class WishlistStore:
 
         async def work(conn: AsyncConnection) -> T:
             nonlocal flushed, flushed_shared, pending_commit_logs
-            service, snapshot = await self._read(conn)
+            service, snapshot = await self._read(conn, wishlist_id=wishlist_id)
             previous = {wl.id: wl.public_token for wl in service._wishlists.values()}
             prior_invites = {wl.id: wl.invite_token for wl in service._wishlists.values()}
             for wl_id, token in prior_invites.items():
@@ -1712,7 +1767,7 @@ class WishlistStore:
                     )
                     if matching_invite:
                         raise TokenCollision
-            flushed = await self._write(conn, service, snapshot)
+            flushed = await self._write(conn, service, snapshot, wishlist_id=wishlist_id)
             for wl in service._wishlists.values():
                 if prior_invites.get(wl.id) != wl.invite_token:
                     await conn.execute(

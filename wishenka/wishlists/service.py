@@ -110,9 +110,48 @@ _RESERVATION_INVENTORY_METHODS = frozenset(
         "revert_reservation_to_active",
     }
 )
+_SINGLE_WISHLIST_METHODS = frozenset(
+    {
+        "get_wishlist_by_id",
+        "get_wishlist_view",
+        "add_member",
+        "remove_member",
+        "get_members",
+        "update_wishlist_settings",
+        "archive_wishlist",
+        "unarchive_wishlist",
+        "delete_wishlist",
+        "restore_deleted_wishlist",
+        "transfer_ownership",
+        "add_wish_item",
+        "get_wish_item",
+        "list_wish_items",
+        "list_gifted_items",
+        "reorder_wish_items",
+        "archive_wish_item",
+        "restore_wish_item",
+        "regenerate_public_token",
+        "regenerate_invite_token",
+        "is_favorite",
+        "add_favorite",
+        "remove_favorite",
+    }
+)
 
 if TYPE_CHECKING:
     from wishenka.wishlists.store import WishlistStore
+
+
+def _wishlist_scope(
+    method: Callable[..., Awaitable[Any]],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> int | None:
+    """Return the target wishlist_id for single-wishlist methods, or None for unscoped."""
+    if method.__name__ not in _SINGLE_WISHLIST_METHODS:
+        return None
+    bound = signature(method).bind(None, *args, **kwargs)
+    return int(bound.arguments["wishlist_id"])
 
 
 def _inventory_scope(
@@ -210,7 +249,8 @@ def _transactional[T](method: Callable[..., Awaitable[T]]) -> Callable[..., Awai
                 raise InventoryBusyError("Receipt delivery is busy") from exc
 
         if scope is None:
-            return await self._store.execute(call)
+            wishlist_id = _wishlist_scope(method, args, kwargs)
+            return await self._store.execute(call, wishlist_id=wishlist_id)
         item_id, reservation_id = scope
         return await self._store.execute_wish(
             call,

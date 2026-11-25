@@ -1344,14 +1344,38 @@ relational architecture, `WishlistStore` coordinates atomic row-level persistenc
   `WishlistStore.execute_with_connection()` catch `TokenCollision` / `IntegrityError` and retry up
   to 5 times with newly generated cryptographic tokens.
 - **Public Hybrid Transaction Seam (`WishlistStore.execute_with_connection`)**:
-  `execute_with_connection(operation)` accepts `Callable[[WishlistService, AsyncConnection], Awaitable[T]]`
-  and runs both hydrated `WishlistService` domain operations and caller-scoped SQL on the same
-  `AsyncConnection` inside one `BEGIN IMMEDIATE` transaction (sharing `_read`/`_write` snapshot
-  diffing, token-collision retries, error mapping, and post-commit log flushing).
-  `WishlistStore.execute()` delegates to `execute_with_connection()`. Callers outside the
-  wishlist domain that need atomic cross-table writes alongside domain operations (such as
-  `wishenka.bot.capture:mutate` updating `bot_drafts` and `bot_capture_order` with
-  `add_wish_item`) use `execute_with_connection()` instead of private `_read`/`_write` hooks.
+  `execute_with_connection(operation, *, wishlist_id=None)` accepts
+  `Callable[[WishlistService, AsyncConnection], Awaitable[T]]` and runs both hydrated
+  `WishlistService` domain operations and caller-scoped SQL on the same `AsyncConnection` inside
+  one `BEGIN IMMEDIATE` transaction (sharing `_read`/`_write` snapshot diffing, token-collision
+  retries, error mapping, and post-commit log flushing).
+  `WishlistStore.execute(operation, *, wishlist_id=None)` delegates to `execute_with_connection()`.
+  Callers outside the wishlist domain that need atomic cross-table writes alongside domain
+  operations (such as `wishenka.bot.capture:mutate` updating `bot_drafts` and `bot_capture_order`
+  with `add_wish_item`) use `execute_with_connection()` instead of private `_read`/`_write` hooks.
+- **Single-Wishlist Scoped Hydration (`WISHENKA-213`)**:
+  `WishlistStore.execute(..., wishlist_id=...)`, `execute_with_connection(..., wishlist_id=...)`,
+  `_read(..., wishlist_id=...)`, and `_write(..., wishlist_id=...)` support optional
+  `wishlist_id: int | None = None`:
+  - When `wishlist_id` is an `int`, `_read()` hydrates only the target wishlist (`wl_lists`), its
+    members (`wl_members`), items (`wl_items`), reservations (`wl_reservations`), receipts
+    (`wl_receipts`), scoped notification settings (`user_notification_settings` for owner, members,
+    and reservers; `wl_list_notification_settings` for `wishlist_id`), and favorites
+    (`wl_favorites`), while skipping `wl_view_history` completely (`_write()` also skips
+    `wl_view_history` diffing when `wishlist_id is not None`).
+  - In `wishenka/wishlists/service.py`, `_SINGLE_WISHLIST_METHODS` (`frozenset` of 23
+    single-wishlist methods such as `get_wishlist_by_id`, `get_wishlist_view`, `add_member`,
+    `remove_member`, `get_members`, `update_wishlist_settings`, `archive_wishlist`,
+    `unarchive_wishlist`, `delete_wishlist`, `restore_deleted_wishlist`, `transfer_ownership`,
+    `add_wish_item`, `get_wish_item`, `list_wish_items`, `list_gifted_items`,
+    `reorder_wish_items`, `archive_wish_item`, `restore_wish_item`, `regenerate_public_token`,
+    `regenerate_invite_token`, `is_favorite`, `add_favorite`, `remove_favorite`) and
+    `_wishlist_scope(method, args, kwargs) -> int | None` extract `wishlist_id` via
+    `inspect.signature(method).bind(...)` inside `_transactional` whenever `_inventory_scope`
+    returns `None`, passing `wishlist_id=wishlist_id` to `self._store.execute(...)`. Unlisted
+    methods fall back to `wishlist_id=None` (full-database snapshot). Any newly added
+    `WishlistService` method operating on a single `wishlist_id` must be added to
+    `_SINGLE_WISHLIST_METHODS` to opt into scoped hydration.
 - **Read-Only Deferred Transactions (`WishlistStore.execute_read`)**:
   `execute_read(work)` accepts `Callable[[AsyncConnection], Awaitable[T]]`, binds
   `execution_options(read_only=True)` on the connection, and runs `work(conn)` inside a deferred
@@ -1378,8 +1402,8 @@ Database operations emit structured audit logs under the `wishenka.wishlists` lo
 
 | Event (`event`) | Level | Trigger | Key Extra Attributes |
 | --- | :---: | --- | --- |
-| `wishlist_store_read` | `INFO` | State read into service | `wishlists_count`, `items_count` |
-| `wishlist_store_write` | `INFO` | Differential committed | `wishlists_count`, `items_count` |
+| `wishlist_store_read` | `INFO` | State read into service | `scoped`, `wishlist_id`, `wishlists_count`, `items_count`, `reservations_count`, `members_count`, `favorites_count`, `history_count` |
+| `wishlist_store_write` | `INFO` | Differential committed | `scoped`, `wishlist_id`, `wishlists_count`, `members_count`, `items_count`, `reservations_count`, `deleted_wishlists_count`, `deleted_members_count`, `deleted_items_count`, `deleted_reservations_count` |
 | `wishlist_repo_mutation` | `INFO` | Repository mutation | `entity`, `operation`, `entity_id` |
 | `wishlist_repo_batch_read` | `DEBUG` | Batched `IN (...)` read (`get_items_by_ids`, `get_wishlist_headers_by_ids`) | `entity`, `requested_count`, `chunks_count`, `found_count` |
 | `reservation_cabinet_read` | `DEBUG` | Cabinet hydrated in `_cabinet_service` | `include_items`, `reservations_count`, `items_count`, `wishlists_count` |
@@ -1624,8 +1648,8 @@ Settings in `wishenka.config.Settings` (prefixed with `WISHENKA_` in environment
 | `view_history_listed` | `INFO` | History fetched | `user_id`, `count` |
 | `view_history_recorded` | `INFO` | View recorded | `wishlist_id`, `user_id` |
 | `view_history_cleared` | `INFO` | History cleared (once per delete) | `user_id`, `removed_count` |
-| `wishlist_store_read` | `INFO` | State read | `wishlists_count` |
-| `wishlist_store_write` | `INFO` | Changes committed | `wishlists_count` |
+| `wishlist_store_read` | `INFO` | State read | `scoped`, `wishlist_id`, `wishlists_count`, `items_count` |
+| `wishlist_store_write` | `INFO` | Changes committed | `scoped`, `wishlist_id`, `wishlists_count`, `items_count` |
 | `wishlist_repo_mutation` | `INFO` | Repo mutation | `entity`, `operation`, `count` |
 | `background_worker_started` | `INFO` | Worker loop started | `interval_seconds` |
 | `background_worker_stopped` | `INFO` | Worker loop stopped | None |

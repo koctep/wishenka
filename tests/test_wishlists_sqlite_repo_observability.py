@@ -57,7 +57,13 @@ async def test_wishlist_store_read_write_structured_logging(
     assert len(read_records) >= 1, "Expected at least one wishlist_store_read event"
     assert len(write_records) >= 1, "Expected at least one wishlist_store_write event"
 
+    read_rec = read_records[0]
+    assert getattr(read_rec, "scoped", None) is False
+    assert getattr(read_rec, "wishlist_id", "missing") is None
+
     write_rec = write_records[0]
+    assert getattr(write_rec, "scoped", None) is False
+    assert getattr(write_rec, "wishlist_id", "missing") is None
     assert getattr(write_rec, "wishlists_count", None) == 1
     assert getattr(write_rec, "members_count", None) == 0
     assert getattr(write_rec, "items_count", None) == 1
