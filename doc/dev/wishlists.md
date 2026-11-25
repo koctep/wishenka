@@ -298,9 +298,21 @@ Unauthenticated and public capability routes are protected by
 `app.state.public_link_rate_limiter` in [`wishenka.web.app`](../../wishenka/web/app.py)):
 
 - **Protected Routes** (`match_public_link_route`):
-  - `GET /share/{token}`
-  - `GET /invite/{token}`
-  - `POST /invite/{token}/join`
+  - `GET` and `HEAD` `/share/{token}`
+  - `GET` and `HEAD` `/invite/{token}`
+  - `POST /invite/{token}/join` (`HEAD` on this three-segment path is not matched)
+- **HEAD on the two-segment paths**: `HEAD` spends the same per-client window as `GET`.
+  The matcher uppercases the method and runs `path.lstrip("/")` before splitting, so
+  extra leading slashes do not skip the limit for `HEAD` or `GET`. The method is not
+  rewritten to `GET`.
+  - An in-budget `HEAD` is forwarded unchanged. Share and invite pages are
+    `@router.get` handlers with no `HEAD` method, so the router returns
+    `405 Method Not Allowed` (`Allow: GET`). That status does not reveal whether the
+    token is valid, because the handler does not run.
+  - An over-limit `HEAD` never reaches the router. The middleware returns the
+    token-free `429` from `_build_rate_limit_response` and logs
+    `public_link_rate_limited` with `method=HEAD` and route `/share/{token}` or
+    `/invite/{token}`.
 - **Algorithm & Bounds**: `SlidingWindowRateLimiter` maintains an in-memory per-client
   timestamp `deque` inside an `OrderedDict` (`max_requests` within `window_seconds`, bounded by
   `max_clients` with expired-bucket pruning and oldest-client eviction).
@@ -1964,7 +1976,7 @@ Settings in `wishenka.config.Settings` (prefixed with `WISHENKA_` in environment
 | `wishlist_delete_not_found` | `WARNING` | `DELETE /api/wishlists/{id}` for an unknown id (client gets 404) | `wishlist_id`, `user_id` |
 | `wishlist_delete_denied` | `WARNING` | `DELETE /api/wishlists/{id}` by a non-owner (client gets the same 404); server-side only, ids only; `execute()` also logs `wishlist_permission_denied` with `operation=delete_wishlist` | `wishlist_id`, `user_id` |
 | `wishlist_deleted_by_owner` | `INFO` | Owner delete succeeded (also on an idempotent repeat) | `wishlist_id`, `user_id`, `retention_days`, `outcome` (`deleted` or `already_deleted`) |
-| `public_link_rate_limited` | `WARNING` | Public share/invite link throttled (`wishenka.web.rate_limit`) | `route` (`/share/{token}`, `/invite/{token}`, `/invite/{token}/join`), `method`, `client_ip`, `retry_after` |
+| `public_link_rate_limited` | `WARNING` | Public share/invite link throttled (`wishenka.web.rate_limit`). `HEAD` and `GET` on `/share/{token}` and `/invite/{token}` share one bucket; an over-limit `HEAD` is logged here before routing | `route` (`/share/{token}`, `/invite/{token}`, `/invite/{token}/join`), `method` (`GET`, `HEAD`, or `POST`), `client_ip`, `retry_after` |
 | `item_missing_parent_wishlist` | `ERROR` | `WishItem.wishlist` is `None` in `_require_item_wishlist` | `item_id`, `wishlist_id` |
 
 Creation notes (WISHENKA-296): a rejected creation (`422`) has no dedicated event; it is visible
@@ -2075,9 +2087,13 @@ WishlistError
 
 #### `429 Too Many Requests` on `/share/{token}` or `/invite/{token}`
 - **Root Cause**: Client exceeded `WISHENKA_PUBLIC_RATE_LIMIT_MAX_REQUESTS` within
-  `WISHENKA_PUBLIC_RATE_LIMIT_WINDOW_SECONDS`. Behind a reverse proxy, if
-  `WISHENKA_PUBLIC_RATE_LIMIT_TRUST_PROXY_HEADERS` is `False`, all users may share the proxy's
-  peer IP and trip the shared bucket.
+  `WISHENKA_PUBLIC_RATE_LIMIT_WINDOW_SECONDS`. `GET` and `HEAD` on these two paths share
+  one per-client bucket. An over-limit `HEAD` is `429` before routing, with a token-free
+  body, and is logged as `public_link_rate_limited` with `method=HEAD`. An in-budget
+  `HEAD` stays `HEAD` and is `405` when the router has no `HEAD` handler.
+  `POST /invite/{token}/join` uses the same limiter and is unchanged. Behind a reverse
+  proxy, if `WISHENKA_PUBLIC_RATE_LIMIT_TRUST_PROXY_HEADERS` is `False`, all users may
+  share the proxy's peer IP and trip the shared bucket.
 - **Resolution**: Wait for the `Retry-After` interval, tune `WISHENKA_PUBLIC_RATE_LIMIT_*`
   settings, or enable `WISHENKA_PUBLIC_RATE_LIMIT_TRUST_PROXY_HEADERS=true` when deployed behind
   a trusted reverse proxy that sets `X-Forwarded-For` or `X-Real-IP`.

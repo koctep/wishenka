@@ -7,16 +7,21 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from pydantic import ValidationError
 
 from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.config import Settings
 from wishenka.web.app import create_app
-from wishenka.web.rate_limit import SlidingWindowRateLimiter
+from wishenka.web.rate_limit import (
+    PublicLinkRateLimitMiddleware,
+    SlidingWindowRateLimiter,
+    resolve_client_ip,
+)
 from wishenka.wishlists.service import WishlistService
 
 pytestmark = pytest.mark.timeout(30)
@@ -53,6 +58,50 @@ async def _build_app(
         )
         wishlist = await service.create_wishlist(owner=owner, title="Secret Birthday List")
         yield app, str(wishlist.public_token), str(wishlist.invite_token)
+
+
+def _http_scope_request(
+    *,
+    method: str = "GET",
+    path: str = "/share/example-token",
+    client: tuple[str, int] | None = ("127.0.0.1", 80),
+    headers: dict[str, str] | None = None,
+    app: FastAPI | None = None,
+) -> Request:
+    """Build a Request from an ASGI scope, including a missing socket peer."""
+    raw_headers = [
+        (name.lower().encode("latin-1"), value.encode("latin-1"))
+        for name, value in (headers or {}).items()
+    ]
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode("ascii"),
+        "query_string": b"",
+        "headers": raw_headers,
+        "client": client,
+        "server": ("testserver", 80),
+    }
+    if app is not None:
+        scope["app"] = app
+    return Request(scope)
+
+
+async def _passthrough(_request: Request) -> Response:
+    """Stand-in route used when the limiter itself is the subject."""
+    return Response(status_code=204)
+
+
+def _assert_retry_after(response: httpx.Response, *, window_seconds: int) -> None:
+    """Refusal matches the existing public-link Retry-After contract."""
+    assert response.status_code == 429
+    assert "Retry-After" in response.headers
+    retry_after = int(response.headers["Retry-After"])
+    assert 1 <= retry_after <= window_seconds
 
 
 @pytest.mark.asyncio
@@ -397,3 +446,211 @@ async def test_rate_limit_logs_structured_event_without_token_leakage(
                 if isinstance(value, str):
                     assert public_token not in value
                     assert invite_token not in value
+
+
+@pytest.mark.asyncio
+async def test_head_share_shares_allowance_with_get(tmp_path: Path) -> None:
+    """HEAD /share/{token} spends the same allowance, so the third call is refused."""
+    async with _build_app(
+        tmp_path,
+        db_name="head_share.db",
+        max_requests=2,
+        window_seconds=60,
+    ) as (app, public_token, _invite_token):
+        transport = httpx.ASGITransport(app=app, client=("10.0.0.50", 1500))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            head = await client.head(f"/share/{public_token}")
+            first_get = await client.get(f"/share/{public_token}")
+            second_get = await client.get(f"/share/{public_token}")
+
+        assert head.status_code != 429
+        assert first_get.status_code == 200
+        assert second_get.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_head_invite_shares_allowance_with_get(tmp_path: Path) -> None:
+    """Two HEAD /invite/{token} probes spend the allowance, so the following GET is 429."""
+    async with _build_app(
+        tmp_path,
+        db_name="head_invite.db",
+        max_requests=2,
+        window_seconds=60,
+    ) as (app, _public_token, invite_token):
+        transport = httpx.ASGITransport(app=app, client=("10.0.0.51", 1501))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            first_head = await client.head(f"/invite/{invite_token}")
+            second_head = await client.head(f"/invite/{invite_token}")
+            opened = await client.get(f"/invite/{invite_token}")
+
+        assert first_head.status_code != 429
+        assert second_head.status_code != 429
+        assert opened.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_head_unknown_share_token_is_rate_limited_without_leaking(tmp_path: Path) -> None:
+    """Unknown-secret HEAD probes share one allowance and the refusal names no secret."""
+    async with _build_app(
+        tmp_path,
+        db_name="head_unknown.db",
+        max_requests=1,
+        window_seconds=60,
+    ) as (app, _public_token, _invite_token):
+        transport = httpx.ASGITransport(app=app, client=("10.0.0.52", 1502))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            first = await client.head("/share/missing-one")
+            second = await client.head("/share/missing-two")
+
+        assert first.status_code != 429
+        _assert_retry_after(second, window_seconds=60)
+        assert "missing-one" not in second.text
+        assert "missing-two" not in second.text
+        assert "Secret Birthday List" not in second.text
+
+
+@pytest.mark.asyncio
+async def test_head_past_allowance_matches_page_open_refusal(tmp_path: Path) -> None:
+    """Once GET has filled the budget, HEAD on share and invite is the same 429."""
+    async with _build_app(
+        tmp_path,
+        db_name="head_refused.db",
+        max_requests=1,
+        window_seconds=60,
+    ) as (app, public_token, invite_token):
+        transport = httpx.ASGITransport(app=app, client=("10.0.0.53", 1503))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            opened = await client.get(f"/share/{public_token}")
+            blocked_share = await client.head(f"/share/{public_token}")
+            blocked_invite = await client.head(f"/invite/{invite_token}")
+
+        assert opened.status_code == 200
+        _assert_retry_after(blocked_share, window_seconds=60)
+        _assert_retry_after(blocked_invite, window_seconds=60)
+        assert public_token not in blocked_share.text
+        assert invite_token not in blocked_invite.text
+        assert "Secret Birthday List" not in blocked_share.text
+        assert "Secret Birthday List" not in blocked_invite.text
+
+
+@pytest.mark.asyncio
+async def test_in_budget_public_links_stay_available_when_head_is_counted(
+    tmp_path: Path,
+) -> None:
+    """Inside the allowance, HEAD, share open, invite open, and join stay available."""
+    async with _build_app(
+        tmp_path,
+        db_name="head_in_budget.db",
+        max_requests=4,
+        window_seconds=60,
+    ) as (app, public_token, invite_token):
+        transport = httpx.ASGITransport(app=app, client=("10.0.0.54", 1504))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            head = await client.head(f"/share/{public_token}")
+            share = await client.get(f"/share/{public_token}")
+            invite = await client.get(f"/invite/{invite_token}")
+            joined = await client.post(
+                f"/invite/{invite_token}/join",
+                headers={"Origin": "http://testserver"},
+            )
+
+        assert head.status_code != 429
+        assert share.status_code == 200
+        assert invite.status_code == 200
+        assert joined.status_code != 429
+
+
+def test_resolve_client_ip_uses_x_real_ip_when_proxy_trusted() -> None:
+    """Trusted X-Real-IP is the visitor; whitespace is stripped; X-Forwarded-For wins."""
+    peer = ("192.0.2.10", 4000)
+    named = _http_scope_request(
+        client=peer,
+        headers={"X-Real-IP": "  203.0.113.8  "},
+    )
+    assert resolve_client_ip(named, trust_proxy_headers=True) == "203.0.113.8"
+
+    forwarded = _http_scope_request(
+        client=peer,
+        headers={
+            "X-Forwarded-For": "198.51.100.20",
+            "X-Real-IP": "203.0.113.8",
+        },
+    )
+    assert resolve_client_ip(forwarded, trust_proxy_headers=True) == "198.51.100.20"
+
+
+def test_resolve_client_ip_ignores_x_real_ip_when_proxy_untrusted() -> None:
+    """With proxy trust off, X-Real-IP is ignored and the socket peer is the visitor."""
+    request = _http_scope_request(
+        client=("10.0.0.7", 70),
+        headers={"X-Real-IP": "203.0.113.8"},
+    )
+    assert resolve_client_ip(request, trust_proxy_headers=False) == "10.0.0.7"
+
+
+def test_resolve_client_ip_unknown_when_client_missing() -> None:
+    """No socket peer and no trusted address is the single key ``unknown``."""
+    request = _http_scope_request(client=None)
+    assert resolve_client_ip(request, trust_proxy_headers=False) == "unknown"
+    assert resolve_client_ip(request, trust_proxy_headers=True) == "unknown"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trust_proxy_headers", [False, True])
+async def test_unidentified_requests_share_one_public_link_allowance(
+    tmp_path: Path,
+    trust_proxy_headers: bool,
+) -> None:
+    """Two peer-less public-link requests with no trusted address share one allowance."""
+    async with _build_app(
+        tmp_path,
+        db_name="unknown_peer.db",
+        max_requests=1,
+        window_seconds=60,
+        trust_proxy_headers=trust_proxy_headers,
+    ) as (app, public_token, _invite_token):
+        middleware = PublicLinkRateLimitMiddleware(app)
+        path = f"/share/{public_token}"
+        first = await middleware.dispatch(
+            _http_scope_request(path=path, client=None, app=app),
+            _passthrough,
+        )
+        second = await middleware.dispatch(
+            _http_scope_request(path=path, client=None, app=app),
+            _passthrough,
+        )
+
+        assert first.status_code != 429
+        assert second.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_distinct_trusted_x_real_ip_visitors_have_separate_allowances(
+    tmp_path: Path,
+) -> None:
+    """Trusted X-Real-IP values are separate visitors even when the socket peer matches."""
+    async with _build_app(
+        tmp_path,
+        db_name="x_real_ip.db",
+        max_requests=1,
+        window_seconds=60,
+        trust_proxy_headers=True,
+    ) as (app, public_token, _invite_token):
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 8080))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            first = await client.get(
+                f"/share/{public_token}",
+                headers={"X-Real-IP": "203.0.113.8"},
+            )
+            other = await client.get(
+                f"/share/{public_token}",
+                headers={"X-Real-IP": "203.0.113.9"},
+            )
+            repeat = await client.get(
+                f"/share/{public_token}",
+                headers={"X-Real-IP": "203.0.113.8"},
+            )
+
+        assert first.status_code != 429
+        assert other.status_code != 429
+        assert repeat.status_code == 429

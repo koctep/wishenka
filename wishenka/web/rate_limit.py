@@ -119,7 +119,7 @@ def match_public_link_route(method: str, path: str) -> str | None:
     """Return a token-redacted route template for rate-limited public endpoints, or ``None``."""
     parts = path.lstrip("/").split("/")
     upper_method = method.upper()
-    if upper_method == "GET" and len(parts) == 2 and parts[1]:
+    if upper_method in {"GET", "HEAD"} and len(parts) == 2 and parts[1]:
         if parts[0] == "share":
             return "/share/{token}"
         if parts[0] == "invite":
