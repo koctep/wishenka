@@ -334,14 +334,18 @@ each action visible pending, success and error feedback. It adds no endpoint.
   message `miniapp.deleted.restoring`), restore archived wishlist, favorite toggle, member
   remove, role change, revoke invite, reset public link. History clearing and the settings form
   keep their own existing pending state.
-- **Create-button scope**: since WISHENKA-296 the home button only opens the creation form; the
-  guarded control is the form's own Create button (`withPending(createBtn, send, ...)`,
-  `miniapp.js:533`), shared by taps and Enter. Assertion A6 (a burst sends exactly one
-  `POST /api/wishlists`) is carried by `test_enter_and_tap_burst_sends_exactly_one_post` and
-  `test_real_tap_burst_sends_exactly_one_post` in `tests/test_wishlist_create_form_browser.py`
-  and by `test_create_wishlist_burst_sends_a_single_post` in
-  `tests/test_cross_screen_comfort_browser.py`. The remaining re-check and the unprotected retry
-  after a lost response are tracked in WISHENKA-312 and WISHENKA-322.
+- **Create-button scope**: the home button only opens the creation form. The
+  guarded control is the form's own Create button
+  (`withPending(createBtn, send, ...)`, `miniapp.js`), shared by taps and Enter.
+  One deliberate confirmation of that form sends one `POST /api/wishlists`.
+  Repeated taps and Enter while that request is in flight do not send another.
+  Opening the form does not create a list. A burst is locked by
+  `test_enter_and_tap_burst_sends_exactly_one_post` and
+  `test_real_tap_burst_sends_exactly_one_post` in
+  `tests/test_wishlist_create_form_browser.py` and by
+  `test_create_wishlist_burst_sends_a_single_post` in
+  `tests/test_cross_screen_comfort_browser.py`. A retry after a lost response
+  stays on WISHENKA-322.
 
 #### htmx Pending and Failure Feedback (`app.js`, `base.html`)
 
@@ -441,11 +445,13 @@ capabilities. The application strictly adheres to the following token safety rul
 ### 1. Wishlist Creation
 
 - **Trigger**: the home button "Create wishlist" (`home-create-btn`) opens the creation form
-  (`showCreate`, `miniapp.js:378`). The button sends no request. The bot menu item "Create
-  wishlist" and the deep link `startapp=create` open the home screen, where `create` only focuses
-  this button (`miniapp.js:1158-1160`); nothing is created by them.
-- **API Call**: `POST /api/wishlists` with `name` (required), `description`, `event_title`,
-  `event_date`, sent only after the user confirms the form with a valid title.
+  (`showCreate`). The button sends no request. Opening the form does not create a list.
+  The bot menu item "Create wishlist" and the deep link `startapp=create` open the home
+  screen and only focus this button; nothing is created by them.
+- **API Call**: one deliberate confirmation of the form sends one `POST /api/wishlists`
+  with `name` (required), `description`, `event_title`, and `event_date`, after the
+  title passes the client check. Repeated taps and Enter while that request is in
+  flight do not send another.
 - **Behavior**: the server creates an active personal wishlist with generated tokens and the
   trimmed title; a missing or invalid title is rejected with `422` and nothing is created.
 - **UI State**: on success the client opens the new wishlist (`showList`) with the add-item entry
@@ -583,12 +589,13 @@ and the form is enough). Product wording: `in-docs/spec.md` 4.2 and UC-01.
   `wishenka/web/routes/wishlists.py:43-54`). Client and server limits are equal, so a `422` after
   a valid client check arises only from `trim()` versus `strip()` differences on rare Unicode
   spaces.
-- **Submit** (`form` submit handler, `:521-538`): `preventDefault`, ignored while `submitting`,
+- **Submit** (form submit handler): `preventDefault`, ignored while `submitting`,
   previous errors cleared, client validation, then
   `withPending(createBtn, send, miniapp.create.pending)`.
-  `send()` (`:501`) calls `setBusy(true)` (Cancel disabled, inputs `readonly`), posts once and, on
-  success, `showList(list.id)`. If that list load fails it calls `goHome()` and then writes
-  `miniapp.list.load_failed` as an error (the list already exists).
+  `send()` calls `setBusy(true)` (Cancel disabled, inputs `readonly`) and posts once.
+  Repeated taps and Enter while that request is in flight do not send another.
+  On success, `showList(list.id)`. If that list load fails it calls `goHome()` and then
+  writes `miniapp.list.load_failed` as an error (the list already exists).
 - **Errors**: `mapFailure` (`:465`) reads `err.body.detail[].loc` (last element). A `422` on
   `name` and/or `event_date` becomes inline errors on those fields (a `422` on `name` always
   shows `error_title_required`, even for an over-long title; follow-up WISHENKA-320). Any other

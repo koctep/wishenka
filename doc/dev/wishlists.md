@@ -60,16 +60,23 @@ authentication described in [Authentication](auth.md). Authenticated routes requ
 session; the public route also accepts anonymous callers. A request with an invalid session may be
 rejected by the optional authentication dependency.
 
-- `POST /api/wishlists`: Authenticated user creates a list; returns 201. The body is
-  `WishlistCreateInput` (`wishenka/web/routes/wishlists.py:43-54`): `name` is required, is trimmed
-  with `str.strip()` and must be 1-255 code points after trimming; the stored title is the trimmed
-  value. `description`, `event_title` and `event_date` stay optional (inherited from
-  `WishlistInput`). A missing, `null`, blank, non-string or over-long `name` is rejected with
-  `422` and the standard pydantic body whose `detail[].loc` is `["body", "name"]` (an invalid
-  `event_date` gives `["body", "event_date"]`); nothing is created. An empty `{}` body is no
-  longer accepted (WISHENKA-296, reverses the former automatic empty list). `PATCH
-  /api/wishlists/{id}` still uses the permissive `WishlistInput` (`:34-40`, `name: str | None`),
-  so a rename to blank or to a longer title is accepted there (follow-up WISHENKA-320).
+- `POST /api/wishlists`: Authenticated user creates a list; returns 201. One request
+  inserts one list. The body is `WishlistCreateInput`
+  (`wishenka/web/routes/wishlists.py`): `name` is required, is trimmed with `str.strip()`
+  and must be 1-255 code points after trimming; the stored title is the trimmed value.
+  `description`, `event_title` and `event_date` stay optional (inherited from
+  `WishlistInput`). A missing, `null`, blank, non-string or over-long `name` is rejected
+  with `422` and the standard pydantic body whose `detail[].loc` is `["body", "name"]`
+  (an invalid `event_date` gives `["body", "event_date"]`); nothing is created. An empty
+  `{}` body is no longer accepted (WISHENKA-296, reverses the former automatic empty
+  list). `PATCH /api/wishlists/{id}` still uses the permissive `WishlistInput`
+  (`name: str | None`), so a rename to blank or to a longer title is accepted there
+  (follow-up WISHENKA-320). After `create_wishlist` returns, `execute()` logs
+  `wishlist_mutation_committed` with `operation=create_wishlist`, before
+  `get_wishlist_repository()` commits. That record is not proof the commit succeeded.
+  The Mini App sends this request only from one deliberate confirmation of the create
+  form; opening the form does not call it
+  ([miniapp.md](miniapp.md#1-wishlist-creation)).
 
 - `GET /api/wishlists`: Lists the caller's active memberships. Set `include_archived=true` to
   include archived lists.
@@ -1917,10 +1924,24 @@ Settings in `wishenka.config.Settings` (prefixed with `WISHENKA_` in environment
 
 ### Audit Event Reference
 
+`wishlist_created` is logged twice on one successful create: the service
+(`wishenka.wishlists`, `wishlist_id`, `owner_id`, `format`, `time_type`,
+`event_date`) and the route (`wishenka.web.wishlists`, `wishlist_id`,
+`user_id`). Do not count creations with it.
+
+`wishlist_mutation_committed` (`INFO`, logger `wishenka.web.wishlists`) is
+logged in `execute()` (`wishenka/web/routes/wishlists.py`) after the handler
+returns and before `get_wishlist_repository()` commits. For creation the field
+is `operation=create_wishlist`. That record is not proof the commit succeeded.
+A storage error inside the handler does not emit it. A 422 or a missing session
+before the handler does not emit it. A later commit failure is
+`wishlist_store_error` from the repository dependency and can follow this
+record.
+
 | Event (`event`) | Level | Trigger | Key Attributes |
 | --- | :---: | --- | --- |
-| `wishlist_created` | `INFO` | New wishlist created. Logged twice per creation: by the service (`wishenka.wishlists.service`: `wishlist_id`, `owner_id`, `format`, `time_type`, `event_date`) and by the route (`wishenka.web.wishlists`: `wishlist_id`, `user_id`). Count creations with `wishlist_mutation_committed`, not with this event | `wishlist_id`, `owner_id` / `user_id` |
-| `wishlist_mutation_committed` | `INFO` | Single-fire signal after a committed mutation in `execute()`; for creation `operation=create_wishlist`, emitted only on success (never for a 422, 401, 403 or 500) | `operation` |
+| `wishlist_created` | `INFO` | Service, then route. Do not count it | `wishlist_id` |
+| `wishlist_mutation_committed` | `INFO` | After handler, before commit | `operation` |
 | `wishlist_status_changed` | `INFO` | Status changed | `wishlist_id`, `to_status` |
 | `member_joined` | `INFO` | Collaborator joined | `wishlist_id`, `user_id` |
 | `member_role_assigned` | `INFO` | Role updated | `wishlist_id`, `role` |
