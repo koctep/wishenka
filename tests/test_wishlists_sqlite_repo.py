@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import pytest
 from sqlalchemy import event, text
+from sqlalchemy.exc import OperationalError
 
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.wishlists.exceptions import InsufficientQuantityError
@@ -337,7 +338,7 @@ class _ReadProbeError(RuntimeError):
 
 @pytest.mark.asyncio
 async def test_execute_read_rolls_back_mutations_on_normal_return(tmp_path: Path) -> None:
-    """execute_read must roll back uncommitted SQL mutations when work returns normally."""
+    """execute_read must reject SQL writes immediately with OperationalError (readonly)."""
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'execute_read_rollback.db'}"
     store = WishlistStore(db_url)
     owner = AuthenticatedUser(telegram_id=11, first_name="Reader")
@@ -350,14 +351,14 @@ async def test_execute_read_rolls_back_mutations_on_normal_return(tmp_path: Path
 
         wishlist_id = await store.execute(seed)
 
-        async def mutate_in_read(conn: Any) -> str:
+        async def mutate_in_read(conn: Any) -> None:
             await conn.execute(
                 text("UPDATE wl_lists SET title = :title WHERE id = :id"),
                 {"title": "Mutated", "id": wishlist_id},
             )
-            return "done"
 
-        assert await store.execute_read(mutate_in_read) == "done"
+        with pytest.raises(OperationalError, match="readonly"):
+            await store.execute_read(mutate_in_read)
 
         async def read_title(conn: Any) -> str:
             row = (
@@ -375,7 +376,7 @@ async def test_execute_read_rolls_back_mutations_on_normal_return(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_execute_read_rolls_back_mutations_on_exception(tmp_path: Path) -> None:
-    """execute_read must roll back uncommitted mutations and propagate exceptions."""
+    """execute_read must propagate exceptions and leave pooled connections writable."""
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'execute_read_exception.db'}"
     store = WishlistStore(db_url)
     owner = AuthenticatedUser(telegram_id=12, first_name="ReaderErr")
@@ -389,14 +390,21 @@ async def test_execute_read_rolls_back_mutations_on_exception(tmp_path: Path) ->
         wishlist_id = await store.execute(seed)
 
         async def failing_read(conn: Any) -> None:
-            await conn.execute(
-                text("UPDATE wl_lists SET title = :title WHERE id = :id"),
-                {"title": "ShouldRollback", "id": wishlist_id},
-            )
+            await conn.execute(text("SELECT 1"))
             raise _ReadProbeError("boom")
 
         with pytest.raises(_ReadProbeError, match="boom"):
             await store.execute_read(failing_read)
+
+        async def update_title(service: WishlistService) -> str:
+            updated = await service.update_wishlist_settings(
+                wishlist_id=wishlist_id,
+                actor=owner,
+                title="UpdatedAfterException",
+            )
+            return updated.title
+
+        assert await store.execute(update_title) == "UpdatedAfterException"
 
         async def read_title(conn: Any) -> str:
             row = (
@@ -407,7 +415,7 @@ async def test_execute_read_rolls_back_mutations_on_exception(tmp_path: Path) ->
             ).one()
             return str(row.title)
 
-        assert await store.execute_read(read_title) == "Committed"
+        assert await store.execute_read(read_title) == "UpdatedAfterException"
     finally:
         await store.engine.dispose()
 

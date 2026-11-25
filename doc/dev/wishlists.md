@@ -1391,14 +1391,23 @@ relational architecture, `WishlistStore` coordinates atomic row-level persistenc
     `_SINGLE_WISHLIST_METHODS` to opt into scoped hydration.
 - **Read-Only Deferred Transactions (`WishlistStore.execute_read`)**:
   `execute_read(work)` accepts `Callable[[AsyncConnection], Awaitable[T]]`, binds
-  `execution_options(read_only=True)` on the connection, and runs `work(conn)` inside a deferred
-  `BEGIN` transaction (rolling back on exit). `configure_immediate_transactions` checks
-  `conn.get_execution_options().get("read_only")` in the `begin` event listener and emits `BEGIN`
-  instead of `BEGIN IMMEDIATE`, allowing read-only paths (such as `wishenka.bot.support`
+  `execution_options(read_only=True)` on the connection, starts a deferred `BEGIN` transaction,
+  and executes `PRAGMA query_only = ON` before running `work(conn)`. `configure_immediate_transactions`
+  checks `conn.get_execution_options().get("read_only")` in the `begin` event listener and emits
+  `BEGIN` instead of `BEGIN IMMEDIATE`, allowing read-only paths (such as `wishenka.bot.support`
   rate-limit checks, diagnostic collection, and the gifter reservation cabinet) to read without
-  acquiring a SQLite write lock. Direct rollback (normal return and exception) and non-blocking
-  WAL read behavior alongside an active `BEGIN IMMEDIATE` transaction are verified in
-  `tests/test_wishlists_sqlite_repo.py`.
+  acquiring a SQLite write lock while SQLite immediately rejects any SQL write with
+  `OperationalError` (`readonly`). If a `SQLAlchemyError` satisfies `is_sqlite_busy(exc)`,
+  `execute_read` logs `wishlist_read_busy` (`WARNING`) and raises `InventoryBusyError`. In
+  `finally`, it rolls back any open transaction (`conn.rollback()`), resets `PRAGMA query_only = OFF`
+  via `raw_conn.execution_options(isolation_level="AUTOCOMMIT")` before returning the connection to
+  the pool, and—if the reset raises `BaseException`—logs `wishlist_read_query_only_reset_failed`
+  (`WARNING`, `error_type`), calls `await raw_conn.invalidate()` so the tainted connection is not
+  reused, and re-raises only when no prior exception is active. Direct rollback, non-blocking WAL
+  read behavior alongside an active `BEGIN IMMEDIATE` transaction, `query_only` enforcement/reset,
+  `SQLITE_BUSY` mapping, and reset-failure invalidation are verified in
+  `tests/test_wishlists_sqlite_repo.py` and
+  [`tests/test_wishenka_254_execute_read_hardening_repro.py`](../../tests/test_wishenka_254_execute_read_hardening_repro.py).
 - **Batched Reservation Cabinet Loading (`WishlistStore._cabinet_service`)**:
   `WishlistStore.get_user_reservations` and `WishlistStore.get_user_reservations_summary` run
   inside `WishlistStore.execute_read`, pinning a consistent WAL snapshot on the first `SELECT`
@@ -1424,6 +1433,8 @@ Database operations emit structured audit logs under the `wishenka.wishlists` lo
 | `reservation_cabinet_read` | `DEBUG` | Cabinet hydrated in `_cabinet_service` | `include_items`, `reservations_count`, `items_count`, `wishlists_count` |
 | `reservation_cabinet_busy` | `WARNING` | `SQLITE_BUSY` on cabinet read | `operation` |
 | `reservation_cabinet_error` | `ERROR` | Non-busy `SQLAlchemyError` on cabinet read | `operation`, `error_type` |
+| `wishlist_read_busy` | `WARNING` | `SQLITE_BUSY` inside `WishlistStore.execute_read` | `event` |
+| `wishlist_read_query_only_reset_failed` | `WARNING` | `PRAGMA query_only = OFF` reset failed in `execute_read` `finally` (connection invalidated) | `event`, `error_type` |
 | `wishlist_store_init_failed` | `WARNING` | `WishlistStore.initialize()` failed before/during `dispose()` | `error_type`, `has_temporary_db` |
 | `wishlist_store_temp_db_removed` | `DEBUG` | `WishlistStore.dispose()` unlinked owned `:memory:` temp DB and sidecars | `event` |
 | `wishlist_token_collision_retry` | `WARNING` | Collision retry | `attempt` |
