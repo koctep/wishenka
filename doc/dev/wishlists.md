@@ -175,6 +175,19 @@ configure this store. All workers must point to the same database file to share 
 applies a five-second SQLite busy timeout (`busy_timeout = 5000`) and serializes each mutation with
 `BEGIN IMMEDIATE`.
 
+For `:memory:` URLs (`sqlite+aiosqlite:///:memory:`), `WishlistStore.__init__` provisions an
+isolated temporary SQLite file so synchronous Alembic migrations and async `aiosqlite` connections
+share the same database. `WishlistStore.initialize()` enforces a cleanup-on-failure contract:
+migration errors (`OSError`, `RuntimeError`, `ValueError`, `SQLAlchemyError`) are mapped to
+`RuntimeError("Unable to initialize wishlist storage")`, and on any `BaseException` (including
+mapped errors, unmapped exceptions, and `asyncio.CancelledError`), `initialize()` logs
+`wishlist_store_init_failed` (`WARNING`), calls `await self.dispose()`, and re-raises.
+`WishlistStore.dispose()` is idempotent: it disposes `self.engine` and, when the store owns a
+temporary `:memory:` database, unlinks the temp file, `migration_lock_path(temp_path)`, and
+`-wal`/`-shm`/`-journal` sidecars (`missing_ok=True`), logs `wishlist_store_temp_db_removed`
+(`DEBUG`), and clears `_temporary_database_path` in a `finally` block (file-backed databases are
+never unlinked).
+
 As implemented in [WISHENKA-48](https://pypost.atlassian.net/browse/WISHENKA-48), persistence uses
 a fully normalized relational schema (`wl_lists`, `wl_members`, `wl_items`, `wl_reservations`,
 `wl_favorites`, `wl_view_history`, `wl_tokens`, `wl_invite_tokens`, `wl_counters`) mapped via
@@ -1411,6 +1424,8 @@ Database operations emit structured audit logs under the `wishenka.wishlists` lo
 | `reservation_cabinet_read` | `DEBUG` | Cabinet hydrated in `_cabinet_service` | `include_items`, `reservations_count`, `items_count`, `wishlists_count` |
 | `reservation_cabinet_busy` | `WARNING` | `SQLITE_BUSY` on cabinet read | `operation` |
 | `reservation_cabinet_error` | `ERROR` | Non-busy `SQLAlchemyError` on cabinet read | `operation`, `error_type` |
+| `wishlist_store_init_failed` | `WARNING` | `WishlistStore.initialize()` failed before/during `dispose()` | `error_type`, `has_temporary_db` |
+| `wishlist_store_temp_db_removed` | `DEBUG` | `WishlistStore.dispose()` unlinked owned `:memory:` temp DB and sidecars | `event` |
 | `wishlist_token_collision_retry` | `WARNING` | Collision retry | `attempt` |
 | `wishlist_store_error` | `ERROR` | Database error | `event` |
 | `wishlist_store_integrity_error` | `ERROR` | Constraint failure | `event` |

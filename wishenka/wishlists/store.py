@@ -397,17 +397,36 @@ class WishlistStore:
     async def initialize(self) -> None:
         """Bring the wishlist database to Alembic head before it is used."""
         try:
-            await upgrade_to_head(self.database_url)
-        except (OSError, RuntimeError, ValueError, SQLAlchemyError) as exc:
-            raise RuntimeError("Unable to initialize wishlist storage") from exc
+            try:
+                await upgrade_to_head(self.database_url)
+            except (OSError, RuntimeError, ValueError, SQLAlchemyError) as exc:
+                raise RuntimeError("Unable to initialize wishlist storage") from exc
+        except BaseException as exc:
+            logger.warning(
+                "Wishlist store initialization failed; disposing resources",
+                extra={
+                    "event": "wishlist_store_init_failed",
+                    "error_type": type(exc).__name__,
+                    "has_temporary_db": self._temporary_database_path is not None,
+                },
+            )
+            await self.dispose()
+            raise
 
     async def dispose(self) -> None:
         """Dispose connections and remove this store's owned temporary database."""
         await self.engine.dispose()
         if self._temporary_database_path is not None:
+            temp_path = self._temporary_database_path
             try:
-                self._temporary_database_path.unlink(missing_ok=True)
-                migration_lock_path(self._temporary_database_path).unlink(missing_ok=True)
+                temp_path.unlink(missing_ok=True)
+                migration_lock_path(temp_path).unlink(missing_ok=True)
+                for suffix in ("-wal", "-shm", "-journal"):
+                    Path(f"{temp_path}{suffix}").unlink(missing_ok=True)
+                logger.debug(
+                    "Removed temporary wishlist database files",
+                    extra={"event": "wishlist_store_temp_db_removed"},
+                )
             finally:
                 self._temporary_database_path = None
 
