@@ -1383,7 +1383,9 @@ relational architecture, `WishlistStore` coordinates atomic row-level persistenc
   `conn.get_execution_options().get("read_only")` in the `begin` event listener and emits `BEGIN`
   instead of `BEGIN IMMEDIATE`, allowing read-only paths (such as `wishenka.bot.support`
   rate-limit checks, diagnostic collection, and the gifter reservation cabinet) to read without
-  acquiring a SQLite write lock.
+  acquiring a SQLite write lock. Direct rollback (normal return and exception) and non-blocking
+  WAL read behavior alongside an active `BEGIN IMMEDIATE` transaction are verified in
+  `tests/test_wishlists_sqlite_repo.py`.
 - **Batched Reservation Cabinet Loading (`WishlistStore._cabinet_service`)**:
   `WishlistStore.get_user_reservations` and `WishlistStore.get_user_reservations_summary` run
   inside `WishlistStore.execute_read`, pinning a consistent WAL snapshot on the first `SELECT`

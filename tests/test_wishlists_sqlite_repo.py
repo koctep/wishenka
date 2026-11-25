@@ -329,3 +329,142 @@ async def test_reservation_waits_for_sqlite_writer(tmp_path: Path) -> None:
             await asyncio.gather(pending, return_exceptions=True)
         await waiter.engine.dispose()
         await holder.engine.dispose()
+
+
+class _ReadProbeError(RuntimeError):
+    """Sentinel exception for testing execute_read rollback."""
+
+
+@pytest.mark.asyncio
+async def test_execute_read_rolls_back_mutations_on_normal_return(tmp_path: Path) -> None:
+    """execute_read must roll back uncommitted SQL mutations when work returns normally."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'execute_read_rollback.db'}"
+    store = WishlistStore(db_url)
+    owner = AuthenticatedUser(telegram_id=11, first_name="Reader")
+    try:
+        await store.initialize()
+
+        async def seed(service: WishlistService) -> int:
+            wishlist = await service.create_wishlist(owner=owner, title="Original")
+            return wishlist.id
+
+        wishlist_id = await store.execute(seed)
+
+        async def mutate_in_read(conn: Any) -> str:
+            await conn.execute(
+                text("UPDATE wl_lists SET title = :title WHERE id = :id"),
+                {"title": "Mutated", "id": wishlist_id},
+            )
+            return "done"
+
+        assert await store.execute_read(mutate_in_read) == "done"
+
+        async def read_title(conn: Any) -> str:
+            row = (
+                await conn.execute(
+                    text("SELECT title FROM wl_lists WHERE id = :id"),
+                    {"id": wishlist_id},
+                )
+            ).one()
+            return str(row.title)
+
+        assert await store.execute_read(read_title) == "Original"
+    finally:
+        await store.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_execute_read_rolls_back_mutations_on_exception(tmp_path: Path) -> None:
+    """execute_read must roll back uncommitted mutations and propagate exceptions."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'execute_read_exception.db'}"
+    store = WishlistStore(db_url)
+    owner = AuthenticatedUser(telegram_id=12, first_name="ReaderErr")
+    try:
+        await store.initialize()
+
+        async def seed(service: WishlistService) -> int:
+            wishlist = await service.create_wishlist(owner=owner, title="Committed")
+            return wishlist.id
+
+        wishlist_id = await store.execute(seed)
+
+        async def failing_read(conn: Any) -> None:
+            await conn.execute(
+                text("UPDATE wl_lists SET title = :title WHERE id = :id"),
+                {"title": "ShouldRollback", "id": wishlist_id},
+            )
+            raise _ReadProbeError("boom")
+
+        with pytest.raises(_ReadProbeError, match="boom"):
+            await store.execute_read(failing_read)
+
+        async def read_title(conn: Any) -> str:
+            row = (
+                await conn.execute(
+                    text("SELECT title FROM wl_lists WHERE id = :id"),
+                    {"id": wishlist_id},
+                )
+            ).one()
+            return str(row.title)
+
+        assert await store.execute_read(read_title) == "Committed"
+    finally:
+        await store.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_execute_read_does_not_block_on_active_immediate_transaction(
+    tmp_path: Path,
+) -> None:
+    """execute_read must complete without waiting on an active BEGIN IMMEDIATE writer."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'execute_read_wal.db'}"
+    writer = WishlistStore(db_url)
+    reader = WishlistStore(db_url)
+    owner = AuthenticatedUser(telegram_id=13, first_name="WalOwner")
+    write_locked = asyncio.Event()
+    release_write = asyncio.Event()
+    writer_task: asyncio.Task[None] | None = None
+    try:
+        await writer.initialize()
+
+        async def seed(service: WishlistService) -> int:
+            wishlist = await service.create_wishlist(owner=owner, title="Before")
+            return wishlist.id
+
+        wishlist_id = await writer.execute(seed)
+
+        async def hold_write(conn: Any) -> None:
+            await conn.execute(
+                text("UPDATE wl_lists SET title = :title WHERE id = :id"),
+                {"title": "During", "id": wishlist_id},
+            )
+            write_locked.set()
+            await asyncio.wait_for(release_write.wait(), timeout=5.0)
+
+        async def read_title(conn: Any) -> str:
+            row = (
+                await conn.execute(
+                    text("SELECT title FROM wl_lists WHERE id = :id"),
+                    {"id": wishlist_id},
+                )
+            ).one()
+            return str(row.title)
+
+        writer_task = asyncio.create_task(writer.transaction(hold_write))
+        await asyncio.wait_for(write_locked.wait(), timeout=2.0)
+
+        observed_during_write = await asyncio.wait_for(reader.execute_read(read_title), timeout=2.0)
+        assert observed_during_write == "Before"
+
+        release_write.set()
+        await asyncio.wait_for(writer_task, timeout=5.0)
+
+        observed_after_commit = await asyncio.wait_for(reader.execute_read(read_title), timeout=2.0)
+        assert observed_after_commit == "During"
+    finally:
+        if writer_task is not None and not writer_task.done():
+            release_write.set()
+            writer_task.cancel()
+            await asyncio.gather(writer_task, return_exceptions=True)
+        await reader.engine.dispose()
+        await writer.engine.dispose()

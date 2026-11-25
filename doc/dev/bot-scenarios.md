@@ -158,7 +158,7 @@ removes query strings; external proxies and their access logs must be configured
 Run the focused tests with:
 
 ```bash
-make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_start_repro.py tests/test_bot_entry_repro.py'
+make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_principal.py tests/test_bot_start_repro.py tests/test_bot_entry_repro.py'
 make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_capture_repro.py tests/test_bot_capture_atomic_store_repro.py tests/test_bot_capture_order_retention_repro.py tests/test_bot_capture_order_retention.py'
 make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_support_repro.py tests/test_bot_support.py tests/test_wishenka_182_repro.py'
 make test-serial PYTEST_ARGS='tests/test_bot_menu_miniapp_e2e_browser.py'
