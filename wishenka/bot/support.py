@@ -118,7 +118,6 @@ async def collect_diagnostic_context(
     *,
     ticket_ref: str,
     now: datetime,
-    internal_user_id: int,
     telegram_user_id: int,
     username: str | None,
     display_name: str,
@@ -128,7 +127,7 @@ async def collect_diagnostic_context(
     """Query metadata-only user and wishlist summary counts and known tokens for redaction."""
     dest_active = await conn.scalar(
         text("SELECT active FROM bot_destinations WHERE user_id=:uid"),
-        {"uid": internal_user_id},
+        {"uid": telegram_user_id},
     )
     active_wl = await conn.scalar(
         text("SELECT COUNT(*) FROM wl_lists WHERE owner_id=:tg AND status='active'"),
@@ -197,7 +196,7 @@ async def collect_diagnostic_context(
     ctx = DiagnosticContext(
         ticket_ref=ticket_ref,
         submitted_at_iso=now.strftime("%d.%m.%y %H:%M:%S UTC"),
-        internal_user_id=internal_user_id,
+        internal_user_id=telegram_user_id,
         telegram_user_id=telegram_user_id,
         username=username or "",
         display_name=display_name,
@@ -312,9 +311,9 @@ async def _submit_support_message(
             await conn.execute(
                 text(
                     "SELECT created_at FROM support_tickets "
-                    "WHERE owner_id=:owner AND created_at>:cutoff ORDER BY created_at ASC"
+                    "WHERE telegram_id=:tg AND created_at>:cutoff ORDER BY created_at ASC"
                 ),
-                {"owner": int(record.id), "cutoff": now_ts - window_sec},
+                {"tg": int(record.telegram_id), "cutoff": now_ts - window_sec},
             )
         ).all()
         if len(rows) >= max_tickets:
@@ -325,7 +324,6 @@ async def _submit_support_message(
             conn,
             ticket_ref=ticket_ref,
             now=now_dt,
-            internal_user_id=int(record.id),
             telegram_user_id=int(record.telegram_id),
             username=record.username,
             display_name=display_name,
@@ -337,7 +335,7 @@ async def _submit_support_message(
 
     status, payload, wait_minutes = await store.execute_read(_prepare_read)
     if status == "rate_limited":
-        await clear_support_session(store, int(record.id), message.chat.id)
+        await clear_support_session(store, int(record.telegram_id), message.chat.id)
         await message.answer(t("bot.support.rate_limited", lang, minutes=wait_minutes))
         logger.info(
             "Support message rate limited",
@@ -347,7 +345,7 @@ async def _submit_support_message(
 
     destinations = _destinations(deps)
     if not destinations or message.bot is None:
-        await clear_support_session(store, int(record.id), message.chat.id)
+        await clear_support_session(store, int(record.telegram_id), message.chat.id)
         await message.answer(t("bot.support.unavailable", lang))
         logger.warning(
             "Support channel unavailable",
@@ -370,7 +368,7 @@ async def _submit_support_message(
             continue
 
     if delivered == 0:
-        await clear_support_session(store, int(record.id), message.chat.id)
+        await clear_support_session(store, int(record.telegram_id), message.chat.id)
         await message.answer(t("bot.support.unavailable", lang))
         logger.error(
             "Support ticket delivery failed",
@@ -387,19 +385,18 @@ async def _submit_support_message(
     async def _record_sent(conn: AsyncConnection) -> None:
         await conn.execute(
             text(
-                "INSERT INTO support_tickets(ticket_ref, owner_id, telegram_id, created_at) "
-                "VALUES (:ref, :owner, :tg, :now)"
+                "INSERT INTO support_tickets(ticket_ref, telegram_id, created_at) "
+                "VALUES (:ref, :tg, :now)"
             ),
             {
                 "ref": ticket_ref,
-                "owner": int(record.id),
                 "tg": int(record.telegram_id),
                 "now": now_ts,
             },
         )
         await conn.execute(
             text("DELETE FROM support_input WHERE owner_id=:owner AND chat_id=:chat"),
-            {"owner": int(record.id), "chat": message.chat.id},
+            {"owner": int(record.telegram_id), "chat": message.chat.id},
         )
 
     await store.transaction(_record_sent)
@@ -475,7 +472,7 @@ def create_support_router(dependencies: Any) -> Router:
             return
         expires = int(_now(dependencies).timestamp()) + ttl
         await _open_support_session(
-            store, int(record.id), int(record.telegram_id), message.chat.id, expires
+            store, int(record.telegram_id), int(record.telegram_id), message.chat.id, expires
         )
         inline = (command.args or "").strip()
         if inline:
@@ -497,7 +494,7 @@ def create_support_router(dependencies: Any) -> Router:
                 expires = int(_now(dependencies).timestamp()) + ttl
                 await _open_support_session(
                     store,
-                    int(record.id),
+                    int(record.telegram_id),
                     int(record.telegram_id),
                     callback.message.chat.id,
                     expires,
@@ -518,7 +515,9 @@ def create_support_router(dependencies: Any) -> Router:
             record = await principal(callback.from_user, callback.message.chat.id, user_record)
             lang = await _language(callback.from_user, dependencies, locale)
             if record is not None and store is not None:
-                await clear_support_session(store, int(record.id), callback.message.chat.id)
+                await clear_support_session(
+                    store, int(record.telegram_id), callback.message.chat.id
+                )
             await callback.message.answer(t("bot.support.cancelled", lang))
             logger.info("Support session cancelled", extra={"event": "bot_support_cancelled"})
         await callback.answer()
@@ -536,7 +535,7 @@ def create_support_router(dependencies: Any) -> Router:
         async def _clear_if_active(conn: AsyncConnection) -> bool:
             res = await conn.execute(
                 text("DELETE FROM support_input WHERE owner_id=:owner AND chat_id=:chat"),
-                {"owner": int(record.id), "chat": message.chat.id},
+                {"owner": int(record.telegram_id), "chat": message.chat.id},
             )
             return bool(res.rowcount)
 
@@ -556,7 +555,7 @@ def create_support_router(dependencies: Any) -> Router:
         if user is None or users is None or message.chat.id != user.id:
             raise SkipHandler
         record = user_record or await users.get_by_telegram_id(user.id)
-        if record is None or not await has_active_session(int(record.id), message.chat.id):
+        if record is None or not await has_active_session(int(record.telegram_id), message.chat.id):
             raise SkipHandler
         lang = await _language(user, dependencies, locale)
         await message.answer(t("bot.support.non_text", lang), reply_markup=_cancel_keyboard(lang))
@@ -575,7 +574,7 @@ def create_support_router(dependencies: Any) -> Router:
         if user is None or users is None or message.chat.id != user.id:
             raise SkipHandler
         record = user_record or await users.get_by_telegram_id(user.id)
-        if record is None or not await has_active_session(int(record.id), message.chat.id):
+        if record is None or not await has_active_session(int(record.telegram_id), message.chat.id):
             raise SkipHandler
         lang = await _language(user, dependencies, locale)
         await _submit_support_message(message, dependencies, record, message.text or "", lang)

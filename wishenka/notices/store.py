@@ -566,7 +566,7 @@ class NoticeStore:
                         "JOIN wl_lists l ON l.id=o.wishlist_id JOIN wl_items i ON "
                         "i.id=o.wish_item_id "
                         "JOIN users u ON u.telegram_id=o.giver_user_id "
-                        "JOIN bot_destinations d ON d.user_id=u.id AND d.active=1 "
+                        "JOIN bot_destinations d ON d.user_id=u.telegram_id AND d.active=1 "
                         "WHERE o.id=:id AND l.status != 'deleted' AND i.received_quantity > 0 "
                         "AND (i.recipient_user_id IS NULL OR "
                         "o.giver_user_id != i.recipient_user_id) "

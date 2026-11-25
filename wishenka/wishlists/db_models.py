@@ -155,7 +155,9 @@ class WishlistTokenRow(Base):
     __tablename__ = "wl_tokens"
 
     token: Mapped[str] = mapped_column(String, primary_key=True)
-    wishlist_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    wishlist_id: Mapped[int] = mapped_column(
+        ForeignKey("wl_lists.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     active: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
 
@@ -165,6 +167,9 @@ class InviteTokenRow(Base):
     __tablename__ = "wl_invite_tokens"
 
     token: Mapped[str] = mapped_column(String, primary_key=True)
+    wishlist_id: Mapped[int] = mapped_column(
+        ForeignKey("wl_lists.id", ondelete="CASCADE"), nullable=False, index=True
+    )
 
 
 class CounterRow(Base):

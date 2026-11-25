@@ -266,7 +266,16 @@ async def test_token_collision_retry_logging(
         # Pre-populate wl_invite_tokens with colliding token
         async with store.engine.begin() as conn:
             await conn.execute(
-                text("INSERT INTO wl_invite_tokens VALUES (:token)"),
+                text(
+                    "INSERT INTO wl_lists (id, owner_id, title, status, public_token, "
+                    "invite_token, created_at, updated_at) "
+                    "VALUES (999, 1, 'Other', 'active', 'pub_999', :token, "
+                    "'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+                ),
+                {"token": colliding_tokens[0]},
+            )
+            await conn.execute(
+                text("INSERT INTO wl_invite_tokens (token, wishlist_id) VALUES (:token, 999)"),
                 {"token": colliding_tokens[0]},
             )
 

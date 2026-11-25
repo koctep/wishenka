@@ -49,5 +49,5 @@ async def ensure_private_bot_user(
 
     effective_now = _resolve_effective_now(dependencies, now)
     async with users.engine.begin() as conn:
-        await upsert_bot_destination(conn, int(record.id), chat_id, effective_now)
+        await upsert_bot_destination(conn, int(record.telegram_id), chat_id, effective_now)
     return record

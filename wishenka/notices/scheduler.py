@@ -117,7 +117,7 @@ class ReminderScheduler:
                     await conn.execute(
                         text(
                             "SELECT b.id,b.owner_id,b.month,b.day,b.revision,u.telegram_id "
-                            "FROM birthday_entries b JOIN users u ON u.id=b.owner_id "
+                            "FROM birthday_entries b JOIN users u ON u.telegram_id=b.owner_id "
                             "WHERE b.deleted=0 AND b.id>:cursor ORDER BY b.id LIMIT :limit"
                         ),
                         {"cursor": birthday_cursor, "limit": PAGE_SIZE},

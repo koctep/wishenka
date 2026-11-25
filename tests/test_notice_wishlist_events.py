@@ -224,12 +224,12 @@ async def test_favorite_tracking_reminder_respects_current_favorite(
 ) -> None:
     from datetime import UTC, datetime
 
-    from tests.receipt_support import GIFTER
+    from tests.receipt_support import GIFTER, OWNER_ID
     from tests.test_notice_delivery_repro import _run_reminder_scan
 
     db = tmp_path / "favorite.db"
     async with open_store(db) as store:
-        seed_users(db, GIFTER_ID)
+        seed_users(db, OWNER_ID, GIFTER_ID)
 
         async def setup(service: WishlistService) -> tuple[int, int]:
             wl = await service.create_wishlist(

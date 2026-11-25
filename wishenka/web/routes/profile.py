@@ -34,8 +34,10 @@ logger = logging.getLogger("wishenka.web.profile")
 bot_i18n_logger = logging.getLogger("wishenka.bot.i18n")
 
 
-async def _find_active_chat_id(request: Request, user_store: UserStore, user_id: int) -> int | None:
-    """Look up the active private Telegram chat_id for an internal user id, if available."""
+async def _find_active_chat_id(
+    request: Request, user_store: UserStore, telegram_id: int
+) -> int | None:
+    """Look up the active private Telegram chat_id for a Telegram user id, if available."""
     wishlist_store = getattr(request.app.state, "wishlist_store", None)
     engine = wishlist_store.engine if wishlist_store is not None else user_store.engine
     async with engine.connect() as conn:
@@ -47,7 +49,7 @@ async def _find_active_chat_id(request: Request, user_store: UserStore, user_id:
         row = (
             await conn.execute(
                 text("SELECT chat_id FROM bot_destinations WHERE user_id = :uid AND active = 1"),
-                {"uid": user_id},
+                {"uid": telegram_id},
             )
         ).first()
         return int(row[0]) if row is not None else None
@@ -245,7 +247,7 @@ async def update_profile_locale(
             detail="User profile not found",
         ) from err
 
-    chat_id = await _find_active_chat_id(request, user_store, updated.id)
+    chat_id = await _find_active_chat_id(request, user_store, updated.telegram_id)
     if chat_id is not None:
         custom_hook = getattr(request.app.state, "bot_command_sync", None)
         background_tasks.add_task(

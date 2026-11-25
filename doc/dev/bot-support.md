@@ -100,10 +100,10 @@ Session mutual exclusion and superseding rules:
 Created by Alembic revision `add_support_channel` (`down_revision = "add_notice_uncertain"`, see
 [migrations.md](migrations.md)):
 
-- **`support_input(owner_id INTEGER NOT NULL, chat_id INTEGER NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (owner_id, chat_id))`**:
-  Durable active support session state per internal user ID and private chat ID.
-- **`support_tickets(id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_ref TEXT NOT NULL UNIQUE, owner_id INTEGER NOT NULL, telegram_id INTEGER NOT NULL, created_at INTEGER NOT NULL)`**
-  with index **`idx_support_tickets_owner_time ON support_tickets(owner_id, created_at)`**:
+- **`support_input(owner_id INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE, chat_id INTEGER NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (owner_id, chat_id))`**:
+  Durable active support session state per Telegram user ID (`users.telegram_id`, migrated from `users.id` in `unify_user_keys_and_cascades`) and private chat ID.
+- **`support_tickets(id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_ref TEXT NOT NULL UNIQUE, telegram_id INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE, created_at INTEGER NOT NULL)`**
+  with index **`idx_support_tickets_owner_time ON support_tickets(telegram_id, created_at)`** (unified in `unify_user_keys_and_cascades`, `WISHENKA-188`):
   Content-free log of delivered support tickets used for unique ticket references and cross-restart
   sliding-window rate limiting. Message bodies are never stored in SQLite.
 - **Periodic cleanup (`cleanup_drafts` in `wishenka/bot/capture.py`):** Deletes up to 100 expired
@@ -155,7 +155,7 @@ Deletes any active `support_input` row for `(owner_id, chat_id)` inside a `Wishl
 when another bot command or callback supersedes the support session.
 
 - **`store`**: `WishlistStore` instance.
-- **`owner_id`**: Internal user ID (`users.id`).
+- **`owner_id`**: Telegram user ID (`users.telegram_id`).
 - **`chat_id`**: Private Telegram chat ID.
 
 ### `DiagnosticContext` and `collect_diagnostic_context(...)`
@@ -243,7 +243,7 @@ Additional error boundaries:
     another command (`/start`, `/help`, `/birthdays`, `/reservation_confirmations`) that superseded
     the support session before sending the text.
 - **User is rate-limited immediately:**
-  - Check `SELECT COUNT(*), MIN(created_at) FROM support_tickets WHERE owner_id = :id` against
+  - Check `SELECT COUNT(*), MIN(created_at) FROM support_tickets WHERE telegram_id = :telegram_id` against
     `WISHENKA_SUPPORT_RATE_LIMIT_WINDOW_SECONDS` and `WISHENKA_SUPPORT_RATE_LIMIT_MAX_TICKETS`.
     Rejected or failed deliveries never write to `support_tickets`.
 

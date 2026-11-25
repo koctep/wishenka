@@ -128,6 +128,9 @@ Five Alembic revisions extend the wishlist database schema for notifications, re
      to coordinate external receipt delivery attempts across processes and block concurrent promise completion.
    - Creates `receipt_delivery_fence_audit(id PRIMARY KEY, wish_item_id, user_id, attempt_id, operator, evidence, resolved_at DEFAULT CURRENT_TIMESTAMP)`
      to record audited manual resolutions of unresolved fences.
+6. **`unify_user_keys_and_cascades`** (down revision `add_receipt_delivery_fence`, `WISHENKA-188`):
+   - Migrates `bot_destinations.user_id`, `birthday_entries.owner_id`, and `birthday_input.owner_id` from `users.id` to `users(telegram_id)` with `ON DELETE CASCADE`.
+   - Rebuilds `reminder_outbox` with `ON DELETE CASCADE` foreign keys on `user_id` (`users(telegram_id)`), `list_id` (`wl_lists(id)`), `item_id` (`wl_items(id)`), and `birthday_id` (`birthday_entries(id)`), cleaning any orphaned rows during rebuild.
 
 ### Surprise Protection and Live Eligibility Rules
 

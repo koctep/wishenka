@@ -59,12 +59,16 @@ def test_retention_migration_upgrade_backfills_and_downgrade_reverts(tmp_path: P
             "VALUES ('gift_received',1,202)"
         )
         conn.execute(
-            "INSERT INTO birthday_entries(id,owner_id,label,month,day,revision,deleted) "
-            "VALUES (1,101,'Secret Friend',5,12,2,1)"
+            "INSERT INTO users(id,telegram_id,first_name,is_premium,created_at,updated_at) "
+            "VALUES (1,101,'Test',0,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')"
         )
         conn.execute(
             "INSERT INTO birthday_entries(id,owner_id,label,month,day,revision,deleted) "
-            "VALUES (2,101,'Active Friend',6,15,1,0)"
+            "VALUES (1,1,'Secret Friend',5,12,2,1)"
+        )
+        conn.execute(
+            "INSERT INTO birthday_entries(id,owner_id,label,month,day,revision,deleted) "
+            "VALUES (2,1,'Active Friend',6,15,1,0)"
         )
         conn.execute("INSERT INTO bot_destinations(user_id,chat_id,active) VALUES (1,101,1)")
 
@@ -78,7 +82,7 @@ def test_retention_migration_upgrade_backfills_and_downgrade_reverts(tmp_path: P
         assert bdays[1] == (2, "Active Friend", 6, 15, 0, None)
 
         dest = conn.execute("SELECT user_id,active,updated_at FROM bot_destinations").fetchone()
-        assert dest is not None and dest[0] == 1 and dest[1] == 1 and dest[2] > 0
+        assert dest is not None and dest[0] == 101 and dest[1] == 1 and dest[2] > 0
 
         keys = conn.execute("SELECT giver_user_id,created_at FROM notice_receipt_keys").fetchone()
         expected_ts = int(datetime(2026, 1, 1, 0, 0, tzinfo=UTC).timestamp())

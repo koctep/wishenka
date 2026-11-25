@@ -175,18 +175,15 @@ async def test_terminal_reminder_purge_preserves_active_cycle_and_uncertain(
             notice_reminder_lead_days=(7,),
         )
         await _verify_start(monkeypatch, db, OWNER_ID)
-        owner_db_id = sql_rows(db, "SELECT id FROM users WHERE telegram_id = ?", (OWNER_ID,))[0][
-            "id"
-        ]
         sql_exec(
             db,
             "INSERT INTO birthday_entries(owner_id, label, month, day) VALUES (?, ?, ?, ?)",
-            (owner_db_id, "Cycle Friend", 3, 10),
+            (OWNER_ID, "Cycle Friend", 3, 10),
         )
         sql_exec(
             db,
             "INSERT INTO birthday_entries(owner_id, label, month, day) VALUES (?, ?, ?, ?)",
-            (owner_db_id, "Uncertain Friend", 3, 1),
+            (OWNER_ID, "Uncertain Friend", 3, 1),
         )
 
         # Seed an old uncertain reminder row that must never be purged.
@@ -197,7 +194,7 @@ async def test_terminal_reminder_purge_preserves_active_cycle_and_uncertain(
             "(occurrence_key, kind, user_id, birthday_id, revision, event_date, status, "
             "attempts, next_attempt_at) "
             "VALUES (?, 'birthday', ?, 2, 1, '2030-03-01', 'uncertain', 1, ?)",
-            ("bday:2:1:2030-03-01:7", owner_db_id, old_epoch),
+            ("bday:2:1:2030-03-01:7", OWNER_ID, old_epoch),
         )
 
         # Schedule and send the 2030-03-10 birthday reminder 7 days early (2030-03-03).

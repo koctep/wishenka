@@ -133,7 +133,7 @@ async def _ensure_private_destination(
     if store is not None:
         from wishenka.bot.support import clear_support_session
 
-        await clear_support_session(store, int(record.id), message.chat.id)
+        await clear_support_session(store, int(record.telegram_id), message.chat.id)
     return record
 
 
@@ -215,7 +215,9 @@ def create_router(dependencies: EntryDependencies) -> Router:
                 if record is not None:
                     from wishenka.bot.support import clear_support_session
 
-                    await clear_support_session(store, int(record.id), callback.message.chat.id)
+                    await clear_support_session(
+                        store, int(record.telegram_id), callback.message.chat.id
+                    )
             lang = await _language(callback.from_user, dependencies, locale)
             await callback.message.answer(
                 t("bot.entry.help", lang),
@@ -248,7 +250,7 @@ def create_router(dependencies: EntryDependencies) -> Router:
         if store is not None:
             from wishenka.bot.support import clear_support_session
 
-            await clear_support_session(store, int(record.id), message.chat.id)
+            await clear_support_session(store, int(record.telegram_id), message.chat.id)
         async with users.engine.begin() as conn:
             await conn.execute(
                 text(

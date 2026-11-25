@@ -90,7 +90,9 @@ async def test_cleanup_expired_tokens_repo(tmp_path: Path) -> None:
                 ),
                 {"exp": active_expiry, "now": now_iso},
             )
-            await conn.execute(text("INSERT INTO wl_invite_tokens (token) VALUES ('tok_active')"))
+            await conn.execute(
+                text("INSERT INTO wl_invite_tokens (token, wishlist_id) VALUES ('tok_active', 1)")
+            )
 
             # Expired invite token
             await conn.execute(
@@ -102,7 +104,9 @@ async def test_cleanup_expired_tokens_repo(tmp_path: Path) -> None:
                 ),
                 {"exp": expired_expiry, "now": now_iso},
             )
-            await conn.execute(text("INSERT INTO wl_invite_tokens (token) VALUES ('tok_expired')"))
+            await conn.execute(
+                text("INSERT INTO wl_invite_tokens (token, wishlist_id) VALUES ('tok_expired', 2)")
+            )
 
         async with store.engine.begin() as conn:
             repo = WishlistRepository(conn)
@@ -358,7 +362,9 @@ async def test_run_cleanup_cycle_domain(tmp_path: Path) -> None:
                 ),
                 {"exp": expired_expiry, "now": now_iso},
             )
-            await conn.execute(text("INSERT INTO wl_invite_tokens (token) VALUES ('tok_101')"))
+            await conn.execute(
+                text("INSERT INTO wl_invite_tokens (token, wishlist_id) VALUES ('tok_101', 101)")
+            )
 
             # Soft-deleted wishlist past 30-day retention
             await conn.execute(

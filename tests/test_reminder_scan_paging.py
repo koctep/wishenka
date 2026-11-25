@@ -32,11 +32,10 @@ async def _seed(store: object, db: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 
     await store.execute(create)  # type: ignore[attr-defined]
     with sqlite3.connect(db) as conn:
-        owner = conn.execute("SELECT id FROM users WHERE telegram_id=?", (OWNER_ID,)).fetchone()[0]
         for index in range(5):
             conn.execute(
                 "INSERT INTO birthday_entries(owner_id,label,month,day) VALUES (?,?,?,?)",
-                (owner, f"Birthday {index}", 3 if index == 4 else 8, 8),
+                (OWNER_ID, f"Birthday {index}", 3 if index == 4 else 8, 8),
             )
 
 

@@ -75,7 +75,7 @@ async def _register_deliverable_users(db_url: str, users: list[AuthenticatedUser
     user_store = UserStore(db_url)
     try:
         for user in users:
-            profile = await user_store.upsert_user(
+            await user_store.upsert_user(
                 TelegramUser(
                     id=user.telegram_id,
                     first_name=user.first_name,
@@ -88,7 +88,7 @@ async def _register_deliverable_users(db_url: str, users: list[AuthenticatedUser
                         "INSERT OR REPLACE INTO bot_destinations "
                         "(user_id, chat_id, active) VALUES (:uid, :chat_id, 1)"
                     ),
-                    {"uid": profile.id, "chat_id": user.telegram_id},
+                    {"uid": user.telegram_id, "chat_id": user.telegram_id},
                 )
     finally:
         await user_store.engine.dispose()

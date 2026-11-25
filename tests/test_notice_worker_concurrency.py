@@ -59,7 +59,7 @@ async def _seed_pending_notices(db: Path, giver_ids: list[int]) -> None:
                             "INSERT OR REPLACE INTO bot_destinations "
                             "(user_id, chat_id, active) VALUES (:id, :chat, 1)"
                         ),
-                        {"id": profile.id, "chat": gid},
+                        {"id": profile.telegram_id, "chat": gid},
                     )
         finally:
             await users.engine.dispose()

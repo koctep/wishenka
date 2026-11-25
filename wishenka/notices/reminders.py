@@ -239,9 +239,9 @@ async def claim_reminder(
             dest, raw_dest_locale = await _fetch_first_with_locale_fallback(
                 conn,
                 "SELECT d.chat_id,u.locale FROM bot_destinations d JOIN users u "
-                "ON d.user_id=u.id WHERE u.telegram_id=:user AND d.active=1",
+                "ON d.user_id=u.telegram_id WHERE u.telegram_id=:user AND d.active=1",
                 "SELECT d.chat_id FROM bot_destinations d JOIN users u "
-                "ON d.user_id=u.id WHERE u.telegram_id=:user AND d.active=1",
+                "ON d.user_id=u.telegram_id WHERE u.telegram_id=:user AND d.active=1",
                 {"user": row["user_id"]},
             )
             setting = await _read_user_setting(conn, row["user_id"], row["kind"], category)
@@ -253,7 +253,7 @@ async def claim_reminder(
                         await conn.execute(
                             text(
                                 "SELECT b.label FROM birthday_entries b JOIN users u ON "
-                                "u.id=b.owner_id "
+                                "u.telegram_id=b.owner_id "
                                 "WHERE b.id=:id AND b.revision=:revision AND b.deleted=0 "
                                 "AND u.telegram_id=:user"
                             ),
@@ -409,11 +409,11 @@ async def refresh_reminder(store: TransactionalStore, claim: Reminder, now: int)
             conn,
             "SELECT q.*,d.chat_id,u.locale FROM reminder_outbox q "
             "JOIN users u ON u.telegram_id=q.user_id "
-            "JOIN bot_destinations d ON d.user_id=u.id AND d.active=1 "
+            "JOIN bot_destinations d ON d.user_id=u.telegram_id AND d.active=1 "
             "WHERE q.id=:id AND q.status='sending' AND q.claim_token=:token",
             "SELECT q.*,d.chat_id FROM reminder_outbox q "
             "JOIN users u ON u.telegram_id=q.user_id "
-            "JOIN bot_destinations d ON d.user_id=u.id AND d.active=1 "
+            "JOIN bot_destinations d ON d.user_id=u.telegram_id AND d.active=1 "
             "WHERE q.id=:id AND q.status='sending' AND q.claim_token=:token",
             {"id": claim.ident, "token": claim.claim_token},
         )
@@ -442,7 +442,8 @@ async def refresh_reminder(store: TransactionalStore, claim: Reminder, now: int)
         if row["kind"] == "birthday":
             title = await conn.scalar(
                 text(
-                    "SELECT b.label FROM birthday_entries b JOIN users u ON u.id=b.owner_id "
+                    "SELECT b.label FROM birthday_entries b "
+                    "JOIN users u ON u.telegram_id=b.owner_id "
                     "WHERE b.id=:id AND b.revision=:revision AND "
                     "b.deleted=0 AND u.telegram_id=:user"
                 ),

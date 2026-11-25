@@ -210,9 +210,7 @@ async def test_birthday_reminders_reenable_resumes_future_delivery(tmp_path: Pat
     users = UserStore(f"sqlite+aiosqlite:///{db}")
     await users.initialize()
     try:
-        profile = await users.upsert_user(
-            TelegramUser(id=OWNER_ID, first_name="Alice", language_code="en")
-        )
+        await users.upsert_user(TelegramUser(id=OWNER_ID, first_name="Alice", language_code="en"))
     finally:
         await users.engine.dispose()
 
@@ -220,13 +218,13 @@ async def test_birthday_reminders_reenable_resumes_future_delivery(tmp_path: Pat
         sql_exec(
             db,
             "INSERT OR REPLACE INTO bot_destinations (user_id, chat_id, active) VALUES (?, ?, 1)",
-            (profile.id, OWNER_ID),
+            (OWNER_ID, OWNER_ID),
         )
         sql_exec(
             db,
             "INSERT INTO birthday_entries (id, owner_id, label, month, day, revision, deleted) "
             "VALUES (1, ?, 'Dad', 7, 10, 1, 0)",
-            (profile.id,),
+            (OWNER_ID,),
         )
         now = int(datetime(2030, 7, 3, tzinfo=UTC).timestamp())
         sql_exec(

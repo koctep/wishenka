@@ -213,8 +213,8 @@ async def test_partial_destination_success_stored_language_and_ticket_cleanup(
         async with store.engine.begin() as conn:
             await conn.execute(
                 text(
-                    "INSERT INTO support_tickets(ticket_ref, owner_id, telegram_id, created_at) "
-                    "VALUES ('SUP-01010000-OLDTICK1', 1, 101, :old_ts)"
+                    "INSERT INTO support_tickets(ticket_ref, telegram_id, created_at) "
+                    "VALUES ('SUP-01010000-OLDTICK1', 101, :old_ts)"
                 ),
                 {"old_ts": old_ts},
             )

@@ -1085,15 +1085,17 @@ CREATE INDEX IF NOT EXISTS idx_wl_view_history_user_time
 -- 7. Public Sharing Capability Token Registry
 CREATE TABLE IF NOT EXISTS wl_tokens (
     token TEXT PRIMARY KEY,
-    wishlist_id INTEGER NOT NULL,
+    wishlist_id INTEGER NOT NULL REFERENCES wl_lists(id) ON DELETE CASCADE,
     active INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_wl_tokens_wishlist ON wl_tokens(wishlist_id, active);
 
 -- 8. Collaborator Invite Capability Token Registry
 CREATE TABLE IF NOT EXISTS wl_invite_tokens (
-    token TEXT PRIMARY KEY
+    token TEXT PRIMARY KEY,
+    wishlist_id INTEGER NOT NULL REFERENCES wl_lists(id) ON DELETE CASCADE
 );
+CREATE INDEX IF NOT EXISTS idx_wl_invite_tokens_wishlist ON wl_invite_tokens(wishlist_id);
 
 -- 9. Monotonic Sequence ID Counters
 CREATE TABLE IF NOT EXISTS wl_counters (
@@ -1104,14 +1106,13 @@ CREATE TABLE IF NOT EXISTS wl_counters (
 
 #### Foreign Key Constraints & Cascading Deletion
 - Foreign key enforcement is enabled on every SQLite connection via `PRAGMA foreign_keys = ON`.
-- Deleting a user from `users` cascades (`ON DELETE CASCADE` on `user_id` → `users(telegram_id)`,
-  added in Alembic revision `add_user_fk_cascades`; see [migrations.md](migrations.md)) to:
+- Deleting a user from `users` cascades (`ON DELETE CASCADE` on `user_id` / `owner_id` / `telegram_id` → `users(telegram_id)`,
+  added in Alembic revisions `add_user_fk_cascades` and `unify_user_keys_and_cascades`; see [migrations.md](migrations.md)) to:
   - All collaborative memberships in `wl_members`.
   - All user bookmark entries in `wl_favorites`.
   - All user viewing history records in `wl_view_history`.
-  - Inserting rows into `wl_members`, `wl_favorites`, or `wl_view_history` with a `user_id` not
-    present in `users(telegram_id)` fails with `IntegrityError` when `PRAGMA foreign_keys = ON` is
-    active.
+  - Bot delivery, birthday, support, and reminder rows (`bot_destinations`, `birthday_entries`, `birthday_input`, `support_input`, `support_tickets`, `reminder_outbox`).
+  - Inserting rows into these tables with a user key not present in `users(telegram_id)` fails with `IntegrityError` when `PRAGMA foreign_keys = ON` is active.
   - `AccountDeletionService` (`wishenka/wishlists/deletion.py`) executes within `BEGIN IMMEDIATE`
     and `PRAGMA foreign_keys = ON`, transferring/deleting owned lists and deleting the `users` row
     so both explicit cleanup and `ON DELETE CASCADE` remove all user-linked records.
@@ -1120,6 +1121,8 @@ CREATE TABLE IF NOT EXISTS wl_counters (
   - All contained items in `wl_items` (and subsequently all reservations in `wl_reservations`).
   - All user bookmark entries in `wl_favorites`.
   - All user viewing history records in `wl_view_history`.
+  - Capability token registry entries in `wl_tokens` and `wl_invite_tokens` (added in `unify_user_keys_and_cascades`).
+  - Queued reminders in `reminder_outbox` (`list_id`, plus `item_id` on `wl_items` and `birthday_id` on `birthday_entries`).
 - Deleting a wish item (`wl_items`) cascades to all its reservations (`wl_reservations`), its
   receipt records (`wl_receipts`) and its notice queue rows (`notification_outbox`).
 - A soft-deleted list (`status = 'deleted'`) keeps its receipt records and queue rows: the cascade

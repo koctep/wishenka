@@ -211,8 +211,8 @@ class WishlistRepository:
                 {"token": wishlist.public_token, "id": wishlist.id},
             )
             await self.conn.execute(
-                text("INSERT INTO wl_invite_tokens (token) VALUES (:token)"),
-                {"token": wishlist.invite_token},
+                text("INSERT INTO wl_invite_tokens (token, wishlist_id) VALUES (:token, :id)"),
+                {"token": wishlist.invite_token, "id": wishlist.id},
             )
         except IntegrityError as exc:
             if any(name in str(exc.orig) for name in ("wl_tokens.token", "wl_invite_tokens.token")):
@@ -269,8 +269,8 @@ class WishlistRepository:
         await self._ensure_tokens_available(invite_token=new_token)
         try:
             await self.conn.execute(
-                text("INSERT INTO wl_invite_tokens (token) VALUES (:token)"),
-                {"token": new_token},
+                text("INSERT INTO wl_invite_tokens (token, wishlist_id) VALUES (:token, :id)"),
+                {"token": new_token, "id": wishlist_id},
             )
         except IntegrityError as exc:
             if "wl_invite_tokens.token" in str(exc.orig):

@@ -11,7 +11,7 @@ The `wishenka.users` subsystem manages durable Telegram user identity, profile s
 
 | Scope | Status | Responsibility |
 | --- | --- | --- |
-| Baseline (`wishenka/users/`) | Implemented | `users` table (imperatively created by `UserStore.initialize()`), `UserRecord`, `UserStore.upsert_user` / `get_by_telegram_id` / `get_by_id`, unconditional `language_code` sync. |
+| Baseline (`wishenka/users/`) | Implemented | `users` table (managed via Alembic `upgrade_to_head()` from `UserStore.initialize()`, `WISHENKA-188`), `UserRecord`, `UserStore.upsert_user` / `get_by_telegram_id` / `get_by_id`, unconditional `language_code` sync. |
 | `WISHENKA-33` | Implemented | `RU`/`EN` i18n across TMA, Bot, and Outbox; Alembic revision `add_user_locale` adding `locale` & `locale_source` (synced with `UserStore.initialize()`); `wishenka/i18n/`; `GET /settings` & `PATCH /api/profile/locale`; `wishenka/bot/i18n.py` `LocaleMiddleware`. |
 | `WISHENKA-34` | Implemented (Profile & Preferences) | `birth_day`, `birth_month`, `birth_year`, `birthdate_source` (`'auto'` \| `'explicit'`) in `users`/`UserRecord`, `validate_birthdate`, `set_birthdate`/`clear_birthdate`, `NotificationPreferencesStore` (`wishenka/notices/preferences.py`), `birthday_reminders` priority in `reminders.py`, and Mini App `/settings` UI + `/api/profile/preferences`, `/api/profile/birthdate`, `/api/profile/notifications/*` APIs. (`avatar_url` and `ChatFullInfo.birthdate` sync remain future enhancements.) |
 | `WISHENKA-35` | Implemented | `AccountDeletionService` (`BEGIN IMMEDIATE` cascade), deterministic collaborative ownership transfer (`is_collaborative = 1` preserved), item recipient anonymization, PII purge across `telegram_id` and `users.id` tables, `deleted_session_revocations`, auth liveness/revocation checks, `GET /api/profile/deletion-preview`, `POST /api/profile/delete`, and Settings UI confirmation. |
@@ -61,15 +61,15 @@ flowchart LR
     Notices -->|"Read u.locale, u.id, bot_destinations"| DB
 ```
 
-### Critical Schema Invariant: Identifier Split (`telegram_id` vs. `users.id`)
+### Unified User Key Invariant (`users.telegram_id`, `WISHENKA-188`)
 
-All tables live in a single SQLite WAL database (`settings.database_url`, `PRAGMA foreign_keys = ON`, `PRAGMA busy_timeout = 5000`), but historical schemas split user references across two keys:
+All tables live in a single SQLite WAL database (`settings.database_url`, `PRAGMA foreign_keys = ON`, `PRAGMA busy_timeout = 5000`). Previously, bot and support tables referenced the internal `users.id` while wishlist and notification tables referenced `users.telegram_id`. Alembic revision `unify_user_keys_and_cascades` (`WISHENKA-188`) unified all user foreign keys onto `users(telegram_id)` with `ON DELETE CASCADE` (`users.id` remains the internal `AUTOINCREMENT` primary key used for session liveness checks):
 
-| Identifier Key | Tables & Columns (Baseline) | Notes |
+| Identifier Key | Tables & Columns | Notes |
 | --- | --- | --- |
-| **`users.telegram_id`** | `wl_lists.owner_id`, `wl_members.user_id`, `wl_items.recipient_user_id`, `wl_reservations.user_id`, `wl_favorites.user_id`, `wl_view_history.user_id`, `wl_idempotency_records.actor_id`, `notification_outbox.giver_user_id`, `notice_receipt_keys.giver_user_id`, `user_notification_settings.user_id`, `wl_list_notification_settings.user_id`, `reminder_outbox.user_id` | Wishlist domain, notification preferences, and outbox rows. `wl_items` has no separate `created_by` column. |
-| **`users.id`** (internal PK) | `bot_destinations.user_id`, `birthday_entries.owner_id`, `support_tickets.owner_id` (also has `telegram_id`) | Bot delivery, private birthdays, and support rate-limiting. |
-| **Bot dialog state** | `birthday_input(owner_id, chat_id)`, `support_input(owner_id, chat_id)`, `bot_drafts(owner, chat)`, `bot_capture_order(owner, chat)` | `WISHENKA-35` deletion must clear these using the exact key conventions of `bot/birthdays.py`, `bot/support.py`, and `bot/capture.py`. |
+| **`users.telegram_id`** (`ON DELETE CASCADE`) | `wl_members.user_id`, `wl_favorites.user_id`, `wl_view_history.user_id`, `bot_destinations.user_id`, `birthday_entries.owner_id`, `birthday_input.owner_id`, `support_input.owner_id`, `support_tickets.telegram_id`, `reminder_outbox.user_id` | Enforced by SQLite foreign keys (`PRAGMA foreign_keys = ON`). |
+| **`users.telegram_id`** (logical key) | `wl_lists.owner_id`, `wl_items.recipient_user_id`, `wl_reservations.user_id`, `wl_idempotency_records.actor_id`, `notification_outbox.giver_user_id`, `notice_receipt_keys.giver_user_id`, `user_notification_settings.user_id`, `wl_list_notification_settings.user_id` | Wishlist domain, notification preferences, and outbox rows (`AccountDeletionService` handles ownership transfer and explicit cleanup). |
+| **Bot dialog state** | `bot_drafts(owner, chat)`, `bot_capture_order(owner, chat)` | Keyed by Telegram user/chat IDs; cleared during account deletion. |
 
 ---
 
@@ -127,13 +127,14 @@ CREATE INDEX IF NOT EXISTS idx_deleted_session_revocations_expires
     - `UserStore.upsert_user(...)` preserves existing `birth_day`, `birth_month`, `birth_year`, and `birthdate_source` when `birthdate_source = 'explicit'` so Telegram re-logins or bot syncs never overwrite or clear manual edits.
 - **Notification settings linkage**: Existing tables `user_notification_settings(user_id, event_type, enabled, updated_at)` and `wl_list_notification_settings(user_id, wishlist_id, event_type, enabled, updated_at)` both key `user_id` on `users.telegram_id`, managed via `NotificationPreferencesStore` (`wishenka/notices/preferences.py`). Supported global `event_type` values: `wishlist_changes` (default `True`), `reservation_changes` (opt-in, default `False`), `gift_received` (default `True`), `reminders` (default `True`), and `birthday_reminders` (default `True`). Per-wishlist overrides support `wishlist_changes`, `reservation_changes`, `gift_received`, and `reminders` (`True`, `False`, or `None` to inherit global). See [notifications.md](notifications.md) for delivery-time resolution.
 
-### Alembic Migration Strategy (`WISHENKA-33` / `WISHENKA-35`)
+### Alembic Migration Strategy (`WISHENKA-33` / `WISHENKA-35` / `WISHENKA-188`)
 
-The Alembic revisions in `wishenka/wishlists/alembic/versions/` include `add_user_locale` (`WISHENKA-33`) and `add_deleted_session_revocations` (`WISHENKA-35`, `down_revision = "add_user_locale"`, see [migrations.md](migrations.md)):
+The Alembic revisions in `wishenka/wishlists/alembic/versions/` include `add_user_locale` (`WISHENKA-33`), `add_deleted_session_revocations` (`WISHENKA-35`), `add_user_fk_cascades`, and `unify_user_keys_and_cascades` (`WISHENKA-188`, see [migrations.md](migrations.md)):
 
 1. `add_user_locale`: idempotently creates `users` (if absent in DBs initialized solely by `WishlistStore`) or adds missing `locale` / `locale_source` columns and backfills `locale` from `language_code`.
 2. `add_deleted_session_revocations`: creates `deleted_session_revocations` and `idx_deleted_session_revocations_expires` (`CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`).
-3. `UserStore.initialize()` remains aligned on the same `users` DDL and `PRAGMA table_info(users)` check so isolated unit tests that initialize `UserStore` without `WishlistStore.initialize()` get the identical schema.
+3. `unify_user_keys_and_cascades`: consolidates the full `users` DDL (including `birth_day`, `birth_month`, `birth_year`, `birthdate_source`) in Alembic, migrates `bot_destinations`, `birthday_entries`, `birthday_input`, `support_input`, and `support_tickets` to `users(telegram_id) ON DELETE CASCADE`, and adds `ON DELETE CASCADE` FKs on `wl_tokens`, `wl_invite_tokens`, and `reminder_outbox`.
+4. `UserStore.initialize()` no longer duplicates `users` DDL; it configures WAL mode (when owning its engine) and delegates schema creation/migration directly to `upgrade_to_head(self.database_url)`.
 
 ---
 
@@ -211,7 +212,7 @@ At transaction start, the service computes `subject_hash = compute_revocation_su
    - Zero notifications are sent to list recipients (Surprise Invariant).
 5. **Purge remaining PII & bot state**:
    - By `tg_id`: delete from `wl_favorites`, `wl_view_history`, `user_notification_settings`, `wl_list_notification_settings`, `notification_outbox` (`giver_user_id`), `notice_receipt_keys` (`giver_user_id`), `reminder_outbox` (`user_id`), and `wl_idempotency_records` (`actor_id`).
-   - By `internal_user_id` / `tg_id` / `chat_id`: delete from `birthday_entries`, `birthday_input`, `bot_destinations`, `support_input`, `support_tickets`, `bot_drafts`, and `bot_capture_order`, then `DELETE FROM users WHERE telegram_id = :tg_id`.
+   - By `tg_id` / `chat_id`: delete from `birthday_entries`, `birthday_input`, `bot_destinations`, `support_input`, `support_tickets`, `bot_drafts`, and `bot_capture_order`, then `DELETE FROM users WHERE telegram_id = :tg_id` (which also enforces `ON DELETE CASCADE` on all `users(telegram_id)` FK tables).
 6. **Revoke stateless sessions & allow instant re-registration**:
    - Upsert `(subject_hash, revoked_before = now_epoch, expires_at = now_epoch + max(1, session_ttl_seconds))` into `deleted_session_revocations` (`ON CONFLICT(subject_hash) DO UPDATE SET revoked_before = MAX(...), expires_at = MAX(...)`) inside the same transaction.
    - `get_optional_current_user` (`wishenka/auth/dependencies.py`, via `_is_session_active`) checks:
@@ -232,7 +233,7 @@ At transaction start, the service computes `subject_hash = compute_revocation_su
 - **`UserStore` & `UserStoreBusyError` (`wishenka/users/store.py`, re-exported in `wishenka/users/__init__.py`)**:
   - **Transaction & locking contract (`WISHENKA-121`)**:
     - When `UserStore` creates its own `AsyncEngine` (`connect_args={"timeout": 5}`), it registers `configure_immediate_transactions(self.engine.sync_engine)`.
-    - `initialize()` configures `PRAGMA journal_mode=WAL`, `PRAGMA synchronous=NORMAL`, and `PRAGMA busy_timeout=5000` on an `isolation_level="AUTOCOMMIT"` connection (mapping `SQLITE_BUSY` to `UserStoreBusyError` and other `SQLAlchemyError`s to `RuntimeError`), then runs DDL/column checks inside `_immediate(..., operation="initialize")`.
+    - `initialize()` configures `PRAGMA journal_mode=WAL`, `PRAGMA synchronous=NORMAL`, and `PRAGMA busy_timeout=5000` on an `isolation_level="AUTOCOMMIT"` connection (when owning its engine; mapping `SQLITE_BUSY` to `UserStoreBusyError` and other `SQLAlchemyError`s to `RuntimeError`), then delegates schema setup to `await upgrade_to_head(self.database_url)`.
     - Write methods (`upsert_user`, `upsert_from_bot`, `set_locale`, `set_birthdate`, `clear_birthdate`) execute inside `_immediate(work, operation=...)` (`BEGIN IMMEDIATE`); on `SQLITE_BUSY` after `busy_timeout`, the transaction rolls back, logs `user_store_busy`, and raises retryable `UserStoreBusyError` (other `SQLAlchemyError`s log `user_store_error` and raise `RuntimeError`).
     - Read methods (`get_by_telegram_id`, `get_by_id`) execute inside `_read(work)` with `execution_options(read_only=True)` (deferred `BEGIN`, rolled back on exit) so lookups do not acquire a write lock or block behind `BEGIN IMMEDIATE` writers.
   - `upsert_user(user: TelegramUser, *, channel: str = "miniapp") -> UserRecord` (`WISHENKA-33/34`; preserves `explicit` `locale` and `birthdate`)
@@ -374,7 +375,7 @@ No Prometheus/OpenTelemetry exporter is currently wired in the codebase; these c
 - **Manual birthday overwritten by Telegram**: Ensure `UserStore.sync_telegram_birthday` checks `birthday_source != 'manual'` before writing or clearing. Even after an explicit manual clear, `birthday_source` remains `'manual'`.
 - **New owner loses gifter visibility after collaborative list transfer**: Never reset `is_collaborative = 0` when transferring ownership, even if `wl_members` becomes empty; `WishlistAccessPolicy.is_recipient_id` relies on `is_collaborative = 1` to avoid treating the new owner as the recipient of every wish.
 - **Old tokens surviving instant re-registration**: Verify `get_optional_current_user` checks `users.id` (`AUTOINCREMENT`) alongside `telegram_id` and falls back to `deleted_session_revocations` when `claims.user_id is None`.
-- **Schema drift in standalone unit tests**: Keep `UserStore.initialize()` DDL and `PRAGMA table_info(users)` column checks aligned with the Alembic revision in `wishenka/wishlists/alembic/versions/`.
+- **Schema drift in standalone unit tests**: `UserStore.initialize()` delegates to `upgrade_to_head(self.database_url)`, so all `users` schema changes must be made in Alembic revisions under `wishenka/wishlists/alembic/versions/` rather than ad-hoc DDL.
 
 ### Verification Suites (`WISHENKA-33/34/35`)
 

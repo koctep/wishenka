@@ -67,7 +67,7 @@ class EventProducer:
                     continue
             deliverable = await conn.scalar(
                 text(
-                    "SELECT 1 FROM users u JOIN bot_destinations d ON d.user_id=u.id "
+                    "SELECT 1 FROM users u JOIN bot_destinations d ON d.user_id=u.telegram_id "
                     "WHERE u.telegram_id=:user AND d.active=1"
                 ),
                 {"user": user},

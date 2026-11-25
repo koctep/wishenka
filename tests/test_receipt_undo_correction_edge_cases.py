@@ -27,7 +27,6 @@ from tests.receipt_support import (
     receipt_rows,
     seed_users,
     sql_exec,
-    sql_rows,
     table_rows,
 )
 from tests.receipt_ui_support import (
@@ -49,12 +48,10 @@ pytestmark = pytest.mark.timeout(20)
 def _seed_deliverable_gifter(db: Path | str, telegram_id: int) -> None:
     """Seed a user and active bot destination so receipt-change notices queue in reminder_outbox."""
     seed_users(db, telegram_id)
-    rows = sql_rows(db, "SELECT id FROM users WHERE telegram_id = ?", (telegram_id,))
-    user_pk = int(rows[0]["id"])
     sql_exec(
         db,
         "INSERT OR IGNORE INTO bot_destinations(user_id, chat_id, active) VALUES (?, ?, 1)",
-        (user_pk, telegram_id),
+        (telegram_id, telegram_id),
     )
 
 

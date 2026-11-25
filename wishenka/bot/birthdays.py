@@ -48,7 +48,7 @@ def create_birthday_router(dependencies: Any) -> Router:
             chat,
             user_record=user_record,
         )
-        return int(record.id) if record is not None else None
+        return int(record.telegram_id) if record is not None else None
 
     async def listing(message: Message, owner: int, lang: SupportedLocale) -> None:
         async with store.engine.connect() as conn:
@@ -250,7 +250,11 @@ def create_birthday_router(dependencies: Any) -> Router:
                             "SELECT * FROM birthday_input WHERE owner_id=:owner AND chat_id=:chat "
                             "AND expires_at>:now"
                         ),
-                        {"owner": record.id, "chat": message.chat.id, "now": int(time.time())},
+                        {
+                            "owner": int(record.telegram_id),
+                            "chat": message.chat.id,
+                            "now": int(time.time()),
+                        },
                     )
                 )
                 .mappings()
@@ -266,7 +270,7 @@ def create_birthday_router(dependencies: Any) -> Router:
                         "UPDATE birthday_input SET stage='date',label=:label WHERE owner_id=:owner "
                         "AND chat_id=:chat"
                     ),
-                    {"label": value, "owner": record.id, "chat": message.chat.id},
+                    {"label": value, "owner": int(record.telegram_id), "chat": message.chat.id},
                 )
                 return "date"
             try:
@@ -280,7 +284,7 @@ def create_birthday_router(dependencies: Any) -> Router:
                     text(
                         "SELECT COUNT(*) FROM birthday_entries WHERE owner_id=:owner AND deleted=0"
                     ),
-                    {"owner": record.id},
+                    {"owner": int(record.telegram_id)},
                 )
                 if count is not None and count >= 20:
                     return "limit"
@@ -289,7 +293,12 @@ def create_birthday_router(dependencies: Any) -> Router:
                         "INSERT INTO birthday_entries(owner_id,label,month,day) "
                         "VALUES (:owner,:label,:month,:day)"
                     ),
-                    {"owner": record.id, "label": pending["label"], "month": month, "day": day},
+                    {
+                        "owner": int(record.telegram_id),
+                        "label": pending["label"],
+                        "month": month,
+                        "day": day,
+                    },
                 )
             else:
                 result = await conn.execute(
@@ -300,7 +309,7 @@ def create_birthday_router(dependencies: Any) -> Router:
                         "WHERE id=:id AND owner_id=:owner AND revision=:revision AND deleted=0"
                     ),
                     {
-                        "owner": record.id,
+                        "owner": int(record.telegram_id),
                         "id": pending["entry_id"],
                         "revision": pending["revision"],
                         "label": pending["label"],
@@ -312,7 +321,7 @@ def create_birthday_router(dependencies: Any) -> Router:
                     return "stale"
             await conn.execute(
                 text("DELETE FROM birthday_input WHERE owner_id=:owner AND chat_id=:chat"),
-                {"owner": record.id, "chat": message.chat.id},
+                {"owner": int(record.telegram_id), "chat": message.chat.id},
             )
             return "saved"
 

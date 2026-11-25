@@ -12,8 +12,9 @@ and `ALTER TABLE` code in `WishlistStore` is removed.
   ad-hoc code is recognized, stamped with the matching revision and then upgraded. Recognized
   legacy data is never rewritten.
 - Concurrent startup of several processes on one database file is serialized by a lock file.
-- The `users` table of `UserStore` is not covered by Alembic. It still creates its structures in
-  `UserStore.initialize()` (see [auth.md](auth.md)).
+- The `users` table of `UserStore` is also managed by Alembic (`unify_user_keys_and_cascades`):
+  `UserStore.initialize()` delegates schema setup to `upgrade_to_head(self.database_url)` instead of
+  maintaining duplicate DDL (see [users.md](users.md)).
 
 ## Architecture
 
@@ -71,9 +72,16 @@ Revision chain (linear):
 18. `add_reminder_outbox_updated_at` - adds `updated_at INTEGER` and
     `idx_reminder_outbox_status_updated(status, updated_at)` to `reminder_outbox`, and backfills
     `COALESCE(claimed_at, next_attempt_at)` (see [notifications.md](notifications.md)).
-19. `add_receipt_delivery_fence` (head) - creates `receipt_delivery_fence` and
+19. `add_receipt_delivery_fence` - creates `receipt_delivery_fence` and
     `receipt_delivery_fence_audit` for per-giver receipt delivery coordination and audited fence
     resolution (see [notifications.md](notifications.md)).
+20. `unify_user_keys_and_cascades` (head) - consolidates `users` DDL (including `birth_day`,
+    `birth_month`, `birth_year`, `birthdate_source`) in Alembic, migrates `bot_destinations`,
+    `birthday_entries`, `birthday_input`, `support_input`, and `support_tickets` to
+    `users(telegram_id)` with `ON DELETE CASCADE`, and adds `ON DELETE CASCADE` foreign keys on
+    `wl_tokens`, `wl_invite_tokens` (backfilling `wishlist_id`), and `reminder_outbox` (`user_id`,
+    `list_id`, `item_id`, `birthday_id`). Cleans orphaned rows during table rebuilds and logs
+    `unify_user_keys_orphans_cleaned` / `unify_user_keys_migration_completed`.
 
 Details of revisions 5 and 6 are in [gift-receipt.md](gift-receipt.md), revisions 7 and 8 in
 [bot-scenarios.md](bot-scenarios.md), revisions 9 and 10 in [notifications.md](notifications.md),
@@ -344,6 +352,7 @@ and drops all nine baseline tables in reverse dependency order.
 
 | Revision | `ROLLBACK_POLICY` | `downgrade()` behavior |
 | --- | --- | --- |
+| `unify_user_keys_and_cascades` | `reversible` | Rebuilds `reminder_outbox`, `wl_invite_tokens`, `wl_tokens`, `support_tickets`, `support_input`, `birthday_input`, `birthday_entries`, and `bot_destinations` back to their pre-unification schemas (`users.id` mappings where applicable, no cascade FKs; orphaned rows removed during upgrade are not restored) |
 | `add_receipt_delivery_fence` | `reversible` | Drops `receipt_delivery_fence_audit` and `receipt_delivery_fence` (discards active delivery fences and audit history) |
 | `add_reminder_outbox_updated_at` | `reversible` | Drops `idx_reminder_outbox_status_updated` and `reminder_outbox.updated_at` if present (discards reminder retention timestamps) |
 | `add_bot_capture_order_retention` | `reversible` | Drops `idx_bot_capture_order_updated_at` and `bot_capture_order.updated_at` if present (discards capture watermark retention timestamps) |

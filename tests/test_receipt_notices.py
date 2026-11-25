@@ -95,7 +95,7 @@ class _Env:
                                 "INSERT OR REPLACE INTO bot_destinations "
                                 "(user_id, chat_id, active) VALUES (:id, :chat, 1)"
                             ),
-                            {"id": profile.id, "chat": user.telegram_id},
+                            {"id": profile.telegram_id, "chat": user.telegram_id},
                         )
             finally:
                 await users.engine.dispose()

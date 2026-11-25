@@ -107,7 +107,7 @@ async def test_reminder_outbox_writers_stamp_updated_at(tmp_path: Path) -> None:
         sql_exec(
             db,
             "INSERT INTO bot_destinations(user_id, chat_id, active, updated_at) "
-            "VALUES (1, 1001, 1, 100)",
+            "VALUES (1001, 1001, 1, 100)",
         )
         sql_exec(
             db,
@@ -119,7 +119,7 @@ async def test_reminder_outbox_writers_stamp_updated_at(tmp_path: Path) -> None:
         sql_exec(
             db,
             "INSERT INTO birthday_entries(id, owner_id, label, month, day, revision, deleted) "
-            "VALUES (20, 1, 'Alice', 1, 12, 1, 0)",
+            "VALUES (20, 1001, 'Alice', 1, 12, 1, 0)",
         )
 
         # 1. Scheduler INSERTs stamp updated_at.

@@ -150,13 +150,13 @@ async def test_account_deletion_e2e_cascade_ownership_privacy_and_revocation(
                 db,
                 "INSERT OR REPLACE INTO bot_destinations (user_id, chat_id, active) "
                 "VALUES (?, ?, 1)",
-                (owner_profile.id, OWNER_ID),
+                (OWNER_ID, OWNER_ID),
             )
             sql_exec(
                 db,
                 "INSERT INTO birthday_entries (id, owner_id, label, month, day, revision, deleted) "
                 "VALUES (1, ?, 'Mom', 5, 20, 1, 0)",
-                (owner_profile.id,),
+                (OWNER_ID,),
             )
             sql_exec(
                 db,
@@ -294,15 +294,10 @@ async def test_account_deletion_e2e_cascade_ownership_privacy_and_revocation(
         # PII & bot state deleted
         assert sql_rows(db, "SELECT id FROM users WHERE telegram_id = ?", (OWNER_ID,)) == []
         assert (
-            sql_rows(
-                db, "SELECT user_id FROM bot_destinations WHERE user_id = ?", (owner_profile.id,)
-            )
+            sql_rows(db, "SELECT user_id FROM bot_destinations WHERE user_id = ?", (OWNER_ID,))
             == []
         )
-        assert (
-            sql_rows(db, "SELECT id FROM birthday_entries WHERE owner_id = ?", (owner_profile.id,))
-            == []
-        )
+        assert sql_rows(db, "SELECT id FROM birthday_entries WHERE owner_id = ?", (OWNER_ID,)) == []
         assert (
             sql_rows(
                 db,

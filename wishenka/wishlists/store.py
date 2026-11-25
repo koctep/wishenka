@@ -1613,7 +1613,13 @@ class WishlistStore:
                 message = "Unable to allocate a unique capability"
             except IntegrityError as exc:
                 if not any(
-                    name in str(exc.orig) for name in ("wl_tokens.token", "wl_invite_tokens.token")
+                    name in str(exc.orig)
+                    for name in (
+                        "wl_tokens.token",
+                        "wl_invite_tokens.token",
+                        "wl_lists.public_token",
+                        "wl_lists.invite_token",
+                    )
                 ):
                     logger.error(
                         "Wishlist storage integrity error",
@@ -1681,10 +1687,13 @@ class WishlistStore:
             service, snapshot = await self._read(conn)
             previous = {wl.id: wl.public_token for wl in service._wishlists.values()}
             prior_invites = {wl.id: wl.invite_token for wl in service._wishlists.values()}
-            for token in prior_invites.values():
+            for wl_id, token in prior_invites.items():
                 await conn.execute(
-                    text("INSERT OR IGNORE INTO wl_invite_tokens VALUES (:token)"),
-                    {"token": token},
+                    text(
+                        "INSERT OR IGNORE INTO wl_invite_tokens (token, wishlist_id) "
+                        "VALUES (:token, :id)"
+                    ),
+                    {"token": token, "id": wl_id},
                 )
             result = await operation(service, conn)
             for wl in service._wishlists.values():
@@ -1695,10 +1704,6 @@ class WishlistStore:
                     )
                     if matching_public or wl.invite_token == wl.public_token:
                         raise TokenCollision
-                    await conn.execute(
-                        text("INSERT INTO wl_invite_tokens VALUES (:token)"),
-                        {"token": wl.invite_token},
-                    )
                 old = previous.get(wl.id)
                 if old != wl.public_token:
                     matching_invite = await conn.scalar(
@@ -1707,6 +1712,17 @@ class WishlistStore:
                     )
                     if matching_invite:
                         raise TokenCollision
+            flushed = await self._write(conn, service, snapshot)
+            for wl in service._wishlists.values():
+                if prior_invites.get(wl.id) != wl.invite_token:
+                    await conn.execute(
+                        text(
+                            "INSERT INTO wl_invite_tokens (token, wishlist_id) VALUES (:token, :id)"
+                        ),
+                        {"token": wl.invite_token, "id": wl.id},
+                    )
+                old = previous.get(wl.id)
+                if old != wl.public_token:
                     await conn.execute(
                         text("UPDATE wl_tokens SET active=0 WHERE wishlist_id=:id"),
                         {"id": wl.id},
@@ -1715,7 +1731,6 @@ class WishlistStore:
                         text("INSERT INTO wl_tokens VALUES (:token, :id, 1)"),
                         {"token": wl.public_token, "id": wl.id},
                     )
-            flushed = await self._write(conn, service, snapshot)
             flushed_shared = list(service._flushed_shared_events)
             pending_commit_logs = list(service._pending_commit_logs)
             return result

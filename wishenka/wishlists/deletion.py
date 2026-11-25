@@ -174,16 +174,14 @@ class AccountDeletionService:
 
         async def work(conn: AsyncConnection) -> DeletionResultDTO:
             has_users_table = await _table_exists(conn, "users")
-            user_row = None
-            if has_users_table:
-                user_row = (
-                    await conn.execute(
-                        text("SELECT id FROM users WHERE telegram_id = :uid"),
-                        {"uid": telegram_id},
-                    )
-                ).fetchone()
-
-            internal_user_id = int(user_row.id) if user_row is not None else None
+            user_exists = (
+                await conn.scalar(
+                    text("SELECT 1 FROM users WHERE telegram_id = :uid"),
+                    {"uid": telegram_id},
+                )
+                if has_users_table
+                else None
+            )
 
             owned_lists = (
                 await conn.execute(
@@ -218,7 +216,7 @@ class AccountDeletionService:
             )
 
             if (
-                user_row is None
+                user_exists is None
                 and not owned_lists
                 and not member_rows
                 and any_reservations is None
@@ -324,26 +322,13 @@ class AccountDeletionService:
                     )
                 )
 
-            # Hard-delete personal and solo collaborative lists + tokens
+            # Hard-delete personal and solo collaborative lists (wl_tokens, wl_invite_tokens,
+            # and reminder_outbox cascade automatically via FK ON DELETE CASCADE).
             if lists_to_delete:
                 delete_ids = [wl_id for wl_id, _ in lists_to_delete]
-                invite_tokens = [tok for _, tok in lists_to_delete if tok]
                 await _delete_if_table_exists_in(
                     conn, "wl_list_notification_settings", "wishlist_id", delete_ids
                 )
-                await conn.execute(
-                    text("DELETE FROM wl_tokens WHERE wishlist_id IN :ids").bindparams(
-                        bindparam("ids", expanding=True)
-                    ),
-                    {"ids": delete_ids},
-                )
-                if invite_tokens:
-                    await conn.execute(
-                        text("DELETE FROM wl_invite_tokens WHERE token IN :tokens").bindparams(
-                            bindparam("tokens", expanding=True)
-                        ),
-                        {"tokens": invite_tokens},
-                    )
                 del_res = await conn.execute(
                     text("DELETE FROM wl_lists WHERE id IN :ids").bindparams(
                         bindparam("ids", expanding=True)
@@ -430,41 +415,30 @@ class AccountDeletionService:
                 conn, "wl_idempotency_records", "actor_id = :uid", {"uid": telegram_id}
             )
 
-            if internal_user_id is not None:
-                await _delete_if_table_exists(
-                    conn, "birthday_entries", "owner_id = :oid", {"oid": internal_user_id}
-                )
-                await _delete_if_table_exists(
-                    conn,
-                    "birthday_input",
-                    "owner_id = :oid OR chat_id = :uid",
-                    {"oid": internal_user_id, "uid": telegram_id},
-                )
-                await _delete_if_table_exists(
-                    conn, "bot_destinations", "user_id = :oid", {"oid": internal_user_id}
-                )
-                await _delete_if_table_exists(
-                    conn,
-                    "support_input",
-                    "owner_id = :oid OR chat_id = :uid",
-                    {"oid": internal_user_id, "uid": telegram_id},
-                )
-                await _delete_if_table_exists(
-                    conn,
-                    "support_tickets",
-                    "owner_id = :oid OR telegram_id = :uid",
-                    {"oid": internal_user_id, "uid": telegram_id},
-                )
-            else:
-                await _delete_if_table_exists(
-                    conn, "birthday_input", "chat_id = :uid", {"uid": telegram_id}
-                )
-                await _delete_if_table_exists(
-                    conn, "support_input", "chat_id = :uid", {"uid": telegram_id}
-                )
-                await _delete_if_table_exists(
-                    conn, "support_tickets", "telegram_id = :uid", {"uid": telegram_id}
-                )
+            await _delete_if_table_exists(
+                conn, "birthday_entries", "owner_id = :uid", {"uid": telegram_id}
+            )
+            await _delete_if_table_exists(
+                conn,
+                "birthday_input",
+                "owner_id = :uid OR chat_id = :uid",
+                {"uid": telegram_id},
+            )
+            await _delete_if_table_exists(
+                conn, "bot_destinations", "user_id = :uid", {"uid": telegram_id}
+            )
+            await _delete_if_table_exists(
+                conn,
+                "support_input",
+                "owner_id = :uid OR chat_id = :uid",
+                {"uid": telegram_id},
+            )
+            await _delete_if_table_exists(
+                conn,
+                "support_tickets",
+                "telegram_id = :uid",
+                {"uid": telegram_id},
+            )
 
             await _delete_if_table_exists(
                 conn,

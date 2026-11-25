@@ -20,55 +20,13 @@ from wishenka.i18n.locale import (
 )
 from wishenka.sqlite import configure_immediate_transactions, is_sqlite_busy
 from wishenka.users.models import BirthdateSource, UserRecord
+from wishenka.wishlists.migrations import upgrade_to_head
 
 if TYPE_CHECKING:
     from wishenka.auth.models import TelegramUser
 
 T = TypeVar("T")
 logger = logging.getLogger("wishenka.users")
-
-_USERS_TABLE_DDL = """
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    telegram_id INTEGER NOT NULL UNIQUE,
-    first_name TEXT NOT NULL,
-    last_name TEXT,
-    username TEXT,
-    language_code TEXT,
-    locale TEXT NOT NULL DEFAULT 'en' CHECK (locale IN ('ru', 'en')),
-    locale_source TEXT NOT NULL DEFAULT 'auto' CHECK (locale_source IN ('auto', 'explicit')),
-    birth_day INTEGER,
-    birth_month INTEGER,
-    birth_year INTEGER,
-    birthdate_source TEXT NOT NULL DEFAULT 'auto'
-        CHECK (birthdate_source IN ('auto', 'explicit')),
-    is_premium INTEGER NOT NULL DEFAULT 0 CHECK (is_premium IN (0, 1)),
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-)
-"""
-
-_BACKFILL_ALL_SQL = """
-UPDATE users
-SET locale = CASE
-        WHEN lower(trim(coalesce(language_code, ''))) LIKE 'ru%' THEN 'ru'
-        ELSE 'en'
-    END,
-    locale_source = 'auto'
-"""
-
-_REPAIR_INVALID_SQL = """
-UPDATE users
-SET locale = CASE
-        WHEN lower(trim(coalesce(language_code, ''))) LIKE 'ru%' THEN 'ru'
-        ELSE 'en'
-    END,
-    locale_source = 'auto'
-WHERE locale IS NULL
-   OR locale NOT IN ('ru', 'en')
-   OR locale_source IS NULL
-   OR locale_source NOT IN ('auto', 'explicit')
-"""
 
 _USER_COLUMNS = (
     "id, telegram_id, first_name, last_name, username, language_code, "
@@ -111,6 +69,8 @@ class UserStore:
     """Async transactional SQLite storage for user entities."""
 
     def __init__(self, database_url: str, *, engine: AsyncEngine | None = None) -> None:
+        self.database_url = database_url
+        self._external_engine = engine is not None
         if engine is not None:
             self.engine: AsyncEngine = engine
         else:
@@ -174,68 +134,30 @@ class UserStore:
                     await conn.rollback()
 
     async def initialize(self) -> None:
-        """Initialize table schema, locale columns, and WAL mode idempotently."""
-        async with self.engine.connect() as raw_conn:
-            autocommit_conn = await raw_conn.execution_options(isolation_level="AUTOCOMMIT")
-            try:
-                await autocommit_conn.exec_driver_sql("PRAGMA journal_mode=WAL")
-                await autocommit_conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
-                await autocommit_conn.exec_driver_sql("PRAGMA busy_timeout=5000")
-            except SQLAlchemyError as exc:
-                if is_sqlite_busy(exc):
-                    logger.warning(
-                        "User store initialization busy while configuring WAL mode",
-                        extra={"event": "user_store_busy", "operation": "initialize"},
+        """Delegate schema migrations to Alembic and configure WAL mode idempotently."""
+        if not self._external_engine:
+            async with self.engine.connect() as raw_conn:
+                autocommit_conn = await raw_conn.execution_options(isolation_level="AUTOCOMMIT")
+                try:
+                    await autocommit_conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+                    await autocommit_conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
+                    await autocommit_conn.exec_driver_sql("PRAGMA busy_timeout=5000")
+                except SQLAlchemyError as exc:
+                    if is_sqlite_busy(exc):
+                        logger.warning(
+                            "User store initialization busy while configuring WAL mode",
+                            extra={"event": "user_store_busy", "operation": "initialize"},
+                        )
+                        raise UserStoreBusyError(
+                            "User service is temporarily busy; please retry"
+                        ) from exc
+                    logger.error(
+                        "User store initialization failed due to database error",
+                        extra={"event": "user_store_error", "operation": "initialize"},
                     )
-                    raise UserStoreBusyError(
-                        "User service is temporarily busy; please retry"
-                    ) from exc
-                logger.error(
-                    "User store initialization failed due to database error",
-                    extra={"event": "user_store_error", "operation": "initialize"},
-                )
-                raise RuntimeError("User storage operation failed") from exc
+                    raise RuntimeError("User storage operation failed") from exc
 
-        async def _init_schema(conn: AsyncConnection) -> None:
-            await conn.exec_driver_sql(_USERS_TABLE_DDL)
-            await conn.exec_driver_sql(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id)"
-            )
-            await conn.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)"
-            )
-            columns_res = await conn.execute(text("PRAGMA table_info(users)"))
-            columns = {str(row["name"]) for row in columns_res.mappings().all()}
-            added_column = False
-            if "locale" not in columns:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE users ADD COLUMN locale TEXT NOT NULL DEFAULT 'en' "
-                    "CHECK (locale IN ('ru', 'en'))"
-                )
-                added_column = True
-            if "locale_source" not in columns:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE users ADD COLUMN locale_source TEXT NOT NULL DEFAULT 'auto' "
-                    "CHECK (locale_source IN ('auto', 'explicit'))"
-                )
-                added_column = True
-            if added_column:
-                await conn.exec_driver_sql(_BACKFILL_ALL_SQL)
-            else:
-                await conn.exec_driver_sql(_REPAIR_INVALID_SQL)
-            if "birth_day" not in columns:
-                await conn.exec_driver_sql("ALTER TABLE users ADD COLUMN birth_day INTEGER")
-            if "birth_month" not in columns:
-                await conn.exec_driver_sql("ALTER TABLE users ADD COLUMN birth_month INTEGER")
-            if "birth_year" not in columns:
-                await conn.exec_driver_sql("ALTER TABLE users ADD COLUMN birth_year INTEGER")
-            if "birthdate_source" not in columns:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE users ADD COLUMN birthdate_source TEXT NOT NULL DEFAULT 'auto' "
-                    "CHECK (birthdate_source IN ('auto', 'explicit'))"
-                )
-
-        await self._immediate(_init_schema, operation="initialize")
+        await upgrade_to_head(self.database_url)
         self._initialized = True
 
     async def _ensure_initialized(self) -> None:

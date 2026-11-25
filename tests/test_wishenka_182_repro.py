@@ -321,7 +321,7 @@ async def test_all_private_routers_preserve_stored_language_and_activate_destina
         async with users.engine.begin() as conn:
             await conn.execute(
                 text("DELETE FROM bot_destinations WHERE user_id = :uid"),
-                {"uid": seeded.id},
+                {"uid": tg_id},
             )
 
     async def assert_preserved_and_activated(router_name: str) -> None:
@@ -334,7 +334,7 @@ async def test_all_private_routers_preserve_stored_language_and_activate_destina
         async with users.engine.connect() as conn:
             active = await conn.scalar(
                 text("SELECT active FROM bot_destinations WHERE user_id = :uid"),
-                {"uid": seeded.id},
+                {"uid": tg_id},
             )
         assert active == 1, f"{router_name} did not activate bot_destinations"
 

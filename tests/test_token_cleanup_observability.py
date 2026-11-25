@@ -46,7 +46,9 @@ async def test_background_cleanup_completed_logging(
                 ),
                 {"exp": expired_dt, "now": now_iso},
             )
-            await conn.execute(text("INSERT INTO wl_invite_tokens (token) VALUES ('tok_10')"))
+            await conn.execute(
+                text("INSERT INTO wl_invite_tokens (token, wishlist_id) VALUES ('tok_10', 10)")
+            )
             await conn.execute(
                 text(
                     "INSERT INTO wl_lists (id, owner_id, title, status, public_token, "
@@ -232,7 +234,9 @@ async def test_wishlist_repo_mutation_cleanup_expired_logging(
                 ),
                 {"exp": expired_dt, "now": now_iso},
             )
-            await conn.execute(text("INSERT INTO wl_invite_tokens (token) VALUES ('inv_100')"))
+            await conn.execute(
+                text("INSERT INTO wl_invite_tokens (token, wishlist_id) VALUES ('inv_100', 100)")
+            )
 
         with caplog.at_level(logging.INFO, logger="wishenka.wishlists.repository"):
             count = await store.cleanup_expired_tokens(now)
@@ -340,7 +344,7 @@ async def test_cleanup_logs_zero_token_leakage(
                 {"tok": sensitive_token, "exp": expired_dt, "now": now_iso},
             )
             await conn.execute(
-                text("INSERT INTO wl_invite_tokens (token) VALUES (:tok)"),
+                text("INSERT INTO wl_invite_tokens (token, wishlist_id) VALUES (:tok, 300)"),
                 {"tok": sensitive_token},
             )
 

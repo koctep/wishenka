@@ -573,12 +573,9 @@ async def test_reminders_fallback_to_en_for_missing_user_locale_and_legacy_schem
         now = int(datetime.now(UTC).timestamp())
 
         with sqlite3.connect(db_path) as conn:
-            user_row_id = conn.execute("SELECT id FROM users WHERE telegram_id = 6001").fetchone()[
-                0
-            ]
             conn.execute(
                 "INSERT INTO bot_destinations (user_id, chat_id, active) VALUES (?, ?, 1)",
-                (user_row_id, 6001),
+                (6001, 6001),
             )
             conn.execute(
                 "INSERT INTO reminder_outbox "
@@ -655,12 +652,9 @@ def test_profile_locale_patch_runs_bot_sync_in_background_tasks(tmp_path: Path) 
         cookie_header = "; ".join(f"{k}={v}" for k, v in client.cookies.items())
 
         with sqlite3.connect(db_path) as conn:
-            user_row_id = conn.execute("SELECT id FROM users WHERE telegram_id = 7001").fetchone()[
-                0
-            ]
             conn.execute(
                 "INSERT INTO bot_destinations (user_id, chat_id, active) VALUES (?, ?, 1)",
-                (user_row_id, 7001),
+                (7001, 7001),
             )
 
         async def verify_non_blocking_asgi() -> None:
