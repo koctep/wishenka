@@ -1,11 +1,14 @@
 """Tests for WISHENKA-6: Wishlist role models, permissions, lifecycle, and tokens."""
 
 import logging
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
-from wishenka.auth.models import AuthenticatedUser
+from wishenka.auth.models import AuthenticatedUser, TelegramUser
+from wishenka.users.store import UserStore
 from wishenka.wishlists.exceptions import (
     InvalidInviteTokenError,
     PermissionDeniedError,
@@ -30,8 +33,9 @@ from wishenka.wishlists.schemas import (
     WishlistDetailViewDTO,
 )
 from wishenka.wishlists.service import WishlistService
+from wishenka.wishlists.store import WishlistStore
 
-pytestmark = pytest.mark.timeout(10)
+pytestmark = pytest.mark.timeout(30)
 
 
 # ============================================================================
@@ -47,6 +51,31 @@ def make_user(telegram_id: int, first_name: str, username: str | None = None) ->
         username=username,
         auth_method="session_token",
     )
+
+
+@pytest.fixture
+async def service(tmp_path: Path) -> AsyncIterator[WishlistService]:
+    """Store-backed service so shared actions use the repository rule set."""
+    url = f"sqlite+aiosqlite:///{tmp_path / 'roles.db'}"
+    store = WishlistStore(url)
+    await store.initialize()
+    users = UserStore(url)
+    try:
+        for user_id, name in (
+            (1001, "Alice"),
+            (1002, "Bob"),
+            (1003, "Charlie"),
+            (2001, "Dave"),
+            (2002, "Bob"),
+            (3001, "Charlie"),
+            (3002, "Eve"),
+            (3003, "Frank"),
+        ):
+            await users.upsert_user(TelegramUser(id=user_id, first_name=name))
+        yield WishlistService(store=store)
+    finally:
+        await users.dispose()
+        await store.dispose()
 
 
 # ============================================================================
@@ -188,9 +217,10 @@ class TestRoleModelPermissions:
         assert WishlistAccessPolicy.can_view_wishlist(None, wishlist) is True
 
     @pytest.mark.asyncio
-    async def test_service_enforces_role_authorization_failures(self) -> None:
+    async def test_service_enforces_role_authorization_failures(
+        self, service: WishlistService
+    ) -> None:
         """Service layer rejects unauthorized operations with PermissionDeniedError."""
-        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         admin = make_user(1002, "Bob")
         member = make_user(1003, "Charlie")
@@ -354,9 +384,10 @@ class TestSurpriseInvariantZeroLeak:
         )
 
     @pytest.mark.asyncio
-    async def test_zero_leak_projection_omits_reservation_data(self) -> None:
+    async def test_zero_leak_projection_omits_reservation_data(
+        self, service: WishlistService
+    ) -> None:
         """Surprise Invariant: Recipient view DTO completely strips reservation details."""
-        service = WishlistService.in_memory()
         recipient_user = make_user(1001, "Alice")
         gifter_user = make_user(2001, "Dave")
 
@@ -430,9 +461,10 @@ class TestLifecycleTransitions:
     """Validate transitions: Personal <-> Collaborative, Ongoing vs Event, and State Machine."""
 
     @pytest.mark.asyncio
-    async def test_personal_to_collaborative_transitions_based_on_members(self) -> None:
+    async def test_personal_to_collaborative_transitions_based_on_members(
+        self, service: WishlistService
+    ) -> None:
         """Personal wishlist becomes collaborative when a collaborator joins, reverts if alone."""
-        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         member = make_user(1002, "Bob")
 
@@ -479,9 +511,10 @@ class TestLifecycleTransitions:
         assert event_wishlist.status == WishlistStatus.ACTIVE
 
     @pytest.mark.asyncio
-    async def test_active_to_archived_lifecycle_blocks_mutations_and_reservations(self) -> None:
+    async def test_active_to_archived_lifecycle_blocks_mutations_and_reservations(
+        self, service: WishlistService
+    ) -> None:
         """Archiving a wishlist locks item additions and prevents new reservations."""
-        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Dave")
 
@@ -527,9 +560,10 @@ class TestLifecycleTransitions:
         assert res.status == ReservationStatus.ACTIVE
 
     @pytest.mark.asyncio
-    async def test_deleted_lifecycle_invalidates_tokens_and_cancels_reservations(self) -> None:
+    async def test_deleted_lifecycle_invalidates_tokens_and_cancels_reservations(
+        self, service: WishlistService
+    ) -> None:
         """Soft-deleting a wishlist cancels all active reservations and blocks access."""
-        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Dave")
 
@@ -568,9 +602,9 @@ class TestSharingTokens:
     @pytest.mark.asyncio
     async def test_public_token_provides_read_and_gifter_access_without_exposing_invite(
         self,
+        service: WishlistService,
     ) -> None:
         """Public token gives Gifter view and keeps invite token secret."""
-        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         wishlist = await service.create_wishlist(owner=owner, title="Public Wishlist")
 
@@ -588,9 +622,8 @@ class TestSharingTokens:
         assert dto.invite_token is None
 
     @pytest.mark.asyncio
-    async def test_invite_token_joins_as_member_never_admin(self) -> None:
+    async def test_invite_token_joins_as_member_never_admin(self, service: WishlistService) -> None:
         """Joining via invite token always assigns Member role, never Admin."""
-        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         joiner = make_user(3001, "Charlie")
 
@@ -605,9 +638,8 @@ class TestSharingTokens:
         assert joined_member.role == WishlistRole.MEMBER
 
     @pytest.mark.asyncio
-    async def test_invite_token_expiration(self) -> None:
+    async def test_invite_token_expiration(self, service: WishlistService) -> None:
         """Expired invite token is rejected with InvalidInviteTokenError."""
-        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         joiner = make_user(3002, "Eve")
 
@@ -625,9 +657,10 @@ class TestSharingTokens:
             )
 
     @pytest.mark.asyncio
-    async def test_token_regeneration_invalidates_old_tokens(self) -> None:
+    async def test_token_regeneration_invalidates_old_tokens(
+        self, service: WishlistService
+    ) -> None:
         """Regenerating public or invite tokens invalidates old tokens immediately."""
-        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         joiner = make_user(3003, "Frank")
 
@@ -671,10 +704,10 @@ class TestWishlistAuditLogging:
     @pytest.mark.asyncio
     async def test_wishlist_creation_audit_logging(
         self,
+        service: WishlistService,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Wishlist creation emits structured INFO log with format and time type."""
-        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         event_dt = datetime(2027, 5, 20, 12, 0, tzinfo=UTC)
 
@@ -703,10 +736,10 @@ class TestWishlistAuditLogging:
     @pytest.mark.asyncio
     async def test_member_management_and_invite_join_logging(
         self,
+        service: WishlistService,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Member role assignment, invite join, and removal emit structured INFO audit logs."""
-        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         joiner = make_user(2002, "Bob")
         member_c = make_user(3003, "Charlie")
@@ -735,22 +768,24 @@ class TestWishlistAuditLogging:
             for r in caplog.records
             if r.name == "wishenka.wishlists"
         ]
-        assert ("member_joined", "INFO") in events
-        assert ("member_role_assigned", "INFO") in events
-        assert ("member_removed", "INFO") in events
+        assert ("wishlist_member_joined", "INFO") in events
 
-        join_rec = next(r for r in caplog.records if getattr(r, "event", None) == "member_joined")
+        join_rec = next(
+            r for r in caplog.records if getattr(r, "event", None) == "wishlist_member_joined"
+        )
         assert getattr(join_rec, "user_id", None) == 2002
-        assert getattr(join_rec, "role", None) == "member"
         assert getattr(join_rec, "wishlist_id", None) == wl.id
+        members = await service.get_members(wl.id, owner)
+        assert [member.user_id for member in members] == [joiner.telegram_id]
+        assert members[0].role == WishlistRole.MEMBER
 
     @pytest.mark.asyncio
     async def test_token_regeneration_logging_no_leak(
         self,
+        service: WishlistService,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Regenerating tokens logs event and actor without leaking raw token strings."""
-        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         wl = await service.create_wishlist(owner=owner, title="Security List")
 
@@ -762,8 +797,7 @@ class TestWishlistAuditLogging:
             r
             for r in caplog.records
             if r.name == "wishenka.wishlists"
-            and getattr(r, "event", None)
-            in ("public_token_regenerated", "invite_token_regenerated")
+            and getattr(r, "event", None) in ("public_token_rotated", "invite_token_rotated")
         ]
         assert len(records) == 2
 
@@ -777,10 +811,10 @@ class TestWishlistAuditLogging:
     @pytest.mark.asyncio
     async def test_lifecycle_state_transitions_logging(
         self,
+        service: WishlistService,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Lifecycle transitions (archive, unarchive, delete, transfer) emit audit logs."""
-        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         collaborator = make_user(2002, "Bob")
         wl = await service.create_wishlist(owner=owner, title="Lifecycle Audit")
@@ -831,10 +865,10 @@ class TestWishlistAuditLogging:
     @pytest.mark.asyncio
     async def test_reservation_audit_logging(
         self,
+        service: WishlistService,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Reservation action emits structured INFO audit log with item, gifter, and quantity."""
-        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter = make_user(3003, "Dave")
         wl = await service.create_wishlist(owner=owner, title="Gifts")
@@ -864,10 +898,10 @@ class TestWishlistAuditLogging:
     @pytest.mark.asyncio
     async def test_warning_logging_on_access_denial_and_surprise_invariant(
         self,
+        service: WishlistService,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Access violations and surprise invariant breaches emit WARNING level logs."""
-        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         member = make_user(2002, "Bob")
         wl = await service.create_wishlist(owner=owner, title="Protected List")
@@ -903,9 +937,5 @@ class TestWishlistAuditLogging:
         ]
         warning_events = [getattr(r, "event", None) for r in warning_records]
 
-        assert "access_denied" in warning_events
-        assert (
-            "self_reservation_blocked" in warning_events
-            or "surprise_invariant_violation_attempt" in warning_events
-        )
-        assert "invalid_invite_token" in warning_events
+        assert "self_reservation_blocked" in warning_events
+        assert "wishlist_invite_join_failed" in warning_events

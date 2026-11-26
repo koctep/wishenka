@@ -8,20 +8,29 @@ a collection error of the whole suite.
 from __future__ import annotations
 
 import importlib
+import secrets
 import sqlite3
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from wishenka.auth.models import AuthenticatedUser
+from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
+from wishenka.users.store import UserStore
 from wishenka.web.app import create_app
-from wishenka.wishlists.models import WishItem
+from wishenka.wishlists.models import (
+    WishItem,
+    Wishlist,
+    WishlistMember,
+    WishlistRole,
+    WishlistStatus,
+)
 from wishenka.wishlists.service import WishlistService
 from wishenka.wishlists.store import WishlistStore
 
@@ -91,6 +100,80 @@ def item_of(service: WishlistService, item_id: int) -> WishItem:
     return service._items[item_id]
 
 
+def place_wishlist(
+    service: WishlistService,
+    owner: AuthenticatedUser,
+    title: str,
+    *,
+    description: str | None = None,
+    invite_ttl: timedelta | None = None,
+) -> Wishlist:
+    """Attach one list to an in-memory graph. Shared rules stay on the repository."""
+    now = datetime.now(UTC)
+    service._next_wishlist_id += 1
+    ttl = timedelta(days=7) if invite_ttl is None else invite_ttl
+    wishlist = Wishlist(
+        id=service._next_wishlist_id,
+        owner_id=owner.telegram_id,
+        owner_name=owner.first_name,
+        title=title,
+        description=description,
+        status=WishlistStatus.ACTIVE,
+        public_token=secrets.token_urlsafe(16),
+        invite_token=secrets.token_urlsafe(24),
+        invite_token_expires_at=now + ttl,
+        created_at=now,
+        updated_at=now,
+    )
+    service._wishlists[wishlist.id] = wishlist
+    return wishlist
+
+
+def place_item(
+    service: WishlistService,
+    wishlist: Wishlist,
+    title: str,
+    *,
+    quantity: int = 1,
+    recipient_user_id: int | None = None,
+    recipient_name: str | None = None,
+) -> WishItem:
+    """Attach one wish to an in-memory graph. Shared rules stay on the repository."""
+    service._next_item_id += 1
+    item = WishItem(
+        id=service._next_item_id,
+        wishlist_id=wishlist.id,
+        title=title,
+        quantity=quantity,
+        recipient_user_id=recipient_user_id,
+        recipient_name=recipient_name,
+        wishlist=wishlist,
+    )
+    wishlist.items.append(item)
+    service._items[item.id] = item
+    return item
+
+
+def place_member(
+    service: WishlistService,
+    wishlist: Wishlist,
+    user_id: int,
+    role: WishlistRole = WishlistRole.MEMBER,
+) -> WishlistMember:
+    """Attach one member for inventory checks. Membership rules stay on the repository."""
+    service._next_member_id += 1
+    member = WishlistMember(
+        id=service._next_member_id,
+        wishlist_id=wishlist.id,
+        user_id=user_id,
+        role=role,
+        wishlist=wishlist,
+    )
+    wishlist.members.append(member)
+    wishlist.is_collaborative = True
+    return member
+
+
 async def seed_wish(
     service: WishlistService,
     *,
@@ -100,22 +183,25 @@ async def seed_wish(
     recipient_name: str | None = None,
 ) -> tuple[int, int]:
     """Create the owner's list and one wish. ``quantity=None`` keeps the default of one unit."""
+    units = 1 if quantity is None else quantity
+    if service._store is None:
+        wishlist = place_wishlist(service, OWNER, list_title)
+        item = place_item(
+            service,
+            wishlist,
+            title,
+            quantity=units,
+            recipient_name=recipient_name,
+        )
+        return wishlist.id, item.id
     wishlist = await service.create_wishlist(owner=OWNER, title=list_title)
-    if quantity is None:
-        item = await service.add_wish_item(
-            wishlist_id=wishlist.id,
-            actor=OWNER,
-            title=title,
-            recipient_name=recipient_name,
-        )
-    else:
-        item = await service.add_wish_item(
-            wishlist_id=wishlist.id,
-            actor=OWNER,
-            title=title,
-            quantity=quantity,
-            recipient_name=recipient_name,
-        )
+    item = await service.add_wish_item(
+        wishlist_id=wishlist.id,
+        actor=OWNER,
+        title=title,
+        quantity=units,
+        recipient_name=recipient_name,
+    )
     return wishlist.id, item.id
 
 
@@ -217,3 +303,35 @@ async def open_store(path: Path) -> AsyncIterator[WishlistStore]:
         yield store
     finally:
         await store.engine.dispose()
+
+
+@asynccontextmanager
+async def open_service(path: Path, *actors: AuthenticatedUser) -> AsyncIterator[WishlistService]:
+    """Store-backed service. Shared actions use the repository; users must exist first."""
+    url = f"{SQLITE_PREFIX}{path}"
+    store = WishlistStore(url)
+    await store.initialize()
+    users = UserStore(url)
+    try:
+        for actor in actors:
+            await users.upsert_user(TelegramUser(id=actor.telegram_id, first_name=actor.first_name))
+        yield WishlistService(store=store)
+    finally:
+        await users.dispose()
+        await store.dispose()
+
+
+@asynccontextmanager
+async def open_domain(path: Path) -> AsyncIterator[WishlistService]:
+    """Store-backed service with the receipt actors present in ``users``."""
+    url = f"{SQLITE_PREFIX}{path}"
+    store = WishlistStore(url)
+    await store.initialize()
+    users = UserStore(url)
+    try:
+        for actor in (OWNER, CO_AUTHOR, GIFTER, OTHER_GIFTER, THIRD_GIFTER, STRANGER):
+            await users.upsert_user(TelegramUser(id=actor.telegram_id, first_name=actor.first_name))
+        yield WishlistService(store=store)
+    finally:
+        await users.dispose()
+        await store.dispose()

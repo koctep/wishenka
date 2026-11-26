@@ -229,7 +229,7 @@ async def test_owner_with_promise_on_another_list_is_a_giver(tmp_path: Path) -> 
             await service.create_reservation(item_id=item.id, user=OWNER, quantity=1)
             return item.id
 
-        item_id = await env.store.execute(setup)
+        item_id = await setup(WishlistService(env.store))
 
         async def act(service: WishlistService) -> None:
             await service.record_item_fulfillment(item_id, OTHER_GIFTER, 1)
@@ -644,7 +644,7 @@ async def test_notice_for_a_deleted_list_is_skipped_not_sent(tmp_path: Path) -> 
         async def delete(service: WishlistService) -> None:
             await service.delete_wishlist(env.wishlist_id, OWNER)
 
-        await env.store.execute(delete)
+        await delete(WishlistService(env.store))
         sender = FakeNoticeSender()
 
         await env.worker(sender).run_once(_base())

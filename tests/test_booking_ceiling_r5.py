@@ -249,11 +249,14 @@ async def _execute[T](
     operation: Callable[[WishlistService], Awaitable[T]],
     *,
     initialize: bool = False,
+    on_store: bool = False,
 ) -> T:
     store = WishlistStore(f"sqlite+aiosqlite:///{db_path}")
     try:
         if initialize:
             await store.initialize()
+        if on_store:
+            return await operation(WishlistService(store))
         return await store.execute(operation)
     finally:
         await store.engine.dispose()
@@ -275,7 +278,7 @@ async def _seed_wishlist(db_path: Path, quantities: list[int]) -> tuple[int, lis
             item_ids.append(item.id)
         return wishlist.id, item_ids
 
-    return await _execute(db_path, setup, initialize=True)
+    return await _execute(db_path, setup, initialize=True, on_store=True)
 
 
 async def _seed_reservation(db_path: Path, item_id: int) -> int:

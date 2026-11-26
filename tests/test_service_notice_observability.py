@@ -44,7 +44,7 @@ async def test_reminder_summary_is_aggregated_and_private(
                 event_date=datetime(2030, 3, 8, tzinfo=UTC),
             )
 
-        await store.execute(create)
+        await create(WishlistService(store))
         await _verify_start(monkeypatch, db, OWNER_ID)
         env = _Env(store, db)
         now = int(datetime(2030, 3, 1, tzinfo=UTC).timestamp())
@@ -226,7 +226,7 @@ async def test_concurrent_scans_log_only_aggregate_committed_work(
                 event_date=datetime(2030, 3, 8, tzinfo=UTC),
             )
 
-        await store.execute(create)
+        await create(WishlistService(store))
         await _verify_start(monkeypatch, db, OWNER_ID)
         env = _Env(store, db)
         now = int(datetime(2030, 3, 1, tzinfo=UTC).timestamp())

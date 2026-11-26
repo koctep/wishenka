@@ -616,8 +616,8 @@ FastAPI APIRouter mounted at `/api/wishlists/{wishlist_id}/items` providing HTTP
   - `User = Annotated[AuthenticatedUser, Depends(get_current_user)]`: Enforces authenticated session for mutations (`POST`, `PUT`, `PATCH`).
   - `OptionalUser = Annotated[AuthenticatedUser | None, Depends(get_optional_current_user)]`: Allows anonymous access for public wishlist views while extracting caller credentials for personalized gifter badges when logged in.
 - **Transactional Execution Wrapper ([`execute`](file:///home/src/wishenka/web/routes/items.py#L34-L104))**:
-  - A test-injected `request.app.state.wishlist_service` runs the action on that in-memory service.
-  - When `item_id` is set, the persistent path is [`WishlistStore.execute_wish`](file:///home/src/wishenka/wishlists/store.py#L942). `update_item` (`PATCH`) passes the item id. Other item routes call [`WishlistStore.execute`](file:///home/src/wishenka/wishlists/store.py#L1221), the full-snapshot unit of work. Both paths translate a timed-out SQLite lock to [`InventoryBusyError`](file:///home/src/wishenka/wishlists/exceptions.py#L52) before a generic storage `RuntimeError`.
+  - The handler uses the request `WishlistRepository`. Shared item actions (`add_wish_item`, list, reorder, archive, restore) run on `RepoWishlistOps(repo)`.
+  - When `item_id` is set, the persistent path is [`WishlistStore.execute_wish`](file:///home/src/wishenka/wishlists/store.py#L942). `update_item` (`PATCH`) passes the item id. That wish-scoped path translates a timed-out SQLite lock to [`InventoryBusyError`](file:///home/src/wishenka/wishlists/exceptions.py#L52) before a generic storage `RuntimeError`. Reservations and receipts stay on `execute_wish`.
   - Maps domain exceptions to standard HTTP error responses. The 503 body is the exception text (`The wish was busy and the attempt changed nothing`). It names no gifter.
     - [`InventoryBusyError`](file:///home/src/wishenka/wishlists/exceptions.py#L52) $\rightarrow$ **`503 Service Unavailable`** (`event="item_inventory_busy"`, plus `item_id` when the route passed one).
     - [`WishlistNotFoundError`](file:///home/src/wishenka/wishlists/exceptions.py#L12), [`WishlistDeletedError`](file:///home/src/wishenka/wishlists/exceptions.py#L20), [`ItemNotFoundError`](file:///home/src/wishenka/wishlists/exceptions.py#L32) $\rightarrow$ **`404 Not Found`** (`event="item_not_found"`).
@@ -652,7 +652,7 @@ Inventory changes for one wish share the SQLite file across service copies. The 
 3. Runs the domain operation on that partial service. The service has no store, so the method body runs in memory inside the open transaction.
 4. Persists changed rows only ([`_persist_wish`](file:///home/src/wishenka/wishlists/store.py#L1168-L1219)): the item row when its state changed, reservations that are new or changed, and the reservation counter when it changed. It does not call `_write`. Unchanged rows, other wishes, members, favorites, and view history stay untouched.
 
-The configured `WishlistService` sends these methods through `execute_wish` via `_transactional`: `create_reservation`, `update_wish_item`, and `record_item_fulfillment` (by `item_id`); `cancel_reservation`, `update_reservation_quantity`, `mark_reservation_purchased`, and `revert_reservation_to_active` (by `reservation_id`). Other public methods still use the full-snapshot `execute`, which starts with the same `Connection.begin()`.
+The configured `WishlistService` sends these methods through `execute_wish` via `_transactional`: `create_reservation`, `update_wish_item`, and `record_item_fulfillment` (by `item_id`); `cancel_reservation`, `update_reservation_quantity`, `mark_reservation_purchased`, and `revert_reservation_to_active` (by `reservation_id`). Shared names in `_SHARED_REPOSITORY_METHODS` forward through `WishlistStore.run_repository`. `update_wishlist_settings`, `transfer_ownership`, and `is_favorite` still use the snapshot `execute`.
 
 `SQLITE_BUSY` after `busy_timeout` is recognized on the driver error, its
 `orig`, or its cause (`sqlite_errorcode` low byte `SQLITE_BUSY`, or the text
@@ -1179,60 +1179,79 @@ except SSRFBlockedError as exc:
 
 ### 7. Managing Wish Items and Piece Accounting via Domain Service
 
-Items are managed through [`WishlistService`](file:///home/src/wishenka/wishlists/service.py#L144):
+Shared wish methods (`create_wishlist`, `add_wish_item`, `reorder_wish_items`,
+`archive_wish_item`, `restore_wish_item`) run on `RepoWishlistOps` inside
+`WishlistStore.run_repository`. On `WishlistService.in_memory()` those names
+log `wishlist_repository_path_required` and raise `WishlistNotFoundError`.
+Reservation, quantity, and receipt methods still run their bodies when the
+service has no store, and a store-backed service sends them through
+`execute_wish`. See [Shared wishlist rule set](wishlists.md#shared-wishlist-rule-set).
+
+The sample below uses a store-backed service for reservation, quantity, and
+receipt calls, which go through `execute_wish`. It creates, reorders, archives,
+and restores wishes with `RepoWishlistOps` inside `run_repository`. Each shared
+call returns the object from that transaction. Piece checks that follow a wish
+mutation read the reservation returned by `execute_wish`, or the aggregate
+loaded by a later repository call.
 
 ```python
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.items.models import ItemPriority
 from wishenka.wishlists.exceptions import (
     CannotReduceQuantityBelowReservedError,
-    PermissionDeniedError,
     WishlistArchivedError,
 )
-from wishenka.wishlists.models import TelegramUser
+from wishenka.wishlists.repo_ops import RepoWishlistOps
 from wishenka.wishlists.service import WishlistService, project_wish_item
+from wishenka.wishlists.store import WishlistStore
 
-service = WishlistService.in_memory()
-owner = AuthenticatedUser(telegram_id=101, username="alice")
-gifter = AuthenticatedUser(telegram_id=202, username="bob")
+store = WishlistStore("sqlite+aiosqlite:///:memory:")
+await store.initialize()
+# Reservation, quantity, and receipt methods on this service use execute_wish.
+service = WishlistService(store)
+owner = AuthenticatedUser(telegram_id=101, first_name="Alice", username="alice")
+gifter = AuthenticatedUser(telegram_id=202, first_name="Bob", username="bob")
 
 # 1. Create a wishlist and an item with piece quantity = 5
-wishlist = await service.create_wishlist(owner_id=owner.telegram_id, title="Birthday Wishlist")
-item1 = await service.add_wish_item(
-    actor=owner,
-    wishlist_id=wishlist.id,
-    title="Board Game Sets",
-    quantity=5,
-    price=2500,
-    priority=ItemPriority.HIGH,
-)
+async def seed(repo):
+    ops = RepoWishlistOps(repo)
+    wishlist = await ops.create_wishlist(owner_id=owner.telegram_id, title="Birthday Wishlist")
+    item1 = await ops.add_wish_item(
+        actor=owner,
+        wishlist_id=wishlist.id,
+        title="Board Game Sets",
+        quantity=5,
+        price=2500,
+        priority=ItemPriority.HIGH,
+    )
+    item2 = await ops.add_wish_item(
+        actor=owner,
+        wishlist_id=wishlist.id,
+        title="Wireless Headphones",
+        quantity=1,
+        price=12000,
+    )
+    return wishlist, item1, item2
+
+wishlist, item1, item2 = await store.run_repository(seed)
 assert item1.display_order == 0
 assert item1.desired_quantity == 5
 assert item1.available_quantity == 5
-
-# Add a second item - display_order auto-increments
-item2 = await service.add_wish_item(
-    actor=owner,
-    wishlist_id=wishlist.id,
-    title="Wireless Headphones",
-    quantity=1,
-    price=12000,
-)
 assert item2.display_order == 1
 
-# 2. Gifter reserves 2 units of item1
-await service.create_reservation(item_id=item1.id, user=gifter, quantity=2)
-assert item1.reserved_quantity == 2
-assert item1.available_quantity == 3
+# 2. Gifter reserves 2 units of item1 (wish transaction, not the repository path)
+reservation = await service.create_reservation(item_id=item1.id, user=gifter, quantity=2)
+assert reservation.wish_item.reserved_quantity == 2
+assert reservation.wish_item.available_quantity == 3
 
 # 3. Open promises do not set the minimum: reducing to 1 is allowed and over-books the item.
-await service.update_wish_item(item_id=item1.id, actor=owner, quantity=1)
-assert item1.quantity == 1
-assert item1.reserved_quantity == 2  # The open promise remains intact.
+reduced = await service.update_wish_item(item_id=item1.id, actor=owner, quantity=1)
+assert reduced.quantity == 1
+assert reduced.reserved_quantity == 2  # The open promise remains intact.
 
 # Restore quantity for the following examples.
-await service.update_wish_item(item_id=item1.id, actor=owner, quantity=3)
-assert item1.available_quantity == 1
+restored_qty = await service.update_wish_item(item_id=item1.id, actor=owner, quantity=3)
+assert restored_qty.available_quantity == 1
 
 # Received units do set the minimum, even though the exception retains its legacy name.
 await service.update_wish_item(item_id=item2.id, actor=owner, quantity=3)
@@ -1243,51 +1262,69 @@ except CannotReduceQuantityBelowReservedError as exc:
     print(f"Reduction blocked: {exc}")
 
 # 4. Atomic Reordering: Swap item2 and item1
-reordered = await service.reorder_wish_items(
-    wishlist_id=wishlist.id,
-    actor=owner,
-    item_ids=[item2.id, item1.id],
-)
+async def reorder(repo):
+    return await RepoWishlistOps(repo).reorder_wish_items(
+        wishlist_id=wishlist.id,
+        actor=owner,
+        item_ids=[item2.id, item1.id],
+    )
+
+reordered = await store.run_repository(reorder)
 assert reordered[0].id == item2.id
 assert reordered[0].display_order == 0
 assert reordered[1].id == item1.id
 assert reordered[1].display_order == 1
 
 # 5. Safe Archiving: Soft-deletes item1 while preserving the reservation
-archived_view = await service.archive_wish_item(
-    wishlist_id=wishlist.id,
-    item_id=item1.id,
-    actor=owner,
-)
-assert archived_view.is_archived is True
-# Reservations remain safely intact:
-assert len([r for r in item1.reservations if r.status.value == "active"]) == 1
+async def archive(repo):
+    return await RepoWishlistOps(repo).archive_wish_item(
+        wishlist_id=wishlist.id,
+        item_id=item1.id,
+        actor=owner,
+    )
 
-# Editing archived item is rejected
+archived_view = await store.run_repository(archive)
+assert archived_view.is_archived is True
+
+async def load(repo):
+    return await RepoWishlistOps(repo).get_wishlist_by_id(wishlist.id)
+
+loaded = await store.run_repository(load)
+stored_item1 = next(it for it in loaded.items if it.id == item1.id)
+# Reservations remain safely intact:
+assert len([r for r in stored_item1.reservations if r.status.value == "active"]) == 1
+
+# Editing archived item is rejected (execute_wish)
 try:
     await service.update_wish_item(item_id=item1.id, actor=owner, title="New Title")
 except WishlistArchivedError:
     print("Archived item cannot be modified")
 
 # 6. Restoration: Unarchives and appends item1 to the end of the active list
-restored_view = await service.restore_wish_item(
-    wishlist_id=wishlist.id,
-    item_id=item1.id,
-    actor=owner,
-)
+async def restore(repo):
+    return await RepoWishlistOps(repo).restore_wish_item(
+        wishlist_id=wishlist.id,
+        item_id=item1.id,
+        actor=owner,
+    )
+
+restored_view = await store.run_repository(restore)
 assert restored_view.is_archived is False
 assert restored_view.display_order == 1  # item2 is 0, so restored item takes 1
 
 # 7. Surprise Invariant Projections
-recipient_view = project_wish_item(item1, current_user=owner)
+loaded = await store.run_repository(load)
+stored_item1 = next(it for it in loaded.items if it.id == item1.id)
+recipient_view = project_wish_item(stored_item1, current_user=owner)
 assert recipient_view.is_recipient is True
 assert not hasattr(recipient_view, "available_quantity")  # Zero reservation leakage
 
-gifter_view = project_wish_item(item1, current_user=gifter)
+gifter_view = project_wish_item(stored_item1, current_user=gifter)
 assert gifter_view.is_recipient is False
 assert gifter_view.available_quantity == 1
 assert gifter_view.is_reserved_by_me is True
 assert gifter_view.my_reserved_quantity == 2
+await store.dispose()
 ```
 
 ### 8. Invoking the REST API via HTTP Client

@@ -93,10 +93,8 @@ async def _seed_viewers(users: UserStore) -> tuple[AuthenticatedUser, Authentica
 
 
 async def _reload_history_ids(store: WishlistStore, viewer: AuthenticatedUser) -> list[int]:
-    async def read(service: WishlistService) -> list[int]:
-        return _history_wishlist_ids(await service.get_history(viewer, limit=_HISTORY_LIMIT))
-
-    return await store.execute(read)
+    history = await WishlistService(store=store).get_history(viewer, limit=_HISTORY_LIMIT)
+    return _history_wishlist_ids(history)
 
 
 async def _stored_history_ids(store: WishlistStore, viewer: AuthenticatedUser) -> list[int]:
@@ -108,25 +106,6 @@ async def _stored_history_ids(store: WishlistStore, viewer: AuthenticatedUser) -
         return [entry.wishlist_id for entry in entries]
 
     return await store.execute_read(read)
-
-
-@pytest.mark.asyncio
-async def test_in_memory_equal_times_follow_recording_sequence_newest_first() -> None:
-    """A, then B, then C, then A again at one instant lists A, C, B."""
-    service = WishlistService.in_memory()
-    viewer = _user(_VIEWER_ID, "Viewer")
-    created = await _create_owned(service, viewer, ["A", "B", "C"])
-    wishlist_a, wishlist_b, wishlist_c = created
-
-    with _frozen_recording_clock(_FROZEN):
-        await service.record_view(viewer, wishlist_a)
-        await service.record_view(viewer, wishlist_b)
-        await service.record_view(viewer, wishlist_c)
-        await service.record_view(viewer, wishlist_a)
-
-    history = await service.get_history(viewer, limit=_HISTORY_LIMIT)
-    assert {viewed_at for _, viewed_at in history} == {_FROZEN}
-    assert _history_wishlist_ids(history) == [wishlist_a, wishlist_c, wishlist_b]
 
 
 @pytest.mark.asyncio
@@ -152,30 +131,6 @@ async def test_stored_equal_times_follow_recording_sequence_after_reload(tmp_pat
     finally:
         await users.engine.dispose()
         await store.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_equal_time_limit_keeps_newer_recordings() -> None:
-    """The twenty shown rows are the newest recordings; another viewer does not reorder them."""
-    viewer = _user(_VIEWER_ID, "Viewer")
-    other = _user(_OTHER_ID, "Other")
-    service = WishlistService.in_memory()
-    created = await _create_owned(service, viewer, [f"L{index}" for index in range(1, 22)])
-    other_lists = await _create_owned(service, other, ["Other-1", "Other-2"])
-    expected = _expected_limit_order(created)
-
-    with _frozen_recording_clock(_FROZEN):
-        for wishlist_id in created[:_HISTORY_LIMIT]:
-            await service.record_view(viewer, wishlist_id)
-        for wishlist_id in other_lists:
-            await service.record_view(other, wishlist_id)
-        await service.record_view(viewer, created[0])
-        await service.record_view(viewer, created[-1])
-
-    shown = await service.get_history(viewer, limit=_HISTORY_LIMIT)
-    assert {viewed_at for _, viewed_at in shown} == {_FROZEN}
-    assert _history_wishlist_ids(shown) == expected
-    assert created[1] not in _history_wishlist_ids(shown)
 
 
 @pytest.mark.asyncio
@@ -212,21 +167,7 @@ async def test_stored_equal_time_limit_keeps_newer_recordings(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_later_view_time_ranks_before_earlier_view_time(tmp_path: Path) -> None:
-    """Different view times stay most-recent-first on the session list and after reload."""
-    viewer = _user(_VIEWER_ID, "Viewer")
-    service = WishlistService.in_memory()
-    earlier_id, later_id = await _create_owned(service, viewer, ["Earlier", "Later"])
-
-    with _frozen_recording_clock(_FROZEN) as (service_clock, repo_clock):
-        await service.record_view(viewer, earlier_id)
-        service_clock.now.return_value = _LATER
-        repo_clock.now.return_value = _LATER
-        await service.record_view(viewer, later_id)
-
-    history = await service.get_history(viewer, limit=_HISTORY_LIMIT)
-    assert _history_wishlist_ids(history) == [later_id, earlier_id]
-    assert [viewed_at for _, viewed_at in history] == [_LATER, _FROZEN]
-
+    """Different view times stay most-recent-first after reload."""
     store, users = await _open_stores(tmp_path, "wishenka_304_times.db")
     try:
         stored_viewer, _other = await _seed_viewers(users)

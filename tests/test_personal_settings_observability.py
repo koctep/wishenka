@@ -53,7 +53,7 @@ def test_settings_mutations_log_safe_success_events(
         owner = AuthenticatedUser(
             telegram_id=OWNER_ID, first_name="SecretAlice", auth_method="session_token"
         )
-        wishlist_id = asyncio.run(app.state.wishlist_store.execute(_create))
+        wishlist_id = asyncio.run(_create(WishlistService(app.state.wishlist_store)))
         headers = bearer(sessions, OWNER_ID, "SecretAlice")
         with _capture(caplog):
             calls: list[Any] = [

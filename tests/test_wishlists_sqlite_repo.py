@@ -76,7 +76,7 @@ async def test_wishlist_update_does_not_execute_mass_table_delete(tmp_path: Path
     async def create_op(service: WishlistService) -> Wishlist:
         return await service.create_wishlist(owner=owner, title="My Birthday List")
 
-    created = await store.execute(create_op)
+    created = await create_op(WishlistService(store))
 
     # Track all executed SQL queries during an update
     executed_statements: list[str] = []
@@ -123,7 +123,7 @@ async def test_wishlist_repository_direct_granular_queries(tmp_path: Path) -> No
         wl2 = await service.create_wishlist(owner=u202, title="List 202")
         return wl1.id, wl2.id
 
-    wl1_id, wl2_id = await store.execute(create_data)
+    wl1_id, wl2_id = await create_data(WishlistService(store))
 
     async with store.engine.connect() as conn:
         repo = WishlistRepository(conn)
@@ -167,7 +167,7 @@ async def test_atomic_reservation_allocation_and_rollback(tmp_path: Path) -> Non
         )
         return wl.id, item.id
 
-    wl_id, item_id = await store.execute(setup)
+    wl_id, item_id = await setup(WishlistService(store))
 
     # First verify normalized schema for reservations table
     async with store.engine.connect() as conn:
@@ -226,7 +226,7 @@ async def test_fifty_concurrent_reservations_do_not_overbook(tmp_path: Path) -> 
             )
             return item.id
 
-        item_id = await store.execute(setup)
+        item_id = await setup(WishlistService(store))
         async with store.engine.connect() as conn:
             assert (await conn.execute(text("PRAGMA journal_mode"))).scalar_one() == "wal"
             assert (await conn.execute(text("PRAGMA busy_timeout"))).scalar_one() == 5000
@@ -303,7 +303,7 @@ async def test_reservation_waits_for_sqlite_writer(tmp_path: Path) -> None:
             )
             return item.id
 
-        item_id = await holder.execute(setup)
+        item_id = await setup(WishlistService(holder))
 
         @event.listens_for(waiter.engine.sync_engine, "before_cursor_execute")
         def on_statement(conn, cursor, statement, parameters, context, executemany):
@@ -349,7 +349,7 @@ async def test_execute_read_rolls_back_mutations_on_normal_return(tmp_path: Path
             wishlist = await service.create_wishlist(owner=owner, title="Original")
             return wishlist.id
 
-        wishlist_id = await store.execute(seed)
+        wishlist_id = await seed(WishlistService(store))
 
         async def mutate_in_read(conn: Any) -> None:
             await conn.execute(
@@ -387,7 +387,7 @@ async def test_execute_read_rolls_back_mutations_on_exception(tmp_path: Path) ->
             wishlist = await service.create_wishlist(owner=owner, title="Committed")
             return wishlist.id
 
-        wishlist_id = await store.execute(seed)
+        wishlist_id = await seed(WishlistService(store))
 
         async def failing_read(conn: Any) -> None:
             await conn.execute(text("SELECT 1"))
@@ -439,7 +439,7 @@ async def test_execute_read_does_not_block_on_active_immediate_transaction(
             wishlist = await service.create_wishlist(owner=owner, title="Before")
             return wishlist.id
 
-        wishlist_id = await writer.execute(seed)
+        wishlist_id = await seed(WishlistService(writer))
 
         async def hold_write(conn: Any) -> None:
             await conn.execute(

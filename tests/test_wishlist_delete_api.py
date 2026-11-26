@@ -138,6 +138,13 @@ def _run[T](env: Env, action: Callable[[WishlistService], Awaitable[T]]) -> T:
     return result
 
 
+def _run_shared[T](env: Env, action: Callable[[WishlistService], Awaitable[T]]) -> T:
+    """Run a shared wishlist action on the store-backed service, outside snapshot execute."""
+    assert env.client.portal is not None
+    result: T = env.client.portal.call(action, env.app.state.domain_service)
+    return result
+
+
 def _create(env: Env, name: str = "Birthday", user_id: int = OWNER_ID) -> dict[str, Any]:
     created = env.client.post("/api/wishlists", json={"name": name}, headers=env.headers(user_id))
     assert created.status_code == 201, created.text
@@ -354,7 +361,7 @@ def test_repeat_delete_after_retention_window_is_410_and_changes_nothing(
         async def delete(service: WishlistService) -> None:
             await service.delete_wishlist(wishlist_id, OWNER)
 
-        _run(first, delete)
+        _run_shared(first, delete)
     expired = (datetime.now(UTC) - timedelta(days=31)).isoformat()
     with sqlite3.connect(db_path) as conn:
         conn.execute("UPDATE wl_lists SET updated_at = ? WHERE id = ?", (expired, wishlist_id))
@@ -435,7 +442,7 @@ def test_non_owner_never_learns_that_a_list_is_deleted_or_archived(env: Env, sta
         else:
             await service.archive_wishlist(created["id"], OWNER)
 
-    _run(env, move)
+    _run_shared(env, move)
 
     for caller in (ADMIN_ID, MEMBER_ID, STRANGER_ID):
         response = _delete(env, created["id"], caller)
@@ -450,7 +457,7 @@ def test_owner_cannot_delete_archived_list_directly(env: Env) -> None:
     async def archive(service: WishlistService) -> None:
         await service.archive_wishlist(created["id"], OWNER)
 
-    _run(env, archive)
+    _run_shared(env, archive)
 
     response = _delete(env, created["id"])
 

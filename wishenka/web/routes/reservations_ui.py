@@ -145,9 +145,8 @@ def _list_context(
 async def _load_items(request: Request, user_id: int) -> list[MyReservationItemDTO]:
     """Load the caller's occupying promises."""
 
-    injected = getattr(request.app.state, "wishlist_service", None)
-    source = injected if injected is not None else request.app.state.wishlist_store
-    return cast(list[MyReservationItemDTO], await source.get_user_reservations(user_id=user_id))
+    store = request.app.state.wishlist_store
+    return cast(list[MyReservationItemDTO], await store.get_user_reservations(user_id=user_id))
 
 
 @router.get("/web/reservations/card", response_class=HTMLResponse)
@@ -158,9 +157,8 @@ async def reservations_card(
 ) -> Response:
     """Return the home card fragment. The badge is the distinct-wish count."""
 
-    injected = getattr(request.app.state, "wishlist_service", None)
-    source = injected if injected is not None else request.app.state.wishlist_store
-    summary = await source.get_user_reservations_summary(user_id=current_user.telegram_id)
+    store = request.app.state.wishlist_store
+    summary = await store.get_user_reservations_summary(user_id=current_user.telegram_id)
     return templates.TemplateResponse(
         request=request,
         name="partials/reservations_card.html",

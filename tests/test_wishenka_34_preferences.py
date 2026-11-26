@@ -25,6 +25,7 @@ from wishenka.notices.preferences import (
 )
 from wishenka.notices.reminders import claim_reminder
 from wishenka.users.store import UserNotFoundError, UserStore, validate_birthdate
+from wishenka.wishlists.service import WishlistService
 
 pytestmark = pytest.mark.timeout(30)
 
@@ -97,14 +98,12 @@ async def test_preferences_store_validation_roles_and_isolation(tmp_path: Path) 
             "VALUES (?, 'Owner', '2026-01-01', '2026-01-01')",
             (OWNER_ID,),
         )
-        wl_owner = await wl_store.execute(lambda svc: svc.create_wishlist(owner=OWNER, title="Own"))
-        wl_other = await wl_store.execute(
-            lambda svc: svc.create_wishlist(owner=GIFTER, title="Gifter List")
+        wl_owner = await WishlistService(wl_store).create_wishlist(owner=OWNER, title="Own")
+        wl_other = await WishlistService(wl_store).create_wishlist(
+            owner=GIFTER, title="Gifter List"
         )
-        await wl_store.execute(
-            lambda svc: svc.get_wishlist_by_public_token(wl_other.public_token, OWNER)
-        )
-        await wl_store.execute(lambda svc: svc.add_favorite(OWNER, wl_other.id))
+        await WishlistService(wl_store).get_wishlist_by_public_token(wl_other.public_token, OWNER)
+        await WishlistService(wl_store).add_favorite(OWNER, wl_other.id)
 
         prefs = NotificationPreferencesStore(wl_store.engine)
         defaults = await prefs.get_global_settings(OWNER_ID)

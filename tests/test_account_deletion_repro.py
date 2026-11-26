@@ -24,6 +24,7 @@ from tests.receipt_support import (
 )
 from wishenka.auth.models import TelegramUser
 from wishenka.wishlists.models import WishlistRole
+from wishenka.wishlists.service import WishlistService
 
 pytestmark = pytest.mark.timeout(60)
 
@@ -49,11 +50,11 @@ async def test_deletion_preview_and_confirm_api_contract(tmp_path: Path) -> None
         db = Path(db_path_of(app))
         async with open_store(db) as store:
             # 1. Personal list with wish + another user's reservation (must NOT count in preview)
-            personal_wl = await store.execute(
-                lambda svc: svc.create_wishlist(owner=OWNER, title="Personal")
+            personal_wl = await WishlistService(store).create_wishlist(
+                owner=OWNER, title="Personal"
             )
-            personal_item = await store.execute(
-                lambda svc: svc.add_wish_item(wishlist_id=personal_wl.id, actor=OWNER, title="Book")
+            personal_item = await WishlistService(store).add_wish_item(
+                wishlist_id=personal_wl.id, actor=OWNER, title="Book"
             )
             await store.execute(
                 lambda svc: svc.create_reservation(
@@ -62,24 +63,20 @@ async def test_deletion_preview_and_confirm_api_contract(tmp_path: Path) -> None
             )
 
             # 2. Collaborative list with another member (will transfer)
-            collab_wl = await store.execute(
-                lambda svc: svc.create_wishlist(owner=OWNER, title="Shared")
-            )
-            await store.execute(
-                lambda svc: svc.add_member(
-                    wishlist_id=collab_wl.id,
-                    actor=OWNER,
-                    user_id=CO_AUTHOR_ID,
-                    role=WishlistRole.ADMIN,
-                )
+            collab_wl = await WishlistService(store).create_wishlist(owner=OWNER, title="Shared")
+            await WishlistService(store).add_member(
+                wishlist_id=collab_wl.id,
+                actor=OWNER,
+                user_id=CO_AUTHOR_ID,
+                role=WishlistRole.ADMIN,
             )
 
             # 3. Own reservation in GIFTER's list
-            gifter_wl = await store.execute(
-                lambda svc: svc.create_wishlist(owner=GIFTER, title="Greta List")
+            gifter_wl = await WishlistService(store).create_wishlist(
+                owner=GIFTER, title="Greta List"
             )
-            gifter_item = await store.execute(
-                lambda svc: svc.add_wish_item(wishlist_id=gifter_wl.id, actor=GIFTER, title="Mug")
+            gifter_item = await WishlistService(store).add_wish_item(
+                wishlist_id=gifter_wl.id, actor=GIFTER, title="Mug"
             )
             await store.execute(
                 lambda svc: svc.create_reservation(item_id=gifter_item.id, user=OWNER, quantity=1)
@@ -167,13 +164,11 @@ async def test_account_deletion_e2e_cascade_ownership_privacy_and_revocation(
             )
 
             # 1. Personal list with wish + GIFTER's reservation
-            personal_wl = await store.execute(
-                lambda svc: svc.create_wishlist(owner=OWNER, title="Alice Personal")
+            personal_wl = await WishlistService(store).create_wishlist(
+                owner=OWNER, title="Alice Personal"
             )
-            personal_item = await store.execute(
-                lambda svc: svc.add_wish_item(
-                    wishlist_id=personal_wl.id, actor=OWNER, title="Private Lamp"
-                )
+            personal_item = await WishlistService(store).add_wish_item(
+                wishlist_id=personal_wl.id, actor=OWNER, title="Private Lamp"
             )
             await store.execute(
                 lambda svc: svc.create_reservation(
@@ -182,45 +177,37 @@ async def test_account_deletion_e2e_cascade_ownership_privacy_and_revocation(
             )
 
             # 2. Collaborative list: OTHER_GIFTER is member, CO_AUTHOR is admin -> CO_AUTHOR wins
-            collab_wl = await store.execute(
-                lambda svc: svc.create_wishlist(owner=OWNER, title="Family List")
+            collab_wl = await WishlistService(store).create_wishlist(
+                owner=OWNER, title="Family List"
             )
-            await store.execute(
-                lambda svc: svc.add_member(
-                    wishlist_id=collab_wl.id,
-                    actor=OWNER,
-                    user_id=OTHER_GIFTER_ID,
-                    role=WishlistRole.MEMBER,
-                )
+            await WishlistService(store).add_member(
+                wishlist_id=collab_wl.id,
+                actor=OWNER,
+                user_id=OTHER_GIFTER_ID,
+                role=WishlistRole.MEMBER,
             )
-            await store.execute(
-                lambda svc: svc.add_member(
-                    wishlist_id=collab_wl.id,
-                    actor=OWNER,
-                    user_id=CO_AUTHOR_ID,
-                    role=WishlistRole.ADMIN,
-                )
+            await WishlistService(store).add_member(
+                wishlist_id=collab_wl.id,
+                actor=OWNER,
+                user_id=CO_AUTHOR_ID,
+                role=WishlistRole.ADMIN,
             )
-            collab_item = await store.execute(
-                lambda svc: svc.add_wish_item(
-                    wishlist_id=collab_wl.id,
-                    actor=OWNER,
-                    title="Coffee Maker",
-                    recipient_name="Alice",
-                )
+            collab_item = await WishlistService(store).add_wish_item(
+                wishlist_id=collab_wl.id,
+                actor=OWNER,
+                title="Coffee Maker",
+                recipient_name="Alice",
             )
             await store.execute(
                 lambda svc: svc.create_reservation(item_id=collab_item.id, user=GIFTER, quantity=1)
             )
 
             # 3. GIFTER's list where OWNER reserved 1 of 2 units
-            gifter_wl = await store.execute(
-                lambda svc: svc.create_wishlist(owner=GIFTER, title="Greta Wishes")
+            gifter_wl = await WishlistService(store).create_wishlist(
+                owner=GIFTER, title="Greta Wishes"
             )
-            gifter_item = await store.execute(
-                lambda svc: svc.add_wish_item(
-                    wishlist_id=gifter_wl.id, actor=GIFTER, title="Teacup", quantity=2
-                )
+            gifter_item = await WishlistService(store).add_wish_item(
+                wishlist_id=gifter_wl.id, actor=GIFTER, title="Teacup", quantity=2
             )
             await store.execute(
                 lambda svc: svc.create_reservation(item_id=gifter_item.id, user=OWNER, quantity=1)

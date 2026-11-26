@@ -51,14 +51,14 @@ async def test_partial_receipt_followed_by_wish_archive_still_delivers_receipt_n
             await service.create_reservation(item.id, GIFTER, quantity=2)
             return wl.id, item.id
 
-        wishlist_id, item_id = await store.execute(setup)
+        wishlist_id, item_id = await setup(WishlistService(store))
         sql_exec(db, "DELETE FROM reminder_outbox")
 
         async def fulfill_then_archive(service: WishlistService) -> None:
             await service.record_item_fulfillment(item_id, OWNER, 1)
             await service.archive_wish_item(wishlist_id, item_id, OWNER)
 
-        await store.execute(fulfill_then_archive)
+        await fulfill_then_archive(WishlistService(store))
 
         sender = FakeNoticeSender()
         worker = _Env(store, db).worker(sender)
@@ -92,7 +92,7 @@ async def test_wishlist_restore_and_update_notify_giver_with_open_reservation(
                 await service.create_reservation(item.id, GIFTER, quantity=1)
                 return wl.id
 
-            wishlist_id = await store.execute(setup)
+            wishlist_id = await setup(WishlistService(store))
             sql_exec(db, "DELETE FROM reminder_outbox")
 
             async def lifecycle(service: WishlistService) -> None:
@@ -102,7 +102,7 @@ async def test_wishlist_restore_and_update_notify_giver_with_open_reservation(
                     wishlist_id, OWNER, title="Anniversary Updated"
                 )
 
-            await store.execute(lifecycle)
+            await lifecycle(WishlistService(store))
 
         resp = client.patch(
             f"/api/wishlists/{wishlist_id}",
@@ -141,7 +141,7 @@ async def test_member_role_patch_and_ownership_transfer_emit_membership_changed_
                 await service.add_member(wl.id, OWNER, GIFTER_ID, role=WishlistRole.MEMBER)
                 return wl.id
 
-            wishlist_id = await store.execute(setup)
+            wishlist_id = await setup(WishlistService(store))
             sql_exec(db, "DELETE FROM reminder_outbox")
 
         resp = client.patch(
@@ -185,7 +185,7 @@ async def test_reservation_does_not_grant_shared_event_delivery_when_giver_becom
             await service.create_reservation(item.id, GIFTER, quantity=1)
             return item.id
 
-        item_id = await store.execute(setup)
+        item_id = await setup(WishlistService(store))
         sql_exec(db, "DELETE FROM reminder_outbox")
 
         async def update_item(service: WishlistService) -> None:

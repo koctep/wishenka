@@ -247,9 +247,10 @@ is the shared predicate. A missing user is not a recipient.
 The client promise API is
 [`wishenka/web/routes/reservations.py`](file:///home/src/wishenka/web/routes/reservations.py),
 included from `wishenka/web/app.py`. `execute` in that module is the HTTP
-adapter. Unless tests inject `app.state.wishlist_service`, the action is
+adapter. The action is
 passed to
-[`WishlistStore.execute_wish`](file:///home/src/wishenka/wishlists/store.py#L942-L997).
+[`WishlistStore.execute_wish`](file:///home/src/wishenka/wishlists/store.py#L942-L997)
+or `execute_wish_idempotent`. The route does not read a second wishlist service.
 Create passes `item_id`. Quantity change, cancel, purchase, and undo pass
 `reservation_id`. The store accepts exactly one of those keys. The service
 loaded inside `execute_wish` does not open a second transaction.
@@ -462,8 +463,8 @@ read.
 | `GET` | `/web/reservations` | `reservations_cabinet.html` |
 | `GET` | `/web/reservations/list` | `partials/reservations_list.html` |
 
-A read uses `WishlistStore.execute` (a full snapshot), or the injected
-service when tests set `app.state.wishlist_service`.
+A read calls `WishlistStore.get_user_reservations` or
+`get_user_reservations_summary`. Those methods use `execute_read`.
 
 #### Home card
 
@@ -508,17 +509,15 @@ promise. The web layer groups the rows by `wishlist_id`. Groups are
 ordered by `title.casefold()`, then `wishlist_id`. Rows inside a
 group follow `created_at`, then `reservation_id`.
 
-For an injected in-memory `WishlistService`, both cabinet methods select from an ordered
-user-to-reservation index. Registration and removal maintain the index; status and quantity
-remain on the authoritative reservation objects. For SQLite, the routes call
+The routes call
 `WishlistStore.get_user_reservations` or `get_user_reservations_summary` directly. These use
 the existing user index, and the list loads associated wishes and their occupants using the
 item index. They do not hydrate the full reservation table. No migration or new configuration
 is needed. Lookup is followed by work proportional to matching records and related wishes;
 SQLite index lookup is not strictly constant time.
 
-SQLite cabinet reads use one `BEGIN IMMEDIATE` transaction for a consistent snapshot. This
-also reserves a writer lock until the read completes. The summary counts qualifying records
+SQLite cabinet reads use `WishlistStore.execute_read`: a deferred `BEGIN` with
+`PRAGMA query_only = ON`. The summary counts qualifying records
 even if their wish is missing, while the list omits those records. Both preserve the existing
 caller filtering and response projection. See
 [WISHENKA-176](https://pypost.atlassian.net/browse/WISHENKA-176) for the batching and
@@ -799,43 +798,59 @@ Quantity change, cancel, purchase, undo, and complete use that same prefix plus
 
 ### Domain methods
 
-The examples below call `WishlistService` in process. The HTTP routes above
-are the client path. They call these same methods through `execute_wish`.
+The examples below call reservation methods on `WishlistService` in process.
+Those methods still run their bodies when the service has no store. The HTTP
+routes above are the client path. They call these same methods through
+`execute_wish`. Shared setup such as `create_wishlist` and `add_wish_item`
+fail-closes on `WishlistService.in_memory()`; that setup uses `RepoWishlistOps`
+inside `run_repository`. See
+[Shared wishlist rule set](wishlists.md#shared-wishlist-rule-set).
 
 ### 1. Creating a Reservation
 
 ```python
 import asyncio
 from wishenka.auth.models import AuthenticatedUser
-from wishenka.wishlists.service import WishlistService
 from wishenka.wishlists.models import ReservationStatus
+from wishenka.wishlists.repo_ops import RepoWishlistOps
+from wishenka.wishlists.service import WishlistService
+from wishenka.wishlists.store import WishlistStore
 
 async def reserve_gift():
-    service = WishlistService.in_memory()
+    store = WishlistStore("sqlite+aiosqlite:///:memory:")
+    await store.initialize()
+    try:
+        # Reservation methods on this service use execute_wish.
+        service = WishlistService(store)
+        author = AuthenticatedUser(telegram_id=1001, first_name="Alice")
+        gifter = AuthenticatedUser(telegram_id=2002, first_name="Bob")
 
-    # Setup author and gifter
-    author = AuthenticatedUser(telegram_id=1001, first_name="Alice")
-    gifter = AuthenticatedUser(telegram_id=2002, first_name="Bob")
+        async def setup(repo):
+            ops = RepoWishlistOps(repo)
+            wishlist = await ops.create_wishlist(owner=author, title="Birthday Wishlist")
+            item = await ops.add_wish_item(
+                wishlist_id=wishlist.id,
+                actor=author,
+                title="Ceramic Coffee Mug",
+                quantity=3,
+            )
+            return wishlist, item
 
-    # Author creates a wishlist with a multi-piece item
-    wishlist = await service.create_wishlist(owner=author, title="Birthday Wishlist")
-    item = await service.add_wish_item(
-        wishlist_id=wishlist.id,
-        actor=author,
-        title="Ceramic Coffee Mug",
-        quantity=3,
-    )
+        _wishlist, item = await store.run_repository(setup)
 
-    # Gifter reserves 2 pieces
-    reservation = await service.create_reservation(
-        item_id=item.id,
-        user=gifter,
-        quantity=2,
-    )
+        # Gifter reserves 2 pieces on the wish transaction.
+        reservation = await service.create_reservation(
+            item_id=item.id,
+            user=gifter,
+            quantity=2,
+        )
 
-    print(f"Reservation ID: {reservation.id}")
-    print(f"Status: {reservation.status}")  # ReservationStatus.ACTIVE
-    print(f"Reserved: {reservation.quantity}, Available: {item.available_quantity}")  # Reserved: 2, Available: 1
+        print(f"Reservation ID: {reservation.id}")
+        print(f"Status: {reservation.status}")  # ReservationStatus.ACTIVE
+        held = reservation.wish_item
+        print(f"Reserved: {reservation.quantity}, Available: {held.available_quantity}")  # Reserved: 2, Available: 1
+    finally:
+        await store.dispose()
 
 asyncio.run(reserve_gift())
 ```

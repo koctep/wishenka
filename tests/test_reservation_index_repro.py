@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import event
 
+from tests.receipt_support import place_item, place_wishlist
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
@@ -29,10 +30,14 @@ def _user(user_id: int) -> AuthenticatedUser:
 
 async def _seed(service: WishlistService) -> int:
     owner, giver, other = _user(101), _user(202), _user(303)
-    wishlist = await service.create_wishlist(owner=owner, title="Birthday")
-    item = await service.add_wish_item(
-        wishlist_id=wishlist.id, actor=owner, title="Indexed book", quantity=3
-    )
+    if service._store is None:
+        wishlist = place_wishlist(service, owner, "Birthday")
+        item = place_item(service, wishlist, "Indexed book", quantity=3)
+    else:
+        wishlist = await service.create_wishlist(owner=owner, title="Birthday")
+        item = await service.add_wish_item(
+            wishlist_id=wishlist.id, actor=owner, title="Indexed book", quantity=3
+        )
     reservation = await service.create_reservation(item_id=item.id, user=giver, quantity=1)
     await service.create_reservation(item_id=item.id, user=other, quantity=1)
     return reservation.id
@@ -73,7 +78,7 @@ def test_sqlite_cabinet_does_not_load_all_reservations(tmp_path: Path, path: str
     app = create_app(settings)
     sessions = SessionTokenService(settings.secret_key)
     with TestClient(app) as client:
-        asyncio.run(app.state.wishlist_store.execute(_seed))
+        asyncio.run(_seed(WishlistService(app.state.wishlist_store)))
         statements: list[str] = []
 
         def capture(

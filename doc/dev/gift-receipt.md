@@ -266,8 +266,8 @@ Corrects the quantity of an existing receipt act while preserving `received_at` 
 
 ### `GET /api/wishlists/{wishlist_id}/gifted`
 
-Returns `list[GiftedItemDTO]` for members of a non-deleted list (full snapshot read through
-`store.execute`, same refusal table: 403 `forbidden` for a non-member, 404 `not_found` for an
+Returns `list[GiftedItemDTO]` for members of a non-deleted list (`RepoWishlistOps.list_gifted_items`
+on the request repository, same refusal table: 403 `forbidden` for a non-member, 404 `not_found` for an
 unknown list, 404 `wishlist_not_active` for a deleted one). The read stays available when the
 list is archived. Order: newest receipt first (a wish without records falls back to its
 `updated_at`), then `id`.

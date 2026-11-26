@@ -111,8 +111,9 @@ Implemented in [`wishenka/wishlists/store.py`](../../wishenka/wishlists/store.py
      or a member in `wl_members` (`PermissionDeniedError`).
 
 > [!NOTE]
-> When unit tests inject a mock `app.state.wishlist_service` (bypassing `WishlistStore`), routes
-> execute directly against the injected service without idempotency deduplication.
+> Promise and receipt routes enter `WishlistStore.execute_wish_idempotent`. They
+> do not read a second wishlist service, so a repeated key still hits the store
+> deduplication path.
 
 ## TMA Frontend Key Lifecycle
 

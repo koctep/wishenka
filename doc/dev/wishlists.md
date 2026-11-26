@@ -50,6 +50,104 @@ secure sharing tokens.
    Strangers receive the same not-found response as a missing list. See
    [Viewing History Access](#viewing-history-access-wishenka-303).
 
+## Shared wishlist rule set
+
+### Overview
+
+`RepoWishlistOps` (`wishenka/wishlists/repo_ops.py`) is the only shared wishlist
+rule set. It owns lists, wishes, membership, archive, delete, restore,
+favorites, viewing history, and invite join. Mini App screens call those names
+on a `RepoWishlistOps` built from the request repository.
+
+A store-backed `WishlistService` forwards the same public names through
+`WishlistStore.run_repository`. That helper builds one `WishlistRepository`,
+commits the immediate transaction, and flushes commit logs on that repository.
+On failure it clears those logs.
+
+Reservations and receipts stay on `WishlistStore.execute_wish` and
+`execute_wish_idempotent`. `receipts_ui._repo_ctx` is unchanged and stays with
+WISHENKA-324.
+
+### Architecture
+
+- **`RepoWishlistOps`**: the shared rule bodies. Screens in `wishlists.py`,
+  `items.py`, `sharing.py`, `items_ui.py`, and the non-inventory reads in
+  `receipts.py` and `receipts_ui.py` construct `RepoWishlistOps(repo)` from
+  `WishlistRepo`. Those handlers use the request repository.
+- **`_repository_forward`**: when `WishlistService._store` is set, each name in
+  `_SHARED_REPOSITORY_METHODS` calls the same name on `RepoWishlistOps` inside
+  `run_repository`. The wrapper does not enter `execute` or `_write`.
+- **In-memory fail closed**: when `_store` is `None`, those public methods log
+  `wishlist_repository_path_required` (`WARNING`, field `operation` only) and
+  raise `WishlistNotFoundError`. The private `_lookup_wishlist` is not wrapped.
+  `update_wishlist_settings` and `transfer_ownership` read the hydrated graph
+  through that lookup. Public `get_wishlist_by_id` still forwards and
+  fail-closes when the service has no store.
+- **Snapshot methods**: `_SINGLE_WISHLIST_METHODS` is
+  `update_wishlist_settings`, `transfer_ownership`, and `is_favorite`. Those
+  three still use the snapshot wrapper.
+- **Viewing history**: `WishlistRepository.record_view` upserts
+  `(user_id, wishlist_id)` and does not delete older rows. `GET /api/history`
+  still returns at most 20 rows. A visitor with no `users` row logs
+  `view_history_user_missing` and raises `WishlistNotFoundError`.
+  `record_share_view_if_authenticated` swallows that error, so
+  `GET /share/{public_token}` still renders.
+- **Bot capture**: `wishenka/bot/capture.py` save calls
+  `RepoWishlistOps.add_wish_item` inside `store.run_repository`. The draft SQL
+  shares that transaction.
+
+### Usage
+
+Store-backed forward:
+
+```python
+async def work(repo: WishlistRepository) -> WishItem:
+    return await RepoWishlistOps(repo).add_wish_item(wishlist_id, actor, **fields)
+
+item = await store.run_repository(work)
+```
+
+Screen handlers pass the request repository:
+
+```python
+result = await action(RepoWishlistOps(repo))
+```
+
+An in-memory shared call fail-closes:
+
+```python
+service = WishlistService.in_memory()
+await service.record_view(user, wishlist_id)
+```
+
+That call logs `wishlist_repository_path_required` and raises
+`WishlistNotFoundError`. Settings and ownership transfer on a hydrated service
+read one list with `await service._lookup_wishlist(wishlist_id)`.
+
+### Configuration
+
+No new setting or environment variable. `WISHENKA_DATABASE_URL` still selects
+the SQLite file. `run_repository` uses the store's existing `BEGIN IMMEDIATE`
+and busy timeout. It does not snapshot the database and it does not retry
+token collisions.
+
+### Troubleshooting
+
+- **`wishlist_repository_path_required`.** A shared method ran on
+  `WishlistService.in_memory()` or any service whose `_store` is `None`. Call
+  `RepoWishlistOps` inside `run_repository`, or use a store-backed
+  `WishlistService`. The log field is `operation`. Arguments are omitted.
+- **The share page rendered and history has no row for a signed-in visitor.**
+  Look for `view_history_user_missing` (`WARNING`, `wishlist_id`, `user_id`).
+  The visitor has no `users` row. The share page continues.
+  `POST /api/history/{id}` still returns 404 for that visitor.
+- **History lists fewer visits than were recorded.** `GET /api/history` applies
+  `limit=20` after the access filter. Older rows stay in `wl_view_history`.
+  `record_view` does not delete them.
+- **A capture save and its draft disagree.** Save is the `run_repository`
+  callback that calls `RepoWishlistOps.add_wish_item` together with the
+  `bot_drafts` update. That add is not a second snapshot write.
+
 ---
 
 ## HTTP API and persistent storage
@@ -188,7 +286,10 @@ storage exceptions. Configure reverse proxies and other infrastructure separatel
 capability URLs.
 
 All public-link entry points — `GET /share/{public_token}`, `GET /api/public/wishlists/{token}`, and
-`GET /api/public/wishlists/{token}/view` — resolve through `WishlistService.get_wishlist_by_public_token`.
+`GET /api/public/wishlists/{token}/view` — call `RepoWishlistOps.get_wishlist_by_public_token` on the
+request `WishlistRepository`. `sharing.py` builds that object in `_get_service`. `wishlists.py`
+passes it from `execute`.
+
 At the domain layer, `project_wish_item(item, None)` delegates directly to `recipient_view(item)`,
 returning `WishItemRecipientViewDTO` so anonymous callers never receive reservation or giver fields.
 Authenticated non-recipient callers receive `WishItemGifterViewDTO`, while recipients (personal
@@ -204,9 +305,10 @@ unit tests or transient `WishlistStore` hydration, construct the service explici
 `WishlistService.in_memory()`. Web routes (`wishenka/web/routes/wishlists.py`, `items.py`,
 `sharing.py`, `receipts.py`, `items_ui.py`, `receipts_ui.py`) inject a transaction-scoped
 `WishlistRepo` via `wishenka.web.dependencies.get_wishlist_repository` and execute targeted
-queries and non-inventory mutations through `RepoWishlistOps` (single-wish inventory, reservation,
-and receipt mutations continue to use `WishlistStore.execute_wish` / `execute_wish_idempotent`). For
-tests only, `app.state.wishlist_service` can override the router's service.
+queries and non-inventory mutations through `RepoWishlistOps`. Screens use that request
+repository. Single-wish inventory, reservation, and receipt mutations continue to use
+`WishlistStore.execute_wish` / `execute_wish_idempotent`. See
+[Shared wishlist rule set](#shared-wishlist-rule-set).
 
 `WISHENKA_DATABASE_URL` selects the SQLite database and defaults to
 `sqlite+aiosqlite:///data/wishenka.db`. The application initializes the normalized relational
@@ -266,8 +368,9 @@ member management, and token rotation without client-side JavaScript SPA framewo
 - `GET /share/{public_token}`:
   - **Description**: Renders the complete HTML page (`share_wishlist.html`) for a public wishlist.
   - **Authentication**: Optional session (`get_optional_current_user`). Resolves via
-    `WishlistService.get_wishlist_by_public_token(public_token, current_user)`. Unauthenticated
-    guests receive `WishItemRecipientViewDTO` (via `project_wish_item(item, None)` -> `recipient_view(item)`),
+    `RepoWishlistOps.get_wishlist_by_public_token(public_token, current_user)` on the request
+    repository. Unauthenticated guests receive `WishItemRecipientViewDTO` (via
+    `project_wish_item(item, None)` -> `recipient_view(item)`),
     concealing reservation status. Authenticated non-recipient callers receive `WishItemGifterViewDTO`
     and can view availability and reservation controls. If accessed by the list recipient or owner,
     the Surprise Invariant strictly conceals all reservations.
@@ -499,7 +602,8 @@ The Surprise Invariant is enforced at both the domain service layer and the temp
 layer, providing defense-in-depth against data leakage:
 
 1. **Domain DTO Projection**:
-   - When `WishlistService.get_wishlist_by_public_token` or `get_wishlist_view` is called,
+   - When `RepoWishlistOps.get_wishlist_by_public_token` or `get_wishlist_view` is called
+     on the request repository,
      items for which the viewing user is a recipient (`is_recipient == True`) are projected as
      `WishItemRecipientViewDTO`.
    - For gifters (`is_recipient == False`), items are projected as `WishItemGifterViewDTO`.
@@ -657,13 +761,14 @@ When view times differ, the newest time is still first. When view times are
 equal, order is by `recorded_seq`, newest recording first. A repeat keeps the
 same row id and still receives a new sequence, so it becomes the newest
 recording. The row id is not the live tie-break. Existing rows were filled once
-from the old id; later recordings replace that value. The same key is used in
-memory and in SQLite before the existing limit.
+from the old id; later recordings replace that value. SQLite applies that
+order before `LIMIT`.
 
-`WishlistService.get_history` sorts with `_history_rank` (`viewed_at`,
-`recorded_seq`) and `reverse=True`. The in-memory prune uses that key ascending
-and still keeps the last 20. `WishlistRepository.list_view_history` uses
+`WishlistRepository.list_view_history` uses
 `ORDER BY vh.viewed_at DESC, vh.recorded_seq DESC` and then `LIMIT`.
+`record_view` does not delete older rows. An in-memory
+`WishlistService.get_history` fail-closes and does not prune storage. See
+[Shared wishlist rule set](#shared-wishlist-rule-set).
 `GET /api/history` does not sort again and does not return `recorded_seq`.
 The counter is `wl_counters.name = 'view_history_seq'`. Alembic revision
 `add_view_history_recorded_seq` (`ROLLBACK_POLICY = "reversible"`) adds the
@@ -694,9 +799,10 @@ flowchart TD
 - **`WishlistAccessPolicy.can_view_history`** (`wishenka/wishlists/policy.py`): pure
   check. `False` when `user` is `None` or `wishlist.status` is `DELETED`. Otherwise
   `ctx.is_owner or ctx.is_member or has_share_access`. No I/O.
-- **`RepoWishlistOps` and `WishlistService`**: both enforce the policy in `record_view`
-  and `get_history`. HTTP routes use `RepoWishlistOps` unless a test injects
-  `app.state.wishlist_service`.
+- **`RepoWishlistOps`**: enforces the policy in `record_view` and `get_history`.
+  HTTP routes call that adapter on the request repository. A store-backed
+  `WishlistService` forwards the same names through `run_repository`. An
+  in-memory service fail-closes those names.
 - **`WishlistRepository.list_view_history`**: SQL join keeps non-deleted lists where
   the user is owner, member, or grant holder, then
   `ORDER BY viewed_at DESC, recorded_seq DESC` before `LIMIT`.
@@ -806,11 +912,14 @@ Database URL and WAL settings are in
   `record_share_view_if_authenticated`, which calls `record_view`. The helper
   does not write `view_history_recorded`. The domain record operation writes
   it once, on logger `wishenka.wishlists`, after the entry is stored.
-  `WishlistService.record_view` and `RepoWishlistOps.record_view` both write
-  it. The history route does not. The HTML share route logs
+  `RepoWishlistOps.record_view` writes
+  it. The history route does not. A visitor with no `users` row logs
+  `view_history_user_missing` and raises `WishlistNotFoundError`, which the
+  share helper swallows, so the share page still renders. The HTML share route logs
   `wishlist_shared_view` (`INFO`, `wishlist_id`) before it builds the template
   response. The JSON route logs `public_entry_viewed` (`INFO`, `wishlist_id`,
-  `identified` true) inside the action, before `execute` finishes. Those
+  `identified` true) inside the action, before the repository dependency
+  commits. Those
   events establish that the route reached that success log. They do not
   establish that the HTTP response was sent or that the transaction
   completed. Confirm the history row with `GET /api/history`. A refused write
@@ -904,9 +1013,10 @@ authorization must fail closed when `item.wishlist` is absent:
 
 ## Usage / API
 
-The `WishlistService` in
-[`wishenka.wishlists.service`](../../wishenka/wishlists/service.py)
-provides the primary asynchronous application interface.
+Screen handlers build `RepoWishlistOps` from the request repository. That path
+is how `GET /share/{public_token}` and the public wishlist API resolve a list.
+A store-backed `WishlistService` forwards the same shared names through
+`WishlistStore.run_repository`. The signatures below are those names.
 
 ### Service Methods
 
@@ -954,8 +1064,9 @@ async def get_wishlist_by_public_token(
 ```
 
 - **Raises**: `WishlistNotFoundError`, `WishlistDeletedError`.
-- **Consolidated Projection**: Used by `GET /share/{public_token}`, `GET /api/public/wishlists/{token}`,
-  and `GET /api/public/wishlists/{token}/view`. Because `project_wish_item(item, None)` returns
+- **Consolidated Projection**: `GET /share/{public_token}`, `GET /api/public/wishlists/{token}`,
+  and `GET /api/public/wishlists/{token}/view` call this name on `RepoWishlistOps` for the
+  request repository. Because `project_wish_item(item, None)` returns
   `recipient_view(item)` (`WishItemRecipientViewDTO`), anonymous callers (`current_user=None`)
   never receive reservation or giver fields.
 - **Observability**: Emits `public_wishlist_resolved` (`INFO`) with `wishlist_id`, `identified`,
@@ -1251,8 +1362,9 @@ async def remove_favorite(
     `wl_view_history` row if they hold no valid `wl_share_access` grant for the current
     `public_token` (logs `favorite_access_revoked` and, when a history row was removed,
     `view_history_access_revoked`, both with `reason="member_removed"`).
-  - `regenerate_public_token` and `restore_deleted_wishlist` (both `RepoWishlistOps` and
-    `WishlistService` / `WishlistStore` paths), and `transfer_ownership` (`WishlistService` only):
+  - `regenerate_public_token` and `restore_deleted_wishlist` (`RepoWishlistOps`; a
+    store-backed `WishlistService` forwards those names), and `transfer_ownership`
+    (snapshot `WishlistService`, which looks up the list through `_lookup_wishlist`):
     Rotating `public_token` deletes all `wl_share_access` grants for the wishlist and purges
     non-member `wl_favorites` and non-member `wl_view_history` rows (logs `share_access_revoked`
     with `reason` `"public_token_rotated"`, `"wishlist_restored"`, or `"ownership_transferred"`,
@@ -1295,10 +1407,12 @@ async def record_view(
 - **Deduplication**: A previous row for this user and wishlist keeps its id,
   updates `viewed_at`, and receives a new `recorded_seq`, so the repeat is the
   newest recording.
-- **Bound**: `GET /api/history` uses `limit=20`. The same key is used in memory and
-  in SQLite before that limit. `WishlistService.record_view` (in-memory) also drops
-  that user's oldest rows past 20. `RepoWishlistOps.record_view` keeps older stored
-  rows. SQL listing applies the limit after the access filter.
+- **Bound**: `GET /api/history` uses `limit=20`. SQL listing applies that limit
+  after the access filter. `record_view` upserts the current row and does not
+  delete older rows. An in-memory `WishlistService.record_view` fail-closes
+  and does not prune storage. A visitor with no `users` row logs
+  `view_history_user_missing` and raises `WishlistNotFoundError`. The share
+  helper swallows that error.
 - **Log**: `view_history_recorded` is written once, by this domain record
   operation, on logger `wishenka.wishlists`. `POST /api/history/{wishlist_id}`
   does not write it. A deleted wishlist uses
@@ -1326,12 +1440,13 @@ async def clear_history(
 ```
 
 - `get_history`: Returns up to `limit` entries as `(Wishlist, datetime)` tuples.
-  When view times differ, the newest time is still first. When view times are
-  equal, order is by `recorded_seq`, newest recording first. The same key is
-  used in memory and in SQLite before the existing limit. Omits soft-deleted
+  When view   times differ, the newest time is still first. When view times are
+  equal, order is by `recorded_seq`, newest recording first. SQLite applies
+  that order before `LIMIT`. Omits soft-deleted
   lists and lists that fail `can_view_history` (not owner,
   not member, no current share grant). `RepoWishlistOps` loads the SQL-filtered page
-  and checks the policy again. `WishlistService` filters in memory.
+  and checks the policy again. An in-memory `WishlistService.get_history`
+  fail-closes.
   `view_history_listed` is written once, by this domain list operation, on
   logger `wishenka.wishlists`. `GET /api/history` does not write it. The event
   is not `HTTP request completed`. That middleware line is after `call_next`
@@ -1735,8 +1850,10 @@ targeted `WishlistRepository` queries without loading unrelated wishlists:
 
 #### 3. Route Usage (`wishenka/web/routes/`)
 - `wishlists.py`, `items.py`, `sharing.py`, `receipts.py`, `items_ui.py`, and `receipts_ui.py`
-  declare `repo: WishlistRepo` and execute targeted reads/mutations via `RepoWishlistOps(repo)`
-  (preserving `app.state.wishlist_service` fallback for unit tests).
+  declare `repo: WishlistRepo` and execute targeted reads/mutations via `RepoWishlistOps(repo)`.
+  Handlers use that request repository. A store-backed `WishlistService` of the
+  same names forwards through `WishlistStore.run_repository`, which commits and
+  then flushes commit logs on the repository it built.
 - Wish-scoped inventory, reservation, and receipt mutations continue to use
   `WishlistStore.execute_wish` / `execute_wish_idempotent` (`BEGIN IMMEDIATE` serialization); in
   `receipts_ui.py`, single-item mutations (`_execute_receipt_mutation_ui`, `correct_receipt_ui`,
@@ -1790,8 +1907,9 @@ relational architecture, `WishlistStore` coordinates atomic row-level persistenc
   retries, error mapping, and post-commit log flushing).
   `WishlistStore.execute(operation, *, wishlist_id=None)` delegates to `execute_with_connection()`.
   Callers outside the wishlist domain that need atomic cross-table writes alongside domain
-  operations (such as `wishenka.bot.capture:mutate` updating `bot_drafts` and `bot_capture_order`
-  with `add_wish_item`) use `execute_with_connection()` instead of private `_read`/`_write` hooks.
+  operations use `execute_with_connection()` instead of private `_read`/`_write` hooks.
+  Bot capture save is not this seam: `wishenka.bot.capture` calls
+  `RepoWishlistOps.add_wish_item` inside `WishlistStore.run_repository`.
 - **Single-Wishlist Scoped Hydration (`WISHENKA-213`)**:
   `WishlistStore.execute(..., wishlist_id=...)`, `execute_with_connection(..., wishlist_id=...)`,
   `_read(..., wishlist_id=...)`, and `_write(..., wishlist_id=...)` support optional
@@ -1802,19 +1920,16 @@ relational architecture, `WishlistStore` coordinates atomic row-level persistenc
     and reservers; `wl_list_notification_settings` for `wishlist_id`), and favorites
     (`wl_favorites`), while skipping `wl_view_history` completely (`_write()` also skips
     `wl_view_history` diffing when `wishlist_id is not None`).
-  - In `wishenka/wishlists/service.py`, `_SINGLE_WISHLIST_METHODS` (`frozenset` of 23
-    single-wishlist methods such as `get_wishlist_by_id`, `get_wishlist_view`, `add_member`,
-    `remove_member`, `get_members`, `update_wishlist_settings`, `archive_wishlist`,
-    `unarchive_wishlist`, `delete_wishlist`, `restore_deleted_wishlist`, `transfer_ownership`,
-    `add_wish_item`, `get_wish_item`, `list_wish_items`, `list_gifted_items`,
-    `reorder_wish_items`, `archive_wish_item`, `restore_wish_item`, `regenerate_public_token`,
-    `regenerate_invite_token`, `is_favorite`, `add_favorite`, `remove_favorite`) and
-    `_wishlist_scope(method, args, kwargs) -> int | None` extract `wishlist_id` via
-    `inspect.signature(method).bind(...)` inside `_transactional` whenever `_inventory_scope`
-    returns `None`, passing `wishlist_id=wishlist_id` to `self._store.execute(...)`. Unlisted
-    methods fall back to `wishlist_id=None` (full-database snapshot). Any newly added
-    `WishlistService` method operating on a single `wishlist_id` must be added to
-    `_SINGLE_WISHLIST_METHODS` to opt into scoped hydration.
+  - Shared wishlist names (lists, wishes, membership, archive, delete, restore,
+    favorites, viewing history, invite join) are forwarded by `_repository_forward`
+    through `run_repository`. They are not in `_SINGLE_WISHLIST_METHODS` and they
+    do not enter this snapshot path.
+  - `_SINGLE_WISHLIST_METHODS` is `update_wishlist_settings`, `transfer_ownership`,
+    and `is_favorite`. `_wishlist_scope` extracts `wishlist_id` for those three
+    inside `_transactional` and passes it to `execute`. `update_wishlist_settings`
+    and `transfer_ownership` read the hydrated list through the private
+    `_lookup_wishlist`. A new public method that should share the repository
+    rules belongs in `_SHARED_REPOSITORY_METHODS`, not in this snapshot set.
 - **Read-Only Deferred Transactions (`WishlistStore.execute_read`)**:
   `execute_read(work)` accepts `Callable[[AsyncConnection], Awaitable[T]]`, binds
   `execution_options(read_only=True)` on the connection, starts a deferred `BEGIN` transaction,
@@ -2110,6 +2225,8 @@ from the repository dependency and can follow this record.
 | `public_wishlist_resolved` | `INFO` | Public token resolved | `wishlist_id`, `identified`, `user_id`, `projection_mode`, `items_count` |
 | `wishlist_service_store_required` | `ERROR` | `WishlistService` created without store | None (`ValueError` raised) |
 | `wishlist_service_in_memory_created` | `DEBUG` | `WishlistService.in_memory()` created | None |
+| `wishlist_repository_path_required` | `WARNING` | In-memory shared action refused | `operation` |
+| `view_history_user_missing` | `WARNING` | View skipped: visitor has no `users` row | `wishlist_id`, `user_id` |
 | `invite_preview_accessed` | `INFO` | Invite preview rendered | `wishlist_id`, `status` |
 | `invite_joined` | `INFO` | Collaborator joined | `wishlist_id`, `user_id`, `role` |
 | `invite_join_failed` | `WARNING` | Invite join failed | `user_id` |

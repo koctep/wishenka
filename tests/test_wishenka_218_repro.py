@@ -310,7 +310,7 @@ def test_overbooked_state_preserves_promises_and_queues_notices(tmp_path: Path) 
                 await svc.mark_reservation_purchased(res_b.id, gifter_b)
                 return item.id, res_a.id, res_b.id
 
-            item_id, res_a_id, res_b_id = await store.execute(seed)
+            item_id, res_a_id, res_b_id = await seed(WishlistService(store))
 
             # Non-conflicting reduction (1 + 4 <= 5): must NOT queue overbooked notice
             await store.execute_wish(
@@ -388,7 +388,7 @@ def test_editing_coauthor_with_open_promise_receives_overbooked_notice(tmp_path:
                 await svc.create_reservation(item_id=item.id, user=other_giver, quantity=2)
                 return item.id
 
-            item_id = await store.execute(seed)
+            item_id = await seed(WishlistService(store))
             await store.execute_wish(
                 lambda svc: svc.update_wish_item(item_id=item_id, actor=editor, quantity=2),
                 item_id=item_id,

@@ -60,7 +60,7 @@ def _seed_personal_wishlist(env: AppEnv) -> int:
             wl = await svc.create_wishlist(owner=OWNER, title="Personal Wishes")
             return wl.id
 
-        return int(await app.state.wishlist_store.execute(action))
+        return int(await action(WishlistService(app.state.wishlist_store)))
 
     return asyncio.run(_create())
 
@@ -81,7 +81,7 @@ def _seed_collaborative_wishlist(env: AppEnv) -> int:
             )
             return wl.id
 
-        return int(await app.state.wishlist_store.execute(action))
+        return int(await action(WishlistService(app.state.wishlist_store)))
 
     wishlist_id = asyncio.run(_create())
     sql_exec(db, "UPDATE wl_lists SET is_collaborative = 1 WHERE id = ?", (wishlist_id,))

@@ -2,6 +2,7 @@
 
 import json
 import logging
+from pathlib import Path
 from unittest.mock import patch
 
 import httpx
@@ -17,6 +18,7 @@ from wishenka.wishlists.exceptions import (
     WishlistArchivedError,
 )
 from wishenka.wishlists.service import WishlistService
+from wishenka.wishlists.store import WishlistStore
 
 pytestmark = pytest.mark.timeout(10)
 
@@ -356,152 +358,162 @@ class TestItemObservability:
     @pytest.mark.asyncio
     async def test_wishlist_item_quantity_update_observability(
         self,
+        tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Item creation and quantity updates emit structured events with deltas and warnings."""
-        service = WishlistService.in_memory()
+        store = WishlistStore(f"sqlite+aiosqlite:///{tmp_path / 'item-obs.db'}")
+        await store.initialize()
+        service = WishlistService(store=store)
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Bob")
 
-        wl = await service.create_wishlist(owner=owner, title="Observability Wishlist")
+        try:
+            wl = await service.create_wishlist(owner=owner, title="Observability Wishlist")
 
-        # 1. Add item with quantity=3
-        with caplog.at_level(logging.INFO, logger="wishenka.wishlists"):
-            item = await service.add_wish_item(
-                wishlist_id=wl.id,
-                actor=owner,
-                title="Board Game",
-                quantity=3,
+            # 1. Add item with quantity=3
+            with caplog.at_level(logging.INFO, logger="wishenka.wishlists"):
+                item = await service.add_wish_item(
+                    wishlist_id=wl.id,
+                    actor=owner,
+                    title="Board Game",
+                    quantity=3,
+                )
+            created_rec = next(
+                r
+                for r in caplog.records
+                if r.name == "wishenka.wishlists" and getattr(r, "event", None) == "item_created"
             )
-        created_rec = next(
-            r
-            for r in caplog.records
-            if r.name == "wishenka.wishlists" and getattr(r, "event", None) == "item_created"
-        )
-        assert getattr(created_rec, "item_id", None) == item.id
-        assert getattr(created_rec, "wishlist_id", None) == wl.id
-        assert getattr(created_rec, "quantity", None) == 3
+            assert getattr(created_rec, "item_id", None) == item.id
+            assert getattr(created_rec, "wishlist_id", None) == wl.id
+            assert getattr(created_rec, "quantity", None) == 3
 
-        caplog.clear()
+            caplog.clear()
 
-        # 2. Update quantity to 5 (delta = +2)
-        with caplog.at_level(logging.INFO, logger="wishenka.wishlists"):
-            updated_item = await service.update_wish_item(
-                item_id=item.id,
-                actor=owner,
-                quantity=5,
+            # 2. Update quantity to 5 (delta = +2)
+            with caplog.at_level(logging.INFO, logger="wishenka.wishlists"):
+                updated_item = await service.update_wish_item(
+                    item_id=item.id,
+                    actor=owner,
+                    quantity=5,
+                )
+            assert updated_item.quantity == 5
+            update_rec = next(
+                r
+                for r in caplog.records
+                if r.name == "wishenka.wishlists" and getattr(r, "event", None) == "item_updated"
             )
-        assert updated_item.quantity == 5
-        update_rec = next(
-            r
-            for r in caplog.records
-            if r.name == "wishenka.wishlists" and getattr(r, "event", None) == "item_updated"
-        )
-        assert getattr(update_rec, "item_id", None) == item.id
-        assert getattr(update_rec, "wishlist_id", None) == wl.id
-        assert getattr(update_rec, "quantity", None) == 5
-        assert getattr(update_rec, "quantity_delta", None) == 2
+            assert getattr(update_rec, "item_id", None) == item.id
+            assert getattr(update_rec, "wishlist_id", None) == wl.id
+            assert getattr(update_rec, "quantity", None) == 5
+            assert getattr(update_rec, "quantity_delta", None) == 2
 
-        caplog.clear()
+            caplog.clear()
 
-        # 3. Record 2 received units and reserve 2 units
-        await service.record_item_fulfillment(item.id, owner, 2)
-        await service.create_reservation(item_id=item.id, user=gifter, quantity=2)
+            # 3. Record 2 received units and reserve 2 units
+            await service.record_item_fulfillment(item.id, owner, 2)
+            await service.create_reservation(item_id=item.id, user=gifter, quantity=2)
 
-        # 4. Attempt to reduce desired quantity below received (requested 1, received 2)
-        with (
-            caplog.at_level(logging.WARNING, logger="wishenka.wishlists"),
-            pytest.raises(CannotReduceQuantityBelowReservedError),
-        ):
-            await service.update_wish_item(
-                item_id=item.id,
-                actor=owner,
-                quantity=1,
+            # 4. Attempt to reduce desired quantity below received (requested 1, received 2)
+            with (
+                caplog.at_level(logging.WARNING, logger="wishenka.wishlists"),
+                pytest.raises(CannotReduceQuantityBelowReservedError),
+            ):
+                await service.update_wish_item(
+                    item_id=item.id,
+                    actor=owner,
+                    quantity=1,
+                )
+
+            rejected_rec = next(
+                r
+                for r in caplog.records
+                if r.name == "wishenka.wishlists"
+                and getattr(r, "event", None) == "item_quantity_reduction_rejected"
             )
+            assert rejected_rec.levelname == "WARNING"
+            assert getattr(rejected_rec, "item_id", None) == item.id
+            assert getattr(rejected_rec, "requested_quantity", None) == 1
+            assert getattr(rejected_rec, "received_quantity", None) == 2
+            assert getattr(rejected_rec, "reserved_quantity", None) is None
+            assert getattr(rejected_rec, "locked_quantity", None) is None
+            assert "reserved" not in rejected_rec.getMessage().lower()
+            assert "2001" not in rejected_rec.getMessage()
 
-        rejected_rec = next(
-            r
-            for r in caplog.records
-            if r.name == "wishenka.wishlists"
-            and getattr(r, "event", None) == "item_quantity_reduction_rejected"
-        )
-        assert rejected_rec.levelname == "WARNING"
-        assert getattr(rejected_rec, "item_id", None) == item.id
-        assert getattr(rejected_rec, "requested_quantity", None) == 1
-        assert getattr(rejected_rec, "received_quantity", None) == 2
-        assert getattr(rejected_rec, "reserved_quantity", None) is None
-        assert getattr(rejected_rec, "locked_quantity", None) is None
-        assert "reserved" not in rejected_rec.getMessage().lower()
-        assert "2001" not in rejected_rec.getMessage()
+            caplog.clear()
 
-        caplog.clear()
-
-        # 4b. Reduce desired quantity to received_quantity (2), entering overbooked state
-        with caplog.at_level(logging.WARNING, logger="wishenka.wishlists"):
-            overbooked_item = await service.update_wish_item(
-                item_id=item.id,
-                actor=owner,
-                quantity=2,
+            # 4b. Reduce desired quantity to received_quantity (2), entering overbooked state
+            with caplog.at_level(logging.WARNING, logger="wishenka.wishlists"):
+                overbooked_item = await service.update_wish_item(
+                    item_id=item.id,
+                    actor=owner,
+                    quantity=2,
+                )
+            assert overbooked_item.quantity == 2
+            overbooked_rec = next(
+                r
+                for r in caplog.records
+                if r.name == "wishenka.wishlists"
+                and getattr(r, "event", None) == "item_quantity_overbooked"
             )
-        assert overbooked_item.quantity == 2
-        overbooked_rec = next(
-            r
-            for r in caplog.records
-            if r.name == "wishenka.wishlists"
-            and getattr(r, "event", None) == "item_quantity_overbooked"
-        )
-        assert overbooked_rec.levelname == "WARNING"
-        assert getattr(overbooked_rec, "item_id", None) == item.id
-        assert getattr(overbooked_rec, "wishlist_id", None) == wl.id
-        assert getattr(overbooked_rec, "actor_id", None) == owner.telegram_id
-        assert getattr(overbooked_rec, "quantity", None) == 2
-        assert getattr(overbooked_rec, "quantity_delta", None) == -3
-        assert getattr(overbooked_rec, "notified_givers_count", None) == 1
-        assert getattr(overbooked_rec, "reserved_quantity", None) is None
-        assert getattr(overbooked_rec, "givers", None) is None
-        assert "Bob" not in overbooked_rec.getMessage()
-        assert "2001" not in overbooked_rec.getMessage()
+            assert overbooked_rec.levelname == "WARNING"
+            assert getattr(overbooked_rec, "item_id", None) == item.id
+            assert getattr(overbooked_rec, "wishlist_id", None) == wl.id
+            assert getattr(overbooked_rec, "actor_id", None) == owner.telegram_id
+            assert getattr(overbooked_rec, "quantity", None) == 2
+            assert getattr(overbooked_rec, "quantity_delta", None) == -3
+            assert getattr(overbooked_rec, "notified_givers_count", None) == 1
+            assert getattr(overbooked_rec, "reserved_quantity", None) is None
+            assert getattr(overbooked_rec, "givers", None) is None
+            assert "Bob" not in overbooked_rec.getMessage()
+            assert "2001" not in overbooked_rec.getMessage()
 
-        caplog.clear()
+            caplog.clear()
 
-        # 5. Non-existent item update emits item_not_found warning
-        with (
-            caplog.at_level(logging.WARNING, logger="wishenka.wishlists"),
-            pytest.raises(ItemNotFoundError),
-        ):
-            await service.update_wish_item(
-                item_id=99999,
-                actor=owner,
-                quantity=2,
+            # 5. A missing id is logged by the hydrated inventory body. The store
+            # refuses an unknown wish before that body, so this check enters execute.
+            async def missing(hydrated: WishlistService) -> None:
+                await hydrated.update_wish_item(
+                    item_id=99999,
+                    actor=owner,
+                    quantity=2,
+                )
+
+            with (
+                caplog.at_level(logging.WARNING, logger="wishenka.wishlists"),
+                pytest.raises(ItemNotFoundError),
+            ):
+                await store.execute(missing)
+
+            not_found_rec = next(
+                r
+                for r in caplog.records
+                if r.name == "wishenka.wishlists" and getattr(r, "event", None) == "item_not_found"
             )
+            assert not_found_rec.levelname == "WARNING"
+            assert getattr(not_found_rec, "item_id", None) == 99999
 
-        not_found_rec = next(
-            r
-            for r in caplog.records
-            if r.name == "wishenka.wishlists" and getattr(r, "event", None) == "item_not_found"
-        )
-        assert not_found_rec.levelname == "WARNING"
-        assert getattr(not_found_rec, "item_id", None) == 99999
+            caplog.clear()
 
-        caplog.clear()
+            # 6. Archived wishlist blocks item update and emits warning
+            await service.archive_wishlist(wishlist_id=wl.id, actor=owner)
+            with (
+                caplog.at_level(logging.WARNING, logger="wishenka.wishlists"),
+                pytest.raises(WishlistArchivedError),
+            ):
+                await service.update_wish_item(
+                    item_id=item.id,
+                    actor=owner,
+                    title="Renamed after archive",
+                )
 
-        # 6. Archived wishlist blocks item update and emits warning
-        await service.archive_wishlist(wishlist_id=wl.id, actor=owner)
-        with (
-            caplog.at_level(logging.WARNING, logger="wishenka.wishlists"),
-            pytest.raises(WishlistArchivedError),
-        ):
-            await service.update_wish_item(
-                item_id=item.id,
-                actor=owner,
-                title="Renamed after archive",
+            archived_rec = next(
+                r
+                for r in caplog.records
+                if r.name == "wishenka.wishlists"
+                and getattr(r, "event", None) == "item_mutation_blocked_archived"
             )
-
-        archived_rec = next(
-            r
-            for r in caplog.records
-            if r.name == "wishenka.wishlists"
-            and getattr(r, "event", None) == "item_mutation_blocked_archived"
-        )
-        assert archived_rec.levelname == "WARNING"
-        assert getattr(archived_rec, "item_id", None) == item.id
+            assert archived_rec.levelname == "WARNING"
+            assert getattr(archived_rec, "item_id", None) == item.id
+        finally:
+            await store.dispose()

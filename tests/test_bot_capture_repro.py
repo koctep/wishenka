@@ -23,6 +23,7 @@ from wishenka.items.schemas import ItemPreviewDTO
 from wishenka.items.service import ItemPreviewService
 from wishenka.users.store import UserStore
 from wishenka.wishlists.models import WishlistRole
+from wishenka.wishlists.service import WishlistService
 from wishenka.wishlists.store import WishlistStore
 
 pytestmark = pytest.mark.timeout(30)
@@ -114,7 +115,7 @@ async def _setup(
         async def create(service: Any, index: int = index) -> Any:
             return await service.create_wishlist(owner=OWNER, title=f"List {index + 1}")
 
-        ids.append((await store.execute(create)).id)
+        ids.append((await create(WishlistService(store))).id)
     preview = AsyncMock()
     preview.preview = AsyncMock(return_value=ItemPreviewDTO(title="Lamp"))
     deps = SimpleNamespace(
@@ -138,10 +139,30 @@ async def _setup(
 
 
 async def _count(store: WishlistStore, wishlist_id: int) -> int:
-    async def inspect(service: Any) -> int:
-        return len((await service.get_wishlist_by_id(wishlist_id)).items)
+    wishlist = await WishlistService(store).get_wishlist_by_id(wishlist_id)
+    return len(wishlist.items)
 
-    return await store.execute(inspect)
+
+async def _item(store: WishlistStore, wishlist_id: int) -> Any:
+    wishlist = await WishlistService(store).get_wishlist_by_id(wishlist_id)
+    return wishlist.items[0]
+
+
+def _fail_open_repository(
+    store: WishlistStore, monkeypatch: pytest.MonkeyPatch, message: str
+) -> Any:
+    """Raise inside the open repository transaction so the save rolls back."""
+    original = store.run_repository
+
+    async def fail_after_work(work: Any) -> Any:
+        async def wrapped(repo: Any) -> Any:
+            await work(repo)
+            raise RuntimeError(message)
+
+        return await original(wrapped)
+
+    monkeypatch.setattr(store, "run_repository", fail_after_work)
+    return original
 
 
 async def test_long_draft_review_is_bounded_and_preserves_values(
@@ -186,10 +207,7 @@ async def test_long_draft_review_is_bounded_and_preserves_values(
         await harness.callback(_action(review, ("save",)))
         assert "Saved: List 1" in harness.last_message().text
 
-        async def inspect(service: Any) -> Any:
-            return (await service.get_wishlist_by_id(ids[0])).items[0]
-
-        item = await store.execute(inspect)
+        item = await _item(store, ids[0])
         assert item.description == description
         assert item.link == link
     finally:
@@ -424,10 +442,7 @@ async def test_clear_optional_fields_uses_defaults_on_save(
         assert "Price: 42" not in harness.last_message().text
         await harness.callback(_action(harness.last_message(), ("save",)))
 
-        async def inspect(service: Any) -> Any:
-            return (await service.get_wishlist_by_id(ids[0])).items[0]
-
-        assert (await store.execute(inspect)).price is None
+        assert (await _item(store, ids[0])).price is None
     finally:
         await harness.bot.session.close()
         await users.engine.dispose()
@@ -538,7 +553,7 @@ async def test_deleted_destination_is_rechecked_at_save(
         async def delete(service: Any) -> None:
             await service.delete_wishlist(ids[0], OWNER)
 
-        await store.execute(delete)
+        await delete(WishlistService(store))
         await harness.callback(save)
         response = harness.last_message().text.casefold()
         assert any(word in response for word in ("unavailable", "недоступ"))
@@ -564,14 +579,14 @@ async def test_removed_member_cannot_save_previously_selected_list(
         async def add(service: Any) -> None:
             await service.add_member(ids[0], OWNER, 202, WishlistRole.MEMBER)
 
-        await store.execute(add)
+        await add(WishlistService(store))
         await harness.text("Private gift", user=202)
         save = _action(harness.last_message(), ("save", "сохран"))
 
         async def remove(service: Any) -> None:
             await service.remove_member(ids[0], OWNER, 202)
 
-        await store.execute(remove)
+        await remove(WishlistService(store))
         await harness.callback(save, user=202)
         assert await _count(store, ids[0]) == 0
         assert any(
@@ -650,12 +665,7 @@ async def test_slow_older_preview_cannot_replace_newer_draft_after_restart(
         assert "Newest idea" in owner_messages[0].text
         await harness.callback(save)
         assert await _count(store, ids[0]) == 1
-
-        async def saved_title(service: Any) -> str:
-            wishlist = await service.get_wishlist_by_id(ids[0])
-            return str(wishlist.items[0].title)
-
-        assert await store.execute(saved_title) == "Newest idea"
+        assert (await _item(store, ids[0])).title == "Newest idea"
     finally:
         release.set()
         await asyncio.gather(older, return_exceptions=True)
@@ -756,12 +766,7 @@ async def test_redelivery_review_cannot_save_unseen_late_preview(
         await harness.callback(new_save)
         await harness.callback(new_save)
         assert await _count(store, ids[0]) == 1
-
-        async def saved_title(service: Any) -> str:
-            wishlist = await service.get_wishlist_by_id(ids[0])
-            return str(wishlist.items[0].title)
-
-        assert await store.execute(saved_title) == "Enriched idea"
+        assert (await _item(store, ids[0])).title == "Enriched idea"
     finally:
         release.set()
         await asyncio.gather(pending, return_exceptions=True)
@@ -904,14 +909,9 @@ async def test_capture_observability_omits_private_data_on_failure_and_save(
         with caplog.at_level(logging.DEBUG):
             await harness.text(f"{secret} https://{secret}.example.test/?token={secret}")
             save = _action(harness.last_message(), ("save", "сохран"))
-            original = store._write
-
-            async def fail(*args: Any, **kwargs: Any) -> None:
-                raise RuntimeError(secret)
-
-            monkeypatch.setattr(store, "_write", fail)
+            original = _fail_open_repository(store, monkeypatch, secret)
             await harness.callback(save)
-            monkeypatch.setattr(store, "_write", original)
+            monkeypatch.setattr(store, "run_repository", original)
             await harness.callback(save)
 
         events = {getattr(record, "event", ""): record for record in caplog.records}
@@ -1009,16 +1009,10 @@ async def test_failed_atomic_save_can_be_retried(
     try:
         await harness.text("Lamp")
         save = _action(harness.last_message(), ("save", "сохран"))
-        original_write = store._write
-
-        async def fail_after_write(*args: Any, **kwargs: Any) -> Any:
-            await original_write(*args, **kwargs)
-            raise RuntimeError("database failure")
-
-        monkeypatch.setattr(store, "_write", fail_after_write)
+        original = _fail_open_repository(store, monkeypatch, "database failure")
         await harness.callback(save)
         assert "retry" in harness.last_message().text.casefold()
-        monkeypatch.setattr(store, "_write", original_write)
+        monkeypatch.setattr(store, "run_repository", original)
         assert await _count(store, ids[0]) == 0
         await harness.callback(save)
         assert "saved" in harness.last_message().text.casefold()

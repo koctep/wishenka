@@ -23,6 +23,7 @@ from tests.receipt_support import (
 from wishenka.auth.models import TelegramUser
 from wishenka.users.store import UserStore
 from wishenka.wishlists.deletion import AccountDeletionService
+from wishenka.wishlists.exceptions import WishlistNotFoundError
 from wishenka.wishlists.migrations import _configured, upgrade_to_head_sync
 from wishenka.wishlists.models import WishlistRole
 from wishenka.wishlists.service import WishlistService
@@ -47,45 +48,33 @@ async def test_rejects_wishlist_user_links_for_nonexistent_user(
         ghost_user = make_user(NONEXISTENT_USER_ID, "Ghost")
 
         async with open_store(db) as store:
-            wl = await store.execute(
-                lambda svc: svc.create_wishlist(owner=OWNER, title="Collab List")
-            )
-
-            async def fav_ghost(svc: WishlistService) -> None:
-                await svc.get_wishlist_by_public_token(wl.public_token, ghost_user)
-                await svc.add_favorite(user=ghost_user, wishlist_id=wl.id)
+            wl = await WishlistService(store).create_wishlist(owner=OWNER, title="Collab List")
+            service = WishlistService(store)
+            await service.get_wishlist_by_public_token(wl.public_token, ghost_user)
+            with pytest.raises(WishlistNotFoundError):
+                await service.add_favorite(user=ghost_user, wishlist_id=wl.id)
+            with pytest.raises(WishlistNotFoundError):
+                await service.record_view(user=ghost_user, wishlist_id=wl.id)
 
             caplog.clear()
-            with caplog.at_level(logging.ERROR, logger="wishenka.wishlists.store"):
-                with pytest.raises(RuntimeError, match="Wishlist storage operation failed"):
-                    await store.execute(fav_ghost)
+            with (
+                caplog.at_level(logging.ERROR, logger="wishenka.wishlists.store"),
+                pytest.raises(RuntimeError, match="Wishlist storage operation failed"),
+            ):
+                await service.add_member(
+                    wishlist_id=wl.id,
+                    actor=OWNER,
+                    user_id=NONEXISTENT_USER_ID,
+                    role=WishlistRole.MEMBER,
+                )
 
-                async def view_ghost(svc: WishlistService) -> None:
-                    await svc.get_wishlist_by_public_token(wl.public_token, ghost_user)
-                    await svc.record_view(user=ghost_user, wishlist_id=wl.id)
-
-                with pytest.raises(RuntimeError, match="Wishlist storage operation failed"):
-                    await store.execute(view_ghost)
-
-                with pytest.raises(RuntimeError, match="Wishlist storage operation failed"):
-                    await store.execute(
-                        lambda svc: svc.add_member(
-                            wishlist_id=wl.id,
-                            actor=OWNER,
-                            user_id=NONEXISTENT_USER_ID,
-                            role=WishlistRole.MEMBER,
-                        )
-                    )
-
-        integrity_logs = [
-            rec
-            for rec in caplog.records
-            if getattr(rec, "event", None) == "wishlist_store_integrity_error"
+        storage_logs = [
+            rec for rec in caplog.records if getattr(rec, "event", None) == "wishlist_store_error"
         ]
-        assert len(integrity_logs) == 3
-        assert all(rec.levelno == logging.ERROR for rec in integrity_logs)
-        assert str(NONEXISTENT_USER_ID) not in caplog.text
-        assert "Ghost" not in caplog.text
+        assert len(storage_logs) == 1
+        rendered = " ".join(rec.getMessage() for rec in storage_logs)
+        assert str(NONEXISTENT_USER_ID) not in rendered
+        assert "Ghost" not in rendered
 
         now = "2026-01-01T00:00:00+00:00"
         with sqlite3.connect(db) as conn:
@@ -123,40 +112,32 @@ async def test_deleting_user_cascades_favorites_history_and_members_preserving_s
         db = Path(db_path_of(app))
 
         async with open_store(db) as store:
-            wl = await store.execute(
-                lambda svc: svc.create_wishlist(owner=OWNER, title="Shared List")
+            wl = await WishlistService(store).create_wishlist(owner=OWNER, title="Shared List")
+            item = await WishlistService(store).add_wish_item(
+                wishlist_id=wl.id, actor=OWNER, title="Tea Pot"
             )
-            item = await store.execute(
-                lambda svc: svc.add_wish_item(wishlist_id=wl.id, actor=OWNER, title="Tea Pot")
+            await WishlistService(store).add_member(
+                wishlist_id=wl.id,
+                actor=OWNER,
+                user_id=MEMBER_A_ID,
+                role=WishlistRole.MEMBER,
             )
-            await store.execute(
-                lambda svc: svc.add_member(
-                    wishlist_id=wl.id,
-                    actor=OWNER,
-                    user_id=MEMBER_A_ID,
-                    role=WishlistRole.MEMBER,
-                )
+            await WishlistService(store).add_member(
+                wishlist_id=wl.id,
+                actor=OWNER,
+                user_id=MEMBER_B_ID,
+                role=WishlistRole.MEMBER,
             )
-            await store.execute(
-                lambda svc: svc.add_member(
-                    wishlist_id=wl.id,
-                    actor=OWNER,
-                    user_id=MEMBER_B_ID,
-                    role=WishlistRole.MEMBER,
-                )
+            await WishlistService(store).add_member(
+                wishlist_id=wl.id,
+                actor=OWNER,
+                user_id=GIFTER_ID,
+                role=WishlistRole.MEMBER,
             )
-            await store.execute(
-                lambda svc: svc.add_member(
-                    wishlist_id=wl.id,
-                    actor=OWNER,
-                    user_id=GIFTER_ID,
-                    role=WishlistRole.MEMBER,
-                )
-            )
-            await store.execute(lambda svc: svc.add_favorite(user=member_a, wishlist_id=wl.id))
-            await store.execute(lambda svc: svc.record_view(user=member_a, wishlist_id=wl.id))
-            await store.execute(lambda svc: svc.add_favorite(user=GIFTER, wishlist_id=wl.id))
-            await store.execute(lambda svc: svc.record_view(user=GIFTER, wishlist_id=wl.id))
+            await WishlistService(store).add_favorite(user=member_a, wishlist_id=wl.id)
+            await WishlistService(store).record_view(user=member_a, wishlist_id=wl.id)
+            await WishlistService(store).add_favorite(user=GIFTER, wishlist_id=wl.id)
+            await WishlistService(store).record_view(user=GIFTER, wishlist_id=wl.id)
             await store.execute(
                 lambda svc: svc.create_reservation(item_id=item.id, user=GIFTER, quantity=1)
             )
@@ -432,30 +413,24 @@ async def test_account_deletion_service_end_to_end_cascade(
         db = Path(db_path_of(app))
 
         async with open_store(db) as store:
-            shared = await store.execute(
-                lambda svc: svc.create_wishlist(owner=OWNER, title="Shared List")
+            shared = await WishlistService(store).create_wishlist(owner=OWNER, title="Shared List")
+            personal = await WishlistService(store).create_wishlist(
+                owner=member_a, title="MemberA Personal"
             )
-            personal = await store.execute(
-                lambda svc: svc.create_wishlist(owner=member_a, title="MemberA Personal")
+            item = await WishlistService(store).add_wish_item(
+                wishlist_id=shared.id, actor=OWNER, title="Kettle"
             )
-            item = await store.execute(
-                lambda svc: svc.add_wish_item(wishlist_id=shared.id, actor=OWNER, title="Kettle")
+            await WishlistService(store).add_member(
+                wishlist_id=shared.id,
+                actor=OWNER,
+                user_id=MEMBER_A_ID,
+                role=WishlistRole.MEMBER,
             )
-            await store.execute(
-                lambda svc: svc.add_member(
-                    wishlist_id=shared.id,
-                    actor=OWNER,
-                    user_id=MEMBER_A_ID,
-                    role=WishlistRole.MEMBER,
-                )
-            )
-            await store.execute(lambda svc: svc.add_favorite(user=member_a, wishlist_id=shared.id))
-            await store.execute(lambda svc: svc.record_view(user=member_a, wishlist_id=shared.id))
-            await store.execute(
-                lambda svc: svc.get_wishlist_by_public_token(shared.public_token, GIFTER)
-            )
-            await store.execute(lambda svc: svc.add_favorite(user=GIFTER, wishlist_id=shared.id))
-            await store.execute(lambda svc: svc.record_view(user=GIFTER, wishlist_id=shared.id))
+            await WishlistService(store).add_favorite(user=member_a, wishlist_id=shared.id)
+            await WishlistService(store).record_view(user=member_a, wishlist_id=shared.id)
+            await WishlistService(store).get_wishlist_by_public_token(shared.public_token, GIFTER)
+            await WishlistService(store).add_favorite(user=GIFTER, wishlist_id=shared.id)
+            await WishlistService(store).record_view(user=GIFTER, wishlist_id=shared.id)
             await store.execute(
                 lambda svc: svc.create_reservation(item_id=item.id, user=GIFTER, quantity=1)
             )

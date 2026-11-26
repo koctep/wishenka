@@ -27,6 +27,7 @@ from wishenka.auth.session import compute_revocation_subject_hash
 from wishenka.wishlists.cleanup import run_cleanup_cycle
 from wishenka.wishlists.deletion import AccountDeletionService
 from wishenka.wishlists.models import WishlistRole
+from wishenka.wishlists.service import WishlistService
 
 pytestmark = pytest.mark.timeout(60)
 
@@ -48,16 +49,12 @@ async def test_ownership_transfer_deterministic_tie_breakers(tmp_path: Path) -> 
 
         async with open_store(db) as store:
             # Case A: admin beats member even if member joined earlier
-            wl_a = await store.execute(lambda svc: svc.create_wishlist(owner=OWNER, title="List A"))
-            await store.execute(
-                lambda svc: svc.add_member(
-                    wishlist_id=wl_a.id, actor=OWNER, user_id=203, role=WishlistRole.MEMBER
-                )
+            wl_a = await WishlistService(store).create_wishlist(owner=OWNER, title="List A")
+            await WishlistService(store).add_member(
+                wishlist_id=wl_a.id, actor=OWNER, user_id=203, role=WishlistRole.MEMBER
             )
-            await store.execute(
-                lambda svc: svc.add_member(
-                    wishlist_id=wl_a.id, actor=OWNER, user_id=202, role=WishlistRole.ADMIN
-                )
+            await WishlistService(store).add_member(
+                wishlist_id=wl_a.id, actor=OWNER, user_id=202, role=WishlistRole.ADMIN
             )
             sql_exec(
                 db,
@@ -73,16 +70,12 @@ async def test_ownership_transfer_deterministic_tie_breakers(tmp_path: Path) -> 
             )
 
             # Case B: equal role, joined_at, created_at -> lowest telegram_id (201 < 202)
-            wl_b = await store.execute(lambda svc: svc.create_wishlist(owner=OWNER, title="List B"))
-            await store.execute(
-                lambda svc: svc.add_member(
-                    wishlist_id=wl_b.id, actor=OWNER, user_id=202, role=WishlistRole.ADMIN
-                )
+            wl_b = await WishlistService(store).create_wishlist(owner=OWNER, title="List B")
+            await WishlistService(store).add_member(
+                wishlist_id=wl_b.id, actor=OWNER, user_id=202, role=WishlistRole.ADMIN
             )
-            await store.execute(
-                lambda svc: svc.add_member(
-                    wishlist_id=wl_b.id, actor=OWNER, user_id=201, role=WishlistRole.ADMIN
-                )
+            await WishlistService(store).add_member(
+                wishlist_id=wl_b.id, actor=OWNER, user_id=201, role=WishlistRole.ADMIN
             )
             sql_exec(
                 db,
@@ -91,16 +84,12 @@ async def test_ownership_transfer_deterministic_tie_breakers(tmp_path: Path) -> 
             )
 
             # Case C: equal role + equal joined_at -> earlier user created_at (202 before 203)
-            wl_c = await store.execute(lambda svc: svc.create_wishlist(owner=OWNER, title="List C"))
-            await store.execute(
-                lambda svc: svc.add_member(
-                    wishlist_id=wl_c.id, actor=OWNER, user_id=203, role=WishlistRole.MEMBER
-                )
+            wl_c = await WishlistService(store).create_wishlist(owner=OWNER, title="List C")
+            await WishlistService(store).add_member(
+                wishlist_id=wl_c.id, actor=OWNER, user_id=203, role=WishlistRole.MEMBER
             )
-            await store.execute(
-                lambda svc: svc.add_member(
-                    wishlist_id=wl_c.id, actor=OWNER, user_id=202, role=WishlistRole.MEMBER
-                )
+            await WishlistService(store).add_member(
+                wishlist_id=wl_c.id, actor=OWNER, user_id=202, role=WishlistRole.MEMBER
             )
             sql_exec(
                 db,
@@ -140,46 +129,38 @@ async def test_solo_collaborative_and_foreign_membership_and_purchased_booking(
         db = Path(db_path_of(app))
         async with open_store(db) as store:
             # 1. Solo collaborative list (no other members) -> must be deleted
-            solo_wl = await store.execute(
-                lambda svc: svc.create_wishlist(owner=OWNER, title="Solo Collab")
-            )
+            solo_wl = await WishlistService(store).create_wishlist(owner=OWNER, title="Solo Collab")
             sql_exec(db, "UPDATE wl_lists SET is_collaborative = 1 WHERE id = ?", (solo_wl.id,))
-            solo_item = await store.execute(
-                lambda svc: svc.add_wish_item(wishlist_id=solo_wl.id, actor=OWNER, title="Lamp")
+            solo_item = await WishlistService(store).add_wish_item(
+                wishlist_id=solo_wl.id, actor=OWNER, title="Lamp"
             )
             await store.execute(
                 lambda svc: svc.create_reservation(item_id=solo_item.id, user=GIFTER, quantity=1)
             )
 
             # 2. Foreign collaborative list where OWNER is a member and authored an item
-            foreign_wl = await store.execute(
-                lambda svc: svc.create_wishlist(owner=GIFTER, title="Greta Shared")
+            foreign_wl = await WishlistService(store).create_wishlist(
+                owner=GIFTER, title="Greta Shared"
             )
-            await store.execute(
-                lambda svc: svc.add_member(
-                    wishlist_id=foreign_wl.id,
-                    actor=GIFTER,
-                    user_id=OWNER_ID,
-                    role=WishlistRole.MEMBER,
-                )
+            await WishlistService(store).add_member(
+                wishlist_id=foreign_wl.id,
+                actor=GIFTER,
+                user_id=OWNER_ID,
+                role=WishlistRole.MEMBER,
             )
-            authored_item = await store.execute(
-                lambda svc: svc.add_wish_item(
-                    wishlist_id=foreign_wl.id,
-                    actor=OWNER,
-                    title="Tea Set",
-                    recipient_user_id=OWNER_ID,
-                    recipient_name="Alice",
-                )
+            authored_item = await WishlistService(store).add_wish_item(
+                wishlist_id=foreign_wl.id,
+                actor=OWNER,
+                title="Tea Set",
+                recipient_user_id=OWNER_ID,
+                recipient_name="Alice",
             )
-            other_item = await store.execute(
-                lambda svc: svc.add_wish_item(
-                    wishlist_id=foreign_wl.id,
-                    actor=GIFTER,
-                    title="Coffee Grinder",
-                    recipient_user_id=GIFTER_ID,
-                    recipient_name="Greta",
-                )
+            other_item = await WishlistService(store).add_wish_item(
+                wishlist_id=foreign_wl.id,
+                actor=GIFTER,
+                title="Coffee Grinder",
+                recipient_user_id=GIFTER_ID,
+                recipient_name="Greta",
             )
             await store.execute(
                 lambda svc: svc.create_reservation(item_id=other_item.id, user=OWNER, quantity=1)
@@ -255,9 +236,9 @@ async def test_pending_notices_cancelled_and_revocation_cleanup_cycle(tmp_path: 
             (OWNER_ID,),
         )
         async with open_store(db) as store:
-            wl = await store.execute(lambda svc: svc.create_wishlist(owner=OWNER, title="N"))
-            item = await store.execute(
-                lambda svc: svc.add_wish_item(wishlist_id=wl.id, actor=OWNER, title="Cup")
+            wl = await WishlistService(store).create_wishlist(owner=OWNER, title="N")
+            item = await WishlistService(store).add_wish_item(
+                wishlist_id=wl.id, actor=OWNER, title="Cup"
             )
             sql_exec(
                 db,

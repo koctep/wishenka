@@ -42,13 +42,10 @@ async def execute[T](
     repo: WishlistRepository | None = None,
     item_id: int | None = None,
 ) -> T:
-    """Run an item operation against WishlistRepository, execute_wish, or test-injected service."""
+    """Run an item operation against WishlistRepository or execute_wish."""
     operation = getattr(request.scope.get("endpoint"), "__name__", "")
     try:
-        injected = getattr(request.app.state, "wishlist_service", None)
-        if injected is not None:
-            result = await action(injected)
-        elif item_id is not None:
+        if item_id is not None:
             result = cast(
                 T,
                 await request.app.state.wishlist_store.execute_wish(

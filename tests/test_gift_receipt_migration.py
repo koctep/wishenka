@@ -138,7 +138,7 @@ async def test_cascade_on_purge_and_soft_delete_keeps_rows(tmp_path: Path) -> No
         async def delete(service: WishlistService) -> None:
             await service.delete_wishlist(wishlist_id, OWNER)
 
-        await store.execute(delete)
+        await delete(WishlistService(store))
         assert len(receipt_rows(db)) == 1
         assert len(outbox_rows(db)) == 1
 

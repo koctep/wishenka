@@ -6,8 +6,10 @@ import asyncio
 import json
 import logging
 import sqlite3
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -41,6 +43,18 @@ def _make_settings(db_path: Path, retention_days: int = 30) -> Settings:
 
 def _auth_headers(sessions: SessionTokenService, user_id: int, name: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {sessions.create_token(user_id, name)}"}
+
+
+def _on_domain[T](
+    client: TestClient,
+    app: Any,
+    action: Callable[[WishlistService], Awaitable[T]],
+) -> T:
+    """Run a shared action on the store-backed service, outside snapshot execute."""
+    portal = client.portal
+    assert portal is not None
+    result: T = portal.call(action, app.state.domain_service)
+    return result
 
 
 def test_deleted_wishlist_restore_flow_permissions_tokens_and_reservations(
@@ -119,15 +133,19 @@ def test_deleted_wishlist_restore_flow_permissions_tokens_and_reservations(
             == 200
         )
 
-        # Record fulfillment (gift receipt history), create reservation, then soft-delete
-        async def seed_and_delete(service: WishlistService) -> int:
+        # Record fulfillment and a reservation on the inventory graph, then delete on the
+        # repository path. Shared delete is not available on the hydrated service.
+        async def seed_inventory(service: WishlistService) -> int:
             await service.record_item_fulfillment(item_id, owner_user, 1)
             reservation = await service.create_reservation(item_id, gifter_user, quantity=1)
-            await service.delete_wishlist(wishlist_id, owner_user)
             return reservation.id
 
+        async def delete_list(service: WishlistService) -> None:
+            await service.delete_wishlist(wishlist_id, owner_user)
+
         assert client.portal is not None
-        reservation_id = client.portal.call(app.state.wishlist_store.execute, seed_and_delete)
+        reservation_id = client.portal.call(app.state.wishlist_store.execute, seed_inventory)
+        _on_domain(client, app, delete_list)
 
         # 2. GET /api/wishlists/deleted visible ONLY to owner
         owner_deleted = client.get("/api/wishlists/deleted", headers=owner_headers)
@@ -228,7 +246,7 @@ def test_deleted_wishlist_retention_expired_returns_410_and_hides_from_list(
             await service.delete_wishlist(wishlist_id, owner_user)
 
         assert client.portal is not None
-        client.portal.call(app.state.wishlist_store.execute, soft_delete)
+        _on_domain(client, app, soft_delete)
 
     # Shift updated_at past the 30-day retention window before background purge runs
     expired_at = (datetime.now(UTC) - timedelta(days=31)).isoformat()
@@ -274,7 +292,7 @@ def test_restore_deleted_archived_returns_409_and_missing_returns_404(tmp_path: 
             await service.archive_wishlist(wishlist_id, owner_user)
 
         assert client.portal is not None
-        client.portal.call(app.state.wishlist_store.execute, archive_it)
+        _on_domain(client, app, archive_it)
 
         archived_resp = client.post(
             f"/api/wishlists/{wishlist_id}/restore-deleted",
@@ -310,16 +328,30 @@ def test_service_list_deleted_wishlists_sorting_and_days_remaining(tmp_path: Pat
 
         now = datetime(2026, 11, 20, 12, 0, tzinfo=UTC)
 
-        async def setup_and_list(service: WishlistService) -> list[tuple[int, int, WishlistStatus]]:
+        async def delete_both(service: WishlistService) -> None:
             await service.delete_wishlist(older_id, owner_user)
             await service.delete_wishlist(newer_id, owner_user)
-            service._wishlists[older_id].updated_at = now - timedelta(days=29, hours=23)
-            service._wishlists[newer_id].updated_at = now - timedelta(days=10)
+
+        assert client.portal is not None
+        _on_domain(client, app, delete_both)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE wl_lists SET updated_at = ? WHERE id = ?",
+                ((now - timedelta(days=29, hours=23)).isoformat(), older_id),
+            )
+            conn.execute(
+                "UPDATE wl_lists SET updated_at = ? WHERE id = ?",
+                ((now - timedelta(days=10)).isoformat(), newer_id),
+            )
+            conn.commit()
+
+        async def list_deleted(
+            service: WishlistService,
+        ) -> list[tuple[int, int, WishlistStatus]]:
             entries = await service.list_deleted_wishlists(owner_user, retention_days=30, now=now)
             return [(wl.id, days, wl.status) for wl, _exp, days in entries]
 
-        assert client.portal is not None
-        rows = client.portal.call(app.state.wishlist_store.execute, setup_and_list)
+        rows = _on_domain(client, app, list_deleted)
         assert rows == [
             (newer_id, 20, WishlistStatus.DELETED),
             (older_id, 1, WishlistStatus.DELETED),
@@ -382,10 +414,16 @@ def test_deleted_restore_observability_logs(
         async def _delete_both(service: WishlistService) -> None:
             await service.delete_wishlist(ok_id, owner_user)
             await service.delete_wishlist(exp_id, owner_user)
-            service._wishlists[exp_id].updated_at = datetime.now(UTC) - timedelta(days=31)
 
         assert client.portal is not None
-        client.portal.call(app.state.wishlist_store.execute, _delete_both)
+        _on_domain(client, app, _delete_both)
+        expired_at = (datetime.now(UTC) - timedelta(days=31)).isoformat()
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE wl_lists SET updated_at = ? WHERE id = ?",
+                (expired_at, exp_id),
+            )
+            conn.commit()
 
         with caplog.at_level(logging.INFO, logger="wishenka"):
             list_resp = client.get("/api/wishlists/deleted", headers=owner_headers)

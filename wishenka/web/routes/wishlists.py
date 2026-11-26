@@ -98,13 +98,9 @@ async def execute[T](
     operation = getattr(request.scope.get("endpoint"), "__name__", "")
     storage_failed = False
     try:
-        injected = getattr(request.app.state, "wishlist_service", None)
-        if injected is not None:
-            result = await action(injected)
-        elif repo is not None:
-            result = await action(RepoWishlistOps(repo))
-        else:
+        if repo is None:
             raise RuntimeError("WishlistRepository dependency is required")
+        result = await action(RepoWishlistOps(repo))
         if operation in {
             "create_wishlist",
             "update_wishlist",
@@ -274,25 +270,12 @@ async def create_wishlist(
 async def list_wishlists(
     request: Request, user: User, repo: WishlistRepo, include_archived: bool = False
 ) -> list[dict[str, Any]]:
-    async def action(service: Any) -> list[dict[str, Any]]:
-        if isinstance(service, RepoWishlistOps):
-            wls = await service.repo.list_accessible_wishlists(
-                user.telegram_id, include_archived=include_archived
-            )
-            fav_ids = await service.repo.list_favorite_ids(user.telegram_id)
-            return [projection(wl, user, False, is_favorite=(wl.id in fav_ids)) for wl in wls]
-        return [
-            projection(
-                wl,
-                user,
-                False,
-                is_favorite=service.has_favorite(user.telegram_id, wl.id),
-            )
-            for wl in service._wishlists.values()
-            if WishlistAccessPolicy.resolve_context(user, wl).is_member
-            and wl.status != WishlistStatus.DELETED
-            and (include_archived or wl.status == WishlistStatus.ACTIVE)
-        ]
+    async def action(service: RepoWishlistOps) -> list[dict[str, Any]]:
+        wls = await service.repo.list_accessible_wishlists(
+            user.telegram_id, include_archived=include_archived
+        )
+        fav_ids = await service.repo.list_favorite_ids(user.telegram_id)
+        return [projection(wl, user, False, is_favorite=(wl.id in fav_ids)) for wl in wls]
 
     return await execute(request, action, repo=repo)
 
@@ -339,11 +322,7 @@ async def get_wishlist(
     async def action(service: Any) -> dict[str, Any]:
         wl = await service.get_wishlist_by_id(wishlist_id)
         require_member(wl, user)
-        is_fav = (
-            await service.repo.is_favorite(user.telegram_id, wl.id)
-            if isinstance(service, RepoWishlistOps)
-            else service.has_favorite(user.telegram_id, wl.id)
-        )
+        is_fav = await service.repo.is_favorite(user.telegram_id, wl.id)
         return projection(
             wl,
             user,
@@ -435,19 +414,11 @@ async def remove_favorite(
 async def get_history(request: Request, user: User, repo: WishlistRepo) -> list[dict[str, Any]]:
     async def action(service: Any) -> list[dict[str, Any]]:
         history_entries = await service.get_history(user, limit=20)
-        fav_ids = (
-            await service.repo.list_favorite_ids(user.telegram_id)
-            if isinstance(service, RepoWishlistOps)
-            else None
-        )
+        fav_ids = await service.repo.list_favorite_ids(user.telegram_id)
         result = []
         for wl, viewed_at in history_entries:
             ctx = WishlistAccessPolicy.resolve_context(user, wl)
-            is_fav = (
-                wl.id in fav_ids
-                if fav_ids is not None
-                else service.has_favorite(user.telegram_id, wl.id)
-            )
+            is_fav = wl.id in fav_ids
             role = ctx.role.value if ctx.role else ("favorite" if is_fav else None)
             result.append(
                 {
@@ -518,11 +489,8 @@ async def update_wishlist(
             )
         if (wl.title, wl.description, wl.event_title, wl.event_date) != before:
             wl.updated_at = datetime.now(UTC)
-            if isinstance(service, RepoWishlistOps):
-                await service.repo.upsert_wishlist(wl)
-                await service.record_shared_event("list_updated", wl, None, user.telegram_id)
-            else:
-                service._record_shared_event("list_updated", wl, None, user.telegram_id)
+            await service.repo.upsert_wishlist(wl)
+            await service.record_shared_event("list_updated", wl, None, user.telegram_id)
         logger.info(
             "Wishlist updated: id=%s by user=%s",
             wishlist_id,
@@ -626,11 +594,7 @@ async def restore_deleted_wishlist(
                 "retention_days": retention_days,
             },
         )
-        is_fav = (
-            await service.repo.is_favorite(user.telegram_id, wl.id)
-            if isinstance(service, RepoWishlistOps)
-            else service.has_favorite(user.telegram_id, wl.id)
-        )
+        is_fav = await service.repo.is_favorite(user.telegram_id, wl.id)
         return projection(
             wl,
             user,
@@ -835,9 +799,9 @@ async def reserve_from_public_link(
     idempotency_key = parse_idempotency_key(request)
 
     async def action(service: WishlistService) -> PromiseActionDTO:
-        view = await service.get_wishlist_by_public_token(token, user)
+        wishlist = service._resolve_loaded_public_token(token, user)
         reservation = await service.create_reservation(
-            item_id, user, payload.quantity, wishlist_id=view.id
+            item_id, user, payload.quantity, wishlist_id=wishlist.id
         )
         return project_reservation_action(reservation, user)
 
@@ -949,11 +913,8 @@ async def set_role(
         new_role = WishlistRole(body.role)
         if target.role != new_role:
             target.role = new_role
-            if isinstance(service, RepoWishlistOps):
-                await service.record_shared_event("membership_changed", wl, None, user.telegram_id)
-                await service.repo.update_member_role(wishlist_id, user_id, new_role)
-            else:
-                service._record_shared_event("membership_changed", wl, None, user.telegram_id)
+            await service.record_shared_event("membership_changed", wl, None, user.telegram_id)
+            await service.repo.update_member_role(wishlist_id, user_id, new_role)
         logger.info(
             "Member role updated: member %s role changed to %s on wishlist %s by user %s",
             user_id,
@@ -1061,7 +1022,7 @@ async def reset_invite(
     return await execute(request, action, repo=repo)
 
 
-async def find_invitation(service: WishlistService | RepoWishlistOps, token: str) -> Wishlist:
+async def find_invitation(service: RepoWishlistOps, token: str) -> Wishlist:
     """Resolve an active invite without exposing whether a token previously existed."""
     if not token or len(token) > 128:
         logger.warning(
@@ -1069,10 +1030,7 @@ async def find_invitation(service: WishlistService | RepoWishlistOps, token: str
             extra={"event": "invitation_token_malformed"},
         )
         raise HTTPException(status_code=404, detail="Invitation not found")
-    if isinstance(service, RepoWishlistOps):
-        wl = await service.repo.get_by_invite_token(token)
-    else:
-        wl = next((w for w in service._wishlists.values() if w.invite_token == token), None)
+    wl = await service.repo.get_by_invite_token(token)
     if (
         wl is None
         or wl.status != WishlistStatus.ACTIVE

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests.receipt_support import place_item, place_wishlist
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.wishlists.exceptions import WishlistNotFoundError
 from wishenka.wishlists.models import WishItem
@@ -37,11 +38,11 @@ async def _seed_detached_item(
     owner = _make_user(1001, "Owner")
     stranger = _make_user(2002, "Stranger")
 
-    wl = await service.create_wishlist(owner=owner, title="Birthday")
-    item = await service.add_wish_item(
-        wishlist_id=wl.id,
-        actor=owner,
-        title="Original Gift",
+    wishlist = place_wishlist(service, owner, "Birthday")
+    item = place_item(
+        service,
+        wishlist,
+        "Original Gift",
         quantity=3,
         recipient_user_id=recipient_user_id,
     )

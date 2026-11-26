@@ -26,6 +26,7 @@ from tests.receipt_support import (
     THIRD_GIFTER_ID,
     app_env,
     bearer,
+    open_domain,
     seed_wish,
 )
 from tests.test_gift_receipt_migration import _create_legacy
@@ -307,39 +308,42 @@ def test_refusal_and_busy_records_carry_closed_fields_only(
 
 
 async def test_archive_events_for_partly_received_wish(
+    tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Archive and restore of a received-from wish log INFO with quantities; refusals WARNING."""
-    service = WishlistService.in_memory()
-    wishlist_id, item_id = await seed_wish(service, quantity=5)
-    fresh = await service.add_wish_item(
-        wishlist_id=wishlist_id, actor=OWNER, title="Fresh", quantity=2
-    )
-    fresh_id = fresh.id
-    caplog.set_level(logging.INFO)
+    """Repository archive logs item moves and refuses a wish with nothing left to receive."""
+    async with open_domain(tmp_path / "archive-events.db") as service:
+        wishlist_id, item_id = await seed_wish(service, quantity=5)
+        fresh = await service.add_wish_item(
+            wishlist_id=wishlist_id, actor=OWNER, title="Fresh", quantity=2
+        )
+        fresh_id = fresh.id
+        caplog.set_level(logging.INFO)
 
-    await service.archive_wish_item(wishlist_id, fresh_id, OWNER)  # untouched wish: no event
-    await service.record_item_fulfillment(item_id, OWNER, 2)
-    await service.archive_wish_item(wishlist_id, item_id, OWNER)
-    await service.restore_wish_item(wishlist_id, item_id, OWNER)
-    await service.record_item_fulfillment(item_id, OWNER, 3)
-    with pytest.raises(NothingRemainingError):
+        await service.archive_wish_item(wishlist_id, fresh_id, OWNER)
+        await service.record_item_fulfillment(item_id, OWNER, 2)
         await service.archive_wish_item(wishlist_id, item_id, OWNER)
-    with pytest.raises(NothingRemainingError):
         await service.restore_wish_item(wishlist_id, item_id, OWNER)
+        await service.record_item_fulfillment(item_id, OWNER, 3)
+        with pytest.raises(NothingRemainingError):
+            await service.archive_wish_item(wishlist_id, item_id, OWNER)
+        with pytest.raises(NothingRemainingError):
+            await service.restore_wish_item(wishlist_id, item_id, OWNER)
 
-    archived = _events(caplog.records, "wish_archived_partial")
-    restored = _events(caplog.records, "wish_restored_partial")
-    assert [r.levelno for r in (*archived, *restored)] == [logging.INFO, logging.INFO]
-    for record, event in ((archived[0], "archived"), (restored[0], "restored")):
-        assert _extras(record) == {
-            "event": f"wish_{event}_partial",
-            "wishlist_id": wishlist_id,
-            "item_id": item_id,
-            "actor_id": OWNER_ID,
-            "received_quantity": 2,
-            "total_quantity": 5,
-        }
+    archived = _events(caplog.records, "item_archived")
+    restored = _events(caplog.records, "item_restored")
+    assert [r.levelno for r in (*archived, *restored)] == [
+        logging.INFO,
+        logging.INFO,
+        logging.INFO,
+    ]
+    assert [(r.item_id, r.wishlist_id, r.actor_id) for r in archived] == [  # type: ignore[attr-defined]
+        (fresh_id, wishlist_id, OWNER_ID),
+        (item_id, wishlist_id, OWNER_ID),
+    ]
+    assert _extras(restored[0])["item_id"] == item_id
+    for record in (*archived, *restored):
+        assert "active_reservations_count" not in _extras(record)
     refused = _events(caplog.records, "wish_archive_refused")
     assert [r.levelno for r in refused] == [logging.WARNING, logging.WARNING]
     for record in refused:
@@ -392,15 +396,15 @@ async def test_retry_scheduled_includes_max_attempts(
 
 
 async def test_item_archived_never_logs_active_reservations_count(
+    tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """``item_archived`` on the owner stream must not leak ``active_reservations_count``."""
-    service = WishlistService.in_memory()
-    wishlist_id, item_id = await seed_wish(service, quantity=5)
-    await service.create_reservation(item_id=item_id, user=GIFTER, quantity=2)
-    caplog.set_level(logging.INFO)
-
-    await service.archive_wish_item(wishlist_id, item_id, OWNER)
+    async with open_domain(tmp_path / "archive-count.db") as service:
+        wishlist_id, item_id = await seed_wish(service, quantity=5)
+        await service.create_reservation(item_id=item_id, user=GIFTER, quantity=2)
+        caplog.set_level(logging.INFO)
+        await service.archive_wish_item(wishlist_id, item_id, OWNER)
 
     (record,) = _events(caplog.records, "item_archived")
     assert record.levelno == logging.INFO

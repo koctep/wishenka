@@ -15,11 +15,12 @@ from tests.test_notice_delivery_repro import _verify_start
 from tests.test_receipt_notices import _Env
 from wishenka.notices.scheduler import ReminderScheduler
 from wishenka.wishlists.service import WishlistService
+from wishenka.wishlists.store import WishlistStore
 
 pytestmark = pytest.mark.timeout(30)
 
 
-async def _seed(store: object, db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def _seed(store: WishlistStore, db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     await _verify_start(monkeypatch, db, OWNER_ID)
 
     async def create(service: WishlistService) -> None:
@@ -30,7 +31,7 @@ async def _seed(store: object, db: Path, monkeypatch: pytest.MonkeyPatch) -> Non
                 event_date=datetime(2030 if index in (0, 4) else 2031, 3, 8, tzinfo=UTC),
             )
 
-    await store.execute(create)  # type: ignore[attr-defined]
+    await create(WishlistService(store))
     with sqlite3.connect(db) as conn:
         for index in range(5):
             conn.execute(

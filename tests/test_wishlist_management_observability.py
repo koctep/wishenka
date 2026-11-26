@@ -55,7 +55,7 @@ def setup_app(tmp_path: Path) -> Iterator[Setup]:
                 wl = await srv.create_wishlist(owner=owner, title="Birthday Wishlist")
                 return wl.id, wl.invite_token, wl.public_token
 
-            wishlist_id, invite_token, public_token = asyncio.run(store.execute(init_data))
+            wishlist_id, invite_token, public_token = asyncio.run(init_data(WishlistService(store)))
         else:
             import asyncio
 

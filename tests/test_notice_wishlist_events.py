@@ -6,7 +6,15 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from tests.notice_support import FakeNoticeSender
-from tests.receipt_support import GIFTER_ID, OWNER, open_store, seed_users
+from tests.receipt_support import (
+    GIFTER_ID,
+    OWNER,
+    open_store,
+    place_item,
+    place_member,
+    place_wishlist,
+    seed_users,
+)
 from tests.test_notice_delivery_repro import _list_with_member, _verify_start
 from tests.test_receipt_notices import _Env
 from wishenka.notices.rate import reserve_permit
@@ -26,7 +34,7 @@ async def test_shared_item_change_and_archive_are_transactional_and_deliverable(
         async def create(service: WishlistService) -> int:
             return (await service.add_wish_item(wishlist, OWNER, title="Original")).id
 
-        item = await store.execute(create)
+        item = await create(WishlistService(store))
         sender = FakeNoticeSender()
         worker = _Env(store, db).worker(sender)
         import time
@@ -49,7 +57,7 @@ async def test_shared_item_change_and_archive_are_transactional_and_deliverable(
         async def archive(service: WishlistService) -> None:
             await service.archive_wish_item(wishlist, item, OWNER)
 
-        await store.execute(archive)
+        await archive(WishlistService(store))
         await worker.run_once(now + 3)
         assert len(sender.calls) == 3 and "Updated" in sender.calls[2][1]
         assert all(chat == GIFTER_ID for chat, _ in sender.calls)
@@ -83,13 +91,13 @@ async def test_membership_and_list_archive_deliver_only_to_authorized_participan
         async def create(service: WishlistService) -> int:
             return (await service.create_wishlist(owner=OWNER, title="Shared event")).id
 
-        wishlist = await store.execute(create)
+        wishlist = await create(WishlistService(store))
         await _verify_start(monkeypatch, db, GIFTER_ID)
 
         async def add(service: WishlistService) -> None:
             await service.add_member(wishlist, OWNER, GIFTER_ID)
 
-        await store.execute(add)
+        await add(WishlistService(store))
         sender = FakeNoticeSender()
         worker = _Env(store, db).worker(sender)
         now = int(time.time()) + 10
@@ -100,7 +108,7 @@ async def test_membership_and_list_archive_deliver_only_to_authorized_participan
         async def archive(service: WishlistService) -> None:
             await service.archive_wishlist(wishlist, OWNER)
 
-        await store.execute(archive)
+        await archive(WishlistService(store))
         await worker.run_once(now + 1)
         assert len(sender.calls) == 2 and "Shared event" in sender.calls[1][1]
 
@@ -121,7 +129,7 @@ async def test_later_reservation_in_same_transaction_is_not_event_time_audience(
             item = await service.add_wish_item(wl.id, OWNER, title="Before reservation")
             await service.create_reservation(item.id, GIFTER, 1)
 
-        await store.execute(setup)
+        await setup(WishlistService(store))
         sender = FakeNoticeSender()
         await _Env(store, db).worker(sender).run_once(int(time.time()) + 10)
         assert sender.calls == []
@@ -168,7 +176,7 @@ async def test_event_datetime_is_interpreted_as_utc_calendar_date(
                 event_date=datetime(2030, 3, 8, 1, tzinfo=timezone(timedelta(hours=3))),
             )
 
-        await store.execute(create)
+        await create(WishlistService(store))
         await _verify_start(monkeypatch, db, OWNER_ID)
         env = _Env(store, db)
         now = int(datetime(2030, 2, 28, tzinfo=UTC).timestamp())
@@ -205,13 +213,13 @@ async def test_invitation_acceptance_notifies_existing_owner(
         async def create(service: WishlistService) -> str:
             return (await service.create_wishlist(owner=OWNER, title="Invite event")).invite_token
 
-        token = await store.execute(create)
+        token = await create(WishlistService(store))
         await _verify_start(monkeypatch, db, OWNER_ID)
 
         async def join(service: WishlistService) -> None:
             await service.join_by_invite(token, GIFTER)
 
-        await store.execute(join)
+        await join(WishlistService(store))
         sender = FakeNoticeSender()
         await _Env(store, db).worker(sender).run_once(int(time.time()) + 10)
         assert len(sender.calls) == 1
@@ -244,7 +252,7 @@ async def test_favorite_tracking_reminder_respects_current_favorite(
             await service.add_favorite(GIFTER, revoked.id)
             return wl.id, revoked.id
 
-        wishlist, revoked = await store.execute(setup)
+        wishlist, revoked = await setup(WishlistService(store))
         await _verify_start(monkeypatch, db, GIFTER_ID)
         now = int(datetime(2030, 3, 1, tzinfo=UTC).timestamp())
         env = _Env(store, db)
@@ -253,7 +261,7 @@ async def test_favorite_tracking_reminder_respects_current_favorite(
         async def revoke(service: WishlistService) -> None:
             await service.remove_favorite(GIFTER, revoked)
 
-        await store.execute(revoke)
+        await revoke(WishlistService(store))
         sender = FakeNoticeSender()
         await env.worker(sender).run_once(now)
         assert len(sender.calls) == 1 and sender.calls[0][0] == GIFTER_ID
@@ -262,7 +270,7 @@ async def test_favorite_tracking_reminder_respects_current_favorite(
         async def remove(service: WishlistService) -> None:
             await service.remove_favorite(GIFTER, wishlist)
 
-        await store.execute(remove)
+        await remove(WishlistService(store))
         await _run_reminder_scan(store, env.settings, now + 1)
         await env.worker(sender).run_once(now + 1)
         assert len(sender.calls) == 1
@@ -282,13 +290,13 @@ async def test_receipt_is_not_sent_after_member_access_revoked(tmp_path: Path) -
         async def add(service: WishlistService) -> None:
             await service.add_member(env.wishlist_id, OWNER, GIFTER_ID)
 
-        await store.execute(add)
+        await add(WishlistService(store))
         await env.receive(1)
 
         async def remove(service: WishlistService) -> None:
             await service.remove_member(env.wishlist_id, OWNER, GIFTER_ID)
 
-        await store.execute(remove)
+        await remove(WishlistService(store))
         sender = FakeNoticeSender()
         await env.worker(sender).run_once(int(time.time()) + 10)
         assert sender.calls == []
@@ -317,7 +325,7 @@ async def test_other_giver_reservation_activity_does_not_generate_notices(
             first = await service.create_reservation(item.id, GIFTER, 1)
             return item.id, first.id
 
-        item, first = await store.execute(setup)
+        item, first = await setup(WishlistService(store))
         with sqlite3.connect(db) as conn:
             conn.execute("DELETE FROM reminder_outbox")
 
@@ -397,7 +405,7 @@ async def test_shared_change_does_not_fall_back_to_reservation_after_member_remo
             await service.create_reservation(item.id, GIFTER, 1)
             return wl.id, item.id
 
-        wishlist, item = await store.execute(setup)
+        wishlist, item = await setup(WishlistService(store))
         with sqlite3.connect(db) as conn:
             conn.execute("DELETE FROM reminder_outbox")
 
@@ -415,7 +423,7 @@ async def test_shared_change_does_not_fall_back_to_reservation_after_member_remo
         async def remove(service: WishlistService) -> None:
             await service.remove_member(wishlist, OWNER, GIFTER_ID)
 
-        await store.execute(remove)
+        await remove(WishlistService(store))
         sender = FakeNoticeSender()
         await _Env(store, db).worker(sender).run_once(int(time.time()) + 10)
         assert all(chat != GIFTER_ID for chat, _ in sender.calls)
@@ -488,7 +496,7 @@ async def test_opted_in_reservation_confirmations_reach_only_actor(
                 item = await service.add_wish_item(wl.id, OWNER, title="Gift", quantity=3)
                 return item.id
 
-            item = await store.execute(setup)
+            item = await setup(WishlistService(store))
 
             async def reserve(service: WishlistService) -> int:
                 return (await service.create_reservation(item, GIFTER)).id
@@ -571,7 +579,7 @@ async def test_list_owner_confirmation_uses_current_wish_recipient(
             )
             return wishlist.id, item.id
 
-        wishlist, item = await store.execute(setup)
+        wishlist, item = await setup(WishlistService(store))
         with sqlite3.connect(db) as conn:
             conn.execute("DELETE FROM reminder_outbox")
 
@@ -626,7 +634,7 @@ async def test_receipt_to_collaborative_owner_uses_current_wish_recipient(
             await service.record_item_fulfillment(item.id, GIFTER, 1)
             return wishlist.id, item.id
 
-        wishlist, item = await store.execute(setup)
+        wishlist, item = await setup(WishlistService(store))
         with sqlite3.connect(db) as conn:
             conn.execute("DELETE FROM reminder_outbox")
             assert conn.execute(
@@ -656,13 +664,13 @@ async def test_confirmation_is_not_queued_for_actual_wish_recipient(collaborativ
     from tests.receipt_support import OWNER_ID
 
     service = WishlistService.in_memory()
-    wishlist = await service.create_wishlist(owner=OWNER, title="Gift")
+    wishlist = place_wishlist(service, OWNER, "Gift")
     if collaborative:
-        await service.add_member(wishlist.id, OWNER, GIFTER_ID)
-    item = await service.add_wish_item(
-        wishlist.id,
-        OWNER,
-        title="Gift",
+        place_member(service, wishlist, GIFTER_ID)
+    item = place_item(
+        service,
+        wishlist,
+        "Gift",
         recipient_user_id=GIFTER_ID if collaborative else None,
     )
     service._new_shared_item_events.clear()

@@ -1237,7 +1237,7 @@ class WishlistStore:
 
     async def execute_wish_idempotent(
         self,
-        operation: Callable[[WishlistService], Awaitable[tuple[int, str, str]]],
+        operation: Callable[[WishlistService], Awaitable[Any]],
         *,
         actor_id: int,
         idempotency_key: str,
@@ -1249,8 +1249,15 @@ class WishlistStore:
         require_member: bool = False,
         check_not_recipient: bool = False,
         now: datetime | None = None,
+        compose_response: Callable[[AsyncConnection, Any], Awaitable[tuple[int, str, str]]]
+        | None = None,
     ) -> IdempotentResult:
-        """Run one wish mutation with atomic idempotency lookup, replay, and persistence."""
+        """Run one wish mutation with atomic idempotency lookup, replay, and persistence.
+
+        ``compose_response`` runs after the wish rows are written and before the
+        idempotency record is stored, on the same connection. Replay returns the
+        stored body and does not call either function again.
+        """
         if (item_id is None) == (reservation_id is None):
             raise ValueError("Wish inventory change requires item_id or reservation_id")
 
@@ -1306,8 +1313,13 @@ class WishlistStore:
                 )
 
             service, snapshot = await self._load_wish(conn, resolved_item_id)
-            resp_status, resp_content_type, resp_body = await operation(service)
-            reservations_written, flushed = await self._persist_wish(conn, service, snapshot)
+            produced = await operation(service)
+            if compose_response is None:
+                resp_status, resp_content_type, resp_body = produced
+                reservations_written, flushed = await self._persist_wish(conn, service, snapshot)
+            else:
+                reservations_written, flushed = await self._persist_wish(conn, service, snapshot)
+                resp_status, resp_content_type, resp_body = await compose_response(conn, produced)
             flushed_shared = list(service._flushed_shared_events)
             pending_commit_logs = list(service._pending_commit_logs)
 
@@ -1845,6 +1857,35 @@ class WishlistStore:
         must serialise with receipts and promises without a second locking scheme.
         """
         return await self._immediate(work)
+
+    async def run_repository(self, work: Callable[[WishlistRepository], Awaitable[T]]) -> T:
+        """Run repository work in one immediate transaction and flush that instance's logs.
+
+        The callback receives the repository this helper constructs. Commit logs queued on
+        that instance are flushed after commit and cleared on failure. There is no snapshot
+        read, snapshot write, or token-collision retry.
+        """
+        repository: WishlistRepository | None = None
+
+        async def body(conn: AsyncConnection) -> T:
+            nonlocal repository
+            repository = WishlistRepository(conn)
+            return await work(repository)
+
+        try:
+            result = await self._immediate(body)
+        except SQLAlchemyError as exc:
+            if repository is not None:
+                repository.clear_commit_logs()
+            _raise_for_storage_error(exc)
+        except BaseException:
+            if repository is not None:
+                repository.clear_commit_logs()
+            raise
+        if repository is None:
+            raise RuntimeError("Wishlist repository was not opened")
+        repository.flush_commit_logs()
+        return result
 
     async def execute_read(self, work: Callable[[AsyncConnection], Awaitable[T]]) -> T:
         """Run ``work`` in a read-only deferred transaction without ``BEGIN IMMEDIATE``."""

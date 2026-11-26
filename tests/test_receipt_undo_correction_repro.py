@@ -116,7 +116,7 @@ async def test_cancel_receipt_restores_active_list_ends_overbooking_and_keeps_ar
             edited = await service.update_wish_item(item_id, OWNER, quantity=3)
             return gifted, res[0].is_fully_received and edited.quantity == 3
 
-        gifted, cabinet_still_received = await store.execute(check_after)
+        gifted, cabinet_still_received = await check_after(WishlistService(store))
         assert gifted == []
         assert cabinet_still_received is False
 
@@ -129,7 +129,7 @@ async def test_cancel_receipt_restores_active_list_ends_overbooking_and_keeps_ar
             await service.archive_wish_item(wishlist_id, item2.id, OWNER)
             return item2.id
 
-        item2_id = await store.execute(setup_archived_remainder)
+        item2_id = await setup_archived_remainder(WishlistService(store))
         r2_id = receipt_rows(db)[-1]["id"]
 
         async def cancel_archived_remainder(service: WishlistService) -> Any:
@@ -260,7 +260,7 @@ async def test_guards_and_concurrent_double_cancel(tmp_path: Path) -> None:
             await service.record_item_fulfillment(item_id, OWNER, 1, wishlist_id=wishlist_id)
             await service.archive_wishlist(wishlist_id, OWNER)
 
-        await store.execute(record_and_archive)
+        await record_and_archive(WishlistService(store))
         r2_id = receipt_rows(db)[-1]["id"]
 
         async def archived_cancel(service: WishlistService) -> None:

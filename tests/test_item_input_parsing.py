@@ -4,6 +4,7 @@ Covers universal input classification, HTML scraping, graceful fallback,
 multi-quantity piece accounting, and surprise invariant integrity.
 """
 
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -40,6 +41,7 @@ from wishenka.wishlists.schemas import (
     WishItemRecipientViewDTO,
 )
 from wishenka.wishlists.service import WishlistService
+from wishenka.wishlists.store import WishlistStore
 
 pytestmark = pytest.mark.timeout(10)
 
@@ -421,32 +423,40 @@ class TestMultiQuantityInvariants:
 
     @pytest.mark.asyncio
     async def test_partial_reservations_by_multiple_independent_gifters(
-        self,
+        self, tmp_path: Path
     ) -> None:
-        service = WishlistService.in_memory()
+        store = WishlistStore(f"sqlite+aiosqlite:///{tmp_path / 'pieces.db'}")
+        await store.initialize()
+        service = WishlistService(store=store)
         owner = make_user(10, "Alice")
         gifter1 = make_user(20, "Bob")
         gifter2 = make_user(30, "Charlie")
         gifter3 = make_user(40, "Dave")
+        try:
+            wl = await service.create_wishlist(owner_id=owner.telegram_id, title="Новоселье")
+            item = await service.add_wish_item(
+                wishlist_id=wl.id,
+                actor=owner,
+                title="Стулья",
+                quantity=4,
+            )
 
-        wl = await service.create_wishlist(owner_id=owner.telegram_id, title="Новоселье")
-        item = await service.add_wish_item(
-            wishlist_id=wl.id,
-            actor=owner,
-            title="Стулья",
-            quantity=4,
-        )
+            res1 = await service.create_reservation(item_id=item.id, user=gifter1, quantity=2)
+            assert res1.quantity == 2
+            loaded = await service.get_wishlist_by_id(wl.id)
+            current = next(it for it in loaded.items if it.id == item.id)
+            assert current.available_quantity == 2
 
-        res1 = await service.create_reservation(item_id=item.id, user=gifter1, quantity=2)
-        assert res1.quantity == 2
-        assert item.available_quantity == 2
+            res2 = await service.create_reservation(item_id=item.id, user=gifter2, quantity=1)
+            assert res2.quantity == 1
+            loaded = await service.get_wishlist_by_id(wl.id)
+            current = next(it for it in loaded.items if it.id == item.id)
+            assert current.available_quantity == 1
 
-        res2 = await service.create_reservation(item_id=item.id, user=gifter2, quantity=1)
-        assert res2.quantity == 1
-        assert item.available_quantity == 1
-
-        with pytest.raises(InsufficientQuantityError):
-            await service.create_reservation(item_id=item.id, user=gifter3, quantity=2)
+            with pytest.raises(InsufficientQuantityError):
+                await service.create_reservation(item_id=item.id, user=gifter3, quantity=2)
+        finally:
+            await store.dispose()
 
     def test_cannot_reduce_desired_quantity_below_reserved_plus_fulfilled(
         self,

@@ -23,6 +23,7 @@ from wishenka.bot.capture import cleanup_drafts
 from wishenka.bot.entry import create_router
 from wishenka.items.schemas import ItemPreviewDTO
 from wishenka.users.store import UserStore
+from wishenka.wishlists.service import WishlistService
 from wishenka.wishlists.store import WishlistStore
 
 pytestmark = pytest.mark.timeout(30)
@@ -84,7 +85,7 @@ async def _setup(
     async def create_default_list(service: Any) -> Any:
         return await service.create_wishlist(owner=OWNER, title="List 1")
 
-    await store.execute(create_default_list)
+    await create_default_list(WishlistService(store))
 
     preview = AsyncMock()
     preview.preview = AsyncMock(return_value=ItemPreviewDTO(title="Lamp"))

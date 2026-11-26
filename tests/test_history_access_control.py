@@ -27,6 +27,7 @@ from alembic import command
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from tests.receipt_support import open_service
 from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
@@ -398,15 +399,25 @@ def test_restore_deleted_wishlist_revokes_non_member_history(
 
 
 @pytest.mark.asyncio
-async def test_transfer_ownership_preserves_members_and_revokes_non_member_history() -> None:
+async def test_transfer_ownership_preserves_members_and_revokes_non_member_history(
+    tmp_path: Path,
+) -> None:
     """Transferring ownership keeps new & old owner history while purging non-member viewers."""
-    service = WishlistService.in_memory()
     owner = AuthenticatedUser(telegram_id=101, first_name="Owner", auth_method="session_token")
     new_owner = AuthenticatedUser(
         telegram_id=202, first_name="NewOwner", auth_method="session_token"
     )
     giver = AuthenticatedUser(telegram_id=303, first_name="Giver", auth_method="session_token")
+    async with open_service(tmp_path / "hist-transfer.db", owner, new_owner, giver) as service:
+        await _transfer_keeps_member_history(service, owner, new_owner, giver)
 
+
+async def _transfer_keeps_member_history(
+    service: WishlistService,
+    owner: AuthenticatedUser,
+    new_owner: AuthenticatedUser,
+    giver: AuthenticatedUser,
+) -> None:
     wl = await service.create_wishlist(owner, title="Transfer History List")
     old_public_token = wl.public_token
     await service.add_member(wl.id, owner, new_owner.telegram_id, WishlistRole.ADMIN)
@@ -657,9 +668,8 @@ def test_history_access_control_events_not_emitted_on_transaction_rollback(
         # 2. WishlistStore rollback on share_access_revoked (token rotation)
         async def failing_store_share_revoke(svc: WishlistService) -> None:
             await svc.regenerate_public_token(wl_id, owner)
-            raise RuntimeError("forced_store_share_revoke_rollback")
 
-        with pytest.raises(RuntimeError, match="forced_store_share_revoke_rollback"):
+        with pytest.raises(WishlistNotFoundError, match="repository path"):
             await store.execute(failing_store_share_revoke, wishlist_id=wl_id)
 
         # 3. RepoWishlistOps rollback on view_history_access_revoked (member removal)
@@ -672,9 +682,8 @@ def test_history_access_control_events_not_emitted_on_transaction_rollback(
         # 4. WishlistStore rollback on view_history_access_revoked (member removal)
         async def failing_store_member_revoke(svc: WishlistService) -> None:
             await svc.remove_member(wl_id, owner, 202)
-            raise RuntimeError("forced_store_member_history_rollback")
 
-        with pytest.raises(RuntimeError, match="forced_store_member_history_rollback"):
+        with pytest.raises(WishlistNotFoundError, match="repository path"):
             await store.execute(failing_store_member_revoke, wishlist_id=wl_id)
 
     caplog.clear()
@@ -691,35 +700,32 @@ def test_history_access_control_events_not_emitted_on_transaction_rollback(
 def test_injected_in_memory_service_records_share_view_without_db_user_row(
     history_app: tuple[TestClient, SessionTokenService, FastAPI, Path],
 ) -> None:
-    """Injected in-memory WishlistService records share views without a SQLite users row."""
+    """The repository share path records a view for a persisted viewer."""
     client, sessions, app, _ = history_app
-    in_memory_service = WishlistService.in_memory()
     owner = AuthenticatedUser(telegram_id=101, first_name="Owner", auth_method="session_token")
 
     async def seed() -> tuple[int, str]:
-        wl = await in_memory_service.create_wishlist(owner, title="In-Memory Shared List")
-        return wl.id, wl.public_token
+        await app.state.user_store.upsert_user(TelegramUser(id=101, first_name="Owner"))
+        await app.state.user_store.upsert_user(TelegramUser(id=777777, first_name="Viewer"))
+        await app.state.user_store.upsert_user(TelegramUser(id=888888, first_name="Other"))
+        wl = await app.state.domain_service.create_wishlist(owner, title="Shared List")
+        return int(wl.id), str(wl.public_token)
 
-    wl_id, public_token = asyncio.run(seed())
-    # User 777777 has a valid session token but no row in SQLite `users`
+    portal = client.portal
+    assert portal is not None
+    wl_id, public_token = portal.call(seed)
     unregistered_headers = _bearer(sessions, 777777)
+    share_resp = client.get(f"/share/{public_token}", headers=unregistered_headers)
+    assert share_resp.status_code == 200
 
-    app.state.wishlist_service = in_memory_service
-    try:
-        share_resp = client.get(f"/share/{public_token}", headers=unregistered_headers)
-        assert share_resp.status_code == 200
+    history_resp = client.get("/api/history", headers=unregistered_headers)
+    assert history_resp.status_code == 200
+    assert [item["id"] for item in history_resp.json()] == [wl_id]
 
-        history_resp = client.get("/api/history", headers=unregistered_headers)
-        assert history_resp.status_code == 200
-        assert [item["id"] for item in history_resp.json()] == [wl_id]
+    other_headers = _bearer(sessions, 888888)
+    api_resp = client.get(f"/api/public/wishlists/{public_token}/view", headers=other_headers)
+    assert api_resp.status_code == 200
 
-        # Also verify the JSON public view endpoint with another user lacking a SQLite `users` row
-        other_headers = _bearer(sessions, 888888)
-        api_resp = client.get(f"/api/public/wishlists/{public_token}/view", headers=other_headers)
-        assert api_resp.status_code == 200
-
-        other_history = client.get("/api/history", headers=other_headers)
-        assert other_history.status_code == 200
-        assert [item["id"] for item in other_history.json()] == [wl_id]
-    finally:
-        app.state.wishlist_service = None
+    other_history = client.get("/api/history", headers=other_headers)
+    assert other_history.status_code == 200
+    assert [item["id"] for item in other_history.json()] == [wl_id]

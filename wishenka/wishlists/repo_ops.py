@@ -1248,6 +1248,17 @@ class RepoWishlistOps:
                 },
             )
             raise WishlistNotFoundError(f"Wishlist {wishlist_id} not found")
+        if not await self.repo.user_exists(user.telegram_id):
+            logger.warning(
+                "View history record skipped: user %s is not stored",
+                user.telegram_id,
+                extra={
+                    "event": "view_history_user_missing",
+                    "wishlist_id": wishlist_id,
+                    "user_id": user.telegram_id,
+                },
+            )
+            raise WishlistNotFoundError(f"Wishlist {wishlist_id} not found")
         entry = ViewHistoryEntry(
             id=0,
             user_id=user.telegram_id,

@@ -67,10 +67,7 @@ async def _execute[T](
     *,
     repo: WishlistRepository | None = None,
 ) -> T:
-    """Execute a domain operation inside WishlistRepository or injected test service."""
-    injected = getattr(request.app.state, "wishlist_service", None)
-    if injected is not None:
-        return await action(injected)
+    """Execute a domain operation on the request repository."""
     if repo is None:
         raise RuntimeError("WishlistRepository dependency is required")
     return await action(RepoWishlistOps(repo))
@@ -934,11 +931,7 @@ async def get_edit_item_modal(
     ) -> tuple[dict[str, Any], int, bool, list[dict[str, Any]]]:
         wl = await svc.get_wishlist_by_id(wishlist_id)
         _ensure_member_and_active(wl, user)
-        item = (
-            next((it for it in wl.items if it.id == item_id), None)
-            if isinstance(svc, RepoWishlistOps)
-            else svc._items.get(item_id)
-        )
+        item = next((it for it in wl.items if it.id == item_id), None)
         if item is None or item.wishlist_id != wishlist_id:
             raise ItemNotFoundError(f"Item {item_id} not found")
         received_qty = item.received_quantity
@@ -1077,7 +1070,7 @@ async def submit_edit_item(
     ) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
         nonlocal received_quantity_snapshot, is_collaborative_snapshot
         nonlocal collaborative_members_snapshot
-        wl = await svc.get_wishlist_by_id(wishlist_id)
+        wl = await svc._lookup_wishlist(wishlist_id)
         _ensure_member_and_active(wl, user)
         existing = svc._items.get(item_id)
         if existing is None or existing.wishlist_id != wishlist_id:
@@ -1105,15 +1098,11 @@ async def submit_edit_item(
         return project_wish_item(updated, user)
 
     try:
-        injected = getattr(request.app.state, "wishlist_service", None)
-        if injected is not None:
-            projected_item = await action(injected)
-        else:
-            projected_item = await request.app.state.wishlist_store.execute_wish(
-                action,
-                item_id=item_id,
-                operation_name="submit_edit_item",
-            )
+        projected_item = await request.app.state.wishlist_store.execute_wish(
+            action,
+            item_id=item_id,
+            operation_name="submit_edit_item",
+        )
     except InventoryBusyError:
         logger.warning(
             "Item edit was not saved because the wish was busy (item %s)",

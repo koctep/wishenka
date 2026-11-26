@@ -299,11 +299,14 @@ async def _execute[T](
     operation: Callable[[WishlistService], Awaitable[T]],
     *,
     initialize: bool = False,
+    on_store: bool = False,
 ) -> T:
     store = WishlistStore(f"sqlite+aiosqlite:///{db_path}")
     try:
         if initialize:
             await store.initialize()
+        if on_store:
+            return await operation(WishlistService(store))
         return await store.execute(operation)
     finally:
         await store.engine.dispose()
@@ -352,7 +355,7 @@ async def _seed_wishlist(db_path: Path, quantities: list[int]) -> tuple[int, lis
             item_ids.append(item.id)
         return wishlist.id, item_ids
 
-    return await _execute(db_path, setup, initialize=True)
+    return await _execute(db_path, setup, initialize=True, on_store=True)
 
 
 async def _seed_reservation(
@@ -675,7 +678,7 @@ async def test_one_store_keeps_self_booking_and_archive_rules(tmp_path: Path) ->
     async def archive(service: WishlistService) -> None:
         await service.archive_wishlist(wishlist_id, owner)
 
-    await _execute(db_path, archive)
+    await _execute(db_path, archive, on_store=True)
 
     async def book_archived(service: WishlistService) -> None:
         await service.create_reservation(

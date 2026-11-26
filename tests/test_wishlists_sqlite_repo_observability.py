@@ -10,6 +10,7 @@ from sqlalchemy import text
 
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.items.models import ItemPriority
+from wishenka.wishlists.exceptions import WishlistNotFoundError
 from wishenka.wishlists.models import (
     Reservation,
     ReservationStatus,
@@ -36,18 +37,19 @@ async def test_wishlist_store_read_write_structured_logging(
     await store.initialize()
 
     owner = AuthenticatedUser(telegram_id=1001, first_name="Bob")
+    service = WishlistService(store)
+    wishlist = await service.create_wishlist(owner=owner, title="Observability Wishlist")
+    await service.add_wish_item(
+        wishlist_id=wishlist.id,
+        actor=owner,
+        title="Observability Item",
+    )
 
-    async def create_op(service: WishlistService) -> Wishlist:
-        wl = await service.create_wishlist(owner=owner, title="Observability Wishlist")
-        await service.add_wish_item(
-            wishlist_id=wl.id,
-            actor=owner,
-            title="Observability Item",
-        )
-        return wl
+    async def snapshot(hydrated: WishlistService) -> None:
+        await hydrated.get_user_reservations(owner.telegram_id)
 
     with caplog.at_level(logging.INFO, logger="wishenka.wishlists.store"):
-        await store.execute(create_op)
+        await store.execute(snapshot)
 
     read_records = [r for r in caplog.records if getattr(r, "event", None) == "wishlist_store_read"]
     write_records = [
@@ -251,7 +253,7 @@ async def test_token_redaction_in_all_logs(
 async def test_token_collision_retry_logging(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Verify token collision emits structured retry log without leaking colliding token."""
+    """A shared create retries a colliding token on the repository path and does not log it."""
     db_path = tmp_path / "obs_collision_retry.db"
     store = WishlistStore(f"sqlite+aiosqlite:///{db_path}")
     await store.initialize()
@@ -286,19 +288,40 @@ async def test_token_collision_retry_logging(
             )
 
         with patch("wishenka.wishlists.service.secrets.token_urlsafe", side_effect=mock_generate):
+            created = await WishlistService(store).create_wishlist(owner=owner, title="Retry List")
 
-            async def create_op(service: WishlistService) -> Wishlist:
-                return await service.create_wishlist(owner=owner, title="Retry List")
-
-            await store.execute(create_op)
-
-    retry_records = [
-        r for r in caplog.records if getattr(r, "event", None) == "wishlist_token_collision_retry"
-    ]
-    assert len(retry_records) >= 1, "Expected token collision retry log event"
+    assert created.title == "Retry List"
+    assert call_count > 2
 
     for r in caplog.records:
         assert colliding_tokens[0] not in r.getMessage()
         assert colliding_tokens[0] not in repr(r.__dict__)
 
     await store.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_in_memory_shared_action_logs_repository_path_required(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An in-memory shared action fails closed and names only the operation."""
+    service = WishlistService.in_memory()
+    owner = AuthenticatedUser(telegram_id=1, first_name="Ada")
+    with caplog.at_level(logging.WARNING, logger="wishenka.wishlists"):
+        with pytest.raises(WishlistNotFoundError, match="repository path"):
+            await service.record_view(owner, 1)
+        with pytest.raises(WishlistNotFoundError, match="repository path"):
+            await service.get_wishlist_by_public_token("secret-public-token", owner)
+
+    matches = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "wishlist_repository_path_required"
+    ]
+    assert [getattr(record, "operation", None) for record in matches] == [
+        "record_view",
+        "get_wishlist_by_public_token",
+    ]
+    rendered = " ".join(record.getMessage() + repr(record.__dict__) for record in matches)
+    assert "secret-public-token" not in rendered
+    assert "Ada" not in rendered

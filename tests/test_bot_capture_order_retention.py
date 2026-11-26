@@ -29,6 +29,7 @@ from wishenka.config import Settings
 from wishenka.items.schemas import ItemPreviewDTO
 from wishenka.users.store import UserStore
 from wishenka.wishlists.deletion import AccountDeletionService
+from wishenka.wishlists.service import WishlistService
 from wishenka.wishlists.store import WishlistStore
 
 pytestmark = pytest.mark.timeout(30)
@@ -127,7 +128,7 @@ async def test_watermark_updated_at_refreshed_on_edit_and_save(
     store = WishlistStore(url)
     users = UserStore(url)
     await store.initialize()
-    await store.execute(lambda svc: svc.create_wishlist(owner=OWNER, title="List 1"))
+    await WishlistService(store).create_wishlist(owner=OWNER, title="List 1")
 
     clock_now = [datetime(2026, 6, 1, 12, 0, tzinfo=UTC)]
     preview = AsyncMock()

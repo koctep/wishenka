@@ -4,9 +4,11 @@ Tests reservation lifecycle, surprise invariant, and concurrency.
 """
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
+from tests.receipt_support import open_service, place_item, place_member, place_wishlist
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.wishlists.exceptions import (
     CannotReduceQuantityBelowReservedError,
@@ -29,6 +31,52 @@ from wishenka.wishlists.service import WishlistService
 pytestmark = pytest.mark.timeout(10)
 
 
+def graph_service() -> WishlistService:
+    """In-memory graph for reservation checks. Shared list actions stay fail-closed."""
+    service = WishlistService.in_memory()
+
+    async def create_wishlist(
+        owner: AuthenticatedUser,
+        title: str,
+        **_kwargs: object,
+    ) -> object:
+        return place_wishlist(service, owner, title)
+
+    async def add_wish_item(
+        wishlist_id: int,
+        actor: AuthenticatedUser,
+        title: str,
+        quantity: int = 1,
+        recipient_user_id: int | None = None,
+        recipient_name: str | None = None,
+        **_kwargs: object,
+    ) -> object:
+        del actor
+        return place_item(
+            service,
+            service._wishlists[wishlist_id],
+            title,
+            quantity=quantity,
+            recipient_user_id=recipient_user_id,
+            recipient_name=recipient_name,
+        )
+
+    async def add_member(
+        wishlist_id: int,
+        actor: AuthenticatedUser,
+        user_id: int,
+        role: WishlistRole = WishlistRole.MEMBER,
+        **_kwargs: object,
+    ) -> object:
+        del actor
+        return place_member(service, service._wishlists[wishlist_id], user_id, role)
+
+    service.create_wishlist = create_wishlist  # type: ignore[assignment]
+    service.add_wish_item = add_wish_item  # type: ignore[assignment]
+    service.add_member = add_member  # type: ignore[assignment]
+    return service
+
+
 def make_user(telegram_id: int, first_name: str, username: str | None = None) -> AuthenticatedUser:
     """Create test AuthenticatedUser instance."""
     return AuthenticatedUser(
@@ -47,66 +95,53 @@ def make_user(telegram_id: int, first_name: str, username: str | None = None) ->
 class TestSurpriseInvariantIntegrity:
     """Verify zero-leak projection to recipient and strict self-reservation guards."""
 
-    async def test_recipient_view_has_no_reservation_attributes(self) -> None:
+    async def test_recipient_view_has_no_reservation_attributes(self, tmp_path: Path) -> None:
         """Surprise Invariant: Recipient view must NOT expose reservation attributes."""
-        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Bob")
+        async with open_service(tmp_path / "surprise-view.db", owner, gifter) as service:
+            wl = await service.create_wishlist(owner=owner, title="Alice's Wishlist")
+            item = await service.add_wish_item(
+                wishlist_id=wl.id,
+                actor=owner,
+                title="Noise Cancelling Headphones",
+                quantity=1,
+            )
+            await service.get_wishlist_by_public_token(wl.public_token, gifter)
+            res = await service.create_reservation(item_id=item.id, user=gifter, quantity=1)
 
-        wl = await service.create_wishlist(owner=owner, title="Alice's Wishlist")
-        item = await service.add_wish_item(
-            wishlist_id=wl.id,
-            actor=owner,
-            title="Noise Cancelling Headphones",
-            quantity=1,
-        )
+            recip_view = await service.get_wishlist_view(wl.id, current_user=owner)
+            assert len(recip_view.items) == 1
+            recip_item = recip_view.items[0]
+            assert isinstance(recip_item, WishItemRecipientViewDTO)
+            assert recip_item.is_recipient is True
 
-        # Gifter creates a reservation
-        res = await service.create_reservation(item_id=item.id, user=gifter, quantity=1)
+            forbidden_fields = {
+                "available_quantity",
+                "is_fully_reserved",
+                "is_reserved_by_me",
+                "my_reserved_quantity",
+                "my_reservation_status",
+                "my_reservation_id",
+                "reservations",
+            }
+            for field_name in forbidden_fields:
+                assert field_name not in WishItemRecipientViewDTO.model_fields
+                assert not hasattr(recip_item, field_name)
 
-        # Recipient view check
-        recip_view = await service.get_wishlist_view(wl.id, current_user=owner)
-        assert len(recip_view.items) == 1
-        recip_item = recip_view.items[0]
-        assert isinstance(recip_item, WishItemRecipientViewDTO)
-        assert recip_item.is_recipient is True
-
-        # Assert recipient schema has NO reservation leak
-        forbidden_fields = {
-            "available_quantity",
-            "is_fully_reserved",
-            "is_reserved_by_me",
-            "my_reserved_quantity",
-            "my_reservation_status",
-            "my_reservation_id",
-            "reservations",
-        }
-        for field_name in forbidden_fields:
-            assert field_name not in WishItemRecipientViewDTO.model_fields
-            assert not hasattr(recip_item, field_name)
-
-        # Gifter view check: must expose availability AND my_reservation_status & my_reservation_id
-        gifter_view = await service.get_wishlist_view(wl.id, current_user=gifter)
-        assert len(gifter_view.items) == 1
-        gifter_item = gifter_view.items[0]
-        assert isinstance(gifter_item, WishItemGifterViewDTO)
-        assert gifter_item.is_recipient is False
-        assert gifter_item.is_reserved_by_me is True
-        assert gifter_item.my_reserved_quantity == 1
-
-        # Gifter must see their own reservation status and ID (Gaps identified in Architecture 1.3)
-        assert hasattr(gifter_item, "my_reservation_status"), (
-            "Gifter view must include my_reservation_status"
-        )
-        assert gifter_item.my_reservation_status == ReservationStatus.ACTIVE
-        assert hasattr(gifter_item, "my_reservation_id"), (
-            "Gifter view must include my_reservation_id"
-        )
-        assert gifter_item.my_reservation_id == res.id
+            gifter_view = await service.get_wishlist_view(wl.id, current_user=gifter)
+            assert len(gifter_view.items) == 1
+            gifter_item = gifter_view.items[0]
+            assert isinstance(gifter_item, WishItemGifterViewDTO)
+            assert gifter_item.is_recipient is False
+            assert gifter_item.is_reserved_by_me is True
+            assert gifter_item.my_reserved_quantity == 1
+            assert gifter_item.my_reservation_status == ReservationStatus.ACTIVE
+            assert gifter_item.my_reservation_id == res.id
 
     async def test_recipient_cannot_book_own_gift_raises_self_reservation_error(self) -> None:
         """Personal wishlist owner cannot reserve their own gift."""
-        service = WishlistService.in_memory()
+        service = graph_service()
         owner = make_user(1001, "Alice")
         wl = await service.create_wishlist(owner=owner, title="Alice's Wishlist")
         item = await service.add_wish_item(
@@ -121,7 +156,7 @@ class TestSurpriseInvariantIntegrity:
 
     async def test_coauthor_cannot_book_item_where_they_are_explicit_recipient(self) -> None:
         """In collaborative wishlist, assigned co-author recipient cannot reserve own item."""
-        service = WishlistService.in_memory()
+        service = graph_service()
         owner = make_user(1001, "Alice")
         coauthor = make_user(1002, "Bob")
         gifter = make_user(2001, "Charlie")
@@ -166,7 +201,7 @@ class TestReservationLifecycleAndPurchasedState:
 
     async def test_mark_reservation_as_purchased_and_revert_to_active(self) -> None:
         """Gifter can mark reservation as PURCHASED and revert back to ACTIVE."""
-        service = WishlistService.in_memory()
+        service = graph_service()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Bob")
 
@@ -188,7 +223,7 @@ class TestReservationLifecycleAndPurchasedState:
 
     async def test_purchased_reservation_retains_inventory_lock(self) -> None:
         """PURCHASED reservation must lock inventory; available quantity must not increase."""
-        service = WishlistService.in_memory()
+        service = graph_service()
         owner = make_user(1001, "Alice")
         gifter1 = make_user(2001, "Bob")
         gifter2 = make_user(2002, "Charlie")
@@ -219,7 +254,7 @@ class TestReservationLifecycleAndPurchasedState:
 
     async def test_cancel_reservation_restocks_available_quantity(self) -> None:
         """Cancelling reservation in ACTIVE/PURCHASED immediately restocks available quantity."""
-        service = WishlistService.in_memory()
+        service = graph_service()
         owner = make_user(1001, "Alice")
         gifter1 = make_user(2001, "Bob")
         gifter2 = make_user(2002, "Charlie")
@@ -245,7 +280,7 @@ class TestReservationLifecycleAndPurchasedState:
 
     async def test_update_reservation_quantity_partial_adjustments(self) -> None:
         """Gifter can adjust reserved quantity up or down with immediate inventory recalculation."""
-        service = WishlistService.in_memory()
+        service = graph_service()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Bob")
 
@@ -273,7 +308,7 @@ class TestReservationLifecycleAndPurchasedState:
 
     async def test_update_reservation_quantity_rejects_insufficient_balance(self) -> None:
         """Attempting to increase reservation beyond balance raises InsufficientQuantityError."""
-        service = WishlistService.in_memory()
+        service = graph_service()
         owner = make_user(1001, "Alice")
         gifter1 = make_user(2001, "Bob")
         gifter2 = make_user(2002, "Charlie")
@@ -305,7 +340,7 @@ class TestConcurrencyAndOverbookingGuards:
 
     async def test_concurrent_race_condition_prevented_by_coordinator(self) -> None:
         """Concurrent reservation attempts on remaining units serialize with zero overbooking."""
-        service = WishlistService.in_memory()
+        service = graph_service()
         assert service.concurrency_coordinator is not None, (
             "WishlistService must have an ItemConcurrencyCoordinator"
         )
@@ -346,7 +381,7 @@ class TestItemReductionLockWithReservations:
         self,
     ) -> None:
         """Item quantity reduction blocked if quantity < active + purchased reservations."""
-        service = WishlistService.in_memory()
+        service = graph_service()
         owner = make_user(1001, "Alice")
         gifter1 = make_user(2001, "Bob")
         gifter2 = make_user(2002, "Charlie")
@@ -391,7 +426,7 @@ class TestMyReservationsAggregatedCabinet:
 
     async def test_get_user_reservations_returns_active_and_purchased_items(self) -> None:
         """get_user_reservations returns all non-cancelled bookings of user across wishlists."""
-        service = WishlistService.in_memory()
+        service = graph_service()
         owner1 = make_user(1001, "Alice")
         owner2 = make_user(1002, "Bob")
         gifter = make_user(2001, "Charlie")
@@ -440,7 +475,7 @@ class TestMyReservationsAggregatedCabinet:
 
     async def test_get_user_reservations_summary_counter(self) -> None:
         """get_user_reservations_summary returns active/purchased and distinct items counts."""
-        service = WishlistService.in_memory()
+        service = graph_service()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Bob")
 
@@ -462,7 +497,7 @@ class TestMyReservationsAggregatedCabinet:
 
     async def test_archived_item_persists_in_my_reservations_with_flag(self) -> None:
         """Archiving an item by author keeps reservation in gifter cabinet with flag."""
-        service = WishlistService.in_memory()
+        service = graph_service()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Bob")
 

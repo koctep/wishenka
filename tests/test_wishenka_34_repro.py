@@ -67,9 +67,7 @@ async def test_wishlist_notification_override_precedence_reset_and_authz(tmp_pat
     with app_env(tmp_path, db_name) as (client, sessions, app):
         db = Path(db_path_of(app))
         async with open_store(db) as store:
-            wl = await store.execute(
-                lambda svc: svc.create_wishlist(owner=OWNER, title="Birthday List")
-            )
+            wl = await WishlistService(store).create_wishlist(owner=OWNER, title="Birthday List")
 
         owner_headers = bearer(sessions, OWNER_ID, "Alice")
         stranger_headers = bearer(sessions, STRANGER_ID, "Sven")
@@ -271,7 +269,7 @@ async def test_surprise_invariant_holds_when_recipient_enables_all_notifications
                 item = await service.add_wish_item(wl.id, OWNER, title="Headphones", quantity=2)
                 return wl.id, item.id
 
-            wishlist_id, item_id = await store.execute(setup)
+            wishlist_id, item_id = await setup(WishlistService(store))
 
             owner_headers = bearer(sessions, OWNER_ID, "Alice")
             assert (

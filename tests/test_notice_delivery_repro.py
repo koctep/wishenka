@@ -42,6 +42,8 @@ from tests.test_receipt_notices import _Env
 from wishenka.bot.entry import create_router
 from wishenka.i18n import resolve_telegram_locale
 from wishenka.users.store import UserStore
+from wishenka.wishlists.repo_ops import RepoWishlistOps
+from wishenka.wishlists.repository import WishlistRepository
 from wishenka.wishlists.service import WishlistService
 from wishenka.wishlists.store import WishlistStore
 
@@ -110,7 +112,7 @@ async def _list_with_member(store: WishlistStore) -> int:
         await service.add_member(wishlist.id, OWNER, GIFTER_ID)
         return wishlist.id
 
-    return await store.execute(setup)
+    return await setup(WishlistService(store))
 
 
 async def test_wish_creation_produces_durable_work_across_store_restart(
@@ -126,7 +128,7 @@ async def test_wish_creation_produces_durable_work_across_store_restart(
         async def add(service: WishlistService) -> Any:
             return await service.add_wish_item(wishlist_id, OWNER, title="Unique new wish")
 
-        item = await store.execute(add)
+        item = await add(WishlistService(store))
 
     async with open_store(db) as restarted:
         sender = FakeNoticeSender()
@@ -145,12 +147,12 @@ async def test_rolled_back_write_does_not_create_notification_work(tmp_path: Pat
         wishlist_id = await _list_with_member(store)
         before = _notice_values(db)
 
-        async def fail(service: WishlistService) -> None:
-            await service.add_wish_item(wishlist_id, OWNER, title="Never committed")
+        async def fail(repo: WishlistRepository) -> None:
+            await RepoWishlistOps(repo).add_wish_item(wishlist_id, OWNER, title="Never committed")
             raise RuntimeError("deliberate rollback")
 
         with pytest.raises(RuntimeError, match="deliberate rollback"):
-            await store.execute(fail)
+            await store.run_repository(fail)
         assert _notice_values(db) == before
 
 
@@ -341,17 +343,17 @@ async def test_revoked_access_suppresses_pending_shared_change(
         async def add_second_member(service: WishlistService) -> None:
             await service.add_member(wishlist_id, OWNER, OTHER_GIFTER_ID)
 
-        await store.execute(add_second_member)
+        await add_second_member(WishlistService(store))
 
         async def add(service: WishlistService) -> None:
             await service.add_wish_item(wishlist_id, OWNER, title="Private surprise")
 
-        await store.execute(add)
+        await add(WishlistService(store))
 
         async def revoke(service: WishlistService) -> None:
             await service.remove_member(wishlist_id, OWNER, GIFTER_ID)
 
-        await store.execute(revoke)
+        await revoke(WishlistService(store))
         sender = FakeNoticeSender()
         worker = _Env(store, db).worker(sender)
         now = int(time.time()) + 10
@@ -622,7 +624,7 @@ async def test_recipient_giver_overlap_still_receives_safe_list_change(
         async def promote(service: WishlistService) -> None:
             await service.add_member(env.wishlist_id, OWNER, GIFTER_ID, WishlistRole.ADMIN)
 
-        await store.execute(promote)
+        await promote(WishlistService(store))
         sql_exec(
             db,
             "INSERT INTO wl_reservations (id, wish_item_id, user_id, quantity, status, "
@@ -633,7 +635,7 @@ async def test_recipient_giver_overlap_still_receives_safe_list_change(
         async def create(service: WishlistService) -> None:
             await service.add_wish_item(env.wishlist_id, GIFTER, title="Independent list change")
 
-        await store.execute(create)
+        await create(WishlistService(store))
         sender = FakeNoticeSender()
         worker = env.worker(sender)
         now = int(time.time()) + 10
@@ -659,7 +661,7 @@ async def test_dated_list_reminder_survives_scheduler_restart_and_utc_boundary(
                 owner=OWNER, title="Spring occasion", event_date=event_date
             )
 
-        await store.execute(create)
+        await create(WishlistService(store))
         await _verify_start(monkeypatch, db, OWNER_ID)
         env = _Env(store, db)
         before = int(datetime(2030, 2, 28, 23, 59, tzinfo=UTC).timestamp())
@@ -700,7 +702,7 @@ async def test_changed_event_date_invalidates_old_pending_reminder(
             )
             return wl.id
 
-        list_id = await store.execute(create)
+        list_id = await create(WishlistService(store))
         await _verify_start(monkeypatch, db, OWNER_ID)
         env = _Env(store, db)
         now = int(datetime(2030, 3, 1, tzinfo=UTC).timestamp())
@@ -733,7 +735,7 @@ async def test_no_birthday_entry_produces_no_birthday_reminder(
                 owner=OWNER, title="Control occasion", event_date=datetime(2030, 3, 8, tzinfo=UTC)
             )
 
-        await store.execute(create)
+        await create(WishlistService(store))
         await _verify_start(monkeypatch, db, OWNER_ID)
         env = _Env(store, db)
         now = int(datetime(2030, 3, 1, tzinfo=UTC).timestamp())

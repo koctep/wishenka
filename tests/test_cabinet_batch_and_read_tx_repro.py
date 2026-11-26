@@ -44,7 +44,7 @@ async def test_cabinet_read_uses_bounded_batched_queries(tmp_path: Path) -> None
                     )
                     await service.create_reservation(item_id=item.id, user=giver, quantity=1)
 
-        await store.execute(seed)
+        await seed(WishlistService(store))
 
         select_statements: list[str] = []
 
@@ -93,7 +93,7 @@ async def test_cabinet_read_does_not_block_concurrent_writer_and_keeps_snapshot(
             res = await service.create_reservation(item_id=item.id, user=giver, quantity=1)
             return res.id
 
-        reservation_id = await store.execute(seed)
+        reservation_id = await seed(WishlistService(store))
 
         read_pinned = asyncio.Event()
         release_read = asyncio.Event()
@@ -170,7 +170,7 @@ async def test_cabinet_response_parity_with_in_memory_service(tmp_path: Path) ->
             await service.cancel_reservation(r3.id, giver)
             await service.update_reservation_quantity(r1.id, giver, 2)
 
-        await store.execute(seed)
+        await seed(WishlistService(store))
 
         expected_rows = await store.execute(lambda s: s.get_user_reservations(giver.telegram_id))
         expected_summary = await store.execute(
@@ -264,7 +264,7 @@ async def test_cabinet_representative_volume_latency_and_chunking(tmp_path: Path
                     await service.create_reservation(item_id=item.id, user=giver, quantity=1)
             return first_item_id, first_wl_id
 
-        first_item_id, first_wl_id = await store.execute(seed)
+        first_item_id, first_wl_id = await seed(WishlistService(store))
 
         started = time.perf_counter()
         rows = await store.get_user_reservations(giver.telegram_id)
@@ -311,7 +311,7 @@ async def test_cabinet_and_batch_read_logging_omits_pii_and_tokens(
             await service.create_reservation(item_id=item.id, user=giver, quantity=1)
             return wl.public_token, wl.invite_token
 
-        public_token, invite_token = await store.execute(seed)
+        public_token, invite_token = await seed(WishlistService(store))
         caplog.clear()
 
         with (

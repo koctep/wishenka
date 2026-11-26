@@ -30,7 +30,7 @@ from tests.test_wishlist_delete_api import (
     _delete,
     _open_app,
     _reserve,
-    _run,
+    _run_shared,
     _share,
 )
 from wishenka.logging import JsonFormatter
@@ -224,7 +224,7 @@ def test_archived_list_logs_blocked_warning_and_no_success_events(
     async def archive(service: WishlistService) -> None:
         await service.archive_wishlist(created["id"], OWNER)
 
-    _run(env, archive)
+    _run_shared(env, archive)
 
     with caplog.at_level(logging.INFO, logger="wishenka"):
         caplog.clear()
@@ -250,7 +250,7 @@ def test_expired_retention_logs_warning_and_no_success_events(
         async def delete(service: WishlistService) -> None:
             await service.delete_wishlist(created["id"], OWNER)
 
-        _run(first, delete)
+        _run_shared(first, delete)
     expired = (datetime.now(UTC) - timedelta(days=31)).isoformat()
     with sqlite3.connect(db_path) as conn:
         conn.execute("UPDATE wl_lists SET updated_at = ? WHERE id = ?", (expired, created["id"]))

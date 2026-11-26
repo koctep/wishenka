@@ -69,10 +69,7 @@ _repo_ctx: ContextVar[WishlistRepository | None] = ContextVar("_repo_ctx", defau
 
 
 async def _execute(request: Request, action: Any) -> Any:
-    """Run a receipt UI action via injected service, execute_wish, or WishlistRepository."""
-    injected = getattr(request.app.state, "wishlist_service", None)
-    if injected is not None:
-        return await action(injected)
+    """Run a receipt UI action via execute_wish or WishlistRepository."""
     item_id = getattr(action, "_wish_item_id", None)
     if item_id is not None:
         store = request.app.state.wishlist_store
@@ -473,12 +470,6 @@ async def record_receipt_ui(
     mutate._wish_item_id = item_id  # type: ignore[attr-defined]
     mutate._wish_op_name = "record_receipt_ui"  # type: ignore[attr-defined]
 
-    async def action(svc: WishlistService) -> _Receipt:
-        item = await svc.record_item_fulfillment(item_id, user, count, wishlist_id=wishlist_id)
-        return _Receipt(
-            item.title, item.remaining_quantity, await _read_state(svc, wishlist_id, user, locale)
-        )
-
     def _render_receipt_html(done: _Receipt) -> str:
         state = done.state
         shown = state.shown(item_id)
@@ -500,20 +491,22 @@ async def record_receipt_ui(
         return "\n".join(parts)
 
     try:
-        injected = getattr(request.app.state, "wishlist_service", None)
-        if idempotency_key is not None and injected is None:
+        if idempotency_key is not None:
             request_hash = compute_request_hash(
                 "record_receipt_ui",
                 {"wishlist_id": wishlist_id, "item_id": item_id},
                 {"quantity": count},
             )
 
-            async def serialized_action(svc: WishlistService) -> tuple[int, str, str]:
-                done = await action(svc)
+            async def compose_receipt(conn: Any, produced: tuple[str, int]) -> tuple[int, str, str]:
+                title, remaining = produced
+                ops = RepoWishlistOps(WishlistRepository(conn))
+                state = await _read_state(ops, wishlist_id, user, locale)
+                done = _Receipt(title, remaining, state)
                 return status.HTTP_201_CREATED, HTML_MEDIA_TYPE, _render_receipt_html(done)
 
             outcome = await request.app.state.wishlist_store.execute_wish_idempotent(
-                serialized_action,
+                mutate,
                 actor_id=user.telegram_id,
                 idempotency_key=idempotency_key,
                 request_hash=request_hash,
@@ -521,15 +514,13 @@ async def record_receipt_ui(
                 item_id=item_id,
                 operation_name="record_receipt_ui",
                 require_member=True,
+                compose_response=compose_receipt,
             )
             _log(logging.INFO, "receipt_recorded_http", "Receipt recorded", ids)
             return build_replay_response(outcome.status_code, outcome.content_type, outcome.body)
-        if injected is not None:
-            done = await _execute(request, action)
-        else:
-            title_val, remaining_val = await _execute(request, mutate)
-            state = await _execute(request, lambda svc: _read_state(svc, wishlist_id, user, locale))
-            done = _Receipt(title_val, remaining_val, state)
+        title_val, remaining_val = await _execute(request, mutate)
+        state = await _execute(request, lambda svc: _read_state(svc, wishlist_id, user, locale))
+        done = _Receipt(title_val, remaining_val, state)
     except InventoryBusyError:
         _log(logging.WARNING, "receipt_inventory_busy", "Receipt busy", ids)
         return _refusal_fragment(
@@ -590,11 +581,7 @@ async def _check_receipt_entry_open(
         return _ReceiptEntryOpen(
             item.title, 0, 0, WishlistArchivedError(f"Wishlist {wishlist_id} is archived")
         )
-    receipts = (
-        await svc.repo.list_item_receipts(item_id)
-        if isinstance(svc, RepoWishlistOps)
-        else item.receipts
-    )
+    receipts = await svc.repo.list_item_receipts(item_id)
     receipt = next((r for r in receipts if r.id == receipt_id), None)
     if receipt is None:
         return _ReceiptEntryOpen(
@@ -724,16 +711,19 @@ async def _execute_receipt_mutation_ui(
         return _render_mutation_oob(request, wishlist_id, done, notice_fn(done.title), locale)
 
     try:
-        injected = getattr(request.app.state, "wishlist_service", None)
-        if idempotency_key is not None and injected is None:
+        if idempotency_key is not None:
             request_hash = compute_request_hash(
                 operation_name,
                 {"wishlist_id": wishlist_id, "item_id": item_id},
                 request_hash_payload,
             )
 
-            async def serialized_action(svc: WishlistService) -> tuple[int, str, str]:
-                done = await action(svc)
+            async def serialized_action(svc: WishlistService) -> str:
+                return str(await mutate(svc))
+
+            async def compose_mutation(conn: Any, title: str) -> tuple[int, str, str]:
+                ops = RepoWishlistOps(WishlistRepository(conn))
+                done = await _read_full_mutation_state(ops, wishlist_id, user, title, locale)
                 return status.HTTP_200_OK, HTML_MEDIA_TYPE, _render_html(done)
 
             outcome = await request.app.state.wishlist_store.execute_wish_idempotent(
@@ -745,6 +735,7 @@ async def _execute_receipt_mutation_ui(
                 item_id=item_id,
                 operation_name=operation_name,
                 require_member=True,
+                compose_response=compose_mutation,
             )
             _log(
                 logging.INFO,
@@ -754,9 +745,7 @@ async def _execute_receipt_mutation_ui(
                 receipt_id=receipt_id,
             )
             return build_replay_response(outcome.status_code, outcome.content_type, outcome.body)
-        if injected is not None:
-            done = await _execute(request, action)
-        elif mutate is not None:
+        if mutate is not None:
             mutate._wish_item_id = item_id
             mutate._wish_op_name = operation_name
             title_val = await _execute(request, mutate)
@@ -829,10 +818,6 @@ async def correct_receipt_ui(
         )
         return str(item.title)
 
-    async def action(svc: WishlistService) -> _FullMutationState:
-        title = await mutate(svc)
-        return await _read_full_mutation_state(svc, wishlist_id, user, title, locale)
-
     return await _execute_receipt_mutation_ui(
         request,
         user,
@@ -842,7 +827,7 @@ async def correct_receipt_ui(
         "correct_receipt_ui",
         "receipt_corrected_http",
         {"receipt_id": receipt_id, "quantity": count},
-        action,
+        mutate,
         lambda title: t("web.receipt.corrected_notice", locale, count=count, title=title),
         locale,
         mutate=mutate,
@@ -887,10 +872,6 @@ async def cancel_receipt_ui(
         item = await svc.cancel_item_receipt(item_id, receipt_id, user, wishlist_id=wishlist_id)
         return str(item.title)
 
-    async def action(svc: WishlistService) -> _FullMutationState:
-        title = await mutate(svc)
-        return await _read_full_mutation_state(svc, wishlist_id, user, title, locale)
-
     return await _execute_receipt_mutation_ui(
         request,
         user,
@@ -900,7 +881,7 @@ async def cancel_receipt_ui(
         "cancel_receipt_ui",
         "receipt_cancelled_http",
         {"receipt_id": receipt_id},
-        action,
+        mutate,
         lambda title: t("web.receipt.cancelled_notice", locale, title=title),
         locale,
         mutate=mutate,

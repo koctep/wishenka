@@ -19,6 +19,7 @@ from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.bot.entry import create_router
 from wishenka.items.schemas import ItemPreviewDTO
 from wishenka.users.store import UserStore
+from wishenka.wishlists.service import WishlistService
 from wishenka.wishlists.store import WishlistStore
 
 pytestmark = pytest.mark.timeout(30)
@@ -121,9 +122,9 @@ async def test_support_diagnostic_context_avoids_full_table_scans_and_write_tx(
     async def seed_other(service: Any) -> Any:
         return await service.create_wishlist(owner=OTHER_USER, title="Other User List")
 
-    owner_wl = await store.execute(seed_owner)
-    collab_wl = await store.execute(seed_collab)
-    other_wl = await store.execute(seed_other)
+    owner_wl = await seed_owner(WishlistService(store))
+    collab_wl = await seed_collab(WishlistService(store))
+    other_wl = await seed_other(WishlistService(store))
 
     async def seed_extra_tokens(conn: Any) -> None:
         await conn.execute(

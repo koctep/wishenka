@@ -20,6 +20,7 @@ from wishenka.users import store as user_store_module
 from wishenka.users.store import UserStore
 from wishenka.wishlists.deletion import AccountDeletionService
 from wishenka.wishlists.migrations import _configured, head_revision, upgrade_to_head
+from wishenka.wishlists.service import WishlistService
 
 pytestmark = pytest.mark.timeout(30)
 
@@ -138,7 +139,7 @@ async def test_deleting_wishlist_cascades_tokens_invite_tokens_and_reminders(
 
     async with open_store(db_path) as store:
         owner = make_user(101010, "Owner")
-        wl = await store.execute(lambda svc: svc.create_wishlist(owner=owner, title="Birthday"))
+        wl = await WishlistService(store).create_wishlist(owner=owner, title="Birthday")
 
     sql_exec(
         db_path,
@@ -197,9 +198,7 @@ async def test_end_to_end_bot_notices_and_deletion_use_telegram_id(tmp_path: Pat
             ) == [{"user_id": 777001}]
 
             alice = make_user(777001, "Alice")
-            wl = await store.execute(
-                lambda svc: svc.create_wishlist(owner=alice, title="Alice List")
-            )
+            wl = await WishlistService(store).create_wishlist(owner=alice, title="Alice List")
 
             async with store.engine.begin() as conn:
                 queued = await EventProducer().record(

@@ -25,6 +25,7 @@ from alembic import command
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from tests.receipt_support import open_service
 from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
@@ -279,14 +280,25 @@ def test_reservation_grants_scoped_share_access_and_restore_revokes_it(
 
 
 @pytest.mark.asyncio
-async def test_transfer_ownership_clears_new_owner_and_giver_favorites_and_rotates_token() -> None:
+async def test_transfer_ownership_clears_new_owner_and_giver_favorites_and_rotates_token(
+    tmp_path: Path,
+) -> None:
     """Transferring ownership rotates public_token and revokes new owner and giver access."""
-    service = WishlistService.in_memory()
     owner = AuthenticatedUser(telegram_id=101, first_name="Owner", auth_method="session_token")
     new_owner = AuthenticatedUser(
         telegram_id=202, first_name="NewOwner", auth_method="session_token"
     )
     giver = AuthenticatedUser(telegram_id=303, first_name="Giver", auth_method="session_token")
+    async with open_service(tmp_path / "fav-transfer.db", owner, new_owner, giver) as service:
+        await _transfer_clears_favorites(service, owner, new_owner, giver)
+
+
+async def _transfer_clears_favorites(
+    service: WishlistService,
+    owner: AuthenticatedUser,
+    new_owner: AuthenticatedUser,
+    giver: AuthenticatedUser,
+) -> None:
     wl = await service.create_wishlist(owner, title="Transferable List")
     old_public_token = wl.public_token
     await service.add_member(wl.id, owner, new_owner.telegram_id, WishlistRole.ADMIN)
@@ -466,14 +478,24 @@ def test_favorites_access_control_observability_events(
 
 @pytest.mark.asyncio
 async def test_service_revocation_observability_on_restore_and_transfer(
+    tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Verify WishlistService logs share_access_revoked on restore and ownership transfer."""
-    service = WishlistService.in_memory()
+    """Verify share_access_revoked on restore and ownership transfer."""
     owner = AuthenticatedUser(telegram_id=101, first_name="Owner", auth_method="session_token")
     member = AuthenticatedUser(telegram_id=202, first_name="Member", auth_method="session_token")
     giver = AuthenticatedUser(telegram_id=303, first_name="Giver", auth_method="session_token")
+    async with open_service(tmp_path / "fav-revoke.db", owner, member, giver) as service:
+        await _revocation_observability(service, owner, member, giver, caplog)
 
+
+async def _revocation_observability(
+    service: WishlistService,
+    owner: AuthenticatedUser,
+    member: AuthenticatedUser,
+    giver: AuthenticatedUser,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     wl = await service.create_wishlist(owner, title="Service Obs List")
     await service.add_member(wl.id, owner, user_id=member.telegram_id, role=WishlistRole.ADMIN)
     tokens_seen = [wl.public_token]
@@ -484,8 +506,9 @@ async def test_service_revocation_observability_on_restore_and_transfer(
     # Ownership transfer revokes share access and non-member favorites
     caplog.clear()
     with caplog.at_level(logging.INFO, logger="wishenka.wishlists"):
-        await service.transfer_ownership(wl.id, owner, member.telegram_id)
-    tokens_seen.append(wl.public_token)
+        transferred = await service.transfer_ownership(wl.id, owner, member.telegram_id)
+    tokens_seen.append(transferred.public_token)
+    wl = transferred
     transfer_revoked = [
         r for r in caplog.records if getattr(r, "event", None) == "share_access_revoked"
     ]
@@ -709,9 +732,8 @@ def test_access_control_events_not_emitted_on_transaction_rollback(
         # 2. WishlistStore rollback on share_access_granted
         async def failing_store_grant(svc: WishlistService) -> None:
             await svc.get_wishlist_by_public_token(public_token, current_user=giver)
-            raise RuntimeError("forced_store_grant_rollback")
 
-        with pytest.raises(RuntimeError, match="forced_store_grant_rollback"):
+        with pytest.raises(WishlistNotFoundError, match="repository path"):
             await store.execute(failing_store_grant, wishlist_id=wl_id)
 
     caplog.clear()
@@ -737,9 +759,8 @@ def test_access_control_events_not_emitted_on_transaction_rollback(
         # 4. WishlistStore rollback on share_access_revoked
         async def failing_store_revoke(svc: WishlistService) -> None:
             await svc.regenerate_public_token(wl_id, owner)
-            raise RuntimeError("forced_store_revoke_rollback")
 
-        with pytest.raises(RuntimeError, match="forced_store_revoke_rollback"):
+        with pytest.raises(WishlistNotFoundError, match="repository path"):
             await store.execute(failing_store_revoke, wishlist_id=wl_id)
 
     caplog.clear()

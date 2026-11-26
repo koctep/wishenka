@@ -88,7 +88,7 @@ async def test_shared_event_emission_logs_after_commit_and_not_on_rollback(
             await service.add_member(wl.id, OWNER, GIFTER_ID, role=WishlistRole.MEMBER)
             return wl.id
 
-        wl_id = await store.execute(setup)
+        wl_id = await setup(WishlistService(store))
         caplog.clear()
         caplog.set_level(logging.DEBUG, logger=_NOTICE_LOGGER)
 
@@ -139,13 +139,13 @@ async def test_purge_finished_logs_receipt_and_reminder_counts(
             await service.create_reservation(item.id, GIFTER, quantity=1)
             return wl.id, item.id
 
-        wl_id, item_id = await store.execute(setup)
+        wl_id, item_id = await setup(WishlistService(store))
 
         async def fulfill_and_archive(service: WishlistService) -> None:
             await service.record_item_fulfillment(item_id, OWNER, 1)
             await service.archive_wishlist(wl_id, OWNER)
 
-        await store.execute(fulfill_and_archive)
+        await fulfill_and_archive(WishlistService(store))
 
         worker = _Env(store, db).worker(FakeNoticeSender())
         now = int(time.time()) + 10
@@ -196,7 +196,7 @@ async def test_recipient_exclusion_skip_logs_safe_event(
             await service.create_reservation(item.id, GIFTER, quantity=1)
             return item.id
 
-        item_id = await store.execute(setup)
+        item_id = await setup(WishlistService(store))
         sql_exec(db, "DELETE FROM reminder_outbox")
 
         async def update_item(service: WishlistService) -> None:
@@ -249,14 +249,14 @@ async def test_partial_receipt_archival_logs_sent_and_summary_without_leaks(
             await service.create_reservation(item.id, GIFTER, quantity=2)
             return wl.id, item.id
 
-        wl_id, item_id = await store.execute(setup)
+        wl_id, item_id = await setup(WishlistService(store))
         sql_exec(db, "DELETE FROM reminder_outbox")
 
         async def fulfill_then_archive(service: WishlistService) -> None:
             await service.record_item_fulfillment(item_id, OWNER, 1)
             await service.archive_wish_item(wl_id, item_id, OWNER)
 
-        await store.execute(fulfill_then_archive)
+        await fulfill_then_archive(WishlistService(store))
 
         caplog.clear()
         caplog.set_level(logging.DEBUG, logger=_NOTICE_LOGGER)

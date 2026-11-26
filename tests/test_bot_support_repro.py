@@ -21,6 +21,7 @@ from wishenka.bot.capture import cleanup_drafts
 from wishenka.bot.entry import create_router
 from wishenka.items.schemas import ItemPreviewDTO
 from wishenka.users.store import UserStore
+from wishenka.wishlists.service import WishlistService
 from wishenka.wishlists.store import WishlistStore
 
 pytestmark = pytest.mark.timeout(30)
@@ -194,7 +195,7 @@ async def _setup_support(
         async def create(service: Any, index: int = index) -> Any:
             return await service.create_wishlist(owner=OWNER, title=f"Wishlist {index + 1}")
 
-        ids.append((await store.execute(create)).id)
+        ids.append((await create(WishlistService(store))).id)
 
     preview = AsyncMock()
     preview.preview = AsyncMock(return_value=ItemPreviewDTO(title="Parsed Lamp"))
@@ -522,7 +523,7 @@ async def test_privacy_surprise_protection_and_capability_redaction(
             await service.record_item_fulfillment(item.id, OWNER, 1, wishlist_id=wl.id)
             return str(wl.public_token), str(wl.invite_token)
 
-        public_token, invite_token = await store.execute(seed_surprise)
+        public_token, invite_token = await seed_surprise(WishlistService(store))
         caplog.clear()
 
         with caplog.at_level(logging.DEBUG):

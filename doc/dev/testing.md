@@ -1208,15 +1208,14 @@ Telegram Bot API и офлайн-проверки безопасности:
 ## Атомарная транзакционная граница захвата бота (WISHENKA-179)
 
 Модуль `tests/test_bot_capture_atomic_store_repro.py` (`pytestmark = pytest.mark.timeout(15)`)
-проверяет публичный интерфейс `WishlistStore.execute_with_connection` и миграцию
-`wishenka/bot/capture.py:mutate`:
+проверяет `WishlistStore.run_repository` и сохранение в `wishenka/bot/capture.py`:
 
-- `test_execute_with_connection_commits_service_and_sql_atomically` — совместный коммит доменного
-  вызова `WishlistService.add_wish_item` и SQL-обновления `bot_drafts` на одном `AsyncConnection`.
-- `test_execute_with_connection_rolls_back_service_and_sql_on_error` — одновременный откат
-  доменной записи и SQL-изменения при исключении внутри колбэка.
-- `test_bot_capture_save_uses_execute_with_connection_and_preserves_replay` — подтверждает вызов
-  `store.execute_with_connection` при сохранении черновика и идемпотентный повторный ответ.
+- `test_run_repository_commits_wish_add_and_sql_atomically` — совместный коммит
+  `RepoWishlistOps.add_wish_item` и SQL-обновления `bot_drafts` в одном `run_repository`.
+- `test_run_repository_rolls_back_wish_add_and_sql_on_error` — одновременный откат
+  записи желания и SQL-изменения при исключении внутри колбэка.
+- `test_bot_capture_save_uses_run_repository_and_preserves_replay` — подтверждает вызов
+  `store.run_repository` при сохранении черновика и идемпотентный повторный ответ.
 - `test_bot_capture_does_not_access_private_store_read_write` — AST-проверка того, что
   `wishenka/bot/capture.py` не обращается к приватным атрибутам `_read` и `_write`.
 

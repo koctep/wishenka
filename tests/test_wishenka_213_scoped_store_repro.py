@@ -144,6 +144,18 @@ async def test_single_wishlist_mutations_scope_store_hydration(
             read_records = [
                 r for r in caplog.records if getattr(r, "event", None) == "wishlist_store_read"
             ]
+            if op_name != "update_wishlist_settings":
+                assert read_records == [], (
+                    f"{op_name}: repository path must not hydrate, got {len(read_records)} reads"
+                )
+                write_records = [
+                    r for r in caplog.records if getattr(r, "event", None) == "wishlist_store_write"
+                ]
+                assert write_records == [], (
+                    f"{op_name}: repository path must not snapshot-write, "
+                    f"got {len(write_records)} writes"
+                )
+                continue
             assert len(read_records) == 1, (
                 f"{op_name}: expected 1 wishlist_store_read, got {len(read_records)}"
             )
@@ -252,9 +264,7 @@ async def test_scoped_store_handles_nonexistent_wishlist_id(
         read_records = [
             r for r in caplog.records if getattr(r, "event", None) == "wishlist_store_read"
         ]
-        assert len(read_records) == 1
-        assert getattr(read_records[0], "wishlists_count", None) == 0
-        assert getattr(read_records[0], "history_count", None) == 0
+        assert read_records == []
 
         loaded = await service.get_wishlist_by_id(existing.id)
         assert loaded.title == "Existing"
@@ -288,7 +298,7 @@ async def test_scoped_token_regeneration_retries_on_cross_wishlist_collision(
 
         pub_tokens = iter([wl2.public_token, "unique_public_token_213"])
         monkeypatch.setattr(
-            "wishenka.wishlists.service.secrets.token_urlsafe",
+            "wishenka.wishlists.repo_ops.secrets.token_urlsafe",
             lambda _n=16: next(pub_tokens),
         )
         caplog.clear()
@@ -296,17 +306,15 @@ async def test_scoped_token_regeneration_retries_on_cross_wishlist_collision(
             new_pub = await service.regenerate_public_token(wl1.id, owner)
 
         assert new_pub == "unique_public_token_213"
-        assert any(
-            getattr(r, "event", None) == "wishlist_token_collision_retry" for r in caplog.records
-        )
+        assert (await service.get_wishlist_by_id(wl2.id)).public_token == wl2.public_token
         read_records = [
             r for r in caplog.records if getattr(r, "event", None) == "wishlist_store_read"
         ]
-        assert all(getattr(r, "wishlists_count", None) == 1 for r in read_records)
+        assert read_records == []
 
         inv_tokens = iter([wl2.invite_token, "unique_invite_token_213"])
         monkeypatch.setattr(
-            "wishenka.wishlists.service.secrets.token_urlsafe",
+            "wishenka.wishlists.repo_ops.secrets.token_urlsafe",
             lambda _n=16: next(inv_tokens),
         )
         caplog.clear()
@@ -314,9 +322,7 @@ async def test_scoped_token_regeneration_retries_on_cross_wishlist_collision(
             new_inv = await service.regenerate_invite_token(wl1.id, owner)
 
         assert new_inv == "unique_invite_token_213"
-        assert any(
-            getattr(r, "event", None) == "wishlist_token_collision_retry" for r in caplog.records
-        )
+        assert (await service.get_wishlist_by_id(wl2.id)).invite_token == wl2.invite_token
     finally:
         await user_store.engine.dispose()
         await store.engine.dispose()

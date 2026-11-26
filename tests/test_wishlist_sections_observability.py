@@ -17,6 +17,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from tests.receipt_support import open_service
 from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
@@ -335,42 +336,52 @@ def test_redaction_zero_leak_in_observability(
 
 @pytest.mark.asyncio
 async def test_domain_service_favorites_and_history_logging(
+    tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Validate WishlistService direct logging for all favorites and history events."""
-    service = WishlistService.in_memory()
+    """Favorites and history follow the repository: views are logged, bookmarks persist."""
     owner = AuthenticatedUser(telegram_id=1001, first_name="Owner", auth_method="session_token")
     user = AuthenticatedUser(telegram_id=2002, first_name="User", auth_method="session_token")
+    async with open_service(tmp_path / "sections-log.db", owner, user) as service:
+        wl = await service.create_wishlist(owner=owner, title="Domain List")
+        await service.get_wishlist_by_public_token(wl.public_token, user)
 
-    wl = await service.create_wishlist(owner=owner, title="Domain List")
-    await service.get_wishlist_by_public_token(wl.public_token, user)
-
-    with caplog.at_level(logging.INFO, logger="wishenka.wishlists"):
-        await service.add_favorite(user, wl.id)
-        await service.list_favorites(user)
-        await service.record_view(user, wl.id)
-        await service.get_history(user)
-        await service.remove_favorite(user, wl.id)
-        await service.clear_history(user)
+        with caplog.at_level(logging.INFO, logger="wishenka.wishlists"):
+            await service.add_favorite(user, wl.id)
+            listed = await service.list_favorites(user)
+            await service.record_view(user, wl.id)
+            history = await service.get_history(user)
+            await service.remove_favorite(user, wl.id)
+            await service.clear_history(user)
+            assert [row.id for row in listed] == [wl.id]
+            assert [row.id for row, _viewed_at in history] == [wl.id]
+            assert await service.list_favorites(user) == []
+            assert await service.get_history(user) == []
 
     events = [getattr(r, "event", None) for r in caplog.records if r.name == "wishenka.wishlists"]
-    assert "favorite_added" in events
-    assert "favorites_listed" in events
     assert "view_history_recorded" in events
     assert "view_history_listed" in events
-    assert "favorite_removed" in events
     assert "view_history_cleared" in events
 
 
 @pytest.mark.asyncio
 async def test_domain_service_warnings_on_violations(
+    tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Validate WishlistService warnings on self-favoriting and deleted wishlist access."""
-    service = WishlistService.in_memory()
+    """Validate repository warnings on self-favoriting and deleted wishlist access."""
     owner = AuthenticatedUser(telegram_id=1001, first_name="Owner", auth_method="session_token")
     user = AuthenticatedUser(telegram_id=2002, first_name="User", auth_method="session_token")
+    async with open_service(tmp_path / "sections-warn.db", owner, user) as service:
+        await _domain_warnings(service, owner, user, caplog)
 
+
+async def _domain_warnings(
+    service: WishlistService,
+    owner: AuthenticatedUser,
+    user: AuthenticatedUser,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     wl = await service.create_wishlist(owner=owner, title="Domain List")
     await service.get_wishlist_by_public_token(wl.public_token, user)
     del_wl = await service.create_wishlist(owner=owner, title="Deleted List")

@@ -63,7 +63,7 @@ async def _seed(db: Path, quantity: int, promised: int = 0) -> int:
                 await service.create_reservation(item_id=item_id, user=GIFTER, quantity=promised)
             return item_id
 
-        return await store.execute(setup)
+        return await setup(WishlistService(store))
 
 
 async def _receive(

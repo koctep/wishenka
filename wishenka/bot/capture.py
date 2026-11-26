@@ -32,7 +32,8 @@ from wishenka.items.classifier import UniversalInputClassifier
 from wishenka.items.schemas import CreateItemDTO
 from wishenka.users.models import UserRecord
 from wishenka.wishlists.policy import WishlistAccessPolicy
-from wishenka.wishlists.service import WishlistService
+from wishenka.wishlists.repo_ops import RepoWishlistOps
+from wishenka.wishlists.repository import WishlistRepository
 from wishenka.wishlists.store import WishlistStore
 
 _preview_active: ContextVar[bool] = ContextVar("bot_private_preview", default=False)
@@ -107,10 +108,12 @@ def _now(deps: Any) -> datetime:
     return clock() if callable(clock) else datetime.now(UTC)
 
 
-def _allowed(service: Any, actor: AuthenticatedUser) -> list[Any]:
+async def _allowed(repo: WishlistRepository, actor: AuthenticatedUser) -> list[Any]:
+    """Active lists the actor may edit, in the order capture already shows."""
+    lists = await repo.list_accessible_wishlists(actor.telegram_id)
     return [
         wl
-        for wl in service._wishlists.values()
+        for wl in lists
         if WishlistAccessPolicy.can_add_or_edit_item(
             WishlistAccessPolicy.resolve_context(actor, wl), wl
         )
@@ -269,10 +272,10 @@ def create_capture_router(deps: Any) -> Router:
     store: WishlistStore = deps.wishlist_store
 
     async def lists_for(actor: AuthenticatedUser) -> list[Any]:
-        async def work(service: Any) -> list[Any]:
-            return _allowed(service, actor)
+        async def work(repo: WishlistRepository) -> list[Any]:
+            return await _allowed(repo, actor)
 
-        return await store.execute(work)
+        return await store.run_repository(work)
 
     @router.message(F.chat.type == "private", F.text, ~F.text.startswith("/"))
     async def capture(
@@ -541,13 +544,13 @@ def create_capture_router(deps: Any) -> Router:
         now = _now(deps)
         chat = callback.message.chat.id
 
-        async def mutate(
-            service: WishlistService, conn: AsyncConnection
-        ) -> tuple[str, Any, list[Any]]:
+        async def mutate(repo: WishlistRepository) -> tuple[str, Any, list[Any]]:
+            conn = repo.conn
+            ops = RepoWishlistOps(repo)
             draft = await _row(conn, ident)
             if not draft or draft["owner"] != actor.telegram_id or draft["chat"] != chat:
                 return "expired", None, []
-            lists = _allowed(service, actor)
+            lists = await _allowed(repo, actor)
             eligible = {wl.id: wl for wl in lists}
             if (
                 draft["state"] == "saved"
@@ -586,7 +589,7 @@ def create_capture_router(deps: Any) -> Router:
                     if not all(_safe_web_url(values.get(field)) for field in ("link", "image_url")):
                         return "unsafe_url", draft, lists
                     dto = CreateItemDTO.model_validate(values)
-                    item = await service.add_wish_item(wl.id, actor, **dto.model_dump())
+                    item = await ops.add_wish_item(wl.id, actor, **dto.model_dump())
                 except (ValidationError, ValueError):
                     return "invalid", draft, lists
                 await conn.execute(
@@ -669,7 +672,7 @@ def create_capture_router(deps: Any) -> Router:
         try:
             private_context = _preview_active.set(True)
             try:
-                status, draft, lists = await store.execute_with_connection(mutate)
+                status, draft, lists = await store.run_repository(mutate)
             finally:
                 _preview_active.reset(private_context)
         except Exception:

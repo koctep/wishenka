@@ -95,26 +95,33 @@ def test_storage_error_traceback_does_not_expose_tokens(
 
 def test_anonymous_public_view_hides_existing_reservation(tmp_path: Path) -> None:
     """A real reservation is hidden when the visitor's recipient status is unknown."""
-    service = WishlistService.in_memory()
     owner = AuthenticatedUser(telegram_id=101, first_name="Owner", auth_method="session_token")
     giver = AuthenticatedUser(telegram_id=202, first_name="Giver", auth_method="session_token")
+    database = tmp_path / "reserved.db"
+    app = create_app(
+        Settings(database_url=f"sqlite+aiosqlite:///{database}", sqlite_db_path=str(database))
+    )
 
     async def seed_reserved_wishlist() -> str:
+        await app.state.user_store.upsert_user(
+            TelegramUser(id=owner.telegram_id, first_name="Owner")
+        )
+        await app.state.user_store.upsert_user(
+            TelegramUser(id=giver.telegram_id, first_name="Giver")
+        )
+        service = app.state.domain_service
         wishlist = await service.create_wishlist(owner=owner, title="Birthday")
         item = await service.add_wish_item(
             wishlist_id=wishlist.id, actor=owner, title="Board game", quantity=2
         )
         reservation = await service.create_reservation(item_id=item.id, user=giver, quantity=1)
         assert reservation.quantity == 1
-        return wishlist.public_token
+        return str(wishlist.public_token)
 
-    token = asyncio.run(seed_reserved_wishlist())
-    database = tmp_path / "reserved.db"
-    app = create_app(
-        Settings(database_url=f"sqlite+aiosqlite:///{database}", sqlite_db_path=str(database))
-    )
-    app.state.wishlist_service = service
     with TestClient(app) as client:
+        portal = client.portal
+        assert portal is not None
+        token = portal.call(seed_reserved_wishlist)
         response = client.get(f"/api/public/wishlists/{token}")
     assert response.status_code == 200
     public_items = response.json()["items"]
@@ -225,22 +232,17 @@ async def test_store_persists_domain_items_and_reservations_across_instances(
         await service.create_reservation(item_id=item.id, user=giver, quantity=1)
         return wl.id, item.id
 
-    wishlist_id, item_id = await first.execute(seed)
+    wishlist_id, item_id = await seed(WishlistService(first))
 
-    async def inspect(service: WishlistService) -> None:
-        wl = await service.get_wishlist_by_id(wishlist_id)
-        assert wl.items[0].id == item_id
-        assert wl.items[0].reservations[0].quantity == 1
-        await service.archive_wishlist(wishlist_id, owner)
+    saved = WishlistService(second)
+    wl = await saved.get_wishlist_by_id(wishlist_id)
+    assert wl.items[0].id == item_id
+    assert wl.items[0].reservations[0].quantity == 1
+    await saved.archive_wishlist(wishlist_id, owner)
 
-    await second.execute(inspect)
-
-    async def inspect_archive(service: WishlistService) -> None:
-        wl = await service.get_wishlist_by_id(wishlist_id)
-        assert wl.status.value == "archived"
-        assert wl.items[0].reservations[0].user_id == giver.telegram_id
-
-    await first.execute(inspect_archive)
+    archived = await WishlistService(first).get_wishlist_by_id(wishlist_id)
+    assert archived.status.value == "archived"
+    assert archived.items[0].reservations[0].user_id == giver.telegram_id
     await first.engine.dispose()
     await second.engine.dispose()
 
@@ -259,7 +261,7 @@ async def test_concurrent_instances_allocate_distinct_ids(tmp_path: Path) -> Non
     async def create(service: WishlistService) -> int:
         return (await service.create_wishlist(owner=owner)).id
 
-    ids = await asyncio.gather(first.execute(create), second.execute(create))
+    ids = await asyncio.gather(create(WishlistService(first)), create(WishlistService(second)))
     assert sorted(ids) == [1, 2]
     await first.engine.dispose()
     await second.engine.dispose()
@@ -291,24 +293,28 @@ def test_members_can_view_but_only_managers_can_change_settings(tmp_path: Path) 
     """Membership is resolved from the server-side aggregate, not client input."""
     from wishenka.wishlists.models import WishlistRole
 
-    service = WishlistService.in_memory()
     owner = AuthenticatedUser(telegram_id=101, first_name="Owner", auth_method="session_token")
-
-    async def seed() -> int:
-        wl = await service.create_wishlist(owner=owner, title="Shared")
-        await service.add_member(wl.id, owner, 202, WishlistRole.MEMBER)
-        await service.add_member(wl.id, owner, 303, WishlistRole.ADMIN)
-        return wl.id
-
-    ident = asyncio.run(seed())
     url = f"sqlite+aiosqlite:///{tmp_path / 'membership.db'}"
     settings = Settings(database_url=url, secret_key="secret")
     sessions = SessionTokenService(settings.secret_key)
     member = {"Authorization": f"Bearer {sessions.create_token(202, 'Member')}"}
     admin = {"Authorization": f"Bearer {sessions.create_token(303, 'Admin')}"}
     app = create_app(settings)
-    app.state.wishlist_service = service
+
+    async def seed() -> int:
+        await app.state.user_store.upsert_user(TelegramUser(id=101, first_name="Owner"))
+        await app.state.user_store.upsert_user(TelegramUser(id=202, first_name="Member"))
+        await app.state.user_store.upsert_user(TelegramUser(id=303, first_name="Admin"))
+        service = app.state.domain_service
+        wl = await service.create_wishlist(owner=owner, title="Shared")
+        await service.add_member(wl.id, owner, 202, WishlistRole.MEMBER)
+        await service.add_member(wl.id, owner, 303, WishlistRole.ADMIN)
+        return int(wl.id)
+
     with TestClient(app) as client:
+        portal = client.portal
+        assert portal is not None
+        ident = portal.call(seed)
         path = f"/api/wishlists/{ident}"
         assert client.get(path, headers=member).status_code == 200
         assert "share_token" not in client.get(path, headers=member).json()
@@ -352,7 +358,7 @@ def test_public_api_shows_persisted_wish_without_reservation_details(tmp_path: P
         return wishlist.public_token
 
     with TestClient(app):
-        token = asyncio.run(app.state.wishlist_store.execute(seed))
+        token = asyncio.run(seed(WishlistService(app.state.wishlist_store)))
     with TestClient(create_app(settings)) as client:
         response = client.get(f"/api/public/wishlists/{token}")
         assert response.status_code == 200
@@ -503,19 +509,13 @@ async def test_domain_token_collisions_retry_and_exhaustion_hides_token(
     assert await service.regenerate_public_token(first.id, owner) == "private-new"
     third = await service.create_wishlist(owner=owner)
     assert third.public_token == "private-unique"
-    with (
-        caplog.at_level(logging.ERROR, logger="wishenka.test"),
-        pytest.raises(RuntimeError) as failure,
-    ):
-        try:
-            await service.create_wishlist(owner=owner)
-        except RuntimeError:
-            logging.getLogger("wishenka.test").exception("Expected collision exhaustion")
-            raise
+    from wishenka.wishlists.exceptions import TokenCollision
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(TokenCollision) as failure:
+        await service.create_wishlist(owner=owner)
     rendered = "".join(traceback.format_exception(failure.value))
     assert "private-old" not in rendered
     assert "private-old" not in caplog.text
-    assert "Unable to allocate a unique public token" in rendered
     await store.engine.dispose()
 
 

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import wraps
 from inspect import iscoroutinefunction, signature
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import wishenka.wishlists.retention as retention
 from wishenka.auth.models import AuthenticatedUser
@@ -29,7 +29,6 @@ from wishenka.wishlists.concurrency import ItemConcurrencyCoordinator
 from wishenka.wishlists.exceptions import (
     CannotReduceQuantityBelowReservedError,
     InsufficientQuantityError,
-    InvalidInviteTokenError,
     InventoryBusyError,
     ItemNotFoundError,
     NothingRemainingError,
@@ -43,7 +42,6 @@ from wishenka.wishlists.exceptions import (
     WishArchivedError,
     WishlistArchivedError,
     WishlistDeletedError,
-    WishlistRetentionExpiredError,
 )
 from wishenka.wishlists.exceptions import (
     WishlistNotFoundError as WishlistNotFoundError,
@@ -57,18 +55,15 @@ from wishenka.wishlists.models import (
     WishItem,
     Wishlist,
     WishlistFavorite,
-    WishlistFormat,
     WishlistMember,
     WishlistRole,
     WishlistStatus,
-    WishlistTimeType,
 )
 from wishenka.wishlists.policy import WishlistAccessPolicy
 from wishenka.wishlists.schemas import (
     GiftedItemDTO,
     MyReservationItemDTO,
     PromiseActionDTO,
-    ReceiptEntryDTO,
     UserReservationsSummaryDTO,
     WishItemGifterViewDTO,
     WishItemRecipientViewDTO,
@@ -116,19 +111,29 @@ _RESERVATION_INVENTORY_METHODS = frozenset(
 )
 _SINGLE_WISHLIST_METHODS = frozenset(
     {
+        "update_wishlist_settings",
+        "transfer_ownership",
+        "is_favorite",
+    }
+)
+_REPOSITORY_REQUIRED = "Wishlist action requires the repository path"
+_SHARED_REPOSITORY_METHODS = frozenset(
+    {
+        "create_wishlist",
         "get_wishlist_by_id",
+        "get_wishlist_or_none",
         "get_wishlist_view",
+        "get_wishlist_by_public_token",
+        "get_wishlist_by_invite_token",
         "add_member",
         "remove_member",
         "get_members",
-        "update_wishlist_settings",
         "archive_wishlist",
         "unarchive_wishlist",
-        "get_wishlist_or_none",
         "classify_owner_delete",
         "delete_wishlist",
+        "list_deleted_wishlists",
         "restore_deleted_wishlist",
-        "transfer_ownership",
         "add_wish_item",
         "get_wish_item",
         "list_wish_items",
@@ -136,11 +141,15 @@ _SINGLE_WISHLIST_METHODS = frozenset(
         "reorder_wish_items",
         "archive_wish_item",
         "restore_wish_item",
+        "join_by_invite",
         "regenerate_public_token",
         "regenerate_invite_token",
-        "is_favorite",
         "add_favorite",
         "remove_favorite",
+        "list_favorites",
+        "record_view",
+        "get_history",
+        "clear_history",
     }
 )
 
@@ -384,11 +393,6 @@ async def record_share_view_if_authenticated(
         await service.record_view(current_user, wishlist_id)
 
 
-def _history_rank(entry: ViewHistoryEntry) -> tuple[datetime, int]:
-    """Rank a view by time, then by recording sequence. The row id is not a rank."""
-    return (entry.viewed_at, entry.recorded_seq)
-
-
 class WishlistService:
     """Domain service managing wishlists, members, items, and role-aware projections."""
 
@@ -624,13 +628,6 @@ class WishlistService:
         self._ensure_reservation_writable(reservation)
 
     @staticmethod
-    def _ensure_wishlist_active(wishlist: Wishlist) -> None:
-        if wishlist.status == WishlistStatus.ARCHIVED:
-            raise WishlistArchivedError("Cannot modify an archived wishlist")
-        if wishlist.status == WishlistStatus.DELETED:
-            raise WishlistDeletedError("Cannot modify a deleted wishlist")
-
-    @staticmethod
     def _require_item_wishlist(item: WishItem) -> Wishlist:
         """Return the item's parent wishlist or fail closed if context is missing."""
         if item.wishlist is None:
@@ -657,64 +654,15 @@ class WishlistService:
         invite_token_expires_in: timedelta | None = None,
         owner_id: int | None = None,
     ) -> Wishlist:
-        """Create a new personal wishlist with cryptographically secure tokens."""
-        effective_owner_id = owner.telegram_id if owner is not None else (owner_id or 0)
-        effective_owner_name = owner.first_name if owner is not None else ""
-        self._next_wishlist_id += 1
-        public_token = secrets.token_urlsafe(16)
-        invite_token = secrets.token_urlsafe(24)
-        ttl = (
-            invite_token_expires_in
-            if invite_token_expires_in is not None
-            else self._default_invite_ttl
-        )
-        invite_token_expires_at = datetime.now(UTC) + ttl
-
-        wishlist = Wishlist(
-            id=self._next_wishlist_id,
-            owner_id=effective_owner_id,
-            owner_name=effective_owner_name,
-            title=title,
-            description=description,
-            event_title=event_title,
-            event_date=event_date,
-            is_collaborative=False,
-            status=WishlistStatus.ACTIVE,
-            public_token=public_token,
-            invite_token=invite_token,
-            invite_token_expires_at=invite_token_expires_at,
-            members=[],
-            items=[],
-        )
-        self._wishlists[wishlist.id] = wishlist
-
-        time_type = (
-            WishlistTimeType.EVENT.value
-            if event_date is not None
-            else WishlistTimeType.ONGOING.value
-        )
-        format_type = (
-            WishlistFormat.COLLABORATIVE.value
-            if wishlist.is_collaborative
-            else WishlistFormat.PERSONAL.value
-        )
-        logger.info(
-            "Wishlist %s created by user %s",
-            wishlist.id,
-            effective_owner_id,
-            extra={
-                "event": "wishlist_created",
-                "wishlist_id": wishlist.id,
-                "owner_id": effective_owner_id,
-                "format": format_type,
-                "time_type": time_type,
-                "event_date": event_date.isoformat() if event_date is not None else None,
-            },
-        )
-        return wishlist
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def get_wishlist_by_id(self, wishlist_id: int) -> Wishlist:
-        """Retrieve a wishlist by its primary ID."""
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
+
+    async def _lookup_wishlist(self, wishlist_id: int) -> Wishlist:
+        """Read one wishlist from the hydrated graph, including the deleted check."""
         if wishlist_id not in self._wishlists:
             logger.warning(
                 "Wishlist lookup failed: id %s not found",
@@ -743,133 +691,16 @@ class WishlistService:
         public_token: str,
         current_user: AuthenticatedUser | None = None,
     ) -> WishlistDetailViewDTO:
-        """Retrieve wishlist projection via public token for gift viewing."""
-        wl = next((w for w in self._wishlists.values() if w.public_token == public_token), None)
-        if wl is None:
-            logger.warning(
-                "Public token lookup failed: token not found",
-                extra={
-                    "event": "public_token_not_found",
-                },
-            )
-            raise WishlistNotFoundError("Wishlist not found")
-        if wl.status == WishlistStatus.DELETED:
-            logger.warning(
-                "Public token lookup failed: wishlist %s is deleted",
-                wl.id,
-                extra={
-                    "event": "deleted_wishlist_access_attempt",
-                    "wishlist_id": wl.id,
-                },
-            )
-            raise WishlistDeletedError(f"Wishlist {wl.id} has been deleted")
-        if current_user is not None and wl.owner_id != current_user.telegram_id:
-            self._share_access[(current_user.telegram_id, wl.id)] = ShareAccessGrant(
-                user_id=current_user.telegram_id,
-                wishlist_id=wl.id,
-                public_token=wl.public_token,
-            )
-            self._emit_or_defer_commit_log(
-                logging.INFO,
-                "Share access granted: wishlist_id=%s user_id=%s",
-                wl.id,
-                current_user.telegram_id,
-                extra={
-                    "event": "share_access_granted",
-                    "wishlist_id": wl.id,
-                    "user_id": current_user.telegram_id,
-                },
-            )
-        view = await self.get_wishlist_view(wl.id, current_user)
-        has_gifter_view = any(isinstance(item, WishItemGifterViewDTO) for item in view.items) or (
-            not view.items and view.user_role is None
-        )
-        projection_mode = (
-            "anonymous_safe"
-            if current_user is None
-            else ("gifter" if has_gifter_view else "recipient_safe")
-        )
-        logger.info(
-            "Public wishlist resolved: wishlist_id=%s identified=%s projection_mode=%s",
-            wl.id,
-            current_user is not None,
-            projection_mode,
-            extra={
-                "event": "public_wishlist_resolved",
-                "wishlist_id": wl.id,
-                "identified": current_user is not None,
-                "user_id": current_user.telegram_id if current_user is not None else None,
-                "projection_mode": projection_mode,
-                "items_count": len(view.items),
-            },
-        )
-        return view
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def get_wishlist_view(
         self,
         wishlist_id: int,
         current_user: AuthenticatedUser | None = None,
     ) -> WishlistDetailViewDTO:
-        """Project wishlist and items applying Surprise Invariant rules."""
-        wl = await self.get_wishlist_by_id(wishlist_id)
-
-        active_items = sorted(
-            [item for item in wl.items if item.is_active],
-            key=lambda it: (it.display_order, it.created_at, it.id),
-        )
-        item_views: list[WishItemRecipientViewDTO | WishItemGifterViewDTO] = [
-            project_wish_item(item, current_user) for item in active_items
-        ]
-
-        ctx = WishlistAccessPolicy.resolve_context(current_user, wl)
-        archived_views: list[WishItemRecipientViewDTO] = []
-        if ctx.is_member:
-            archived_raw = sorted(
-                [item for item in wl.items if item.is_in_archive],
-                key=lambda it: (it.display_order, it.created_at, it.id),
-            )
-            archived_views = [recipient_view(item) for item in archived_raw]
-
-        can_edit = WishlistAccessPolicy.can_edit_settings(ctx, wl)
-        can_archive = WishlistAccessPolicy.can_archive(ctx, wl)
-        can_delete = WishlistAccessPolicy.can_delete(ctx, wl)
-        invite_token = wl.invite_token if (ctx.is_owner or ctx.is_admin) else None
-
-        logger.debug(
-            "Wishlist %s view projected for user %s (role=%s, items_count=%s)",
-            wl.id,
-            current_user.telegram_id if current_user else None,
-            ctx.role,
-            len(item_views),
-            extra={
-                "event": "wishlist_view_projected",
-                "wishlist_id": wl.id,
-                "user_id": current_user.telegram_id if current_user else None,
-                "role": ctx.role,
-                "items_count": len(item_views),
-                "archived_items_count": len(archived_views),
-            },
-        )
-
-        return WishlistDetailViewDTO(
-            id=wl.id,
-            title=wl.title,
-            owner_name=wl.owner_name,
-            description=wl.description,
-            event_title=wl.event_title,
-            event_date=wl.event_date,
-            is_collaborative=wl.is_collaborative,
-            warn_on_delete_reserved=wl.warn_on_delete_reserved,
-            status=wl.status,
-            user_role=ctx.role,
-            can_edit=can_edit,
-            can_archive=can_archive,
-            can_delete=can_delete,
-            public_token=wl.public_token,
-            invite_token=invite_token,
-            items=item_views,
-            archived_items=archived_views,
-        )
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def add_member(
         self,
@@ -878,83 +709,8 @@ class WishlistService:
         user_id: int,
         role: WishlistRole = WishlistRole.MEMBER,
     ) -> WishlistMember:
-        """Add or update a collaborator in the wishlist."""
-        wl = await self.get_wishlist_by_id(wishlist_id)
-        ctx = WishlistAccessPolicy.resolve_context(actor, wl)
-        if not WishlistAccessPolicy.can_manage_members(ctx, wl):
-            logger.warning(
-                "Actor %s denied permission to manage members for wishlist %s",
-                actor.telegram_id,
-                wishlist_id,
-                extra={
-                    "event": "access_denied",
-                    "actor_id": actor.telegram_id,
-                    "wishlist_id": wishlist_id,
-                    "action": "manage_members",
-                },
-            )
-            raise PermissionDeniedError("Actor cannot manage members")
-        if role == WishlistRole.ADMIN and not WishlistAccessPolicy.can_change_member_role(ctx, wl):
-            logger.warning(
-                "Actor %s denied permission to assign admin role for wishlist %s",
-                actor.telegram_id,
-                wishlist_id,
-                extra={
-                    "event": "access_denied",
-                    "actor_id": actor.telegram_id,
-                    "wishlist_id": wishlist_id,
-                    "action": "assign_admin_role",
-                },
-            )
-            raise PermissionDeniedError("Only owner can assign admin role")
-
-        existing = next((m for m in wl.members if m.user_id == user_id), None)
-        if existing is not None:
-            if existing.role != role:
-                self._record_shared_event("membership_changed", wl, None, actor.telegram_id)
-            existing.role = role
-            logger.info(
-                "Member %s role updated to %s in wishlist %s by actor %s",
-                user_id,
-                role.value,
-                wishlist_id,
-                actor.telegram_id,
-                extra={
-                    "event": "member_role_assigned",
-                    "user_id": user_id,
-                    "wishlist_id": wishlist_id,
-                    "role": role.value,
-                    "actor_id": actor.telegram_id,
-                },
-            )
-            return existing
-
-        self._next_member_id += 1
-        member = WishlistMember(
-            id=self._next_member_id,
-            wishlist_id=wl.id,
-            user_id=user_id,
-            role=role,
-            wishlist=wl,
-        )
-        wl.members.append(member)
-        self._record_shared_event("membership_changed", wl, None, actor.telegram_id)
-        wl.is_collaborative = len(wl.members) > 0
-        logger.info(
-            "Member %s role assigned as %s in wishlist %s by actor %s",
-            user_id,
-            role.value,
-            wishlist_id,
-            actor.telegram_id,
-            extra={
-                "event": "member_role_assigned",
-                "user_id": user_id,
-                "wishlist_id": wishlist_id,
-                "role": role.value,
-                "actor_id": actor.telegram_id,
-            },
-        )
-        return member
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def remove_member(
         self,
@@ -962,105 +718,16 @@ class WishlistService:
         actor: AuthenticatedUser,
         user_id: int,
     ) -> None:
-        """Remove a collaborator from the wishlist."""
-        wl = await self.get_wishlist_by_id(wishlist_id)
-        self._ensure_wishlist_active(wl)
-        ctx = WishlistAccessPolicy.resolve_context(actor, wl)
-        if not WishlistAccessPolicy.can_manage_members(ctx, wl) and actor.telegram_id != user_id:
-            logger.warning(
-                "Actor %s denied permission to remove member %s from wishlist %s",
-                actor.telegram_id,
-                user_id,
-                wishlist_id,
-                extra={
-                    "event": "access_denied",
-                    "actor_id": actor.telegram_id,
-                    "user_id": user_id,
-                    "wishlist_id": wishlist_id,
-                    "action": "remove_member",
-                },
-            )
-            raise PermissionDeniedError("Actor cannot remove this member")
-
-        if any(m.user_id == user_id for m in wl.members):
-            self._record_shared_event("membership_changed", wl, None, actor.telegram_id)
-        wl.members = [m for m in wl.members if m.user_id != user_id]
-        wl.is_collaborative = len(wl.members) > 0
-        if (
-            not self._has_valid_share_access(user_id, wl)
-            and self._favorites.pop((user_id, wl.id), None) is not None
-        ):
-            self._emit_or_defer_commit_log(
-                logging.INFO,
-                "Favorite revoked on member removal: wishlist_id=%s user_id=%s actor_id=%s",
-                wl.id,
-                user_id,
-                actor.telegram_id,
-                extra={
-                    "event": "favorite_access_revoked",
-                    "reason": "member_removed",
-                    "wishlist_id": wl.id,
-                    "user_id": user_id,
-                    "actor_id": actor.telegram_id,
-                },
-            )
-        if user_id != wl.owner_id and not self._has_valid_share_access(user_id, wl):
-            before_count = len(self._view_history)
-            self._view_history = [
-                e
-                for e in self._view_history
-                if not (e.user_id == user_id and e.wishlist_id == wl.id)
-            ]
-            if len(self._view_history) < before_count:
-                self._emit_or_defer_commit_log(
-                    logging.INFO,
-                    "View history revoked on member removal: wishlist_id=%s user_id=%s actor_id=%s",
-                    wl.id,
-                    user_id,
-                    actor.telegram_id,
-                    extra={
-                        "event": "view_history_access_revoked",
-                        "reason": "member_removed",
-                        "wishlist_id": wl.id,
-                        "user_id": user_id,
-                        "actor_id": actor.telegram_id,
-                    },
-                )
-        logger.info(
-            "Member %s removed from wishlist %s by actor %s",
-            user_id,
-            wishlist_id,
-            actor.telegram_id,
-            extra={
-                "event": "member_removed",
-                "user_id": user_id,
-                "wishlist_id": wishlist_id,
-                "actor_id": actor.telegram_id,
-            },
-        )
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def get_members(
         self,
         wishlist_id: int,
         actor: AuthenticatedUser,
     ) -> list[WishlistMember]:
-        """Retrieve collaborators belonging to the wishlist."""
-        wl = await self.get_wishlist_by_id(wishlist_id)
-        ctx = WishlistAccessPolicy.resolve_context(actor, wl)
-        if not (ctx.is_owner or ctx.is_admin or ctx.is_member):
-            logger.warning(
-                "Actor %s denied permission to view members of wishlist %s",
-                actor.telegram_id,
-                wishlist_id,
-                extra={
-                    "event": "access_denied",
-                    "actor_id": actor.telegram_id,
-                    "wishlist_id": wishlist_id,
-                    "action": "get_members",
-                },
-            )
-            raise PermissionDeniedError("Actor cannot view members")
-        return list(wl.members)
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def update_wishlist_settings(
         self,
@@ -1072,7 +739,7 @@ class WishlistService:
         event_date: datetime | None = None,
     ) -> Wishlist:
         """Update metadata settings of an active wishlist."""
-        wl = await self.get_wishlist_by_id(wishlist_id)
+        wl = await self._lookup_wishlist(wishlist_id)
         ctx = WishlistAccessPolicy.resolve_context(actor, wl)
         if not WishlistAccessPolicy.can_edit_settings(ctx, wl):
             logger.warning(
@@ -1124,90 +791,20 @@ class WishlistService:
         wishlist_id: int,
         actor: AuthenticatedUser,
     ) -> Wishlist:
-        """Archive an active wishlist, locking items and reservations."""
-        wl = await self.get_wishlist_by_id(wishlist_id)
-        self._ensure_wishlist_active(wl)
-        ctx = WishlistAccessPolicy.resolve_context(actor, wl)
-        if not WishlistAccessPolicy.can_archive(ctx, wl):
-            logger.warning(
-                "Actor %s denied permission to archive wishlist %s",
-                actor.telegram_id,
-                wishlist_id,
-                extra={
-                    "event": "access_denied",
-                    "actor_id": actor.telegram_id,
-                    "wishlist_id": wishlist_id,
-                    "action": "archive_wishlist",
-                },
-            )
-            raise PermissionDeniedError("Actor cannot archive wishlist")
-
-        old_status = wl.status.value
-        wl.status = WishlistStatus.ARCHIVED
-        self._record_shared_event("list_archived", wl, None, actor.telegram_id)
-        wl.updated_at = datetime.now(UTC)
-        logger.info(
-            "Wishlist %s transitioned from %s to %s by actor %s",
-            wishlist_id,
-            old_status,
-            WishlistStatus.ARCHIVED.value,
-            actor.telegram_id,
-            extra={
-                "event": "wishlist_status_changed",
-                "wishlist_id": wishlist_id,
-                "actor_id": actor.telegram_id,
-                "from_status": old_status,
-                "to_status": WishlistStatus.ARCHIVED.value,
-            },
-        )
-        return wl
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def unarchive_wishlist(
         self,
         wishlist_id: int,
         actor: AuthenticatedUser,
     ) -> Wishlist:
-        """Unarchive a wishlist back to active state."""
-        wl = await self.get_wishlist_by_id(wishlist_id)
-        ctx = WishlistAccessPolicy.resolve_context(actor, wl)
-        if not WishlistAccessPolicy.can_archive(ctx, wl):
-            logger.warning(
-                "Actor %s denied permission to unarchive wishlist %s",
-                actor.telegram_id,
-                wishlist_id,
-                extra={
-                    "event": "access_denied",
-                    "actor_id": actor.telegram_id,
-                    "wishlist_id": wishlist_id,
-                    "action": "unarchive_wishlist",
-                },
-            )
-            raise PermissionDeniedError("Actor cannot unarchive wishlist")
-
-        old_status = wl.status.value
-        wl.status = WishlistStatus.ACTIVE
-        if old_status != WishlistStatus.ACTIVE.value:
-            self._record_shared_event("list_restored", wl, None, actor.telegram_id)
-        wl.updated_at = datetime.now(UTC)
-        logger.info(
-            "Wishlist %s transitioned from %s to %s by actor %s",
-            wishlist_id,
-            old_status,
-            WishlistStatus.ACTIVE.value,
-            actor.telegram_id,
-            extra={
-                "event": "wishlist_status_changed",
-                "wishlist_id": wishlist_id,
-                "actor_id": actor.telegram_id,
-                "from_status": old_status,
-                "to_status": WishlistStatus.ACTIVE.value,
-            },
-        )
-        return wl
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def get_wishlist_or_none(self, wishlist_id: int) -> Wishlist | None:
-        """Return the row in any status, including deleted, and write no log."""
-        return self._wishlists.get(wishlist_id)
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def classify_owner_delete(
         self,
@@ -1216,74 +813,16 @@ class WishlistService:
         retention_days: int,
         now: datetime | None = None,
     ) -> retention.OwnerDeleteDecision:
-        """Classify an owner delete. Does not mutate and does not log."""
-        wishlist = await self.get_wishlist_or_none(wishlist_id)
-        if wishlist is None:
-            return retention.OwnerDeleteDecision(
-                kind=retention.OwnerDeleteKind.MISSING,
-                retention_days=retention_days,
-            )
-        ctx = WishlistAccessPolicy.resolve_context(actor, wishlist)
-        if not WishlistAccessPolicy.can_delete(ctx, wishlist):
-            return retention.OwnerDeleteDecision(
-                kind=retention.OwnerDeleteKind.FORBIDDEN,
-                retention_days=retention_days,
-            )
-        if wishlist.status != WishlistStatus.DELETED:
-            return retention.OwnerDeleteDecision(
-                kind=retention.OwnerDeleteKind.APPLY,
-                retention_days=retention_days,
-            )
-        effective_now = now if now is not None else datetime.now(UTC)
-        expired = retention.is_retention_expired(wishlist.updated_at, retention_days, effective_now)
-        kind = retention.OwnerDeleteKind.EXPIRED if expired else retention.OwnerDeleteKind.REPEAT
-        return retention.OwnerDeleteDecision(kind=kind, retention_days=retention_days)
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def delete_wishlist(
         self,
         wishlist_id: int,
         actor: AuthenticatedUser,
     ) -> None:
-        """Soft delete a wishlist and cancel all active reservations."""
-        wl = await self.get_wishlist_by_id(wishlist_id)
-        self._ensure_wishlist_active(wl)
-        ctx = WishlistAccessPolicy.resolve_context(actor, wl)
-        if not WishlistAccessPolicy.can_delete(ctx, wl):
-            logger.warning(
-                "Actor %s denied permission to delete wishlist %s",
-                actor.telegram_id,
-                wishlist_id,
-                extra={
-                    "event": "access_denied",
-                    "actor_id": actor.telegram_id,
-                    "wishlist_id": wishlist_id,
-                    "action": "delete_wishlist",
-                },
-            )
-            raise PermissionDeniedError("Actor cannot delete wishlist")
-
-        old_status = wl.status.value
-        wl.status = WishlistStatus.DELETED
-        wl.updated_at = datetime.now(UTC)
-        for item in wl.items:
-            for res in item.reservations:
-                if res.status in (ReservationStatus.ACTIVE, ReservationStatus.PURCHASED):
-                    res.status = ReservationStatus.CANCELLED
-                    res.updated_at = datetime.now(UTC)
-        logger.info(
-            "Wishlist %s transitioned from %s to %s by actor %s",
-            wishlist_id,
-            old_status,
-            WishlistStatus.DELETED.value,
-            actor.telegram_id,
-            extra={
-                "event": "wishlist_status_changed",
-                "wishlist_id": wishlist_id,
-                "actor_id": actor.telegram_id,
-                "from_status": old_status,
-                "to_status": WishlistStatus.DELETED.value,
-            },
-        )
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def list_deleted_wishlists(
         self,
@@ -1291,34 +830,8 @@ class WishlistService:
         retention_days: int = retention.DEFAULT_WISHLIST_RETENTION_DAYS,
         now: datetime | None = None,
     ) -> list[tuple[Wishlist, datetime, int]]:
-        """List owner's soft-deleted wishlists that are still within the retention window."""
-        effective_now = now if now is not None else datetime.now(UTC)
-        results: list[tuple[Wishlist, datetime, int]] = []
-        for wl in self._wishlists.values():
-            if wl.status != WishlistStatus.DELETED:
-                continue
-            ctx = WishlistAccessPolicy.resolve_context(actor, wl)
-            if not WishlistAccessPolicy.can_restore_deleted(ctx, wl):
-                continue
-            if retention.is_retention_expired(wl.updated_at, retention_days, effective_now):
-                continue
-            deleted_at = retention.deletion_moment(wl.updated_at)
-            expires_at = deleted_at + timedelta(days=retention_days)
-            days_left = retention.days_remaining(wl.updated_at, retention_days, effective_now)
-            results.append((wl, expires_at, days_left))
-        results.sort(key=lambda entry: entry[0].updated_at, reverse=True)
-        logger.info(
-            "Listed %s deleted wishlists for actor %s",
-            len(results),
-            actor.telegram_id,
-            extra={
-                "event": "wishlist_deleted_listed",
-                "actor_id": actor.telegram_id,
-                "count": len(results),
-                "retention_days": retention_days,
-            },
-        )
-        return results
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def restore_deleted_wishlist(
         self,
@@ -1327,79 +840,8 @@ class WishlistService:
         retention_days: int = retention.DEFAULT_WISHLIST_RETENTION_DAYS,
         now: datetime | None = None,
     ) -> Wishlist:
-        """Restore owner's soft-deleted wishlist within the retention window with token rotation."""
-        wl = self._wishlists.get(wishlist_id)
-        if wl is None:
-            raise WishlistNotFoundError(f"Wishlist {wishlist_id} not found")
-
-        ctx = WishlistAccessPolicy.resolve_context(actor, wl)
-        if not WishlistAccessPolicy.can_restore_deleted(ctx, wl):
-            logger.warning(
-                "Actor %s denied permission to restore deleted wishlist %s",
-                actor.telegram_id,
-                wishlist_id,
-                extra={
-                    "event": "access_denied",
-                    "actor_id": actor.telegram_id,
-                    "wishlist_id": wishlist_id,
-                    "action": "restore_deleted_wishlist",
-                },
-            )
-            raise PermissionDeniedError("Actor cannot restore deleted wishlist")
-
-        if wl.status == WishlistStatus.ACTIVE:
-            return wl
-        if wl.status != WishlistStatus.DELETED:
-            raise WishlistArchivedError("Wishlist is archived and cannot be restored as deleted")
-
-        effective_now = now if now is not None else datetime.now(UTC)
-        if retention.is_retention_expired(wl.updated_at, retention_days, effective_now):
-            logger.warning(
-                "Restore rejected for deleted wishlist %s: retention window (%s days) expired",
-                wishlist_id,
-                retention_days,
-                extra={
-                    "event": "wishlist_restore_retention_expired",
-                    "wishlist_id": wishlist_id,
-                    "actor_id": actor.telegram_id,
-                    "retention_days": retention_days,
-                },
-            )
-            raise WishlistRetentionExpiredError("Wishlist retention window has expired")
-
-        new_public_token = self._generate_new_public_token(wl)
-
-        new_invite_token = secrets.token_urlsafe(24)
-        for _ in range(4):
-            if new_invite_token not in {wl.invite_token, wl.public_token, new_public_token}:
-                break
-            new_invite_token = secrets.token_urlsafe(24)
-        if new_invite_token in {wl.invite_token, wl.public_token, new_public_token}:
-            raise RuntimeError("Unable to generate a new invitation token")
-
-        wl.public_token = new_public_token
-        wl.invite_token = new_invite_token
-        wl.invite_token_expires_at = effective_now + self._default_invite_ttl
-        wl.status = WishlistStatus.ACTIVE
-        wl.updated_at = effective_now
-        self._revoke_share_access_for_wishlist(
-            wl, reason="wishlist_restored", actor_id=actor.telegram_id
-        )
-        logger.info(
-            "Deleted wishlist %s restored to %s by actor %s",
-            wishlist_id,
-            WishlistStatus.ACTIVE.value,
-            actor.telegram_id,
-            extra={
-                "event": "wishlist_restored_from_deleted",
-                "wishlist_id": wishlist_id,
-                "actor_id": actor.telegram_id,
-                "from_status": WishlistStatus.DELETED.value,
-                "to_status": WishlistStatus.ACTIVE.value,
-                "retention_days": retention_days,
-            },
-        )
-        return wl
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def transfer_ownership(
         self,
@@ -1408,7 +850,7 @@ class WishlistService:
         new_owner_id: int,
     ) -> Wishlist:
         """Transfer wishlist ownership to a collaborator."""
-        wl = await self.get_wishlist_by_id(wishlist_id)
+        wl = await self._lookup_wishlist(wishlist_id)
         ctx = WishlistAccessPolicy.resolve_context(actor, wl)
         if not WishlistAccessPolicy.can_transfer_ownership(ctx, wl):
             logger.warning(
@@ -1476,100 +918,8 @@ class WishlistService:
         priority: ItemPriority = ItemPriority.MEDIUM,
         category: str | None = None,
     ) -> WishItem:
-        """Add a new wish item to the wishlist."""
-        wl = await self.get_wishlist_by_id(wishlist_id)
-        if wl.status == WishlistStatus.ARCHIVED:
-            logger.warning(
-                "Attempted to add item to archived wishlist %s by actor %s",
-                wishlist_id,
-                actor.telegram_id,
-                extra={
-                    "event": "wishlist_archived_mutation_blocked",
-                    "wishlist_id": wishlist_id,
-                    "actor_id": actor.telegram_id,
-                },
-            )
-            raise WishlistArchivedError(f"Wishlist {wishlist_id} is archived")
-        if wl.status == WishlistStatus.DELETED:
-            logger.warning(
-                "Attempted to add item to deleted wishlist %s by actor %s",
-                wishlist_id,
-                actor.telegram_id,
-                extra={
-                    "event": "wishlist_deleted_mutation_blocked",
-                    "wishlist_id": wishlist_id,
-                    "actor_id": actor.telegram_id,
-                },
-            )
-            raise WishlistDeletedError(f"Wishlist {wishlist_id} is deleted")
-
-        ctx = WishlistAccessPolicy.resolve_context(actor, wl)
-        if not WishlistAccessPolicy.can_add_or_edit_item(ctx, wl):
-            logger.warning(
-                "Actor %s denied permission to add item to wishlist %s",
-                actor.telegram_id,
-                wishlist_id,
-                extra={
-                    "event": "item_access_denied",
-                    "actor_id": actor.telegram_id,
-                    "wishlist_id": wishlist_id,
-                    "action": "add_item",
-                    "role": ctx.role.value if ctx.role else None,
-                },
-            )
-            raise PermissionDeniedError("Actor cannot add items to this wishlist")
-
-        if recipient_user_id is not None:
-            member_uids = {wl.owner_id} | {m.user_id for m in wl.members}
-            if recipient_user_id not in member_uids:
-                raise ValueError(
-                    f"Recipient user {recipient_user_id} is not a member of wishlist {wishlist_id}"
-                )
-
-        next_order = max([it.display_order for it in wl.items], default=-1) + 1
-        self._next_item_id += 1
-        item = WishItem(
-            id=self._next_item_id,
-            wishlist_id=wl.id,
-            title=title,
-            description=description,
-            link=link,
-            price=price,
-            currency=currency,
-            quantity=quantity,
-            received_quantity=0,
-            image_url=image_url,
-            store_name=store_name,
-            store_icon_url=store_icon_url,
-            priority=priority,
-            category=category,
-            display_order=next_order,
-            is_archived=False,
-            recipient_user_id=recipient_user_id,
-            recipient_name=recipient_name,
-            wishlist=wl,
-        )
-        wl.items.append(item)
-        self._items[item.id] = item
-        self._record_shared_event("item_created", wl, item, actor.telegram_id)
-        has_recip = recipient_user_id is not None or bool(recipient_name and recipient_name.strip())
-        logger.info(
-            "Item %s added to wishlist %s by actor %s",
-            item.id,
-            wl.id,
-            actor.telegram_id,
-            extra={
-                "event": "item_created",
-                "item_id": item.id,
-                "wishlist_id": wl.id,
-                "actor_id": actor.telegram_id,
-                "recipient_user_id": recipient_user_id,
-                "quantity": item.quantity,
-                "display_order": item.display_order,
-                "has_recipient": has_recip,
-            },
-        )
-        return item
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def update_wish_item(
         self,
@@ -1823,14 +1173,8 @@ class WishlistService:
         item_id: int,
         actor: AuthenticatedUser | None = None,
     ) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
-        """Retrieve a single wish item projected according to caller's context."""
-        wl = await self.get_wishlist_by_id(wishlist_id)
-        if item_id not in self._items:
-            raise ItemNotFoundError(f"Item {item_id} not found")
-        item = self._items[item_id]
-        if item.wishlist_id != wl.id:
-            raise ItemNotFoundError(f"Item {item_id} not found in wishlist {wishlist_id}")
-        return project_wish_item(item, actor)
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def list_wish_items(
         self,
@@ -1838,68 +1182,16 @@ class WishlistService:
         actor: AuthenticatedUser | None = None,
         include_archived: bool = False,
     ) -> list[WishItemRecipientViewDTO | WishItemGifterViewDTO]:
-        """List wishlist items projected according to caller's context and archive filter."""
-        wl = await self.get_wishlist_by_id(wishlist_id)
-        filtered = [
-            item
-            for item in wl.items
-            if (not item.is_fully_received if include_archived else item.is_active)
-        ]
-        sorted_items = sorted(filtered, key=lambda it: (it.display_order, it.id))
-        return [project_wish_item(it, actor) for it in sorted_items]
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def list_gifted_items(
         self,
         wishlist_id: int,
         actor: AuthenticatedUser | None,
     ) -> list[GiftedItemDTO]:
-        """List received wishes with dated receipts for the list authors only.
-
-        Raises:
-            WishlistNotFoundError: Unknown list.
-            WishlistDeletedError: The list is deleted.
-            PermissionDeniedError: The actor is not a member of the list.
-        """
-        wl = await self.get_wishlist_by_id(wishlist_id)
-        ctx = WishlistAccessPolicy.resolve_context(actor, wl)
-        if not WishlistAccessPolicy.can_view_gifted(ctx, wl):
-            raise PermissionDeniedError("Only list authors can read the gifted wishes")
-        gifted = [item for item in wl.items if item.is_gifted]
-        gifted.sort(
-            key=lambda it: (
-                -max((r.received_at for r in it.receipts), default=it.updated_at).timestamp(),
-                it.id,
-            )
-        )
-        return [
-            GiftedItemDTO(
-                id=item.id,
-                title=item.title,
-                description=item.description,
-                link=item.link,
-                image_url=item.image_url,
-                price=item.price,
-                currency=item.currency,
-                store_name=item.store_name,
-                store_icon_url=item.store_icon_url,
-                recipient_user_id=item.recipient_user_id,
-                recipient_name=item.recipient_name,
-                quantity=item.quantity,
-                received_quantity=item.received_quantity,
-                remaining_quantity=item.remaining_quantity,
-                is_archived=item.is_archived,
-                receipts=[
-                    ReceiptEntryDTO(
-                        id=r.id,
-                        received_at=r.received_at,
-                        quantity=r.quantity,
-                        is_approximate=r.is_approximate,
-                    )
-                    for r in sorted(item.receipts, key=lambda r: (r.received_at, r.id))
-                ],
-            )
-            for item in gifted
-        ]
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def reorder_wish_items(
         self,
@@ -1907,85 +1199,8 @@ class WishlistService:
         actor: AuthenticatedUser,
         item_ids: list[int],
     ) -> list[WishItemRecipientViewDTO | WishItemGifterViewDTO]:
-        """Atomically reorder active items in a wishlist enforcing 1:1 permutation integrity."""
-        wl = await self.get_wishlist_by_id(wishlist_id)
-        if wl.status == WishlistStatus.ARCHIVED:
-            raise WishlistArchivedError(f"Wishlist {wishlist_id} is archived")
-        if wl.status == WishlistStatus.DELETED:
-            raise WishlistDeletedError(f"Wishlist {wishlist_id} is deleted")
-
-        ctx = WishlistAccessPolicy.resolve_context(actor, wl)
-        if not WishlistAccessPolicy.can_add_or_edit_item(ctx, wl):
-            logger.warning(
-                "Actor %s denied permission to reorder items in wishlist %s",
-                actor.telegram_id,
-                wl.id,
-                extra={
-                    "event": "item_access_denied",
-                    "actor_id": actor.telegram_id,
-                    "wishlist_id": wl.id,
-                    "action": "reorder_items",
-                    "role": ctx.role.value if ctx.role else None,
-                },
-            )
-            raise PermissionDeniedError("Actor cannot reorder items in this wishlist")
-
-        active_items = [it for it in wl.items if it.is_active]
-        if len(item_ids) != len(set(item_ids)):
-            reason = "Duplicate item IDs in reorder request"
-            logger.warning(
-                "Invalid reorder request for wishlist %s by actor %s: %s",
-                wl.id,
-                actor.telegram_id,
-                reason,
-                extra={
-                    "event": "item_reorder_invalid",
-                    "wishlist_id": wl.id,
-                    "actor_id": actor.telegram_id,
-                    "reason": reason,
-                },
-            )
-            raise ValueError(reason)
-
-        active_ids_set = {it.id for it in active_items}
-        if set(item_ids) != active_ids_set:
-            reason = "Reorder list must contain exactly all active item IDs for this wishlist"
-            logger.warning(
-                "Invalid reorder request for wishlist %s by actor %s: %s",
-                wl.id,
-                actor.telegram_id,
-                reason,
-                extra={
-                    "event": "item_reorder_invalid",
-                    "wishlist_id": wl.id,
-                    "actor_id": actor.telegram_id,
-                    "reason": reason,
-                },
-            )
-            raise ValueError(reason)
-
-        item_map = {it.id: it for it in active_items}
-        for order, it_id in enumerate(item_ids):
-            item = item_map[it_id]
-            item.display_order = order
-            item.updated_at = datetime.now(UTC)
-
-        wl.items.sort(key=lambda it: (it.display_order, it.id))
-        logger.info(
-            "Items in wishlist %s reordered by actor %s (count=%s)",
-            wl.id,
-            actor.telegram_id,
-            len(item_ids),
-            extra={
-                "event": "items_reordered",
-                "wishlist_id": wl.id,
-                "actor_id": actor.telegram_id,
-                "item_count": len(item_ids),
-                "count": len(item_ids),
-                "item_ids": item_ids,
-            },
-        )
-        return [project_wish_item(item_map[it_id], actor) for it_id in item_ids]
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     @staticmethod
     def _log_archive_refused(wishlist_id: int, item_id: int, actor: AuthenticatedUser) -> None:
@@ -2001,26 +1216,6 @@ class WishlistService:
             },
         )
 
-    @staticmethod
-    def _log_partial_move(
-        event: str, verb: str, wishlist_id: int, item: WishItem, actor: AuthenticatedUser
-    ) -> None:
-        """INFO for archiving or restoring a partly received wish; silent for an untouched one."""
-        if item.received_quantity <= 0:
-            return
-        logger.info(
-            "Partly received wish %s",
-            verb,
-            extra={
-                "event": event,
-                "wishlist_id": wishlist_id,
-                "item_id": item.id,
-                "actor_id": actor.telegram_id,
-                "received_quantity": item.received_quantity,
-                "total_quantity": item.quantity,
-            },
-        )
-
     async def archive_wish_item(
         self,
         wishlist_id: int,
@@ -2028,63 +1223,8 @@ class WishlistService:
         actor: AuthenticatedUser,
         warn_on_delete_reserved: bool | None = None,
     ) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
-        """Safely archive a wish item, preserving reservations and blocking new ones."""
-        wl = await self.get_wishlist_by_id(wishlist_id)
-        if wl.status == WishlistStatus.ARCHIVED:
-            raise WishlistArchivedError(f"Wishlist {wishlist_id} is archived")
-        if wl.status == WishlistStatus.DELETED:
-            raise WishlistDeletedError(f"Wishlist {wishlist_id} is deleted")
-
-        ctx = WishlistAccessPolicy.resolve_context(actor, wl)
-        if not WishlistAccessPolicy.can_add_or_edit_item(ctx, wl):
-            logger.warning(
-                "Actor %s denied permission to archive item %s in wishlist %s",
-                actor.telegram_id,
-                item_id,
-                wl.id,
-                extra={
-                    "event": "item_access_denied",
-                    "actor_id": actor.telegram_id,
-                    "wishlist_id": wl.id,
-                    "item_id": item_id,
-                    "action": "archive_item",
-                    "role": ctx.role.value if ctx.role else None,
-                },
-            )
-            raise PermissionDeniedError("Actor cannot archive items in this wishlist")
-
-        if item_id not in self._items:
-            raise ItemNotFoundError(f"Item {item_id} not found")
-        item = self._items[item_id]
-        if item.wishlist_id != wl.id:
-            raise ItemNotFoundError(f"Item {item_id} not found in wishlist {wishlist_id}")
-        if item.is_fully_received:
-            self._log_archive_refused(wl.id, item.id, actor)
-            raise NothingRemainingError()
-
-        if warn_on_delete_reserved is not None:
-            wl.warn_on_delete_reserved = warn_on_delete_reserved
-            wl.updated_at = datetime.now(UTC)
-
-        was_archived = item.is_archived
-        item.is_archived = True
-        if not was_archived:
-            self._record_shared_event("item_archived", wl, item, actor.telegram_id)
-        item.updated_at = datetime.now(UTC)
-        logger.info(
-            "Item %s archived in wishlist %s by actor %s",
-            item.id,
-            wl.id,
-            actor.telegram_id,
-            extra={
-                "event": "item_archived",
-                "item_id": item.id,
-                "wishlist_id": wl.id,
-                "actor_id": actor.telegram_id,
-            },
-        )
-        self._log_partial_move("wish_archived_partial", "archived", wl.id, item, actor)
-        return project_wish_item(item, actor)
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def restore_wish_item(
         self,
@@ -2092,65 +1232,8 @@ class WishlistService:
         item_id: int,
         actor: AuthenticatedUser,
     ) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
-        """Restore an archived wish item to the end of the active display order."""
-        wl = await self.get_wishlist_by_id(wishlist_id)
-        if wl.status == WishlistStatus.ARCHIVED:
-            raise WishlistArchivedError(f"Wishlist {wishlist_id} is archived")
-        if wl.status == WishlistStatus.DELETED:
-            raise WishlistDeletedError(f"Wishlist {wishlist_id} is deleted")
-
-        ctx = WishlistAccessPolicy.resolve_context(actor, wl)
-        if not WishlistAccessPolicy.can_add_or_edit_item(ctx, wl):
-            logger.warning(
-                "Actor %s denied permission to restore item %s in wishlist %s",
-                actor.telegram_id,
-                item_id,
-                wl.id,
-                extra={
-                    "event": "item_access_denied",
-                    "actor_id": actor.telegram_id,
-                    "wishlist_id": wl.id,
-                    "item_id": item_id,
-                    "action": "restore_item",
-                    "role": ctx.role.value if ctx.role else None,
-                },
-            )
-            raise PermissionDeniedError("Actor cannot restore items in this wishlist")
-
-        if item_id not in self._items:
-            raise ItemNotFoundError(f"Item {item_id} not found")
-        item = self._items[item_id]
-        if item.wishlist_id != wl.id:
-            raise ItemNotFoundError(f"Item {item_id} not found in wishlist {wishlist_id}")
-        if item.remaining_quantity == 0:
-            self._log_archive_refused(wl.id, item.id, actor)
-            raise NothingRemainingError()
-
-        was_archived = item.is_archived
-        item.is_archived = False
-        if was_archived:
-            self._record_shared_event("item_restored", wl, item, actor.telegram_id)
-        active_orders = [it.display_order for it in wl.items if it.is_active and it.id != item.id]
-        item.display_order = max(active_orders, default=-1) + 1
-        item.updated_at = datetime.now(UTC)
-        wl.items.sort(key=lambda it: (it.display_order, it.id))
-        logger.info(
-            "Item %s restored in wishlist %s by actor %s (new_display_order=%s)",
-            item.id,
-            wl.id,
-            actor.telegram_id,
-            item.display_order,
-            extra={
-                "event": "item_restored",
-                "item_id": item.id,
-                "wishlist_id": wl.id,
-                "actor_id": actor.telegram_id,
-                "display_order": item.display_order,
-                "new_display_order": item.display_order,
-            },
-        )
-        self._log_partial_move("wish_restored_partial", "restored", wl.id, item, actor)
-        return project_wish_item(item, actor)
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def create_reservation(
         self,
@@ -3111,126 +2194,23 @@ class WishlistService:
         invite_token: str,
         user: AuthenticatedUser,
     ) -> WishlistMember:
-        """Join a wishlist as Member using an invite token."""
-        wl = next((w for w in self._wishlists.values() if w.invite_token == invite_token), None)
-        if wl is None:
-            logger.warning(
-                "User %s attempted to join with non-existent invite token",
-                user.telegram_id,
-                extra={
-                    "event": "invalid_invite_token",
-                    "user_id": user.telegram_id,
-                },
-            )
-            raise InvalidInviteTokenError("Invalid invite token")
-        if wl.status == WishlistStatus.DELETED:
-            logger.warning(
-                "User %s attempted to join deleted wishlist %s",
-                user.telegram_id,
-                wl.id,
-                extra={
-                    "event": "join_deleted_wishlist",
-                    "user_id": user.telegram_id,
-                    "wishlist_id": wl.id,
-                },
-            )
-            raise WishlistDeletedError(f"Wishlist {wl.id} is deleted")
-        self._ensure_wishlist_active(wl)
-        if wl.invite_token_expires_at is not None and wl.invite_token_expires_at < datetime.now(
-            UTC
-        ):
-            logger.warning(
-                "User %s attempted to join wishlist %s with expired invite token",
-                user.telegram_id,
-                wl.id,
-                extra={
-                    "event": "expired_invite_token",
-                    "user_id": user.telegram_id,
-                    "wishlist_id": wl.id,
-                },
-            )
-            raise InvalidInviteTokenError("Invite token has expired")
-
-        existing = next((m for m in wl.members if m.user_id == user.telegram_id), None)
-        if existing is not None:
-            return existing
-
-        self._next_member_id += 1
-        member = WishlistMember(
-            id=self._next_member_id,
-            wishlist_id=wl.id,
-            user_id=user.telegram_id,
-            role=WishlistRole.MEMBER,
-            wishlist=wl,
-        )
-        wl.members.append(member)
-        wl.is_collaborative = True
-        self._record_shared_event("membership_changed", wl, None, user.telegram_id)
-        logger.info(
-            "User %s joined wishlist %s via invite token with role %s",
-            user.telegram_id,
-            wl.id,
-            WishlistRole.MEMBER.value,
-            extra={
-                "event": "member_joined",
-                "user_id": user.telegram_id,
-                "wishlist_id": wl.id,
-                "role": WishlistRole.MEMBER.value,
-            },
-        )
-        return member
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def get_wishlist_by_invite_token(
         self,
         invite_token: str,
     ) -> Wishlist | None:
-        """Find active wishlist by invite token."""
-        wl = next((w for w in self._wishlists.values() if w.invite_token == invite_token), None)
-        if wl is None or wl.status == WishlistStatus.DELETED:
-            return None
-        return wl
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def regenerate_public_token(
         self,
         wishlist_id: int,
         actor: AuthenticatedUser,
     ) -> str:
-        """Revoke existing public token and generate a new one."""
-        wl = await self.get_wishlist_by_id(wishlist_id)
-        self._ensure_wishlist_active(wl)
-        ctx = WishlistAccessPolicy.resolve_context(actor, wl)
-        if not (ctx.is_owner or ctx.is_admin):
-            logger.warning(
-                "Actor %s denied permission to regenerate public token for wishlist %s",
-                actor.telegram_id,
-                wishlist_id,
-                extra={
-                    "event": "access_denied",
-                    "actor_id": actor.telegram_id,
-                    "wishlist_id": wishlist_id,
-                    "action": "regenerate_public_token",
-                },
-            )
-            raise PermissionDeniedError("Actor cannot regenerate public token")
-
-        new_token = self._generate_new_public_token(wl)
-        wl.public_token = new_token
-        wl.updated_at = datetime.now(UTC)
-        self._revoke_share_access_for_wishlist(
-            wl, reason="public_token_rotated", actor_id=actor.telegram_id
-        )
-        logger.info(
-            "Public token regenerated for wishlist %s by actor %s",
-            wishlist_id,
-            actor.telegram_id,
-            extra={
-                "event": "public_token_regenerated",
-                "actor_id": actor.telegram_id,
-                "wishlist_id": wishlist_id,
-                "token_type": "public_token",
-            },
-        )
-        return new_token
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def regenerate_invite_token(
         self,
@@ -3238,47 +2218,8 @@ class WishlistService:
         actor: AuthenticatedUser,
         expires_in: timedelta | None = None,
     ) -> str:
-        """Revoke existing invite token and generate a new one."""
-        wl = await self.get_wishlist_by_id(wishlist_id)
-        self._ensure_wishlist_active(wl)
-        ctx = WishlistAccessPolicy.resolve_context(actor, wl)
-        if not (ctx.is_owner or ctx.is_admin):
-            logger.warning(
-                "Actor %s denied permission to regenerate invite token for wishlist %s",
-                actor.telegram_id,
-                wishlist_id,
-                extra={
-                    "event": "access_denied",
-                    "actor_id": actor.telegram_id,
-                    "wishlist_id": wishlist_id,
-                    "action": "regenerate_invite_token",
-                },
-            )
-            raise PermissionDeniedError("Actor cannot regenerate invite token")
-
-        new_token = secrets.token_urlsafe(24)
-        for _ in range(4):
-            if new_token != wl.invite_token and new_token != wl.public_token:
-                break
-            new_token = secrets.token_urlsafe(24)
-        if new_token in {wl.invite_token, wl.public_token}:
-            raise RuntimeError("Unable to generate a new invitation token")
-        wl.invite_token = new_token
-        ttl = expires_in if expires_in is not None else self._default_invite_ttl
-        wl.invite_token_expires_at = datetime.now(UTC) + ttl
-        wl.updated_at = datetime.now(UTC)
-        logger.info(
-            "Invite token regenerated for wishlist %s by actor %s",
-            wishlist_id,
-            actor.telegram_id,
-            extra={
-                "event": "invite_token_regenerated",
-                "actor_id": actor.telegram_id,
-                "wishlist_id": wishlist_id,
-                "token_type": "invite_token",
-            },
-        )
-        return new_token
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     def _generate_new_public_token(self, wishlist: Wishlist) -> str:
         """Generate a fresh public_token distinct from the current public and invite tokens."""
@@ -3289,10 +2230,56 @@ class WishlistService:
             new_token = secrets.token_urlsafe(16)
         raise RuntimeError("Unable to generate a new public token")
 
-    def _has_valid_share_access(self, user_id: int, wishlist: Wishlist) -> bool:
-        """Return True if the user holds a share-access grant matching the active public_token."""
-        grant = self._share_access.get((user_id, wishlist.id))
-        return grant is not None and grant.public_token == wishlist.public_token
+    def _resolve_loaded_public_token(
+        self,
+        public_token: str,
+        current_user: AuthenticatedUser | None,
+    ) -> Wishlist:
+        """Match a token on the hydrated graph and record share access for a non-owner.
+
+        Wish inventory loads one list. The public shared lookup stays on the repository.
+        """
+        wishlist = next(
+            (row for row in self._wishlists.values() if row.public_token == public_token),
+            None,
+        )
+        if wishlist is None:
+            logger.warning(
+                "Public token lookup failed: token not found",
+                extra={"event": "public_token_not_found"},
+            )
+            raise WishlistNotFoundError("Wishlist not found")
+        if wishlist.status == WishlistStatus.DELETED:
+            logger.warning(
+                "Public token lookup failed: wishlist %s is deleted",
+                wishlist.id,
+                extra={
+                    "event": "deleted_wishlist_access_attempt",
+                    "wishlist_id": wishlist.id,
+                },
+            )
+            raise WishlistDeletedError(f"Wishlist {wishlist.id} has been deleted")
+        if current_user is not None and wishlist.owner_id != current_user.telegram_id:
+            key = (current_user.telegram_id, wishlist.id)
+            grant = self._share_access.get(key)
+            if grant is None or grant.public_token != wishlist.public_token:
+                self._share_access[key] = ShareAccessGrant(
+                    user_id=current_user.telegram_id,
+                    wishlist_id=wishlist.id,
+                    public_token=wishlist.public_token,
+                )
+                self._emit_or_defer_commit_log(
+                    logging.INFO,
+                    "Share access granted: wishlist_id=%s user_id=%s",
+                    wishlist.id,
+                    current_user.telegram_id,
+                    extra={
+                        "event": "share_access_granted",
+                        "wishlist_id": wishlist.id,
+                        "user_id": current_user.telegram_id,
+                    },
+                )
+        return wishlist
 
     def _revoke_share_access_for_wishlist(
         self,
@@ -3353,225 +2340,82 @@ class WishlistService:
         return self.has_favorite(user.telegram_id, wishlist_id)
 
     async def add_favorite(self, user: AuthenticatedUser, wishlist_id: int) -> WishlistFavorite:
-        """Add a wishlist to user's favorites."""
-        wl = self._wishlists.get(wishlist_id)
-        if wl is None or wl.status == WishlistStatus.DELETED:
-            if wl is not None and wl.status == WishlistStatus.DELETED:
-                logger.warning(
-                    "Favorite attempt on deleted wishlist %s by user %s denied",
-                    wishlist_id,
-                    user.telegram_id,
-                    extra={
-                        "event": "favorite_deleted_wishlist_denied",
-                        "wishlist_id": wishlist_id,
-                        "user_id": user.telegram_id,
-                    },
-                )
-            raise WishlistNotFoundError(f"Wishlist {wishlist_id} not found")
-        if wl.owner_id == user.telegram_id:
-            logger.warning(
-                "Self-favoriting attempt by user %s on wishlist %s denied",
-                user.telegram_id,
-                wishlist_id,
-                extra={
-                    "event": "favorite_own_wishlist_denied",
-                    "wishlist_id": wishlist_id,
-                    "user_id": user.telegram_id,
-                },
-            )
-            raise ValueError("Cannot favorite own wishlist")
-
-        has_share = self._has_valid_share_access(user.telegram_id, wl)
-        if not WishlistAccessPolicy.can_favorite(user, wl, has_share_access=has_share):
-            logger.warning(
-                "Unauthorized favorite attempt on wishlist %s by user %s denied",
-                wishlist_id,
-                user.telegram_id,
-                extra={
-                    "event": "favorite_access_denied",
-                    "wishlist_id": wishlist_id,
-                    "user_id": user.telegram_id,
-                },
-            )
-            raise WishlistNotFoundError(f"Wishlist {wishlist_id} not found")
-
-        key = (user.telegram_id, wishlist_id)
-        fav = self._favorites.get(key)
-        if fav is None:
-            fav = WishlistFavorite(user_id=user.telegram_id, wishlist_id=wishlist_id)
-            self._favorites[key] = fav
-            logger.info(
-                "Wishlist %s favorited by user %s",
-                wishlist_id,
-                user.telegram_id,
-                extra={
-                    "event": "favorite_added",
-                    "wishlist_id": wishlist_id,
-                    "user_id": user.telegram_id,
-                },
-            )
-        return fav
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def remove_favorite(self, user: AuthenticatedUser, wishlist_id: int) -> None:
-        """Remove a wishlist from user's favorites."""
-        key = (user.telegram_id, wishlist_id)
-        if self._favorites.pop(key, None) is not None:
-            logger.info(
-                "Wishlist %s unfavorited by user %s",
-                wishlist_id,
-                user.telegram_id,
-                extra={
-                    "event": "favorite_removed",
-                    "wishlist_id": wishlist_id,
-                    "user_id": user.telegram_id,
-                },
-            )
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def list_favorites(self, user: AuthenticatedUser) -> list[Wishlist]:
-        """List user's favorited wishlists in reverse-chronological order."""
-        user_favs = [f for f in self._favorites.values() if f.user_id == user.telegram_id]
-        user_favs.sort(key=lambda f: f.created_at, reverse=True)
-        result: list[Wishlist] = []
-        for f in user_favs:
-            wl = self._wishlists.get(f.wishlist_id)
-            if wl is not None and WishlistAccessPolicy.can_favorite(
-                user, wl, has_share_access=self._has_valid_share_access(user.telegram_id, wl)
-            ):
-                result.append(wl)
-        logger.info(
-            "Favorites listed for user %s (count=%s)",
-            user.telegram_id,
-            len(result),
-            extra={
-                "event": "favorites_listed",
-                "user_id": user.telegram_id,
-                "count": len(result),
-            },
-        )
-        return result
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def record_view(self, user: AuthenticatedUser, wishlist_id: int) -> ViewHistoryEntry:
-        """Record or update a wishlist view event for user, bounding history to 20 entries."""
-        wl = self._wishlists.get(wishlist_id)
-        if wl is None or wl.status == WishlistStatus.DELETED:
-            if wl is not None and wl.status == WishlistStatus.DELETED:
-                logger.warning(
-                    "View history record denied: wishlist %s is deleted",
-                    wishlist_id,
-                    extra={
-                        "event": "view_history_deleted_wishlist_denied",
-                        "wishlist_id": wishlist_id,
-                        "user_id": user.telegram_id,
-                    },
-                )
-            raise WishlistNotFoundError(f"Wishlist {wishlist_id} not found")
-        has_share = self._has_valid_share_access(user.telegram_id, wl)
-        if not WishlistAccessPolicy.can_view_history(user, wl, has_share_access=has_share):
-            logger.warning(
-                "Unauthorized view history attempt on wishlist %s by user %s denied",
-                wishlist_id,
-                user.telegram_id,
-                extra={
-                    "event": "view_history_access_denied",
-                    "wishlist_id": wishlist_id,
-                    "user_id": user.telegram_id,
-                },
-            )
-            raise WishlistNotFoundError(f"Wishlist {wishlist_id} not found")
-
-        now = datetime.now(UTC)
-        self._next_view_history_seq += 1
-        recorded_seq = self._next_view_history_seq
-        existing = next(
-            (
-                e
-                for e in self._view_history
-                if e.user_id == user.telegram_id and e.wishlist_id == wishlist_id
-            ),
-            None,
-        )
-        if existing is not None:
-            self._view_history.remove(existing)
-            existing.viewed_at = now
-            existing.recorded_seq = recorded_seq
-            self._view_history.append(existing)
-            entry = existing
-        else:
-            self._next_view_history_id += 1
-            entry = ViewHistoryEntry(
-                id=self._next_view_history_id,
-                user_id=user.telegram_id,
-                wishlist_id=wishlist_id,
-                viewed_at=now,
-                recorded_seq=recorded_seq,
-            )
-            self._view_history.append(entry)
-
-        user_entries = [e for e in self._view_history if e.user_id == user.telegram_id]
-        if len(user_entries) > 20:
-            user_entries.sort(key=_history_rank)
-            to_remove = {e.id for e in user_entries[:-20]}
-            self._view_history = [e for e in self._view_history if e.id not in to_remove]
-
-        logger.info(
-            "Wishlist %s view recorded for user %s",
-            wishlist_id,
-            user.telegram_id,
-            extra={
-                "event": "view_history_recorded",
-                "wishlist_id": wishlist_id,
-                "user_id": user.telegram_id,
-            },
-        )
-        return entry
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def get_history(
         self, user: AuthenticatedUser, limit: int = 20
     ) -> list[tuple[Wishlist, datetime]]:
-        """Retrieve up to limit recent wishlists viewed by user, reverse-chronologically."""
-        user_entries = [e for e in self._view_history if e.user_id == user.telegram_id]
-        user_entries.sort(key=_history_rank, reverse=True)
-        result: list[tuple[Wishlist, datetime]] = []
-        for e in user_entries:
-            wl = self._wishlists.get(e.wishlist_id)
-            if wl is not None and WishlistAccessPolicy.can_view_history(
-                user, wl, has_share_access=self._has_valid_share_access(user.telegram_id, wl)
-            ):
-                result.append((wl, e.viewed_at))
-                if len(result) >= limit:
-                    break
-        logger.info(
-            "Viewing history listed for user %s (count=%s)",
-            user.telegram_id,
-            len(result),
-            extra={
-                "event": "view_history_listed",
-                "user_id": user.telegram_id,
-                "count": len(result),
-            },
-        )
-        return result
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
     async def clear_history(self, user: AuthenticatedUser) -> None:
-        """Clear all viewing history entries for user."""
-        before = len(self._view_history)
-        self._view_history = [e for e in self._view_history if e.user_id != user.telegram_id]
-        removed = before - len(self._view_history)
-        logger.info(
-            "Viewing history cleared for user %s (removed=%s)",
-            user.telegram_id,
-            removed,
-            extra={
-                "event": "view_history_cleared",
-                "user_id": user.telegram_id,
-                "removed_count": removed,
-            },
-        )
+        """Fail closed. The repository path owns this wishlist action."""
+        raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
 
 
-# Wrap every public async domain operation so callers of the configured service share
-# the same transaction boundary as HTTP. WishlistService.in_memory() remains available
-# as an explicitly in-memory test implementation.
+def _apply_configured_invite_ttl(
+    method: Callable[..., Awaitable[Any]],
+    service: WishlistService,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Pass the service invite TTL when the caller omits ``invite_token_expires_in``."""
+    if "invite_token_expires_in" not in signature(method).parameters:
+        return args, kwargs
+    bound = signature(method).bind(service, *args, **kwargs)
+    bound.apply_defaults()
+    if bound.arguments.get("invite_token_expires_in") is None:
+        bound.arguments["invite_token_expires_in"] = service._default_invite_ttl
+    return bound.args[1:], dict(bound.kwargs)
+
+
+def _repository_forward[T](method: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
+    """Run a shared action on RepoWishlistOps when a store is configured.
+
+    An in-memory service fails closed. Snapshot settings and ownership transfer
+    read the hydrated graph through ``_lookup_wishlist``, not these methods.
+    """
+
+    @wraps(method)
+    async def invoke(self: WishlistService, *args: Any, **kwargs: Any) -> T:
+        if self._store is None:
+            logger.warning(
+                "Wishlist action refused because the repository path is required",
+                extra={
+                    "event": "wishlist_repository_path_required",
+                    "operation": method.__name__,
+                },
+            )
+            raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
+        forwarded_args, forwarded_kwargs = _apply_configured_invite_ttl(method, self, args, kwargs)
+
+        async def work(repo: Any) -> T:
+            from wishenka.wishlists.repo_ops import RepoWishlistOps
+
+            operation = getattr(RepoWishlistOps(repo), method.__name__)
+            return cast(T, await operation(*forwarded_args, **forwarded_kwargs))
+
+        return await self._store.run_repository(work)
+
+    return invoke
+
+
+# Store-backed shared actions use RepoWishlistOps. Other public coroutines stay transactional.
 for _method_name, _method in tuple(vars(WishlistService).items()):
-    if not _method_name.startswith("_") and iscoroutinefunction(_method):
-        setattr(WishlistService, _method_name, _transactional(_method))
+    if _method_name.startswith("_") or not iscoroutinefunction(_method):
+        continue
+    wrapper = _repository_forward if _method_name in _SHARED_REPOSITORY_METHODS else _transactional
+    setattr(WishlistService, _method_name, wrapper(_method))

@@ -20,14 +20,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from wishenka.auth.models import AuthenticatedUser
+from wishenka.auth.models import AuthenticatedUser, TelegramUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
+from wishenka.users.store import UserStore
 from wishenka.web.app import create_app
 from wishenka.wishlists.exceptions import WishlistNotFoundError
 from wishenka.wishlists.models import WishItemRecipientViewDTO, WishlistRole
@@ -45,6 +48,24 @@ def _make_user(telegram_id: int, first_name: str) -> AuthenticatedUser:
         username=None,
         auth_method="session_token",
     )
+
+
+@asynccontextmanager
+async def _stored(
+    tmp_path: Path, filename: str, people: tuple[tuple[int, str], ...]
+) -> AsyncIterator[WishlistService]:
+    """Store-backed service with the people the shared rules may reference."""
+    url = f"sqlite+aiosqlite:///{tmp_path / filename}"
+    store = WishlistStore(url)
+    users = UserStore(url)
+    await store.initialize()
+    try:
+        for user_id, name in people:
+            await users.upsert_user(TelegramUser(id=user_id, first_name=name))
+        yield WishlistService(store=store)
+    finally:
+        await users.dispose()
+        await store.dispose()
 
 
 def test_public_token_anonymous_returns_recipient_dto(tmp_path: Path) -> None:
@@ -217,86 +238,115 @@ def test_public_api_endpoints_anonymous_recipient_and_gifter_views(tmp_path: Pat
         assert gift_item["my_reserved_quantity"] == 1
 
 
-def test_collaborative_recipient_and_admin_never_see_reservations() -> None:
+def test_collaborative_recipient_and_admin_never_see_reservations(tmp_path: Path) -> None:
     """Owner, admin, and item recipient on collaborative list receive safe views."""
-    service = WishlistService.in_memory()
     owner = _make_user(101, "Alice")
     admin = _make_user(102, "Carol")
     gifter = _make_user(202, "Bob")
 
     async def scenario() -> None:
-        wl = await service.create_wishlist(
-            owner=owner,
-            title="Wedding",
-        )
-        await service.add_member(
-            wishlist_id=wl.id,
-            actor=owner,
-            user_id=admin.telegram_id,
-            role=WishlistRole.ADMIN,
-        )
-
-        item_for_admin = await service.add_wish_item(
-            wishlist_id=wl.id,
-            actor=admin,
-            title="Toaster",
-            quantity=1,
-            recipient_user_id=admin.telegram_id,
-        )
-        await service.create_reservation(item_id=item_for_admin.id, user=gifter, quantity=1)
-
-        # Anonymous public-token view
-        anon_view = await service.get_wishlist_by_public_token(str(wl.public_token), None)
-        assert isinstance(anon_view.items[0], WishItemRecipientViewDTO)
-
-        # Item recipient (admin) via authenticated and public views
-        admin_auth_view = await service.get_wishlist_view(wl.id, admin)
-        admin_pub_view = await service.get_wishlist_by_public_token(str(wl.public_token), admin)
-        assert isinstance(admin_auth_view.items[0], WishItemRecipientViewDTO)
-        assert isinstance(admin_pub_view.items[0], WishItemRecipientViewDTO)
-
-        # Non-recipient gifter sees GifterViewDTO
-        gifter_view = await service.get_wishlist_by_public_token(str(wl.public_token), gifter)
-        assert isinstance(gifter_view.items[0], WishItemGifterViewDTO)
-        assert gifter_view.items[0].available_quantity == 0
-        assert gifter_view.items[0].is_fully_reserved is True
+        async with _stored(
+            tmp_path,
+            "collab.db",
+            ((101, "Alice"), (102, "Carol"), (202, "Bob")),
+        ) as service:
+            await _collaborative_views(service, owner, admin, gifter)
 
     asyncio.run(scenario())
 
 
+async def _collaborative_views(
+    service: WishlistService,
+    owner: AuthenticatedUser,
+    admin: AuthenticatedUser,
+    gifter: AuthenticatedUser,
+) -> None:
+    wl = await service.create_wishlist(
+        owner=owner,
+        title="Wedding",
+    )
+    await service.add_member(
+        wishlist_id=wl.id,
+        actor=owner,
+        user_id=admin.telegram_id,
+        role=WishlistRole.ADMIN,
+    )
+
+    item_for_admin = await service.add_wish_item(
+        wishlist_id=wl.id,
+        actor=admin,
+        title="Toaster",
+        quantity=1,
+        recipient_user_id=admin.telegram_id,
+    )
+    await service.create_reservation(item_id=item_for_admin.id, user=gifter, quantity=1)
+
+    anon_view = await service.get_wishlist_by_public_token(str(wl.public_token), None)
+    assert isinstance(anon_view.items[0], WishItemRecipientViewDTO)
+
+    admin_auth_view = await service.get_wishlist_view(wl.id, admin)
+    admin_pub_view = await service.get_wishlist_by_public_token(str(wl.public_token), admin)
+    assert isinstance(admin_auth_view.items[0], WishItemRecipientViewDTO)
+    assert isinstance(admin_pub_view.items[0], WishItemRecipientViewDTO)
+
+    gifter_view = await service.get_wishlist_by_public_token(str(wl.public_token), gifter)
+    assert isinstance(gifter_view.items[0], WishItemGifterViewDTO)
+    assert gifter_view.items[0].available_quantity == 0
+    assert gifter_view.items[0].is_fully_reserved is True
+
+
 def test_public_projection_observability_logs_without_leaking_tokens(
+    tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Verify structured logs for public projection modes never leak public or invite tokens."""
-    service = WishlistService.in_memory()
     owner = _make_user(101, "Alice")
     gifter = _make_user(202, "Bob")
     missing_token = "missing-capability-token-999"
 
     async def scenario() -> tuple[str, str]:
-        wl = await service.create_wishlist(owner=owner, title="Anniversary")
-        item = await service.add_wish_item(
-            wishlist_id=wl.id,
-            actor=owner,
-            title="Watch",
-            quantity=1,
-        )
-        await service.create_reservation(item_id=item.id, user=gifter, quantity=1)
-        public_token = str(wl.public_token)
-        invite_token = str(wl.invite_token)
-
-        caplog.clear()
-        with caplog.at_level(logging.INFO, logger="wishenka.wishlists"):
-            await service.get_wishlist_by_public_token(public_token, None)
-            await service.get_wishlist_by_public_token(public_token, owner)
-            await service.get_wishlist_by_public_token(public_token, gifter)
-            with pytest.raises(WishlistNotFoundError):
-                await service.get_wishlist_by_public_token(missing_token, None)
-
-        return public_token, invite_token
+        async with _stored(tmp_path, "projection.db", ((101, "Alice"), (202, "Bob"))) as service:
+            return await _projection_tokens(service, owner, gifter, missing_token, caplog)
 
     pub_token, inv_token = asyncio.run(scenario())
+    _assert_projection_logs(caplog, pub_token, inv_token, missing_token)
 
+
+async def _projection_tokens(
+    service: WishlistService,
+    owner: AuthenticatedUser,
+    gifter: AuthenticatedUser,
+    missing_token: str,
+    caplog: pytest.LogCaptureFixture,
+) -> tuple[str, str]:
+    wl = await service.create_wishlist(owner=owner, title="Anniversary")
+    item = await service.add_wish_item(
+        wishlist_id=wl.id,
+        actor=owner,
+        title="Watch",
+        quantity=1,
+    )
+    await service.create_reservation(item_id=item.id, user=gifter, quantity=1)
+    public_token = str(wl.public_token)
+    invite_token = str(wl.invite_token)
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="wishenka.wishlists"):
+        await service.get_wishlist_by_public_token(public_token, None)
+        await service.get_wishlist_by_public_token(public_token, owner)
+        await service.get_wishlist_by_public_token(public_token, gifter)
+        with pytest.raises(WishlistNotFoundError):
+            await service.get_wishlist_by_public_token(missing_token, None)
+
+    return public_token, invite_token
+
+
+def _assert_projection_logs(
+    caplog: pytest.LogCaptureFixture,
+    pub_token: str,
+    inv_token: str,
+    missing_token: str,
+) -> None:
     resolved_records = [
         r for r in caplog.records if getattr(r, "event", None) == "public_wishlist_resolved"
     ]

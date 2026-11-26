@@ -100,10 +100,11 @@ expired rows per pass across `bot_drafts`, `birthday_input`, `support_input`, `s
 the bot draft tables, support tables (`support_input`, `support_tickets`), and the
 notification/birthday tables (see
 [Service notifications and reminders](notifications.md)) when implementing that deletion. The
-atomic capture mutation (`wishenka/bot/capture.py:mutate`) uses the public
-`WishlistStore.execute_with_connection` transactional boundary to combine `WishlistService` domain
-operations with caller-scoped SQL (`bot_drafts` and `bot_capture_order`) inside one
-`BEGIN IMMEDIATE` transaction without accessing private store methods.
+atomic capture mutation (`wishenka/bot/capture.py`) saves a wish with
+`RepoWishlistOps.add_wish_item` inside `WishlistStore.run_repository`. The draft
+SQL (`bot_drafts` and `bot_capture_order`) shares that immediate transaction.
+`run_repository` commits and flushes commit logs on the repository it built.
+The save does not apply a second snapshot add.
 
 ## Running and configuration
 

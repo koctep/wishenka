@@ -200,9 +200,9 @@ def test_cleanup_cycle_purges_expired_idempotency_records(tmp_path: Path) -> Non
     async def _run() -> None:
         await store.initialize()
         owner = _make_user(_OWNER_ID, "Owner")
-        wl = await store.execute(lambda svc: svc.create_wishlist(owner=owner, title="List"))
-        item = await store.execute(
-            lambda svc: svc.add_wish_item(wishlist_id=wl.id, actor=owner, title="Item", quantity=5)
+        wl = await WishlistService(store).create_wishlist(owner=owner, title="List")
+        item = await WishlistService(store).add_wish_item(
+            wishlist_id=wl.id, actor=owner, title="Item", quantity=5
         )
         t0 = datetime(2026, 11, 17, 12, 0, tzinfo=UTC)
 
@@ -248,9 +248,9 @@ def test_concurrent_duplicate_idempotent_requests_execute_once(tmp_path: Path) -
     async def _run() -> None:
         await store.initialize()
         owner = _make_user(_OWNER_ID, "Owner")
-        wl = await store.execute(lambda svc: svc.create_wishlist(owner=owner, title="List"))
-        item = await store.execute(
-            lambda svc: svc.add_wish_item(wishlist_id=wl.id, actor=owner, title="Item", quantity=2)
+        wl = await WishlistService(store).create_wishlist(owner=owner, title="List")
+        item = await WishlistService(store).add_wish_item(
+            wishlist_id=wl.id, actor=owner, title="Item", quantity=2
         )
         req_hash = compute_request_hash("create_reservation", {"item_id": item.id}, {"quantity": 1})
 

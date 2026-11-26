@@ -1,18 +1,67 @@
 """Automated tests for reservation observability, structured logging, and caplog contracts."""
 
 import logging
+from pathlib import Path
 
 import pytest
 
+from tests.receipt_support import open_service, place_item, place_member, place_wishlist
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.wishlists.exceptions import (
     InsufficientQuantityError,
     SelfReservationError,
 )
+from wishenka.wishlists.models import WishlistRole
 from wishenka.wishlists.schemas import WishItemRecipientViewDTO
 from wishenka.wishlists.service import WishlistService
 
 pytestmark = pytest.mark.timeout(10)
+
+
+def graph_service() -> WishlistService:
+    """In-memory graph for reservation logs. Shared list actions stay fail-closed."""
+    service = WishlistService.in_memory()
+
+    async def create_wishlist(
+        owner: AuthenticatedUser,
+        title: str,
+        **_kwargs: object,
+    ) -> object:
+        return place_wishlist(service, owner, title)
+
+    async def add_wish_item(
+        wishlist_id: int,
+        actor: AuthenticatedUser,
+        title: str,
+        quantity: int = 1,
+        recipient_user_id: int | None = None,
+        recipient_name: str | None = None,
+        **_kwargs: object,
+    ) -> object:
+        del actor
+        return place_item(
+            service,
+            service._wishlists[wishlist_id],
+            title,
+            quantity=quantity,
+            recipient_user_id=recipient_user_id,
+            recipient_name=recipient_name,
+        )
+
+    async def add_member(
+        wishlist_id: int,
+        actor: AuthenticatedUser,
+        user_id: int,
+        role: WishlistRole = WishlistRole.MEMBER,
+        **_kwargs: object,
+    ) -> object:
+        del actor
+        return place_member(service, service._wishlists[wishlist_id], user_id, role)
+
+    service.create_wishlist = create_wishlist  # type: ignore[assignment]
+    service.add_wish_item = add_wish_item  # type: ignore[assignment]
+    service.add_member = add_member  # type: ignore[assignment]
+    return service
 
 
 def make_user(telegram_id: int, first_name: str) -> AuthenticatedUser:
@@ -33,7 +82,7 @@ class TestReservationObservability:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """create_reservation must emit structured item_reserved INFO log with context."""
-        service = WishlistService.in_memory()
+        service = graph_service()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Bob")
 
@@ -68,7 +117,7 @@ class TestReservationObservability:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """mark_reservation_purchased must emit structured reservation_purchased INFO log."""
-        service = WishlistService.in_memory()
+        service = graph_service()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Bob")
 
@@ -109,7 +158,7 @@ class TestReservationObservability:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """revert_reservation_to_active must emit structured reservation_reverted INFO log."""
-        service = WishlistService.in_memory()
+        service = graph_service()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Bob")
 
@@ -151,7 +200,7 @@ class TestReservationObservability:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """cancel_reservation must emit structured reservation_cancelled INFO log."""
-        service = WishlistService.in_memory()
+        service = graph_service()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Bob")
 
@@ -192,7 +241,7 @@ class TestReservationObservability:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """update_reservation_quantity must emit reservation_quantity_updated INFO log."""
-        service = WishlistService.in_memory()
+        service = graph_service()
         owner = make_user(1001, "Alice")
         gifter = make_user(2001, "Bob")
 
@@ -235,7 +284,7 @@ class TestReservationObservability:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """record_item_fulfillment must emit structured item_fulfilled INFO log with context."""
-        service = WishlistService.in_memory()
+        service = graph_service()
         owner = make_user(1001, "Alice")
 
         wl = await service.create_wishlist(owner=owner, title="Wedding Registry")
@@ -275,7 +324,7 @@ class TestReservationObservability:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Self-reservation attempt by recipient must emit self_reservation_blocked WARNING."""
-        service = WishlistService.in_memory()
+        service = graph_service()
         owner = make_user(1001, "Alice")
         recipient = make_user(2002, "Bob")
 
@@ -315,7 +364,7 @@ class TestReservationObservability:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Exceeding available balance must emit insufficient_quantity_blocked WARNING."""
-        service = WishlistService.in_memory()
+        service = graph_service()
         owner = make_user(1001, "Alice")
         gifter = make_user(3003, "Charlie")
 
@@ -384,37 +433,31 @@ class TestReservationObservability:
     @pytest.mark.asyncio
     async def test_zero_surprise_leaks_in_recipient_audit_trails(
         self,
+        tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Surprise Invariant: Recipient interactions must never leak reservation details."""
-        service = WishlistService.in_memory()
         owner = make_user(1001, "Alice")
         gifter1 = make_user(2001, "Bob")
         gifter2 = make_user(2002, "Charlie")
+        async with open_service(tmp_path / "surprise-audit.db", owner, gifter1, gifter2) as service:
+            wl = await service.create_wishlist(owner=owner, title="Surprise Wishlist")
+            item = await service.add_wish_item(
+                wishlist_id=wl.id,
+                actor=owner,
+                title="Drone",
+                quantity=2,
+            )
+            res1 = await service.create_reservation(item_id=item.id, user=gifter1, quantity=1)
+            await service.mark_reservation_purchased(reservation_id=res1.id, user=gifter1)
+            await service.create_reservation(item_id=item.id, user=gifter2, quantity=1)
 
-        wl = await service.create_wishlist(owner=owner, title="Surprise Wishlist")
-        item = await service.add_wish_item(
-            wishlist_id=wl.id,
-            actor=owner,
-            title="Drone",
-            quantity=2,
-        )
-
-        # Gifters create and purchase reservations
-        res1 = await service.create_reservation(item_id=item.id, user=gifter1, quantity=1)
-        await service.mark_reservation_purchased(reservation_id=res1.id, user=gifter1)
-        await service.create_reservation(item_id=item.id, user=gifter2, quantity=1)
-
-        caplog.clear()
-
-        # Recipient accesses their wishlist view
-        with caplog.at_level(logging.DEBUG, logger="wishenka.wishlists"):
-            detail_dto = await service.get_wishlist_view(wishlist_id=wl.id, current_user=owner)
-
-        # Recipient queries their own reservations cabinet
-        with caplog.at_level(logging.DEBUG, logger="wishenka.wishlists"):
-            my_res = await service.get_user_reservations(user_id=owner.telegram_id)
-            summary = await service.get_user_reservations_summary(user_id=owner.telegram_id)
+            caplog.clear()
+            with caplog.at_level(logging.DEBUG, logger="wishenka.wishlists"):
+                detail_dto = await service.get_wishlist_view(wishlist_id=wl.id, current_user=owner)
+            with caplog.at_level(logging.DEBUG, logger="wishenka.wishlists"):
+                my_res = await service.get_user_reservations(user_id=owner.telegram_id)
+                summary = await service.get_user_reservations_summary(user_id=owner.telegram_id)
 
         # 1. Projected items obey strict WishItemRecipientViewDTO schema without reservation leaks
         assert len(detail_dto.items) == 1

@@ -128,9 +128,6 @@ async def _run[T](
     operation = getattr(request.scope.get("endpoint"), "__name__", "")
     context = {"wishlist_id": wishlist_id, "item_id": item_id, "actor_id": user.telegram_id}
     try:
-        injected = getattr(request.app.state, "wishlist_service", None)
-        if injected is not None:
-            return await action(injected)
         if item_id is None:
             if repo is None:
                 raise RuntimeError("WishlistRepository dependency is required")

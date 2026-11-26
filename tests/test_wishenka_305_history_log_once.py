@@ -178,20 +178,17 @@ def test_in_memory_route_logs_recorded_and_listed_once(
     history_log_app: tuple[TestClient, SessionTokenService, FastAPI],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Injected WishlistService plus the route must emit each success event once."""
+    """The repository route emits each success event once, ignoring any injected service."""
     client, sessions, app = history_log_app
-    service = WishlistService.in_memory()
+    service: WishlistService = app.state.domain_service
 
     async def seed() -> int:
+        await app.state.user_store.upsert_user(TelegramUser(id=_OWNER_ID, first_name="Owner"))
         wishlist = await service.create_wishlist(_owner(), title=_TITLE)
         return wishlist.id
 
     wishlist_id = asyncio.run(seed())
-    app.state.wishlist_service = service
-    try:
-        _record_and_list(client, sessions, wishlist_id, caplog, title=_TITLE)
-    finally:
-        app.state.wishlist_service = None
+    _record_and_list(client, sessions, wishlist_id, caplog, title=_TITLE)
 
 
 def test_sqlite_route_logs_recorded_and_listed_once(
@@ -215,30 +212,27 @@ def test_in_memory_route_denies_deleted_wishlist_without_favorite_event(
     history_log_app: tuple[TestClient, SessionTokenService, FastAPI],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Injected record_view of a deleted list logs the history denial only."""
+    """A deleted list on the repository path logs the history denial only."""
     client, sessions, app = history_log_app
-    service = WishlistService.in_memory()
+    service: WishlistService = app.state.domain_service
     owner = _owner()
 
     async def seed() -> int:
+        await app.state.user_store.upsert_user(TelegramUser(id=_OWNER_ID, first_name="Owner"))
         wishlist = await service.create_wishlist(owner, title=_TITLE)
         await service.delete_wishlist(wishlist.id, actor=owner)
         return wishlist.id
 
     wishlist_id = asyncio.run(seed())
-    app.state.wishlist_service = service
-    try:
-        caplog.clear()
-        with _capture_history_loggers(caplog, logging.WARNING):
-            response = client.post(f"/api/history/{wishlist_id}", headers=_bearer(sessions))
-            assert response.status_code == 404
-        _assert_history_denial_not_favorite(
-            caplog.records,
-            wishlist_id=wishlist_id,
-            user_id=_OWNER_ID,
-        )
-    finally:
-        app.state.wishlist_service = None
+    caplog.clear()
+    with _capture_history_loggers(caplog, logging.WARNING):
+        response = client.post(f"/api/history/{wishlist_id}", headers=_bearer(sessions))
+        assert response.status_code == 404
+    _assert_history_denial_not_favorite(
+        caplog.records,
+        wishlist_id=wishlist_id,
+        user_id=_OWNER_ID,
+    )
 
 
 def test_sqlite_route_denies_deleted_wishlist_without_favorite_event(
@@ -267,48 +261,63 @@ def test_sqlite_route_denies_deleted_wishlist_without_favorite_event(
     )
 
 
-async def test_service_record_view_of_deleted_wishlist_logs_history_denial_only(
+async def test_in_memory_record_view_fails_closed() -> None:
+    """An in-memory service does not apply the viewing-history rule set."""
+    service = WishlistService.in_memory()
+    with pytest.raises(WishlistNotFoundError, match="repository path"):
+        await service.record_view(_owner(), 1)
+
+
+def test_service_record_view_of_deleted_wishlist_logs_history_denial_only(
+    history_log_app: tuple[TestClient, SessionTokenService, FastAPI],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Direct record_view keeps the history denial and never the favorites name."""
-    service = WishlistService.in_memory()
+    """Store-backed record_view keeps the history denial and never the favorites name."""
+    _client, _sessions, app = history_log_app
+    service: WishlistService = app.state.domain_service
     owner = _owner()
-    wishlist = await service.create_wishlist(owner, title=_TITLE)
-    await service.delete_wishlist(wishlist.id, actor=owner)
 
-    caplog.clear()
-    with (
-        _capture_history_loggers(caplog, logging.WARNING),
-        pytest.raises(WishlistNotFoundError),
-    ):
-        await service.record_view(owner, wishlist.id)
+    async def deny() -> int:
+        wishlist = await service.create_wishlist(owner, title=_TITLE)
+        await service.delete_wishlist(wishlist.id, actor=owner)
+        caplog.clear()
+        with pytest.raises(WishlistNotFoundError):
+            await service.record_view(owner, wishlist.id)
+        return wishlist.id
+
+    with _capture_history_loggers(caplog, logging.WARNING):
+        wishlist_id = asyncio.run(deny())
     _assert_history_denial_not_favorite(
         caplog.records,
-        wishlist_id=wishlist.id,
+        wishlist_id=wishlist_id,
         user_id=_OWNER_ID,
     )
 
 
-async def test_service_add_favorite_of_deleted_wishlist_logs_favorite_denial_once(
+def test_service_add_favorite_of_deleted_wishlist_logs_favorite_denial_once(
+    history_log_app: tuple[TestClient, SessionTokenService, FastAPI],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """add_favorite remains the only writer of favorite_deleted_wishlist_denied."""
-    service = WishlistService.in_memory()
+    """Store-backed add_favorite remains the only writer of favorite_deleted_wishlist_denied."""
+    _client, _sessions, app = history_log_app
+    service: WishlistService = app.state.domain_service
     owner = _owner()
-    wishlist = await service.create_wishlist(owner, title=_TITLE)
-    await service.delete_wishlist(wishlist.id, actor=owner)
 
-    caplog.clear()
-    with (
-        _capture_history_loggers(caplog, logging.WARNING),
-        pytest.raises(WishlistNotFoundError),
-    ):
-        await service.add_favorite(_other(), wishlist.id)
+    async def deny() -> int:
+        wishlist = await service.create_wishlist(owner, title=_TITLE)
+        await service.delete_wishlist(wishlist.id, actor=owner)
+        caplog.clear()
+        with pytest.raises(WishlistNotFoundError):
+            await service.add_favorite(_other(), wishlist.id)
+        return wishlist.id
+
+    with _capture_history_loggers(caplog, logging.WARNING):
+        wishlist_id = asyncio.run(deny())
     denied = _by_event(caplog.records, "favorite_deleted_wishlist_denied")
     history = _by_event(caplog.records, "view_history_deleted_wishlist_denied")
     assert history == []
     assert len(denied) == 1
     assert denied[0].name == _SERVICE_LOGGER
-    assert getattr(denied[0], "wishlist_id", None) == wishlist.id
+    assert getattr(denied[0], "wishlist_id", None) == wishlist_id
     assert getattr(denied[0], "user_id", None) == _OTHER_ID
     assert _TITLE not in denied[0].getMessage()

@@ -38,7 +38,7 @@ async def test_execute_read_rejects_write_with_readonly_error(tmp_path: Path) ->
             wishlist = await service.create_wishlist(owner=owner, title="Original")
             return wishlist.id
 
-        wishlist_id = await store.execute(seed)
+        wishlist_id = await seed(WishlistService(store))
 
         async def mutate_in_read(conn: Any) -> None:
             await conn.execute(
@@ -76,7 +76,7 @@ async def test_execute_read_resets_query_only_before_pool_return(tmp_path: Path)
             wishlist = await service.create_wishlist(owner=owner, title="Initial")
             return wishlist.id
 
-        wishlist_id = await store.execute(seed)
+        wishlist_id = await seed(WishlistService(store))
 
         async def ok_read(conn: Any) -> str:
             row = (
@@ -244,7 +244,7 @@ async def test_execute_read_preserves_non_blocking_wal_reads(tmp_path: Path) -> 
             wishlist = await service.create_wishlist(owner=owner, title="Before")
             return wishlist.id
 
-        wishlist_id = await writer.execute(seed)
+        wishlist_id = await seed(WishlistService(writer))
 
         async def hold_write(conn: Any) -> None:
             await conn.execute(

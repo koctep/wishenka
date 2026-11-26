@@ -1193,9 +1193,12 @@ only (`wishenka/web/static/miniapp.js`, `wishenka/web/static/miniapp.css`).
   recording first. A repeat keeps the same row id and still receives a new
   sequence, so it becomes the newest recording. The row id is not the live
   tie-break. Existing rows were filled once from the old id; later recordings
-  replace that value. The same key is used in memory and in SQLite before the
-  existing limit. The screen lists `GET /api/history` in that order.
-- **20-Entry Bound**: `GET /api/history` returns at most 20 entries. Production `RepoWishlistOps` keeps older stored rows; only the in-memory `WishlistService` prunes storage to 20.
+  replace that value. SQLite applies that order before `LIMIT`. The screen
+  lists `GET /api/history` in that order.
+- **20-Entry Bound**: `GET /api/history` returns at most 20 entries.
+  `RepoWishlistOps.record_view` keeps older stored rows. An in-memory
+  `WishlistService.record_view` fail-closes and does not prune storage. See
+  [Shared wishlist rule set](wishlists.md#shared-wishlist-rule-set).
 - **Zero-Leak Guarantees**: `GET /api/history` projects only sanitized list metadata and omits
   reservation records and buyer details; the screen renders only title, time and role badge.
 - Entry point: the "Viewing history" button in the home top navigation.
@@ -1369,7 +1372,8 @@ wish items without full-page reloads.
 
 #### 9.4. Quick-Add Submission & HTMX Out-of-Band (`hx-swap-oob`) Updates
 - **Endpoint**: `POST /web/wishlists/{wishlist_id}/items/quick` (`quick_add_item`, quick-add route).
-- **Behavior**: Creates the wish item via `WishlistService.add_wish_item` (preferring explicit
+- **Behavior**: Creates the wish item via `RepoWishlistOps.add_wish_item` on the
+  request repository (preferring explicit
   `title` from preview/modal over `raw_input`, defaulting to `quantity=1` and `currency="RUB"`).
 - **Response (`201 Created`)**:
   - Primary payload: Rendered [`partials/item_card.html`](../../wishenka/web/templates/partials/item_card.html)
@@ -1421,11 +1425,11 @@ wish items without full-page reloads.
 
 #### 9.7. Safe Item Archiving & Restoration via HTMX
 - **Archive**: `POST /web/wishlists/{wishlist_id}/items/{item_id}/archive` (`archive_item_ui`),
-  triggered from the edit modal with `hx-confirm`. Calls `WishlistService.archive_wish_item`
+  triggered from the edit modal with `hx-confirm`. Calls `RepoWishlistOps.archive_wish_item`
   (preserving existing gifter reservations) and returns `200 OK` with OOB swaps deleting
   `#item-card-{item_id}` (`hx-swap-oob="delete"`) and emptying `#item-modal-container`.
 - **Restore**: `POST /web/wishlists/{wishlist_id}/items/{item_id}/restore` (`restore_item_ui`).
-  Calls `WishlistService.restore_wish_item` (appending the item to the tail of active items while
+  Calls `RepoWishlistOps.restore_wish_item` (appending the item to the tail of active items while
   retaining reservations) and returns `200 OK` with the rendered `partials/item_card.html`.
 - **Fully received wish (WISHENKA-24)**: both routes answer `409` with the header
   `X-Receipt-Refusal: nothing_remaining` and a body made only of `hx-swap-oob` elements (dialog

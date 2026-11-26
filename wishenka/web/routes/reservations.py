@@ -119,10 +119,7 @@ async def execute[T](
     """Run one promise action through the existing wish transaction."""
     operation = getattr(request.scope.get("endpoint"), "__name__", "")
     try:
-        injected = getattr(request.app.state, "wishlist_service", None)
-        if injected is not None:
-            result = await action(injected)
-        elif idempotency_key is not None:
+        if idempotency_key is not None:
             if actor_id is None or request_hash is None:
                 raise ValueError("Idempotent execution requires actor_id and request_hash")
 
@@ -144,17 +141,16 @@ async def execute[T](
                 check_not_recipient=True,
             )
             return build_replay_response(outcome.status_code, outcome.content_type, outcome.body)
-        else:
-            # The store accepts one wish key. Both path ids stay on the log.
-            result = cast(
-                T,
-                await request.app.state.wishlist_store.execute_wish(
-                    action,
-                    item_id=None if reservation_id is not None else item_id,
-                    reservation_id=reservation_id,
-                    operation_name=operation or "wish_inventory",
-                ),
-            )
+        # The store accepts one wish key. Both path ids stay on the log.
+        result = cast(
+            T,
+            await request.app.state.wishlist_store.execute_wish(
+                action,
+                item_id=None if reservation_id is not None else item_id,
+                reservation_id=reservation_id,
+                operation_name=operation or "wish_inventory",
+            ),
+        )
     except InventoryBusyError as exc:
         logger.warning(
             "Reservation operation busy: %s",
@@ -425,7 +421,6 @@ async def complete_reservation(
         else None
     )
     store = getattr(request.app.state, "wishlist_store", None)
-    injected = getattr(request.app.state, "wishlist_service", None)
 
     async def run() -> PromiseActionDTO | Response:
         return await execute(
@@ -438,8 +433,6 @@ async def complete_reservation(
             request_hash=request_hash,
         )
 
-    if injected is not None:
-        return await run()
     if store is None:
         logger.error(
             "Receipt delivery coordination unavailable",

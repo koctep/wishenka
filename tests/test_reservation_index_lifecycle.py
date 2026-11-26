@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from tests.receipt_support import place_item, place_wishlist
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.wishlists.exceptions import InventoryBusyError
 from wishenka.wishlists.models import WishItem
@@ -63,10 +64,8 @@ def user(uid: int) -> AuthenticatedUser:
 async def test_index_tracks_lifecycle_and_preserves_isolation() -> None:
     service = WishlistService.in_memory()
     owner, giver, other = user(1), user(2), user(3)
-    wishlist = await service.create_wishlist(owner=owner, title="List")
-    item = await service.add_wish_item(
-        wishlist_id=wishlist.id, actor=owner, title="Book", quantity=5
-    )
+    wishlist = place_wishlist(service, owner, "List")
+    item = place_item(service, wishlist, "Book", quantity=5)
     first = await service.create_reservation(item_id=item.id, user=giver, quantity=1)
     await service.create_reservation(item_id=item.id, user=other, quantity=1)
     duplicate = await service.create_reservation(item_id=item.id, user=giver, quantity=1)
@@ -127,7 +126,7 @@ async def test_sqlite_cabinet_matches_snapshot_after_changes_and_restart(tmp_pat
         assert await store.get_user_reservations(999) == []
 
     try:
-        reservation_id = await store.execute(seed)
+        reservation_id = await seed(WishlistService(store))
         await compare()
 
         async def buy(service: WishlistService) -> None:
@@ -209,7 +208,7 @@ async def test_sqlite_read_is_consistent_with_concurrent_write(
         return (await service.create_reservation(item_id=item.id, user=giver, quantity=1)).id
 
     try:
-        reservation_id = await store.execute(seed)
+        reservation_id = await seed(WishlistService(store))
         entered, release = asyncio.Event(), asyncio.Event()
         original = WishlistRepository.get_items_by_ids
 
@@ -256,7 +255,7 @@ async def test_sqlite_missing_wish_keeps_summary_but_omits_list(tmp_path: Path) 
         return item.id
 
     try:
-        item_id = await store.execute(seed)
+        item_id = await seed(WishlistService(store))
         rows = await store.get_user_reservations(2)
         summary = await store.get_user_reservations_summary(2)
         assert len(rows) == 2
