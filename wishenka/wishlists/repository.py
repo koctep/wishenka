@@ -191,6 +191,22 @@ class WishlistRepository:
         )
         return next_val
 
+    async def _next_sequence(self, counter_name: str) -> int:
+        """Allocate the next counter value. Row ids are not part of this sequence."""
+        current = await self.conn.scalar(
+            text("SELECT value FROM wl_counters WHERE name = :name"),
+            {"name": counter_name},
+        )
+        next_val = int(current or 0) + 1
+        await self.conn.execute(
+            text(
+                "INSERT INTO wl_counters (name, value) VALUES (:name, :value) "
+                "ON CONFLICT(name) DO UPDATE SET value = excluded.value"
+            ),
+            {"name": counter_name, "value": next_val},
+        )
+        return next_val
+
     async def _ensure_tokens_available(
         self,
         *,
@@ -1277,11 +1293,13 @@ class WishlistRepository:
         return int(result.rowcount or 0)
 
     async def record_view(self, entry: ViewHistoryEntry) -> None:
-        """Record or update viewing timestamp for a user and wishlist."""
+        """Record or refresh a user's wishlist view and assign the next recording sequence."""
+        entry.recorded_seq = await self._next_sequence("view_history_seq")
         stmt = text(
-            "INSERT INTO wl_view_history (user_id, wishlist_id, viewed_at) "
-            "VALUES (:user_id, :wishlist_id, :viewed_at) "
-            "ON CONFLICT(user_id, wishlist_id) DO UPDATE SET viewed_at = excluded.viewed_at"
+            "INSERT INTO wl_view_history (user_id, wishlist_id, viewed_at, recorded_seq) "
+            "VALUES (:user_id, :wishlist_id, :viewed_at, :recorded_seq) "
+            "ON CONFLICT(user_id, wishlist_id) DO UPDATE SET "
+            "viewed_at = excluded.viewed_at, recorded_seq = excluded.recorded_seq"
         )
         await self.conn.execute(
             stmt,
@@ -1289,6 +1307,7 @@ class WishlistRepository:
                 "user_id": entry.user_id,
                 "wishlist_id": entry.wishlist_id,
                 "viewed_at": _format_dt(entry.viewed_at),
+                "recorded_seq": entry.recorded_seq,
             },
         )
         logger.info(
@@ -1307,7 +1326,7 @@ class WishlistRepository:
     async def list_view_history(self, user_id: int, limit: int = 20) -> list[ViewHistoryEntry]:
         """List recent accessible viewing history for user up to limit."""
         stmt = text(
-            "SELECT vh.id, vh.user_id, vh.wishlist_id, vh.viewed_at "
+            "SELECT vh.id, vh.user_id, vh.wishlist_id, vh.viewed_at, vh.recorded_seq "
             "FROM wl_view_history vh "
             "JOIN wl_lists l ON l.id = vh.wishlist_id "
             "WHERE vh.user_id = :uid "
@@ -1325,7 +1344,7 @@ class WishlistRepository:
             "        AND sa.public_token = l.public_token"
             "    )"
             "  ) "
-            "ORDER BY vh.viewed_at DESC LIMIT :lim"
+            "ORDER BY vh.viewed_at DESC, vh.recorded_seq DESC LIMIT :lim"
         )
         rows = (
             await self.conn.execute(
@@ -1343,6 +1362,7 @@ class WishlistRepository:
                 user_id=int(r.user_id),
                 wishlist_id=int(r.wishlist_id),
                 viewed_at=_parse_dt(r.viewed_at) or datetime.now(UTC),
+                recorded_seq=int(r.recorded_seq),
             )
             for r in rows
         ]

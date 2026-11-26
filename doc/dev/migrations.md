@@ -90,19 +90,28 @@ Revision chain (linear):
     `idx_wl_share_access_wishlist` for verified share-link access grants, and irreversibly purges
     legacy non-member `wl_favorites` rows as a security remediation. Logs
     `legacy_non_member_favorites_purged` (INFO, field `rows`; see [wishlists.md](wishlists.md)).
-22. `purge_legacy_non_member_view_history` (head) - deletes `wl_view_history` rows whose user
+22. `purge_legacy_non_member_view_history` - deletes `wl_view_history` rows whose user
     is neither the wishlist owner, nor a current `wl_members` row, nor a `wl_share_access`
     grant matching `wl_lists.public_token`. One-way security remediation (WISHENKA-303).
     Logs `legacy_non_member_view_history_purged` (INFO, field `rows`; see
     [wishlists.md](wishlists.md#viewing-history-access-wishenka-303)). `downgrade()` logs
     `wishlist_migration_downgrade_refused` and raises `NotImplementedError`.
+23. `add_view_history_recorded_seq` (head) - adds `wl_view_history.recorded_seq`
+    (WISHENKA-304). Existing rows were filled once from the old id; later
+    recordings replace that value. Sets `wl_counters.view_history_seq` to
+    `MAX(recorded_seq)` and rebuilds `idx_wl_view_history_user_time` as
+    `(user_id, viewed_at DESC, recorded_seq DESC)`. When view times differ, the
+    newest time is still first. When view times are equal, order is by
+    `recorded_seq`, newest recording first. The row id is not the live
+    tie-break. `ROLLBACK_POLICY = "reversible"`. See
+    [wishlists.md](wishlists.md#order-wishenka-304).
 
 Details of revisions 5 and 6 are in [gift-receipt.md](gift-receipt.md), revisions 7 and 8 in
 [bot-scenarios.md](bot-scenarios.md), revisions 9 and 10 in [notifications.md](notifications.md),
 revision 11 in [bot-support.md](bot-support.md), and revision 12 in [idempotency.md](idempotency.md).
 The legacy-adoption map (`_REVISIONS`) still stops at `add_item_order_index`; adoption stamps that
 revision and `upgrade head` then applies every later revision, including
-`purge_legacy_non_member_view_history`.
+`purge_legacy_non_member_view_history` and `add_view_history_recorded_seq`.
 
 `head_revision(database_url=...)` in `migrations.py` returns the head id from the script
 directory without opening a database (the URL only builds the config, default in-memory). Tests
@@ -368,6 +377,7 @@ and drops all nine baseline tables in reverse dependency order.
 
 | Revision | `ROLLBACK_POLICY` | `downgrade()` behavior |
 | --- | --- | --- |
+| `add_view_history_recorded_seq` | `reversible` | Drops column and restores time index |
 | `purge_legacy_non_member_view_history` | `one-way` | Logs `wishlist_migration_downgrade_refused` (`revision="purge_legacy_non_member_view_history"`) and raises `NotImplementedError` with backup-restoration guidance (purged unverified `wl_view_history` rows are not restored) |
 | `add_share_access_and_purge_favorites` | `reversible` | Drops `idx_wl_share_access_wishlist` and `wl_share_access` (schema is reversible; the `upgrade()` purge of legacy non-member `wl_favorites` rows is intentionally irreversible as a security remediation) |
 | `unify_user_keys_and_cascades` | `reversible` | Rebuilds `reminder_outbox`, `wl_invite_tokens`, `wl_tokens`, `support_tickets`, `support_input`, `birthday_input`, `birthday_entries`, and `bot_destinations` back to their pre-unification schemas (`users.id` mappings where applicable, no cascade FKs; orphaned rows removed during upgrade are not restored) |
@@ -391,8 +401,10 @@ and drops all nine baseline tables in reverse dependency order.
 | `add_warn_on_delete_reserved` | `one-way` | Logs `wishlist_migration_downgrade_refused` and raises `NotImplementedError` with backup-restoration guidance (SQLite column drop requires rebuilding `wl_lists`) |
 | `base_normalized` | `one-way` | Guarded: logs `wishlist_migration_downgrade_refused` and raises `NotImplementedError` by default; logs `wishlist_migration_destructive_baseline_downgrade` and drops all 9 baseline tables only when `WISHENKA_ALLOW_DESTRUCTIVE_BASELINE_DOWNGRADE=1` |
 
-A downgrade from the current head (`purge_legacy_non_member_view_history`) refuses
-immediately. From `add_share_access_and_purge_favorites`, downgrade succeeds cleanly down
+A downgrade from the current head (`add_view_history_recorded_seq`) restores the
+time-only index and drops `recorded_seq`. The next revision,
+`purge_legacy_non_member_view_history`, refuses immediately. From
+`add_share_access_and_purge_favorites`, downgrade succeeds cleanly down
 to `add_gift_receipts` and refuses at `add_gift_receipts` with backup-restoration guidance.
 
 ## Testing

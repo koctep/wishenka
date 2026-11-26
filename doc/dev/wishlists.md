@@ -154,6 +154,10 @@ rejected by the optional authentication dependency.
 
 - `DELETE /api/history`: Clears all viewing history rows for the caller.
 
+When view times differ, the newest time is still first. When view times are
+equal, order is by `recorded_seq`, newest recording first. The response does
+not include `recorded_seq`. See [Order (WISHENKA-304)](#order-wishenka-304).
+
 - `Wish Items API` (`/api/wishlists/{wishlist_id}/items`): Full REST CRUD lifecycle suite for wish items, including atomic reordering (`PUT /reorder`), safe archiving (`POST /{item_id}/archive`), end-of-list restore (`POST /{item_id}/restore`), piece accounting ($1 \le Q \le 1000$), Reduction Lock invariant, collaborative member addressing, and zero-leak Surprise Invariant projections. Detailed specification, request/response models, and telemetry events are documented in [Items Domain Documentation](items.md).
 
 Create and edit both require a `name` of 1 to 255 code points after the shared edge
@@ -562,7 +566,9 @@ and pure access policies in [`wishenka.wishlists.policy`](../../wishenka/wishlis
 - **`WishlistMember`**: Association between user (`user_id`) and wishlist with `WishlistRole`.
 - **`WishlistFavorite`**: Association tracking a user's favorite (`user_id`, `wishlist_id`).
 - **`ShareAccessGrant`**: Capability-bound access record (`user_id`, `wishlist_id`, `public_token`, `granted_at`) representing an authenticated non-owner's verified share-link visit.
-- **`ViewHistoryEntry`**: One visit (`id`, `user_id`, `wishlist_id`, `viewed_at`). At most one row per user and wishlist.
+- **`ViewHistoryEntry`**: One visit (`id`, `user_id`, `wishlist_id`, `viewed_at`,
+  `recorded_seq`). At most one row per user and wishlist. `id` stays across a
+  repeat. `recorded_seq` is the recording order.
 - **`WishItem`**: An item desired by a recipient, with quantity and optional price.
 - **`Reservation`**: Active allocation of a `WishItem`'s quantity created by a gifter.
 
@@ -645,6 +651,24 @@ The history payload stays inside the Surprise Invariant: list title, description
 event fields, visit time, favorite flag, and role. No reservation rows, quantities,
 or buyer identities.
 
+#### Order (WISHENKA-304)
+
+When view times differ, the newest time is still first. When view times are
+equal, order is by `recorded_seq`, newest recording first. A repeat keeps the
+same row id and still receives a new sequence, so it becomes the newest
+recording. The row id is not the live tie-break. Existing rows were filled once
+from the old id; later recordings replace that value. The same key is used in
+memory and in SQLite before the existing limit.
+
+`WishlistService.get_history` sorts with `_history_rank` (`viewed_at`,
+`recorded_seq`) and `reverse=True`. The in-memory prune uses that key ascending
+and still keeps the last 20. `WishlistRepository.list_view_history` uses
+`ORDER BY vh.viewed_at DESC, vh.recorded_seq DESC` and then `LIMIT`.
+`GET /api/history` does not sort again and does not return `recorded_seq`.
+The counter is `wl_counters.name = 'view_history_seq'`. Alembic revision
+`add_view_history_recorded_seq` (`ROLLBACK_POLICY = "reversible"`) adds the
+column. See [migrations.md](migrations.md).
+
 #### Architecture
 
 ```mermaid
@@ -674,7 +698,8 @@ flowchart TD
   and `get_history`. HTTP routes use `RepoWishlistOps` unless a test injects
   `app.state.wishlist_service`.
 - **`WishlistRepository.list_view_history`**: SQL join keeps non-deleted lists where
-  the user is owner, member, or grant holder, then `ORDER BY viewed_at DESC LIMIT`.
+  the user is owner, member, or grant holder, then
+  `ORDER BY viewed_at DESC, recorded_seq DESC` before `LIMIT`.
   The limit applies to accessible rows, not to stale rows that would be dropped later.
 - **`delete_history_if_no_share_access`**: used by `remove_member`. Deletes the user's
   row unless they are the owner, still a member, or still hold a grant for the
@@ -730,8 +755,11 @@ async def list_view_history(
 ) -> list[ViewHistoryEntry]: ...
 ```
 
-- `record_view` upserts `(user_id, wishlist_id)` and refreshes `viewed_at`.
-- `get_history` returns accessible non-deleted lists, newest first, at most `limit`.
+- `record_view` upserts `(user_id, wishlist_id)`, refreshes `viewed_at`, and
+  writes a new `recorded_seq`. A repeat keeps the same row id.
+- `get_history` returns accessible non-deleted lists at most `limit`. When view
+  times differ, the newest time is still first. When view times are equal, order
+  is by `recorded_seq`, newest recording first.
 - `clear_history` / `DELETE /api/history` deletes every row for that user, including
   lists they can no longer open.
 - A removed member who still holds the current share grant keeps the history row
@@ -745,8 +773,9 @@ async def list_view_history(
 #### Configuration
 
 No new setting or environment variable. Access uses the existing `public_token` and
-`wl_share_access` rows. Startup still runs Alembic to head, which applies
-`purge_legacy_non_member_view_history` once. Database URL and WAL settings are in
+`wl_share_access` rows. Startup still runs Alembic to head. That upgrade applies
+`purge_legacy_non_member_view_history` and then `add_view_history_recorded_seq`.
+Database URL and WAL settings are in
 [Storage and configuration](#storage-and-configuration) and
 [migrations.md](migrations.md).
 
@@ -784,11 +813,20 @@ No new setting or environment variable. Access uses the existing `public_token` 
   rows and log `share_access_revoked` with `revoked_history`. Those events are
   deferred until commit; a rolled-back transaction does not emit them. Re-open the
   current share link while authenticated, or rejoin via invite.
-- **Old stranger rows still in the database.** Confirm Alembic head is
-  `purge_legacy_non_member_view_history` and that startup logged
-  `legacy_non_member_view_history_purged` (`rows`). Listing also hides inaccessible
-  rows if a purge was skipped. Do not downgrade this revision; restore a backup.
+- **Old stranger rows still in the database.** Confirm startup logged
+  `legacy_non_member_view_history_purged` (`rows`) from
+  `purge_legacy_non_member_view_history`. Current head is
+  `add_view_history_recorded_seq`. Listing also hides inaccessible
+  rows if a purge was skipped. Do not downgrade the purge revision; restore a backup.
   See [migrations.md](migrations.md).
+- **Two visits with the same time look unordered.** Compare `recorded_seq`, not
+  `id`. The larger sequence is the newer recording and is listed first. A repeat
+  keeps the row id and still receives a new sequence. Rows that already existed
+  were filled once from the old id; the next recording replaces that value.
+- **`view_history_recorded` and `view_history_listed` do not include titles or the
+  full history.** They are not the middleware line `HTTP request completed`, and
+  not the commit. Record fields are `wishlist_id` and `user_id`. List fields are
+  `user_id` and `count`. `recorded_seq` is not on either event.
 - **History shows reservation or buyer data.** It must not. `GET /api/history`
   builds the allowlist in `get_history` (`wishenka/web/routes/wishlists.py`). Gift
   details stay on item and reservation endpoints, behind `is_recipient`.
@@ -1234,10 +1272,13 @@ async def record_view(
 
 - **Access**: Same rule as [Viewing History Access](#viewing-history-access-wishenka-303).
   Denied calls raise `WishlistNotFoundError` and do not upsert.
-- **Deduplication**: A previous row for this user and wishlist updates `viewed_at`.
-- **Bound**: `GET /api/history` uses `limit=20`. SQL listing applies that limit after the
-  access filter. `WishlistService.record_view` (in-memory) also drops that user's oldest
-  rows past 20. `RepoWishlistOps.record_view` keeps older stored rows.
+- **Deduplication**: A previous row for this user and wishlist keeps its id,
+  updates `viewed_at`, and receives a new `recorded_seq`, so the repeat is the
+  newest recording.
+- **Bound**: `GET /api/history` uses `limit=20`. The same key is used in memory and
+  in SQLite before that limit. `WishlistService.record_view` (in-memory) also drops
+  that user's oldest rows past 20. `RepoWishlistOps.record_view` keeps older stored
+  rows. SQL listing applies the limit after the access filter.
 
 #### `get_history` & `clear_history`
 
@@ -1256,8 +1297,11 @@ async def clear_history(
 ) -> None
 ```
 
-- `get_history`: Returns up to `limit` entries as `(Wishlist, datetime)` tuples, newest
-  first. Omits soft-deleted lists and lists that fail `can_view_history` (not owner,
+- `get_history`: Returns up to `limit` entries as `(Wishlist, datetime)` tuples.
+  When view times differ, the newest time is still first. When view times are
+  equal, order is by `recorded_seq`, newest recording first. The same key is
+  used in memory and in SQLite before the existing limit. Omits soft-deleted
+  lists and lists that fail `can_view_history` (not owner,
   not member, no current share grant). `RepoWishlistOps` loads the SQL-filtered page
   and checks the policy again. `WishlistService` filters in memory and logs
   `view_history_listed`. The HTTP route also logs `view_history_listed` with `count`.
@@ -1412,6 +1456,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS wl_view_history_user_wl
     ON wl_view_history(user_id, wishlist_id);
 CREATE INDEX IF NOT EXISTS idx_wl_view_history_user_time
     ON wl_view_history(user_id, viewed_at DESC);
+-- recorded_seq is added later by add_view_history_recorded_seq.
+-- That revision rebuilds the index as
+-- (user_id, viewed_at DESC, recorded_seq DESC).
 
 -- 7. Public Sharing Capability Token Registry
 CREATE TABLE IF NOT EXISTS wl_tokens (
@@ -1470,7 +1517,8 @@ CREATE TABLE IF NOT EXISTS wl_counters (
     per user per wishlist.
   - `wl_view_history_user_wl` on `(user_id, wishlist_id)`: Prevents duplicate viewing entries,
     allowing deduplication via:
-    `INSERT ... ON CONFLICT DO UPDATE SET viewed_at = excluded.viewed_at`.
+    `INSERT ... ON CONFLICT DO UPDATE` sets `viewed_at` and `recorded_seq`.
+    The row id is not the live tie-break.
   - Primary key `(user_id, wishlist_id)` on `wl_favorites`: Guarantees single bookmark per list.
 - **Lookup Indexes**:
   - `idx_wl_lists_owner` and `idx_wl_lists_status`: Accelerate owner dashboards and status filters.
@@ -1478,6 +1526,10 @@ CREATE TABLE IF NOT EXISTS wl_counters (
   - `idx_wl_items_wishlist` and `idx_wl_items_recipient`: Speed up queries by list and recipient.
   - `idx_wl_reservations_item`, `idx_wl_reservations_user`, `idx_wl_reservations_status`: Speed up
     reservation lookups, user reservation queries, and active booking counting.
+  - `idx_wl_view_history_user_time` on
+    `(user_id, viewed_at DESC, recorded_seq DESC)`: list order after
+    `add_view_history_recorded_seq`. The baseline block above shows the original
+    time-only index.
 
 ### 2. SQLAlchemy 2.0 Declarative Models
 
@@ -1515,7 +1567,8 @@ to typed Python structures using SQLAlchemy 2.0 `Mapped` and `mapped_column` con
 - **`ShareAccessRow`**: Represents `wl_share_access` with composite key `(user_id, wishlist_id)`,
   `public_token`, `granted_at`, and `ON DELETE CASCADE` foreign keys to `users.telegram_id` and
   `wl_lists.id`.
-- **`ViewHistoryRow`**: Represents `wl_view_history` with autoincrement integer primary key `id`,
+- **`ViewHistoryRow`**: Represents `wl_view_history` with autoincrement integer
+  primary key `id`, `recorded_seq`,
   `ForeignKey("users.telegram_id", ondelete="CASCADE")`, and
   `ForeignKey("wl_lists.id", ondelete="CASCADE")`.
 - **`WishlistTokenRow`** & **`InviteTokenRow`**: Represent capability registries `wl_tokens` and
@@ -1547,10 +1600,11 @@ granular async operations over an active SQLAlchemy `AsyncConnection`.
 - `list_user_reservations(user_id: int) -> list[Reservation]`: Fetches active/purchased reservations
   created by the specified user.
 - `list_favorites(user_id: int) -> list[WishlistFavorite]`: Ordered bookmarks for caller.
-- `list_view_history(user_id: int, limit: int = 20) -> list[ViewHistoryEntry]`: Newest
-  accessible visits. Joins `wl_lists`, skips `status = deleted`, and keeps rows where
-  the user is owner, a `wl_members` row, or a `wl_share_access` grant matching
-  `l.public_token`. `LIMIT` applies after that filter.
+- `list_view_history(user_id: int, limit: int = 20) -> list[ViewHistoryEntry]`:
+  Newest accessible visits. Joins `wl_lists`, skips `status = deleted`, and keeps
+  rows where the user is owner, a `wl_members` row, or a `wl_share_access` grant
+  matching `l.public_token`. Order is `viewed_at DESC, recorded_seq DESC` before
+  `LIMIT`.
 
 #### Row-Level Mutation Methods
 - `upsert_wishlist(wishlist: Wishlist)`: Checks existence by ID and executes row-level `UPDATE`
@@ -1579,7 +1633,8 @@ granular async operations over an active SQLAlchemy `AsyncConnection`.
 - `delete_history_if_no_share_access(user_id, wishlist_id, public_token) -> int`:
   Deletes that user's row unless they are the owner, a member, or hold
   `wl_share_access` for `public_token`.
-- `record_view(entry)`: Uses `INSERT ... ON CONFLICT DO UPDATE SET viewed_at = excluded.viewed_at`.
+- `record_view(entry)`: `INSERT ... ON CONFLICT DO UPDATE` sets `viewed_at` and
+  `recorded_seq` from `view_history_seq`. A repeat keeps the same row id.
 - `clear_view_history(user_id: int)`: Deletes viewing history for a single user.
 
 #### Maintenance & Cleanup Methods
@@ -2065,6 +2120,10 @@ from the repository dependency and can follow this record.
 | `wishlist_deleted_by_owner` | `INFO` | Owner delete succeeded (also on an idempotent repeat) | `wishlist_id`, `user_id`, `retention_days`, `outcome` (`deleted` or `already_deleted`) |
 | `public_link_rate_limited` | `WARNING` | Public share/invite link throttled (`wishenka.web.rate_limit`). `HEAD` and `GET` on `/share/{token}` and `/invite/{token}` share one bucket; an over-limit `HEAD` is logged here before routing | `route` (`/share/{token}`, `/invite/{token}`, `/invite/{token}/join`), `method` (`GET`, `HEAD`, or `POST`), `client_ip`, `retry_after` |
 | `item_missing_parent_wishlist` | `ERROR` | `WishItem.wishlist` is `None` in `_require_item_wishlist` | `item_id`, `wishlist_id` |
+
+`view_history_recorded` and `view_history_listed` do not include titles or the
+full history. They are not the middleware line `HTTP request completed`, and
+not the commit.
 
 Creation notes (WISHENKA-296): a rejected creation (`422`) has no dedicated event.
 The service `wishlist_created` record logs the user-entered `event_date` (ISO

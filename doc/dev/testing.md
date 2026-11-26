@@ -688,6 +688,25 @@ make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_history_screen_browser.py -q'
 make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_wishlist_sections_observability.py -q'
 ```
 
+### Equal view times in viewing history (WISHENKA-304)
+
+`tests/test_wishenka_304_history_order_repro.py` (`pytest.mark.timeout(30)`)
+freezes the view clock. It checks the session list and the stored list.
+
+- When view times differ, the newest time is still first.
+- When view times are equal, order is by `recorded_seq`, newest recording first.
+- A repeat keeps the same row id and still receives a new sequence, so it
+  becomes the newest recording.
+- The row id is not the live tie-break. Existing rows were filled once from the
+  old id; later recordings replace that value.
+- The same key is used in memory and in SQLite before the existing limit.
+
+```bash
+make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_wishenka_304_history_order_repro.py -q'
+```
+
+The full suite was not started for this note.
+
 ### Сквозные тесты комфорта и надёжности экранов (WISHENKA-294)
 
 Архитектура слоя и поведение страницы недоступности:

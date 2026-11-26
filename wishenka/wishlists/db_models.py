@@ -163,6 +163,7 @@ class ViewHistoryRow(Base):
         ForeignKey("wl_lists.id", ondelete="CASCADE"), nullable=False
     )
     viewed_at: Mapped[str] = mapped_column(String, nullable=False)
+    recorded_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
 class WishlistTokenRow(Base):

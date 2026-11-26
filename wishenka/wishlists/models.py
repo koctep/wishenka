@@ -74,6 +74,7 @@ class ViewHistoryEntry:
     user_id: int = 0
     wishlist_id: int = 0
     viewed_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    recorded_seq: int = 0
 
 
 @dataclass

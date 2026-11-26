@@ -701,17 +701,18 @@ class WishlistStore:
             hist_rows = (
                 await conn.execute(
                     text(
-                        "SELECT id, user_id, wishlist_id, viewed_at "
+                        "SELECT id, user_id, wishlist_id, viewed_at, recorded_seq "
                         "FROM wl_view_history ORDER BY id ASC"
                     )
                 )
             ).all()
             for h_row in hist_rows:
                 entry = ViewHistoryEntry(
-                    id=int(h_row[0]),
-                    user_id=int(h_row[1]),
-                    wishlist_id=int(h_row[2]),
-                    viewed_at=_parse_dt(h_row[3]) or datetime.now(UTC),
+                    id=int(h_row.id),
+                    user_id=int(h_row.user_id),
+                    wishlist_id=int(h_row.wishlist_id),
+                    viewed_at=_parse_dt(h_row.viewed_at) or datetime.now(UTC),
+                    recorded_seq=int(h_row.recorded_seq),
                 )
                 history_ids.add(entry.id)
                 service._view_history.append(entry)
@@ -721,6 +722,7 @@ class WishlistStore:
         )
         for name in ("wishlist", "member", "item", "reservation", "view_history"):
             setattr(service, f"_next_{name}_id", counters.get(name, 0))
+        service._next_view_history_seq = int(counters.get("view_history_seq", 0))
 
         snapshot = _StorageSnapshot(
             wishlists=set(service._wishlists.keys()),
@@ -956,33 +958,42 @@ class WishlistStore:
                         "user_id": entry.user_id,
                         "wishlist_id": entry.wishlist_id,
                         "viewed_at": _format_dt(entry.viewed_at),
+                        "recorded_seq": entry.recorded_seq,
                     }
                     if entry.id in snapshot.history_ids:
                         await conn.execute(
                             text(
-                                "UPDATE wl_view_history SET viewed_at = :viewed_at WHERE id = :id"
+                                "UPDATE wl_view_history SET viewed_at = :viewed_at, "
+                                "recorded_seq = :recorded_seq WHERE id = :id"
                             ),
                             h_params,
                         )
                     else:
                         await conn.execute(
                             text(
-                                "INSERT INTO wl_view_history (id, user_id, wishlist_id, viewed_at) "
-                                "VALUES (:id, :user_id, :wishlist_id, :viewed_at) "
-                                "ON CONFLICT(user_id, wishlist_id) "
-                                "DO UPDATE SET viewed_at = excluded.viewed_at"
+                                "INSERT INTO wl_view_history "
+                                "(id, user_id, wishlist_id, viewed_at, recorded_seq) "
+                                "VALUES (:id, :user_id, :wishlist_id, :viewed_at, :recorded_seq) "
+                                "ON CONFLICT(user_id, wishlist_id) DO UPDATE SET "
+                                "viewed_at = excluded.viewed_at, "
+                                "recorded_seq = excluded.recorded_seq"
                             ),
                             h_params,
                         )
 
+        counter_upsert = text(
+            "INSERT INTO wl_counters (name, value) VALUES (:name, :value) "
+            "ON CONFLICT(name) DO UPDATE SET value = excluded.value"
+        )
         for name in ("wishlist", "member", "item", "reservation", "view_history"):
             await conn.execute(
-                text(
-                    "INSERT INTO wl_counters (name, value) VALUES (:name, :value) "
-                    "ON CONFLICT(name) DO UPDATE SET value = excluded.value"
-                ),
+                counter_upsert,
                 {"name": name, "value": getattr(service, f"_next_{name}_id", 0)},
             )
+        await conn.execute(
+            counter_upsert,
+            {"name": "view_history_seq", "value": service._next_view_history_seq},
+        )
         flushed = await self._flush_receipt_effects(conn, service)
         logger.info(
             "Wishlist store committed changes: %d wishlists, %d items",

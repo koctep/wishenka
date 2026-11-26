@@ -384,6 +384,11 @@ async def record_share_view_if_authenticated(
         await service.record_view(current_user, wishlist_id)
 
 
+def _history_rank(entry: ViewHistoryEntry) -> tuple[datetime, int]:
+    """Rank a view by time, then by recording sequence. The row id is not a rank."""
+    return (entry.viewed_at, entry.recorded_seq)
+
+
 class WishlistService:
     """Domain service managing wishlists, members, items, and role-aware projections."""
 
@@ -418,6 +423,7 @@ class WishlistService:
         self._share_access: dict[tuple[int, int], ShareAccessGrant] = {}
         self._view_history: list[ViewHistoryEntry] = []
         self._next_view_history_id: int = 0
+        self._next_view_history_seq: int = 0
         # Effects of the current unit of work; the store flushes them with the transaction.
         self._new_receipts: list[ReceiptRecord] = []
         self._updated_receipts: list[ReceiptRecord] = []
@@ -3474,6 +3480,8 @@ class WishlistService:
             raise WishlistNotFoundError(f"Wishlist {wishlist_id} not found")
 
         now = datetime.now(UTC)
+        self._next_view_history_seq += 1
+        recorded_seq = self._next_view_history_seq
         existing = next(
             (
                 e
@@ -3485,6 +3493,7 @@ class WishlistService:
         if existing is not None:
             self._view_history.remove(existing)
             existing.viewed_at = now
+            existing.recorded_seq = recorded_seq
             self._view_history.append(existing)
             entry = existing
         else:
@@ -3494,12 +3503,13 @@ class WishlistService:
                 user_id=user.telegram_id,
                 wishlist_id=wishlist_id,
                 viewed_at=now,
+                recorded_seq=recorded_seq,
             )
             self._view_history.append(entry)
 
         user_entries = [e for e in self._view_history if e.user_id == user.telegram_id]
         if len(user_entries) > 20:
-            user_entries.sort(key=lambda e: e.viewed_at)
+            user_entries.sort(key=_history_rank)
             to_remove = {e.id for e in user_entries[:-20]}
             self._view_history = [e for e in self._view_history if e.id not in to_remove]
 
@@ -3520,7 +3530,7 @@ class WishlistService:
     ) -> list[tuple[Wishlist, datetime]]:
         """Retrieve up to limit recent wishlists viewed by user, reverse-chronologically."""
         user_entries = [e for e in self._view_history if e.user_id == user.telegram_id]
-        user_entries.sort(key=lambda e: e.viewed_at, reverse=True)
+        user_entries.sort(key=_history_rank, reverse=True)
         result: list[tuple[Wishlist, datetime]] = []
         for e in user_entries:
             wl = self._wishlists.get(e.wishlist_id)

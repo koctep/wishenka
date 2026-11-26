@@ -1188,6 +1188,13 @@ only (`wishenka/web/static/miniapp.js`, `wishenka/web/static/miniapp.css`).
 - **Automatic View Recording**: When an authenticated user opens any wishlist (`showList`), the
   client dispatches a background `POST /api/history/{id}`.
 - **Deduplication**: Re-visiting a recorded wishlist updates `viewed_at`, no duplicate row.
+- **Equal view times (WISHENKA-304)**: When view times differ, the newest time is
+  still first. When view times are equal, order is by `recorded_seq`, newest
+  recording first. A repeat keeps the same row id and still receives a new
+  sequence, so it becomes the newest recording. The row id is not the live
+  tie-break. Existing rows were filled once from the old id; later recordings
+  replace that value. The same key is used in memory and in SQLite before the
+  existing limit. The screen lists `GET /api/history` in that order.
 - **20-Entry Bound**: `GET /api/history` returns at most 20 entries. Production `RepoWishlistOps` keeps older stored rows; only the in-memory `WishlistService` prunes storage to 20.
 - **Zero-Leak Guarantees**: `GET /api/history` projects only sanitized list metadata and omits
   reservation records and buyer details; the screen renders only title, time and role badge.
@@ -1272,7 +1279,9 @@ the `purge_legacy_non_member_view_history` migration are in
   or the open was anonymous, or the caller is not a member and has not opened the
   current share link while signed in (`404`). Look for `view_history_recorded` on
   success and `view_history_access_denied` when access was refused. A deleted list
-  logs `view_history_deleted_wishlist_denied`.
+  logs `view_history_deleted_wishlist_denied`. `view_history_recorded` and
+  `view_history_listed` do not include titles or the full history. They are not
+  the middleware line `HTTP request completed`, and not the commit.
 - **Clear stuck in "clearing"**: the `DELETE` never settled (slow or dropped connection). The
   buttons stay disabled by design to prevent duplicates; reload the screen. A failed request
   shows `miniapp.history.clear_failed` and re-enables the buttons.
