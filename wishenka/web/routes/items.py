@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from wishenka.auth.dependencies import get_current_user, get_optional_current_user
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.items.schemas import CreateItemDTO, ReorderItemsDTO, UpdateItemDTO
-from wishenka.web.dependencies import WishlistRepo
+from wishenka.web.dependencies import WishlistReadRepo, WishlistRepo
 from wishenka.wishlists.exceptions import (
     CannotReduceQuantityBelowReservedError,
     InventoryBusyError,
@@ -155,7 +155,7 @@ async def list_items(
     wishlist_id: int,
     request: Request,
     user: OptionalUser,
-    repo: WishlistRepo,
+    repo: WishlistReadRepo,
     include_archived: bool = False,
 ) -> list[WishItemRecipientViewDTO | WishItemGifterViewDTO]:
     """List wishlist items sorted by display_order adhering to Surprise Invariant."""
@@ -212,7 +212,7 @@ async def get_item(
     item_id: int,
     request: Request,
     user: OptionalUser,
-    repo: WishlistRepo,
+    repo: WishlistReadRepo,
 ) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
     """Get single wish item view projected for the caller."""
 

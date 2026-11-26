@@ -13,7 +13,7 @@ from wishenka.auth.dependencies import get_current_user, get_optional_current_us
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.config import Settings
 from wishenka.sqlite import is_sqlite_busy
-from wishenka.web.dependencies import WishlistRepo
+from wishenka.web.dependencies import WishlistReadRepo, WishlistRepo
 from wishenka.web.idempotency import compute_request_hash, parse_idempotency_key
 from wishenka.web.routes.reservations import execute as execute_reservation
 from wishenka.wishlists.exceptions import (
@@ -320,7 +320,7 @@ async def list_deleted_wishlists(
 
 @router.get("/api/wishlists/{wishlist_id}")
 async def get_wishlist(
-    request: Request, wishlist_id: int, user: User, repo: WishlistRepo
+    request: Request, wishlist_id: int, user: User, repo: WishlistReadRepo
 ) -> dict[str, Any]:
     async def action(service: Any) -> dict[str, Any]:
         wl = await service.get_wishlist_by_id(wishlist_id)
@@ -853,7 +853,7 @@ class RoleInput(BaseModel):
 
 @router.get("/api/wishlists/{wishlist_id}/members")
 async def list_members(
-    request: Request, wishlist_id: int, user: User, repo: WishlistRepo
+    request: Request, wishlist_id: int, user: User, repo: WishlistReadRepo
 ) -> list[dict[str, Any]]:
     async def action(service: Any) -> list[dict[str, Any]]:
         wl = await service.get_wishlist_by_id(wishlist_id)

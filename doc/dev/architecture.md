@@ -19,14 +19,47 @@
   - общая настройка транзакций вынесена в `wishenka/sqlite.py`:
     - `configure_immediate_transactions(sync_engine, *, busy_timeout_ms=5000)` выставляет `isolation_level = None`, `PRAGMA foreign_keys=ON` и `PRAGMA busy_timeout` на `connect`, а на `begin` пропускает `AUTOCOMMIT`, применяет `PRAGMA busy_timeout` и открывает `BEGIN` при `execution_options(read_only=True)` либо `BEGIN IMMEDIATE` для записи; используется в `WishlistStore` и `UserStore`
     - `is_sqlite_busy(exc)` рекурсивно проверяет `exc`, `.orig` и `.__cause__` на `SQLITE_BUSY` (`sqlite_errorcode` или сообщение `database is locked` / `database is busy`)
-  - запись инвентаря одного желания и операции записи `UserStore` стартуют с `Connection.begin()`; слушатель `begin` выполняет `BEGIN IMMEDIATE` при `isolation_level = None`; чтение кабинета дарителя (`WishlistStore.get_user_reservations`, `get_user_reservations_summary`) выполняется через `WishlistStore.execute_read` (`execution_options(read_only=True)` -> `BEGIN` с консистентным WAL-снимком на первом `SELECT`, `PRAGMA query_only = ON` со сбросом `OFF` в `AUTOCOMMIT` и `raw_conn.invalidate()` при ошибке сброса, а также отображением `SQLITE_BUSY` в `InventoryBusyError`) и батчевую гидратацию `WishlistRepository.get_items_by_ids` / `get_wishlist_headers_by_ids` без блокировки писателей
+  - запись инвентаря одного желания и операции записи `UserStore` стартуют с
+    `Connection.begin()`; слушатель `begin` выполняет `BEGIN IMMEDIATE` при
+    `isolation_level = None`; чтение кабинета дарителя
+    (`WishlistStore.get_user_reservations`, `get_user_reservations_summary`)
+    выполняется через `WishlistStore.execute_read`, который открывает
+    `read_transaction` (`execution_options(read_only=True)` -> `BEGIN` с
+    консистентным WAL-снимком на первом `SELECT`, `PRAGMA query_only = ON` со
+    сбросом `OFF` в `AUTOCOMMIT` и `raw_conn.invalidate()` при ошибке сброса,
+    а также отображением `SQLITE_BUSY` в `InventoryBusyError`) и батчевую
+    гидратацию `WishlistRepository.get_items_by_ids` /
+    `get_wishlist_headers_by_ids` без блокировки писателей
+  - открытие одного вишлиста (список, деталь, участники, одно желание, список
+    желаний, подаренные и отметка избранного) и чистые GET, которые это
+    показывают, идут через `WishlistStore.read_transaction` (`BEGIN` и
+    `PRAGMA query_only`) и не берут блокировку сохранения; сохранение и
+    запрос, который ещё пишет, остаются на `BEGIN IMMEDIATE`
 - **ORM и миграции:** SQLAlchemy 2.0 (Async) + Alembic
   - Схема таблиц `wl_*` хранилища вишлистов создаётся и меняется только версионными ревизиями Alembic (`wishenka/wishlists/alembic/versions/`); ad-hoc `ALTER TABLE` в коде хранилища нет.
   - Схема таблиц `wl_*` и `users` создаётся и меняется только версионными ревизиями Alembic (`wishenka/wishlists/alembic/versions/`); ad-hoc `ALTER TABLE` и дублирующего DDL `users` в коде хранилищ нет. `UserStore.initialize()` настраивает WAL-режим (для собственного движка) и делегирует миграцию схемы в `upgrade_to_head(self.database_url)` (ревизия `unify_user_keys_and_cascades`, `WISHENKA-188`, консолидирует DDL `users` и переводит все пользовательские внешние ключи на `users(telegram_id)` с `ON DELETE CASCADE`).
   - `WishlistStore.initialize()` при старте приводит БД к head: распознаёт и штампует legacy-схему без изменения данных, применяет `upgrade head`, выбирает WAL. Параллельный старт нескольких процессов сериализуется файлом `<db>.migrate.lock` (`fcntl`, только POSIX, ожидание до 60 с).
   - Для `:memory:` хранилище использует изолированный временный файл, который удаляется в `WishlistStore.dispose()`.
-  - **DI-слой веб-маршрутов (`WISHENKA-80`, `WISHENKA-323`):** HTTP-маршруты (`wishenka/web/routes/wishlists.py`, `items.py`, `sharing.py`, `receipts.py`, `items_ui.py`, `receipts_ui.py`) выполняют общие действия вишлиста через `RepoWishlistOps` на запрошенном `WishlistRepo`. Это единственный общий набор правил (списки, желания, участники, архив, удаление, восстановление, избранное, история просмотров, вход по приглашению). Экраны берут репозиторий запроса. Store-backed `WishlistService` пересылает те же имена в `WishlistStore.run_repository`: хелпер коммитит транзакцию и сбрасывает commit-логи на построенном репозитории. Брони и получения остаются на `execute_wish` / `execute_wish_idempotent`. `receipts_ui._repo_ctx` остаётся за WISHENKA-324. Подробнее: [`doc/dev/wishlists.md`](wishlists.md#shared-wishlist-rule-set).
-  - **Scoped-гидратация одного вишлиста (`WISHENKA-213`):** `_SINGLE_WISHLIST_METHODS` теперь содержит `update_wishlist_settings`, `transfer_ownership` и `is_favorite`. Для них `_transactional` передаёт `wishlist_id` в `WishlistStore.execute`. Настройки и передача владения читают гидратированный список через приватный `_lookup_wishlist`. Общие имена из `_SHARED_REPOSITORY_METHODS` в этот снимок не входят. Подробнее: [`doc/dev/wishlists.md`](wishlists.md#4-concurrency--transaction-management).
+  - **DI-слой веб-маршрутов (`WISHENKA-80`, `WISHENKA-323`, `WISHENKA-338`):**
+    HTTP-маршруты (`wishenka/web/routes/wishlists.py`, `items.py`, `sharing.py`,
+    `receipts.py`, `items_ui.py`, `receipts_ui.py`) выполняют общие действия
+    вишлиста через `RepoWishlistOps`. Чистый GET одного вишлиста берёт
+    `WishlistReadRepo` (`get_wishlist_read_repository` → `read_transaction`) и
+    не берёт блокировку сохранения. Сохранение и запрос, который ещё пишет,
+    остаются на `WishlistRepo` / `get_wishlist_repository` (`BEGIN IMMEDIATE`).
+    Store-backed `WishlistService` пересылает семь открытий в
+    `run_repository_read`, остальные общие имена — в `run_repository` (коммит и
+    сброс commit-логов). Брони и получения остаются на `execute_wish` /
+    `execute_wish_idempotent`. `receipts_ui._execute` без переданного
+    репозитория по-прежнему вызывает `get_wishlist_repository`. Подробнее:
+    [`doc/dev/wishlists.md`](wishlists.md#shared-wishlist-rule-set).
+  - **Scoped-гидратация одного вишлиста (`WISHENKA-213`):**
+    `_SINGLE_WISHLIST_METHODS` содержит `update_wishlist_settings` и
+    `transfer_ownership`. Для них `_transactional` передаёт `wishlist_id` в
+    `WishlistStore.execute`. Настройки и передача владения читают
+    гидратированный список через приватный `_lookup_wishlist`. `is_favorite`
+    входит в `_READ_REPOSITORY_METHODS` и список не переписывает. Подробнее:
+    [`doc/dev/wishlists.md`](wishlists.md#4-concurrency--transaction-management).
   - Подробности, добавление ревизии и диагностика: [`doc/dev/migrations.md`](migrations.md).
 - **Парсинг ссылок:** httpx + BeautifulSoup4 (с защитой от SSRF)
 - **Очередь сообщений:** Встроенный Transactional Outbox в SQLite + асинхронный воркер

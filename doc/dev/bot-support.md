@@ -122,8 +122,9 @@ Created by Alembic revision `add_support_channel` (`down_revision = "add_notice_
   `[REDACTED]`.
 - **Read-only diagnostic collection (`WishlistStore.execute_read`):** Both the `support_tickets`
   sliding-window rate-limit check and `collect_diagnostic_context` execute inside
-  `store.execute_read(...)`, which uses `execution_options(read_only=True)` to run a deferred
-  `BEGIN` transaction rather than acquiring a `BEGIN IMMEDIATE` write lock. Recording a delivered
+  `store.execute_read(...)`, which opens `WishlistStore.read_transaction`
+  (`execution_options(read_only=True)`, deferred `BEGIN`, `PRAGMA query_only`) rather than
+  acquiring a `BEGIN IMMEDIATE` write lock. Recording a delivered
   ticket in `support_tickets` runs separately in a write transaction after delivery succeeds.
 - **Metadata-only diagnostic context (`collect_diagnostic_context`):** Queries only `bot_destinations`
   (`active` boolean), `wl_lists` (counts of `active` and `archived` lists owned by

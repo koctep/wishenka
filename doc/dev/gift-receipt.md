@@ -267,8 +267,9 @@ Corrects the quantity of an existing receipt act while preserving `received_at` 
 ### `GET /api/wishlists/{wishlist_id}/gifted`
 
 Returns `list[GiftedItemDTO]` for members of a non-deleted list (`RepoWishlistOps.list_gifted_items`
-on the request repository, same refusal table: 403 `forbidden` for a non-member, 404 `not_found` for an
-unknown list, 404 `wishlist_not_active` for a deleted one). The read stays available when the
+on `WishlistReadRepo`). That GET uses `read_transaction` and does not take the save lock. Same
+refusal table: 403 `forbidden` for a non-member, 404 `not_found` for an unknown list, 404
+`wishlist_not_active` for a deleted one. The read stays available when the
 list is archived. Order: newest receipt first (a wish without records falls back to its
 `updated_at`), then `id`.
 
@@ -481,7 +482,8 @@ Both routes need a session (`get_current_user`, 401 without one). The POST is a 
 mutation, so it needs the CSRF token; the inline script of `base.html` adds `X-CSRF-Token` to
 every non-GET htmx request in `htmx:configRequest` once the token is fetched.
 
-- **`GET /web/wishlists/{wishlist_id}/items/{item_id}/receipt`** opens the dialog. It is
+- **`GET /web/wishlists/{wishlist_id}/items/{item_id}/receipt`** opens the dialog on
+  `WishlistReadRepo` (`read_transaction`). It does not take the save lock. It is
   advisory: it reads the wish (`get_wishlist_by_id`) and applies the service guards in order
   (unknown wish, not a member, list not active, wish archived, nothing remaining) without
   writing. A member of an active list with remaining units gets 200 and the form (INFO
@@ -506,7 +508,8 @@ every non-GET htmx request in `htmx:configRequest` once the token is fetched.
   **`GET /web/wishlists/{wishlist_id}/items/{item_id}/receipts/{receipt_id}/cancel`**
   (WISHENKA-153): open the correction modal (`partials/receipt_edit_modal.html`) or cancellation
   confirmation modal (`partials/receipt_cancel_modal.html`) for a specific `receipt_id` (INFO
-  `ui_receipt_entry_form_opened`). Refusals return the blocked modal with `X-Receipt-Refusal`.
+  `ui_receipt_entry_form_opened`). Both GETs use `WishlistReadRepo` and do not
+  take the save lock. Refusals return the blocked modal with `X-Receipt-Refusal`.
 - **`POST /web/wishlists/{wishlist_id}/items/{item_id}/receipts/{receipt_id}/edit`** (form field
   `quantity`) and **`POST /web/wishlists/{wishlist_id}/items/{item_id}/receipts/{receipt_id}/cancel`**
   (WISHENKA-153): call `correct_item_receipt` or `cancel_item_receipt`, accept `Idempotency-Key`,

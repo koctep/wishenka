@@ -119,7 +119,11 @@ FastAPI dependency injection utilities for protecting route handlers and resolvi
   `None` for public/guest requests. Enforces session liveness and revocation checks via
   `_is_session_active` (`users` existence for `user_id` claims, `deleted_session_revocations` for
   stateless tokens without `user_id`), raising `HTTPException(401)` with
-  `"Session revoked or account deleted"` when rejected.
+  `"Session revoked or account deleted"` when rejected. When `app.state.wishlist_store` is a
+  `WishlistStore`, that lookup runs inside `read_transaction` (plain `BEGIN` and
+  `PRAGMA query_only`) and does not take the save lock. A pure-read wishlist GET therefore
+  does not take the lock for the session check. Account deletion still writes the revocation
+  row in `BEGIN IMMEDIATE`.
 - `get_user_store`: Resolves `UserStore` instance from `request.app.state.user_store` with fallback
   to configured database URL.
 - `get_settings`: Resolves `Settings` instance from `request.app.state` or instantiates defaults.

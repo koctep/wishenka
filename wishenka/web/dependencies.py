@@ -73,4 +73,22 @@ async def get_wishlist_repository(
         raise RuntimeError("Wishlist storage operation failed")
 
 
+async def get_wishlist_read_repository(
+    store: Annotated[WishlistStore, Depends(get_wishlist_store)],
+) -> AsyncIterator[WishlistRepository]:
+    """Yield a WishlistRepository inside the store's read-only transaction.
+
+    The transaction is plain ``BEGIN`` with ``query_only``. This dependency does not
+    commit, flush commit logs, or map a busy error. ``InventoryBusyError`` raised by
+    ``read_transaction`` propagates to the request.
+    """
+    async with store.read_transaction() as conn:
+        repo = WishlistRepository(conn)
+        try:
+            yield repo
+        finally:
+            repo.clear_commit_logs()
+
+
 WishlistRepo = Annotated[WishlistRepository, Depends(get_wishlist_repository)]
+WishlistReadRepo = Annotated[WishlistRepository, Depends(get_wishlist_read_repository)]

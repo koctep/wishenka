@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from wishenka.auth.dependencies import get_current_user
 from wishenka.auth.models import AuthenticatedUser
-from wishenka.web.dependencies import WishlistRepo
+from wishenka.web.dependencies import WishlistReadRepo
 from wishenka.web.idempotency import (
     build_replay_response,
     compute_request_hash,
@@ -241,7 +241,7 @@ async def record_receipt(
 
 @router.get("/gifted", response_model=list[GiftedItemDTO])
 async def list_gifted(
-    wishlist_id: int, user: User, request: Request, repo: WishlistRepo
+    wishlist_id: int, user: User, request: Request, repo: WishlistReadRepo
 ) -> list[GiftedItemDTO]:
     """Return the received wishes of a list for its authors."""
 

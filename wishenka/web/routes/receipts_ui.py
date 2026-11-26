@@ -22,7 +22,7 @@ from wishenka.auth.dependencies import get_current_user
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.i18n import DEFAULT_LOCALE, SupportedLocale, t
 from wishenka.i18n.dependencies import LocaleDep
-from wishenka.web.dependencies import WishlistRepo, get_wishlist_repository
+from wishenka.web.dependencies import WishlistReadRepo, get_wishlist_repository
 from wishenka.web.gifted_view import (
     RECEIPT_REFUSAL_HEADER,
     GiftedRow,
@@ -237,7 +237,7 @@ async def get_receipt_dialog(
     request: Request,
     user: User,
     locale: LocaleDep,
-    repo: WishlistRepo,
+    repo: WishlistReadRepo,
 ) -> Response:
     """Open the receipt dialog; a stale card gets the blocked dialog with the contract status."""
     token = _repo_ctx.set(repo)
@@ -784,7 +784,7 @@ async def get_receipt_edit_dialog(
     request: Request,
     user: User,
     locale: LocaleDep,
-    repo: WishlistRepo,
+    repo: WishlistReadRepo,
 ) -> Response:
     """Open the receipt quantity correction modal."""
     return await _open_receipt_entry_modal(
@@ -842,7 +842,7 @@ async def get_receipt_cancel_dialog(
     request: Request,
     user: User,
     locale: LocaleDep,
-    repo: WishlistRepo,
+    repo: WishlistReadRepo,
 ) -> Response:
     """Open the receipt cancellation confirmation modal."""
     return await _open_receipt_entry_modal(

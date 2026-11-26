@@ -23,7 +23,7 @@ from wishenka.items.classifier import UniversalInputClassifier
 from wishenka.items.models import InputType, ItemPriority
 from wishenka.items.parser import extract_domain
 from wishenka.items.service import ItemPreviewService
-from wishenka.web.dependencies import WishlistRepo
+from wishenka.web.dependencies import WishlistReadRepo, WishlistRepo
 from wishenka.web.gifted_view import (
     RECEIPT_REFUSAL_HEADER,
     GiftedRow,
@@ -377,7 +377,7 @@ async def view_wishlist_detail(
     request: Request,
     current_user: OptionalUser,
     locale: LocaleDep,
-    repo: WishlistRepo,
+    repo: WishlistReadRepo,
 ) -> Response:
     """Render main TMA wishlist detail page with RBAC-gated Quick Add Bar and edit triggers."""
 
@@ -666,7 +666,7 @@ async def get_new_item_modal(
     request: Request,
     user: User,
     locale: LocaleDep,
-    repo: WishlistRepo,
+    repo: WishlistReadRepo,
     raw_input: str | None = None,
     title: str | None = None,
     link: str | None = None,
@@ -922,7 +922,7 @@ async def get_edit_item_modal(
     request: Request,
     user: User,
     locale: LocaleDep,
-    repo: WishlistRepo,
+    repo: WishlistReadRepo,
 ) -> Response:
     """Render detailed item edit modal enforcing received-quantity floor and Surprise Invariant."""
 
@@ -1465,7 +1465,7 @@ async def archive_confirm_ui(
     request: Request,
     user: User,
     locale: LocaleDep,
-    repo: WishlistRepo,
+    repo: WishlistReadRepo,
 ) -> Response:
     """Render the archive confirmation modal without exposing gifter identities."""
 

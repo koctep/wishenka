@@ -59,10 +59,11 @@ rule set. It owns lists, wishes, membership, archive, delete, restore,
 favorites, viewing history, and invite join. Mini App screens call those names
 on a `RepoWishlistOps` built from the request repository.
 
-A store-backed `WishlistService` forwards the same public names through
+A store-backed `WishlistService` forwards names that write through
 `WishlistStore.run_repository`. That helper builds one `WishlistRepository`,
 commits the immediate transaction, and flushes commit logs on that repository.
-On failure it clears those logs.
+On failure it clears those logs. The seven one-wishlist openings forward
+through `run_repository_read` and do not take the save lock.
 
 Reservations and receipts stay on `WishlistStore.execute_wish` and
 `execute_wish_idempotent`. `receipts_ui._repo_ctx` is unchanged and stays with
@@ -73,19 +74,55 @@ WISHENKA-324.
 - **`RepoWishlistOps`**: the shared rule bodies. Screens in `wishlists.py`,
   `items.py`, `sharing.py`, `items_ui.py`, and the non-inventory reads in
   `receipts.py` and `receipts_ui.py` construct `RepoWishlistOps(repo)` from
-  `WishlistRepo`. Those handlers use the request repository.
+  the request repository.
+- **One-wishlist openings**: `get_wishlist_by_id`, `get_wishlist_view`,
+  `get_members`, `get_wish_item`, `list_wish_items`, `list_gifted_items`, and
+  `is_favorite`. A store-backed `WishlistService` sends those names through
+  `_read_repository_forward` into `WishlistStore.run_repository_read`. That
+  helper opens `read_transaction` (plain `BEGIN` and `PRAGMA query_only`),
+  builds one `WishlistRepository`, and clears commit logs. It does not commit,
+  flush logs, or enter `execute` / `_write`. The opening does not take the
+  save lock. `query_only` rejects a write on that connection.
+- **Pure-read HTTP GETs** use `WishlistReadRepo`
+  (`get_wishlist_read_repository`), which yields the repository inside the
+  same `read_transaction`. The dependency does not commit, flush logs, or map
+  a busy error. `InventoryBusyError` from `read_transaction` propagates.
+  Session lookup on a `WishlistStore` uses that same transaction, so the GET
+  does not take the save lock before the handler runs. These handlers:
+  `get_wishlist` (including `repo.is_favorite` in that request),
+  `list_members`, `list_items`, `get_item`, `list_gifted`,
+  `view_wishlist_detail`, `get_members_partial`, `get_item_card_partial`,
+  `get_share_modal`, `get_new_item_modal`, `get_edit_item_modal`,
+  `archive_confirm_ui`, `get_receipt_dialog`, `get_receipt_edit_dialog`, and
+  `get_receipt_cancel_dialog`.
+- **Saves and requests that also write** stay on `WishlistRepo`
+  (`get_wishlist_repository`). `conn.begin()` has no `read_only` flag, so the
+  listener emits `BEGIN IMMEDIATE`. On success the dependency commits and
+  flushes commit logs. That includes create, update, archive, restore, delete,
+  member changes, token reset, favorite mark or unmark, and reorder. `POST`
+  restore of a deleted wishlist reads `repo.is_favorite` after the save, inside
+  that write transaction. Member removal, item archive, and item restore read
+  the list again on the same write repository. Public link and invite stay
+  here (the share page records a view). Multi-wishlist reads stay here: the
+  wishlist list, favorites list, history, and deleted wishlists.
+  `receipts_ui._execute` with no injected repository still calls
+  `get_wishlist_repository`.
 - **`_repository_forward`**: when `WishlistService._store` is set, each name in
   `_SHARED_REPOSITORY_METHODS` calls the same name on `RepoWishlistOps` inside
-  `run_repository`. The wrapper does not enter `execute` or `_write`.
-- **In-memory fail closed**: when `_store` is `None`, those public methods log
-  `wishlist_repository_path_required` (`WARNING`, field `operation` only) and
-  raise `WishlistNotFoundError`. The private `_lookup_wishlist` is not wrapped.
+  `run_repository` (`BEGIN IMMEDIATE`, then commit and flush). The wrapper does
+  not enter `execute` or `_write`. The seven openings are not in that set.
+- **In-memory fail closed**: when `_store` is `None`, shared methods and the
+  six openings other than `is_favorite` log `wishlist_repository_path_required`
+  (`WARNING`, field `operation` only) and raise `WishlistNotFoundError`.
+  `is_favorite` with no store keeps the in-memory answer.
   `update_wishlist_settings` and `transfer_ownership` read the hydrated graph
-  through that lookup. Public `get_wishlist_by_id` still forwards and
+  through `_lookup_wishlist`. Public `get_wishlist_by_id` still forwards and
   fail-closes when the service has no store.
 - **Snapshot methods**: `_SINGLE_WISHLIST_METHODS` is
-  `update_wishlist_settings`, `transfer_ownership`, and `is_favorite`. Those
-  three still use the snapshot wrapper.
+  `update_wishlist_settings` and `transfer_ownership`. Those two still use the
+  snapshot wrapper. `is_favorite` is a read opening.
+  `RepoWishlistOps.is_favorite` returns `False` for a missing person without a
+  query, otherwise `WishlistRepository.is_favorite`.
 - **Viewing history**: `WishlistRepository.record_view` upserts
   `(user_id, wishlist_id)` and does not delete older rows. `GET /api/history`
   still returns at most 20 rows. A visitor with no `users` row logs
@@ -129,7 +166,7 @@ read one list with `await service._lookup_wishlist(wishlist_id)`.
 No new setting or environment variable. `WISHENKA_DATABASE_URL` still selects
 the SQLite file. `run_repository` uses the store's existing `BEGIN IMMEDIATE`
 and busy timeout. It does not snapshot the database and it does not retry
-token collisions.
+token collisions. The seven openings use `read_transaction` on that same file.
 
 ### Troubleshooting
 
@@ -147,6 +184,11 @@ token collisions.
 - **A capture save and its draft disagree.** Save is the `run_repository`
   callback that calls `RepoWishlistOps.add_wish_item` together with the
   `bot_drafts` update. That add is not a second snapshot write.
+- **A one-wishlist GET waited on a save.** That GET should be on
+  `WishlistReadRepo` or `run_repository_read`. A handler that also writes stays
+  on `get_wishlist_repository` and still takes `BEGIN IMMEDIATE`. A busy read
+  logs `wishlist_read_busy` inside `read_transaction` and raises
+  `InventoryBusyError`.
 
 ---
 
@@ -188,6 +230,8 @@ rejected by the optional authentication dependency.
   with `deleted_at`, `expires_at`, and `days_remaining`.
 
 - `GET /api/wishlists/{id}`: Reads a list for a member, including archived lists.
+  The handler is `get_wishlist` on `WishlistReadRepo`. The favorite mark in that
+  same response is `repo.is_favorite` inside the same read-only transaction.
 
 - `PATCH /api/wishlists/{id}`: Owner or admin updates an active list. The same
   name rule applies. A sent name goes through `normalize_wishlist_name`: `""`,
@@ -220,7 +264,9 @@ rejected by the optional authentication dependency.
 
 - `POST /api/wishlists/{id}/invite/reset`: Owner or admin rotates the collaborator invite token.
 
-- `GET /api/wishlists/{id}/members`: Lists active members and their roles.
+- `GET /api/wishlists/{id}/members`: Lists active members and their roles
+  (`list_members` on `WishlistReadRepo`). The read-only transaction does not
+  take the save lock.
 
 - `PATCH /api/wishlists/{id}/members/{user_id}/role`: Owner promotes or demotes a member.
 
@@ -303,11 +349,13 @@ enforces an explicit persistent `WishlistStore` boundary: passing `store=None` (
 `WishlistService()`) logs `wishlist_service_store_required` and raises `ValueError`. For isolated
 unit tests or transient `WishlistStore` hydration, construct the service explicitly via
 `WishlistService.in_memory()`. Web routes (`wishenka/web/routes/wishlists.py`, `items.py`,
-`sharing.py`, `receipts.py`, `items_ui.py`, `receipts_ui.py`) inject a transaction-scoped
-`WishlistRepo` via `wishenka.web.dependencies.get_wishlist_repository` and execute targeted
-queries and non-inventory mutations through `RepoWishlistOps`. Screens use that request
-repository. Single-wish inventory, reservation, and receipt mutations continue to use
-`WishlistStore.execute_wish` / `execute_wish_idempotent`. See
+`sharing.py`, `receipts.py`, `items_ui.py`, `receipts_ui.py`) build `RepoWishlistOps` from
+the request repository. A pure-read GET that opens one wishlist uses `WishlistReadRepo`
+(`get_wishlist_read_repository` / `read_transaction`) and does not take the save lock. A
+save, and any request that also writes, uses `WishlistRepo`
+(`get_wishlist_repository`, `BEGIN IMMEDIATE`). Single-wish inventory, reservation, and
+receipt mutations continue to use `WishlistStore.execute_wish` /
+`execute_wish_idempotent`. See
 [Shared wishlist rule set](#shared-wishlist-rule-set).
 
 `WISHENKA_DATABASE_URL` selects the SQLite database and defaults to
@@ -321,7 +369,7 @@ migration startup, creates parent directories for a file database, and disposes 
 shutdown (`WishlistStore.dispose()`). `WISHENKA_SQLITE_DB_PATH` is a separate setting and does not
 configure this store. All workers must point to the same database file to share state. The store
 applies a five-second SQLite busy timeout (`busy_timeout = 5000`) and serializes each mutation with
-`BEGIN IMMEDIATE`.
+`BEGIN IMMEDIATE`. One-wishlist openings use `read_transaction` and do not take that lock.
 
 For `:memory:` URLs (`sqlite+aiosqlite:///:memory:`), `WishlistStore.__init__` provisions an
 isolated temporary SQLite file so synchronous Alembic migrations and async `aiosqlite` connections
@@ -1037,8 +1085,10 @@ authorization must fail closed when `item.wishlist` is absent:
 
 Screen handlers build `RepoWishlistOps` from the request repository. That path
 is how `GET /share/{public_token}` and the public wishlist API resolve a list.
-A store-backed `WishlistService` forwards the same shared names through
-`WishlistStore.run_repository`. The signatures below are those names.
+Those two stay on the write repository because the share page records a view.
+A store-backed `WishlistService` forwards shared names that write through
+`WishlistStore.run_repository`. The seven one-wishlist openings forward through
+`run_repository_read`. The signatures below are those names.
 
 ### Service Methods
 
@@ -1108,6 +1158,8 @@ async def get_wishlist_view(
 ```
 
 - **Raises**: `WishlistNotFoundError`, `WishlistDeletedError`.
+- **Transaction**: a store-backed call uses `run_repository_read`. The detail
+  page (`view_wishlist_detail`) uses `WishlistReadRepo` for the same opening.
 - **Surprise Invariant**: For each item, selects `WishItemRecipientViewDTO` if caller is recipient,
   or `WishItemGifterViewDTO` otherwise.
 - **Token Security**: The `invite_token` is exposed in the DTO only to `Owner` and `Admin` members;
@@ -1399,7 +1451,11 @@ async def remove_favorite(
     History rules: [Viewing History Access](#viewing-history-access-wishenka-303).
 - **Idempotency**: Adding an existing favorite is an idempotent no-op.
 - Synchronous `has_favorite(user_id, wishlist_id)` and async `is_favorite(user, wishlist_id)`
-  allow quick lookups.
+  allow quick lookups. A store-backed `is_favorite` is a read opening
+  (`run_repository_read`). It does not rewrite the wishlist and does not take
+  the save lock. `GET /api/wishlists/{id}` reads the mark on `WishlistReadRepo`
+  in the same transaction as the list. Marking or unmarking
+  (`POST` / `DELETE /api/favorites/{id}`) stays on `BEGIN IMMEDIATE`.
 
 #### `list_favorites`
 
@@ -1867,7 +1923,8 @@ adapter:
   `RuntimeError("WishlistStore is not initialized on app.state")`.
 - `get_wishlist_repository(store: Annotated[WishlistStore, Depends(get_wishlist_store)]) -> AsyncIterator[WishlistRepository]`:
   opens a connection from `store.engine.connect()` and yields `WishlistRepository(conn)`.
-  The shared `busy_timeout` and `BEGIN IMMEDIATE` wait are unchanged. There is
+  Saves and requests that also write use this dependency. The shared
+  `busy_timeout` and `BEGIN IMMEDIATE` wait are unchanged. There is
   no second retry. `await conn.begin()`, the work after `yield`, and
   `await conn.commit()` sit in one `try`.
   - On clean exit: commits when a transaction is still open (`await conn.commit()`),
@@ -1890,8 +1947,16 @@ adapter:
   with `error_type`.
   `install_inventory_busy_handler` (`wishenka/web/app.py`) returns HTTP 503 with
   `detail` `str(exc)` and does not log.
+- `get_wishlist_read_repository(store) -> AsyncIterator[WishlistRepository]`:
+  yields `WishlistRepository` inside `WishlistStore.read_transaction` (plain
+  `BEGIN` and `PRAGMA query_only`). It does not commit, flush commit logs, or
+  map a busy error. `InventoryBusyError` from `read_transaction` propagates.
+  Pure-read GETs that open one wishlist use this dependency and do not take
+  the save lock. See [Shared wishlist rule set](#shared-wishlist-rule-set).
 - `WishlistRepo = Annotated[WishlistRepository, Depends(get_wishlist_repository)]`: type alias used
-  by route handlers.
+  by handlers that save or also write.
+- `WishlistReadRepo = Annotated[WishlistRepository, Depends(get_wishlist_read_repository)]`:
+  type alias for the pure-read GETs listed above.
 
 #### 2. Targeted Operations Adapter (`wishenka/wishlists/repo_ops.py`)
 `RepoWishlistOps(repo: WishlistRepository)` implements wishlist domain operations directly over
@@ -1911,14 +1976,18 @@ targeted `WishlistRepository` queries without loading unrelated wishlists:
 
 #### 3. Route Usage (`wishenka/web/routes/`)
 - `wishlists.py`, `items.py`, `sharing.py`, `receipts.py`, `items_ui.py`, and `receipts_ui.py`
-  declare `repo: WishlistRepo` and execute targeted reads/mutations via `RepoWishlistOps(repo)`.
-  Handlers use that request repository. A store-backed `WishlistService` of the
-  same names forwards through `WishlistStore.run_repository`, which commits and
-  then flushes commit logs on the repository it built.
+  execute targeted reads and mutations via `RepoWishlistOps(repo)`. A pure-read
+  GET that opens one wishlist declares `repo: WishlistReadRepo`. A save, and a
+  request that also writes, declares `repo: WishlistRepo`. A store-backed
+  `WishlistService` forwards the seven openings through `run_repository_read`
+  and the remaining shared names through `WishlistStore.run_repository`, which
+  commits and then flushes commit logs on the repository it built.
 - Wish-scoped inventory, reservation, and receipt mutations continue to use
   `WishlistStore.execute_wish` / `execute_wish_idempotent` (`BEGIN IMMEDIATE` serialization); in
   `receipts_ui.py`, single-item mutations (`_execute_receipt_mutation_ui`, `correct_receipt_ui`,
-  `cancel_receipt_ui`) are separated from full-wishlist UI reads (`WishlistRepo` / `RepoWishlistOps`).
+  `cancel_receipt_ui`) are separated from the receipt dialogs
+  (`WishlistReadRepo` / `RepoWishlistOps`). The `_execute` fallback with no
+  injected repository still calls `get_wishlist_repository`.
 
 ### 4. Concurrency & Transaction Management
 
@@ -1981,34 +2050,43 @@ relational architecture, `WishlistStore` coordinates atomic row-level persistenc
     and reservers; `wl_list_notification_settings` for `wishlist_id`), and favorites
     (`wl_favorites`), while skipping `wl_view_history` completely (`_write()` also skips
     `wl_view_history` diffing when `wishlist_id is not None`).
-  - Shared wishlist names (lists, wishes, membership, archive, delete, restore,
-    favorites, viewing history, invite join) are forwarded by `_repository_forward`
-    through `run_repository`. They are not in `_SINGLE_WISHLIST_METHODS` and they
-    do not enter this snapshot path.
-  - `_SINGLE_WISHLIST_METHODS` is `update_wishlist_settings`, `transfer_ownership`,
-    and `is_favorite`. `_wishlist_scope` extracts `wishlist_id` for those three
-    inside `_transactional` and passes it to `execute`. `update_wishlist_settings`
-    and `transfer_ownership` read the hydrated list through the private
-    `_lookup_wishlist`. A new public method that should share the repository
-    rules belongs in `_SHARED_REPOSITORY_METHODS`, not in this snapshot set.
-- **Read-Only Deferred Transactions (`WishlistStore.execute_read`)**:
-  `execute_read(work)` accepts `Callable[[AsyncConnection], Awaitable[T]]`, binds
-  `execution_options(read_only=True)` on the connection, starts a deferred `BEGIN` transaction,
-  and executes `PRAGMA query_only = ON` before running `work(conn)`. `configure_immediate_transactions`
-  checks `conn.get_execution_options().get("read_only")` in the `begin` event listener and emits
-  `BEGIN` instead of `BEGIN IMMEDIATE`, allowing read-only paths (such as `wishenka.bot.support`
-  rate-limit checks, diagnostic collection, and the gifter reservation cabinet) to read without
-  acquiring a SQLite write lock while SQLite immediately rejects any SQL write with
-  `OperationalError` (`readonly`). If a `SQLAlchemyError` satisfies `is_sqlite_busy(exc)`,
-  `execute_read` logs `wishlist_read_busy` (`WARNING`) and raises `InventoryBusyError`. In
-  `finally`, it rolls back any open transaction (`conn.rollback()`), resets `PRAGMA query_only = OFF`
-  via `raw_conn.execution_options(isolation_level="AUTOCOMMIT")` before returning the connection to
-  the pool, and—if the reset raises `BaseException`—logs `wishlist_read_query_only_reset_failed`
-  (`WARNING`, `error_type`), calls `await raw_conn.invalidate()` so the tainted connection is not
-  reused, and re-raises only when no prior exception is active. Direct rollback, non-blocking WAL
-  read behavior alongside an active `BEGIN IMMEDIATE` transaction, `query_only` enforcement/reset,
-  `SQLITE_BUSY` mapping, and reset-failure invalidation are verified in
-  `tests/test_wishlists_sqlite_repo.py` and
+  - Shared wishlist names that write (lists, wishes, membership, archive, delete,
+    restore, favorites, viewing history, invite join) are forwarded by
+    `_repository_forward` through `run_repository`. They are not in
+    `_SINGLE_WISHLIST_METHODS` and they do not enter this snapshot path.
+  - The seven one-wishlist openings are `_READ_REPOSITORY_METHODS`.
+    `_read_repository_forward` sends them through `run_repository_read`. They
+    do not enter this snapshot path and they do not take the save lock.
+  - `_SINGLE_WISHLIST_METHODS` is `update_wishlist_settings` and
+    `transfer_ownership`. `_wishlist_scope` extracts `wishlist_id` for those two
+    inside `_transactional` and passes it to `execute`. Both read the hydrated
+    list through the private `_lookup_wishlist`. A new public method that should
+    share the repository rules belongs in `_SHARED_REPOSITORY_METHODS` or, when
+    it only opens one wishlist, in `_READ_REPOSITORY_METHODS`.
+- **Read-Only Deferred Transactions (`WishlistStore.read_transaction`)**:
+  `read_transaction()` is an async context manager. It binds
+  `execution_options(read_only=True)`, starts a deferred `BEGIN`, and executes
+  `PRAGMA query_only = ON` before yielding the connection.
+  `configure_immediate_transactions` checks `conn.get_execution_options().get("read_only")`
+  in the `begin` listener and emits `BEGIN` instead of `BEGIN IMMEDIATE`.
+  Callers that use it do not take the save lock: one-wishlist openings
+  (`run_repository_read` and `get_wishlist_read_repository`), session lookup on
+  a `WishlistStore`, `wishenka.bot.support` rate-limit checks and diagnostic
+  collection, and the gifter reservation cabinet. SQLite rejects a SQL write on
+  that connection with `OperationalError` (`readonly`). If a `SQLAlchemyError`
+  satisfies `is_sqlite_busy(exc)`, `read_transaction` logs `wishlist_read_busy`
+  (`WARNING`) and raises `InventoryBusyError`. In `finally`, it rolls back any
+  open transaction (`conn.rollback()`), resets `PRAGMA query_only = OFF` via
+  `raw_conn.execution_options(isolation_level="AUTOCOMMIT")` before returning
+  the connection to the pool, and—if the reset raises `BaseException`—logs
+  `wishlist_read_query_only_reset_failed` (`WARNING`, `error_type`), calls
+  `await raw_conn.invalidate()` so the tainted connection is not reused, and
+  re-raises only when no prior exception is active.
+  `execute_read(work)` opens `read_transaction` and runs `work(conn)`. Cabinet
+  reads stay on `execute_read`. Direct rollback, non-blocking WAL read behavior
+  alongside an active `BEGIN IMMEDIATE` transaction, `query_only`
+  enforcement/reset, `SQLITE_BUSY` mapping, and reset-failure invalidation are
+  verified in `tests/test_wishlists_sqlite_repo.py` and
   [`tests/test_wishenka_254_execute_read_hardening_repro.py`](../../tests/test_wishenka_254_execute_read_hardening_repro.py).
 - **Batched Reservation Cabinet Loading (`WishlistStore._cabinet_service`)**:
   `WishlistStore.get_user_reservations` and `WishlistStore.get_user_reservations_summary` run
@@ -2037,9 +2115,9 @@ Database operations emit structured audit logs under the `wishenka.wishlists` lo
 | `reservation_cabinet_read` | `DEBUG` | Cabinet hydrated in `_cabinet_service` | `include_items`, `reservations_count`, `items_count`, `wishlists_count` |
 | `reservation_cabinet_busy` | `WARNING` | `SQLITE_BUSY` on cabinet read | `operation` |
 | `reservation_cabinet_error` | `ERROR` | Non-busy `SQLAlchemyError` on cabinet read | `operation`, `error_type` |
-| `wishlist_read_busy` | `WARNING` | `SQLITE_BUSY` inside `WishlistStore.execute_read` | `event` |
+| `wishlist_read_busy` | `WARNING` | `SQLITE_BUSY` in `read_transaction` | `event` |
 | `wishlist_inventory_busy` | `WARNING` | Busy `SQLAlchemyError` after the shared `busy_timeout` | Shared repository (`wishenka.web.dependencies`): `event` only, after the connection closes. Store save (`wishenka.wishlists.store`): `event`, plus `item_id`, `reservation_id`, or `operation` when the store has them |
-| `wishlist_read_query_only_reset_failed` | `WARNING` | `PRAGMA query_only = OFF` reset failed in `execute_read` `finally` (connection invalidated) | `event`, `error_type` |
+| `wishlist_read_query_only_reset_failed` | `WARNING` | `read_transaction` finally | `error_type` |
 | `wishlist_store_init_failed` | `WARNING` | `WishlistStore.initialize()` failed before/during `dispose()` | `error_type`, `has_temporary_db` |
 | `wishlist_store_temp_db_removed` | `DEBUG` | `WishlistStore.dispose()` unlinked owned `:memory:` temp DB and sidecars | `event` |
 | `wishlist_token_collision_retry` | `WARNING` | Collision retry | `attempt` |

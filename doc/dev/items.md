@@ -616,7 +616,11 @@ FastAPI APIRouter mounted at `/api/wishlists/{wishlist_id}/items` providing HTTP
   - `User = Annotated[AuthenticatedUser, Depends(get_current_user)]`: Enforces authenticated session for mutations (`POST`, `PUT`, `PATCH`).
   - `OptionalUser = Annotated[AuthenticatedUser | None, Depends(get_optional_current_user)]`: Allows anonymous access for public wishlist views while extracting caller credentials for personalized gifter badges when logged in.
 - **Transactional Execution Wrapper ([`execute`](file:///home/src/wishenka/web/routes/items.py#L34-L104))**:
-  - The handler uses the request `WishlistRepository`. Shared item actions (`add_wish_item`, list, reorder, archive, restore) run on `RepoWishlistOps(repo)`.
+  - The handler uses the request `WishlistRepository`. `GET` list (`list_items`)
+    and `GET` one wish (`get_item`) use `WishlistReadRepo`
+    (`read_transaction`) and do not take the save lock. Shared writes
+    (`add_wish_item`, reorder, archive, restore) run on `RepoWishlistOps(repo)`
+    inside `WishlistRepo` (`BEGIN IMMEDIATE`).
   - When `item_id` is set, the persistent path is [`WishlistStore.execute_wish`](file:///home/src/wishenka/wishlists/store.py#L942). `update_item` (`PATCH`) passes the item id. That wish-scoped path translates a timed-out SQLite lock to [`InventoryBusyError`](file:///home/src/wishenka/wishlists/exceptions.py#L52) before a generic storage `RuntimeError`. Reservations and receipts stay on `execute_wish`.
   - Maps domain exceptions to standard HTTP error responses. The 503 body is the exception text (`The wish was busy and the attempt changed nothing`). It names no gifter.
     - [`InventoryBusyError`](file:///home/src/wishenka/wishlists/exceptions.py#L52) $\rightarrow$ **`503 Service Unavailable`** (`event="item_inventory_busy"`, plus `item_id` when the route passed one).
@@ -641,7 +645,10 @@ Inventory changes for one wish share the SQLite file across service copies. The 
 [`_configure_immediate_transactions`](file:///home/src/wishenka/wishlists/store.py#L48-L68) attaches to `engine.sync_engine`:
 
 - On `connect`, `isolation_level = None` so the sqlite3 driver does not emit its own `BEGIN`. The same connect sets `PRAGMA foreign_keys=ON` and `PRAGMA busy_timeout=5000`. `PRAGMA journal_mode=WAL` is persistent database state and is selected once by the migration startup, not by this hook (see [migrations.md](migrations.md)).
-- On `begin`, the listener sets `PRAGMA busy_timeout=5000` and then emits `BEGIN IMMEDIATE`. The listener runs because code calls `Connection.begin()`.
+- On `begin`, the listener sets `PRAGMA busy_timeout=5000` and then emits
+  `BEGIN IMMEDIATE` when the connection is not `read_only`. This inventory
+  path calls `Connection.begin()` without that flag. A one-wishlist opening
+  uses `read_transaction`, so the same listener emits plain `BEGIN`.
 
 [`_immediate`](file:///home/src/wishenka/wishlists/store.py#L1262-L1273) opens a connection, calls `await conn.begin()`, runs the work, and `COMMIT`s. Any `BaseException` rolls the transaction back when it is still open, then re-raises. A failed attempt leaves the wish at the last commit.
 
@@ -652,7 +659,16 @@ Inventory changes for one wish share the SQLite file across service copies. The 
 3. Runs the domain operation on that partial service. The service has no store, so the method body runs in memory inside the open transaction.
 4. Persists changed rows only ([`_persist_wish`](file:///home/src/wishenka/wishlists/store.py#L1168-L1219)): the item row when its state changed, reservations that are new or changed, and the reservation counter when it changed. It does not call `_write`. Unchanged rows, other wishes, members, favorites, and view history stay untouched.
 
-The configured `WishlistService` sends these methods through `execute_wish` via `_transactional`: `create_reservation`, `update_wish_item`, and `record_item_fulfillment` (by `item_id`); `cancel_reservation`, `update_reservation_quantity`, `mark_reservation_purchased`, and `revert_reservation_to_active` (by `reservation_id`). Shared names in `_SHARED_REPOSITORY_METHODS` forward through `WishlistStore.run_repository`. `update_wishlist_settings`, `transfer_ownership`, and `is_favorite` still use the snapshot `execute`.
+The configured `WishlistService` sends these methods through `execute_wish` via
+`_transactional`: `create_reservation`, `update_wish_item`, and
+`record_item_fulfillment` (by `item_id`); `cancel_reservation`,
+`update_reservation_quantity`, `mark_reservation_purchased`, and
+`revert_reservation_to_active` (by `reservation_id`). Shared names in
+`_SHARED_REPOSITORY_METHODS` forward through `WishlistStore.run_repository`.
+`get_wish_item` and `list_wish_items` are one-wishlist openings and forward
+through `run_repository_read`. `update_wishlist_settings` and
+`transfer_ownership` still use the snapshot `execute`. `is_favorite` is a
+read opening and does not.
 
 `SQLITE_BUSY` after `busy_timeout` is recognized on the driver error, its
 `orig`, or its cause (`sqlite_errorcode` low byte `SQLITE_BUSY`, or the text
@@ -1456,7 +1472,7 @@ Set on the wishlist engine in [`_configure_immediate_transactions`](file:///home
 | --- | --- | --- |
 | `PRAGMA journal_mode` | `WAL` | migration startup (`upgrade_to_head_sync`), once per database file; not set by `connect` |
 | `PRAGMA foreign_keys` | `ON` | `connect` |
-| `PRAGMA busy_timeout` | `5000` (milliseconds) | `connect`, and again in the `begin` listener before `BEGIN IMMEDIATE` |
+| `PRAGMA busy_timeout` | `5000` ms | `connect` and `begin`, before `BEGIN` or `BEGIN IMMEDIATE` |
 | `isolation_level` | `None` | `connect`, so sqlite3 does not emit its own `BEGIN` |
 
 ### Network & Security Settings

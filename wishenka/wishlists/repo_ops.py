@@ -1163,6 +1163,16 @@ class RepoWishlistOps:
                     raise
         raise RuntimeError("Unable to generate a new invitation token")
 
+    async def is_favorite(self, user: AuthenticatedUser | None, wishlist_id: int) -> bool:
+        """Return whether this person has marked the wishlist, without loading it.
+
+        A missing person is not a favorite. The answer is the existing ``wl_favorites``
+        select. Marking and unmarking stay on the write path.
+        """
+        if user is None:
+            return False
+        return await self.repo.is_favorite(user.telegram_id, wishlist_id)
+
     async def add_favorite(self, user: AuthenticatedUser, wishlist_id: int) -> WishlistFavorite:
         """Add a wishlist to user's favorites."""
         wl = await self.repo.get_wishlist(wishlist_id)

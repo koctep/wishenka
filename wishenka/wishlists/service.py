@@ -113,6 +113,16 @@ _SINGLE_WISHLIST_METHODS = frozenset(
     {
         "update_wishlist_settings",
         "transfer_ownership",
+    }
+)
+_READ_REPOSITORY_METHODS = frozenset(
+    {
+        "get_wishlist_by_id",
+        "get_wishlist_view",
+        "get_members",
+        "get_wish_item",
+        "list_wish_items",
+        "list_gifted_items",
         "is_favorite",
     }
 )
@@ -120,14 +130,11 @@ _REPOSITORY_REQUIRED = "Wishlist action requires the repository path"
 _SHARED_REPOSITORY_METHODS = frozenset(
     {
         "create_wishlist",
-        "get_wishlist_by_id",
         "get_wishlist_or_none",
-        "get_wishlist_view",
         "get_wishlist_by_public_token",
         "get_wishlist_by_invite_token",
         "add_member",
         "remove_member",
-        "get_members",
         "archive_wishlist",
         "unarchive_wishlist",
         "classify_owner_delete",
@@ -135,9 +142,6 @@ _SHARED_REPOSITORY_METHODS = frozenset(
         "list_deleted_wishlists",
         "restore_deleted_wishlist",
         "add_wish_item",
-        "get_wish_item",
-        "list_wish_items",
-        "list_gifted_items",
         "reorder_wish_items",
         "archive_wish_item",
         "restore_wish_item",
@@ -2413,9 +2417,48 @@ def _repository_forward[T](method: Callable[..., Awaitable[T]]) -> Callable[...,
     return invoke
 
 
-# Store-backed shared actions use RepoWishlistOps. Other public coroutines stay transactional.
+def _read_repository_forward[T](method: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
+    """Run one one-wishlist opening on RepoWishlistOps inside a read-only transaction.
+
+    ``is_favorite`` with no store keeps the in-memory answer. The other six fail closed
+    without a store. A configured store does not enter ``execute`` or ``_write``.
+    """
+
+    @wraps(method)
+    async def invoke(self: WishlistService, *args: Any, **kwargs: Any) -> T:
+        if self._store is None:
+            if method.__name__ == "is_favorite":
+                return await method(self, *args, **kwargs)
+            logger.warning(
+                "Wishlist action refused because the repository path is required",
+                extra={
+                    "event": "wishlist_repository_path_required",
+                    "operation": method.__name__,
+                },
+            )
+            raise WishlistNotFoundError(_REPOSITORY_REQUIRED)
+        forwarded_args, forwarded_kwargs = _apply_configured_invite_ttl(method, self, args, kwargs)
+
+        async def work(repo: Any) -> T:
+            from wishenka.wishlists.repo_ops import RepoWishlistOps
+
+            operation = getattr(RepoWishlistOps(repo), method.__name__)
+            return cast(T, await operation(*forwarded_args, **forwarded_kwargs))
+
+        return await self._store.run_repository_read(work)
+
+    return invoke
+
+
+# Store-backed shared actions use RepoWishlistOps. One-wishlist openings use the read
+# transaction. Other public coroutines stay transactional.
 for _method_name, _method in tuple(vars(WishlistService).items()):
     if _method_name.startswith("_") or not iscoroutinefunction(_method):
         continue
-    wrapper = _repository_forward if _method_name in _SHARED_REPOSITORY_METHODS else _transactional
+    if _method_name in _READ_REPOSITORY_METHODS:
+        wrapper = _read_repository_forward
+    elif _method_name in _SHARED_REPOSITORY_METHODS:
+        wrapper = _repository_forward
+    else:
+        wrapper = _transactional
     setattr(WishlistService, _method_name, wrapper(_method))

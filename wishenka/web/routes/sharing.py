@@ -13,7 +13,7 @@ from wishenka.auth.dependencies import get_current_user, get_optional_current_us
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.i18n import t
 from wishenka.i18n.dependencies import LocaleDep
-from wishenka.web.dependencies import WishlistRepo
+from wishenka.web.dependencies import WishlistReadRepo, WishlistRepo
 from wishenka.web.templates import templates
 from wishenka.wishlists.exceptions import (
     InvalidInviteTokenError,
@@ -103,7 +103,7 @@ async def get_item_card_partial(
     item_id: int,
     current_user: OptionalUser,
     locale: LocaleDep,
-    repo: WishlistRepo,
+    repo: WishlistReadRepo,
     notice: Annotated[str | None, Query()] = None,
     is_first: bool = False,
     is_last: bool = False,
@@ -292,7 +292,7 @@ async def get_members_partial(
     wishlist_id: int,
     user: CurrentUser,
     locale: LocaleDep,
-    repo: WishlistRepo,
+    repo: WishlistReadRepo,
 ) -> Response:
     """Render collaborator member list partial."""
     service = _get_service(repo)
@@ -392,7 +392,7 @@ async def get_share_modal(
     wishlist_id: int,
     user: CurrentUser,
     locale: LocaleDep,
-    repo: WishlistRepo,
+    repo: WishlistReadRepo,
 ) -> Response:
     """Render share modal partial for owner."""
     service = _get_service(repo)
