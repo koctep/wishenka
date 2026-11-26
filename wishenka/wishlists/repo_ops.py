@@ -1281,13 +1281,25 @@ class RepoWishlistOps:
     async def get_history(
         self, user: AuthenticatedUser, limit: int = 20
     ) -> list[tuple[Wishlist, datetime]]:
-        """Retrieve up to limit recent wishlists viewed by user, reverse-chronologically."""
+        """Return up to limit recent wishlists this person may still see."""
         entries = await self.repo.list_view_history(user.telegram_id, limit=limit)
         results: list[tuple[Wishlist, datetime]] = []
+        headers: dict[int, Wishlist] = {}
+        memberships: dict[int, WishlistMember] = {}
+        if entries:
+            ids = [entry.wishlist_id for entry in entries]
+            headers = await self.repo.get_wishlist_headers_by_ids(ids)
+            memberships = await self.repo.list_user_memberships_by_wishlist_ids(
+                user.telegram_id, ids
+            )
         for entry in entries:
-            wl = await self.repo.get_wishlist(entry.wishlist_id)
+            wl = headers.get(entry.wishlist_id)
             if wl is None:
                 continue
+            member = memberships.get(wl.id)
+            if member is not None and member not in wl.members:
+                member.wishlist = wl
+                wl.members.append(member)
             ctx = WishlistAccessPolicy.resolve_context(user, wl)
             has_share = (
                 False

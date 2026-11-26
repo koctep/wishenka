@@ -388,6 +388,45 @@ class WishlistRepository:
         )
         return wishlists
 
+    async def list_user_memberships_by_wishlist_ids(
+        self, user_id: int, wishlist_ids: Sequence[int]
+    ) -> dict[int, WishlistMember]:
+        """Return this user's membership keyed by wishlist id.
+
+        Empty input yields an empty dict. IDs are chunked with the existing
+        500-id helper. A wishlist with no row for this user is absent.
+        """
+        if not wishlist_ids:
+            return {}
+        chunks = _chunked_unique_ids(wishlist_ids)
+        memberships: dict[int, WishlistMember] = {}
+        for chunk in chunks:
+            placeholders, params = _in_clause_params(chunk, "wl")
+            params["uid"] = user_id
+            stmt = text(
+                "SELECT id, wishlist_id, user_id, role, joined_at "
+                "FROM wl_members "
+                f"WHERE user_id = :uid AND wishlist_id IN ({placeholders})"
+            )
+            rows = (await self.conn.execute(stmt, params)).all()
+            for row in rows:
+                member = _row_to_member(row)
+                memberships[member.wishlist_id] = member
+        logger.debug(
+            "Wishlist repository batch read: %d/%d wishlist members (%d chunks)",
+            len(memberships),
+            len(wishlist_ids),
+            len(chunks),
+            extra={
+                "event": "wishlist_repo_batch_read",
+                "entity": "wishlist_member",
+                "requested_count": len(wishlist_ids),
+                "chunks_count": len(chunks),
+                "found_count": len(memberships),
+            },
+        )
+        return memberships
+
     async def get_wishlist(self, wishlist_id: int) -> Wishlist | None:
         """Fetch a single wishlist aggregate with members, items, and reservations."""
         stmt = text(

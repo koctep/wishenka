@@ -787,6 +787,9 @@ flowchart TD
     getHistory --> policy
     recordView --> repo["WishlistRepository.record_view"]
     getHistory --> listSql["WishlistRepository.list_view_history"]
+    getHistory --> headers["get_wishlist_headers_by_ids"]
+    getHistory --> memberships["list_user_memberships_by_wishlist_ids"]
+    getHistory --> shareRow["has_valid_share_access per non-owner non-member row"]
     removeMember["remove_member"] --> dropOne["delete_history_if_no_share_access"]
     rotate["regenerate_public_token / restore / transfer"] --> dropMany["delete_non_member_history"]
     policy --> grants["wl_share_access matches public_token"]
@@ -803,6 +806,17 @@ flowchart TD
   HTTP routes call that adapter on the request repository. A store-backed
   `WishlistService` forwards the same names through `run_repository`. An
   in-memory service fail-closes those names.
+- **Opening history (WISHENKA-325)**: `RepoWishlistOps.get_history` loads the
+  capped visit list with `list_view_history`. When that list is empty it
+  writes `view_history_listed` and returns without either batch. Otherwise
+  it calls `get_wishlist_headers_by_ids` once (those headers keep `items`
+  empty) and `list_user_memberships_by_wishlist_ids` once, then appends this
+  person's membership before `resolve_context`. Order, roles, favorites
+  (`GET /api/history` still calls `list_favorite_ids`), omissions, the cap,
+  and stored rows stay. A missing header is skipped. A non-owner who is not
+  a member still calls `has_valid_share_access` per remaining row. That
+  leftover read is
+  [WISHENKA-353](https://pypost.atlassian.net/browse/WISHENKA-353).
 - **`WishlistRepository.list_view_history`**: SQL join keeps non-deleted lists where
   the user is owner, member, or grant holder, then
   `ORDER BY viewed_at DESC, recorded_seq DESC` before `LIMIT`.
@@ -896,6 +910,14 @@ Database URL and WAL settings are in
 
 #### Troubleshooting
 
+- **No `wishlist_repo_batch_read` on an empty history open.** An empty visit
+  list still writes `view_history_listed` and does not call
+  `get_wishlist_headers_by_ids` or `list_user_memberships_by_wishlist_ids`.
+  Each of those methods also skips the debug line when its id list is empty.
+  A non-empty open logs the event twice: `entity` `wishlist_header`, then
+  `entity` `wishlist_member`. Share-only rows still call
+  `has_valid_share_access` one by one
+  ([WISHENKA-353](https://pypost.atlassian.net/browse/WISHENKA-353)).
 - **`404` on `POST /api/history/{id}` with an id the caller believes is real.**
   The body is always `{"detail": "Wishlist not found"}` for a missing id, a deleted
   list, and a stranger. Check `view_history_access_denied` (`WARNING`, non-member
@@ -1440,12 +1462,19 @@ async def clear_history(
 ```
 
 - `get_history`: Returns up to `limit` entries as `(Wishlist, datetime)` tuples.
-  When view   times differ, the newest time is still first. When view times are
+  When view times differ, the newest time is still first. When view times are
   equal, order is by `recorded_seq`, newest recording first. SQLite applies
-  that order before `LIMIT`. Omits soft-deleted
+  that order before `LIMIT` in `list_view_history`. Omits soft-deleted
   lists and lists that fail `can_view_history` (not owner,
-  not member, no current share grant). `RepoWishlistOps` loads the SQL-filtered page
-  and checks the policy again. An in-memory `WishlistService.get_history`
+  not member, no current share grant). `RepoWishlistOps` loads that capped
+  visit list, then one `get_wishlist_headers_by_ids` (items stay empty) and
+  one `list_user_memberships_by_wishlist_ids`. An empty visit list skips both
+  batches. The caller's membership is attached before `resolve_context`, so
+  the role stays. Favorites stay on the route (`list_favorite_ids`). Stored
+  rows stay. A missing header is skipped. A non-owner who is not a member
+  still calls `has_valid_share_access` per remaining row
+  ([WISHENKA-353](https://pypost.atlassian.net/browse/WISHENKA-353)).
+  An in-memory `WishlistService.get_history`
   fail-closes.
   `view_history_listed` is written once, by this domain list operation, on
   logger `wishenka.wishlists`. `GET /api/history` does not write it. The event
@@ -1743,6 +1772,15 @@ granular async operations over an active SQLAlchemy `AsyncConnection`.
   (`_chunked_unique_ids`) to stay within SQLite bind-parameter limits.
 - `get_wishlist_headers_by_ids(wishlist_ids: Sequence[int]) -> dict[int, Wishlist]`: Batch-loads
   `Wishlist` header rows from `wl_lists` via chunked `IN (...)` queries (`_ID_BATCH_SIZE = 500`).
+  Each row is built with `members=[]` and `items=[]`. An empty id list returns `{}` and does
+  not log. A completed read logs `wishlist_repo_batch_read` (`DEBUG`, `entity` `wishlist_header`).
+- `list_user_memberships_by_wishlist_ids(user_id: int, wishlist_ids: Sequence[int]) -> dict[int, WishlistMember]`:
+  This user's `wl_members` rows for the given ids, keyed by `wishlist_id`. The same 500-id
+  chunks apply (`WHERE user_id = :uid AND wishlist_id IN (...)`). A wishlist with no row for
+  this user is absent. An empty id list returns `{}` and does not log. A completed read logs
+  `wishlist_repo_batch_read` (`DEBUG`, `entity` `wishlist_member`). Opening history calls this
+  once after the header batch and appends each membership onto that header. An empty visit
+  list does not call it. See [Viewing History Access](#viewing-history-access-wishenka-303).
 - `list_user_reservations(user_id: int) -> list[Reservation]`: Fetches active/purchased reservations
   created by the specified user.
 - `list_favorites(user_id: int) -> list[WishlistFavorite]`: Ordered bookmarks for caller.
@@ -1970,7 +2008,7 @@ Database operations emit structured audit logs under the `wishenka.wishlists` lo
 | `wishlist_store_read` | `INFO` | State read into service | `scoped`, `wishlist_id`, `wishlists_count`, `items_count`, `reservations_count`, `members_count`, `favorites_count`, `history_count` |
 | `wishlist_store_write` | `INFO` | Differential committed | `scoped`, `wishlist_id`, `wishlists_count`, `members_count`, `items_count`, `reservations_count`, `deleted_wishlists_count`, `deleted_members_count`, `deleted_items_count`, `deleted_reservations_count` |
 | `wishlist_repo_mutation` | `INFO` | Repository mutation | `entity`, `operation`, `entity_id` |
-| `wishlist_repo_batch_read` | `DEBUG` | Batched `IN (...)` read (`get_items_by_ids`, `get_wishlist_headers_by_ids`) | `entity`, `requested_count`, `chunks_count`, `found_count` |
+| `wishlist_repo_batch_read` | `DEBUG` | Batched `IN (...)` read (`get_items_by_ids` entity `item`, `get_wishlist_headers_by_ids` entity `wishlist_header`, `list_user_memberships_by_wishlist_ids` entity `wishlist_member`) | `entity`, `requested_count`, `chunks_count`, `found_count` |
 | `reservation_cabinet_read` | `DEBUG` | Cabinet hydrated in `_cabinet_service` | `include_items`, `reservations_count`, `items_count`, `wishlists_count` |
 | `reservation_cabinet_busy` | `WARNING` | `SQLITE_BUSY` on cabinet read | `operation` |
 | `reservation_cabinet_error` | `ERROR` | Non-busy `SQLAlchemyError` on cabinet read | `operation`, `error_type` |
