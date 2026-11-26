@@ -79,6 +79,7 @@ function clearAttribute(el, name) {
 function status(message, kind = '') {
   const el = document.getElementById('status');
   el.textContent = message;
+  clearAttribute(el, 'aria-label');
   if (message && STATUS_KINDS.has(kind)) el.setAttribute('data-kind', kind);
   else clearAttribute(el, 'data-kind');
   el.setAttribute('aria-live', kind === 'error' ? 'assertive' : 'polite');
@@ -765,6 +766,7 @@ function deleteWishlistControls(list) {
   const cancelBtn = button(
     t('miniapp.wishlist_delete.cancel'), () => closeConfirm(), 'history-confirm-cancel'
   );
+  cancelBtn.setAttribute('aria-label', t('miniapp.wishlist_delete.cancel_name', {title}));
   const yesBtn = button(
     t('miniapp.wishlist_delete.confirm'),
     pending(() => confirmDelete(), t('miniapp.wishlist_delete.pending')),
@@ -822,10 +824,23 @@ function deleteWishlistControls(list) {
       root.querySelector('h1')?.focus();
       return;
     }
+    if (expired) {
+      await showHome();
+      const failed = t('miniapp.wishlist_delete.failed');
+      status(failed, 'error');
+      // The error marker is a CSS ::before. Name the status with the sentence
+      // so the heading description is that sentence, not the marker plus it.
+      document.getElementById('status')?.setAttribute('aria-label', failed);
+      const heading = root.querySelector('h1');
+      if (heading) {
+        heading.setAttribute('aria-describedby', 'status');
+        heading.focus();
+      }
+      return;
+    }
     deleting = false;
     cancelBtn.disabled = false;
-    if (expired) await showHome();
-    status(expired ? t('miniapp.wishlist_delete.failed') : '', expired ? 'error' : '');
+    status('', '');
     failure.textContent = t('miniapp.wishlist_delete.failed');
     panel.insertBefore(failure, actions);
     // Re-enable before focusing: the pending wrapper only does so after this returns.

@@ -481,27 +481,27 @@ Full description: [Wishlist Creation Form](#wishlist-creation-form-wishenka-296)
 #### Wishlist Delete Zone (WISHENKA-295)
 
 The owner of an `active` list can delete it from the list settings. The zone is rendered by
-`deleteWishlistControls(list)` (`wishenka/web/static/miniapp.js:579`) and appended to the
-`.list-settings-section` right after the settings form (`:831-832`), so it sits outside the `<form>`
+`deleteWishlistControls(list)` (`wishenka/web/static/miniapp.js:756`) and appended to the
+`.list-settings-section` right after the settings form (`:1022-1023`), so it sits outside the `<form>`
 and never submits with it. API contract and events:
 [wishlists.md](wishlists.md#owner-delete-route-delete-apiwishlistsid).
 
 - **Visibility rule**: `deleteWishlistControls` returns `null` (nothing rendered) unless
   `list.role === 'owner'` and `Number(root.dataset.retentionDays)` is a positive integer
-  (`:580-582`). The settings section itself exists only for `owner`/`admin` of an `active` list
-  (`:824-826`), so admins and members never see the zone, and a missing or invalid
+  (`:757-759`). The settings section itself exists only for `owner`/`admin` of an `active` list
+  (`:1015-1016`), so admins and members never see the zone, and a missing or invalid
   `data-retention-days` hides it instead of promising a wrong number of days.
 - **Retention source**: `GET /` writes `data-retention-days="{int}"` on `<main id="app">`
   from `wishlist_retention_days(settings)` (`wishenka/web/routes/miniapp.py`). That
   is the same period delete, recently deleted, and restore use. The usual value
   is 30. Confirmation copy uses this value before the call; after a `200` the
-  success text uses `result.retention_days ?? days` (`:644`). The next document
+  success text uses `result.retention_days ?? days` (`:822`). The next document
   load follows a changed setting. A shell already open keeps the number from
   that load.
 - **Markup**: `div.wishlist-delete-zone` with `h3.wishlist-delete-heading`
   (`miniapp.wishlist_delete.heading`), `p.settings-field-hint` (`hint`) and the trigger
   `button.wishlist-delete-open` (`open`, "Delete wishlist...").
-- **Confirmation panel**: the trigger is replaced in place (`openBtn.replaceWith(panel)`, `:621`)
+- **Confirmation panel**: the trigger is replaced in place (`openBtn.replaceWith(panel)`, `:799`)
   by `div.history-confirm.wishlist-delete-confirm[role="group"]` with `aria-labelledby`
   `wishlist-delete-title-{id}` and `aria-describedby` `wishlist-delete-body-{id}`. The panel
   re-uses the `history-confirm*` classes of the history screen: `p.history-confirm-title` (the
@@ -509,39 +509,56 @@ and never submits with it. API contract and events:
   `miniapp.common.untitled_wishlist`; the title is set through text, never parsed as HTML), the
   body with three `p.empty-hint` (`consequences`, `restore_promise`, `purge_promise`, both
   promises with `{days}`), and `div.history-confirm-actions.wishlist-delete-actions` holding
-  `button.history-confirm-cancel` (`cancel`) first and
-  `button.history-confirm-yes.btn-danger` (`confirm`, "Yes, delete wishlist") second.
+  `button.history-confirm-cancel` (`cancel`, visible "Cancel" / "Отмена") first and
+  `button.history-confirm-yes.btn-danger` (`confirm`, "Yes, delete wishlist") second. The delete
+  Cancel also sets `aria-label` from `cancel_name` (see **Cancel names** below).
 - **Focus**: opening focuses Cancel, never the destructive button. Cancel and Escape inside the
-  panel (`closeConfirm`, `:624-629`) send nothing, remove any error, put the trigger back and
+  panel (`closeConfirm`, `:802-807`) send nothing, remove any error, put the trigger back and
   focus it. They do nothing while a request is pending (`deleting`).
 - **Pending**: the confirm button runs through `pending(..., miniapp.wishlist_delete.pending)`
   (`withPending`: `disabled`, `aria-busy="true"`, `.is-pending`, polite `#status`), so a double
   click or Enter sends one `DELETE`. Cancel is disabled while the request runs.
 - **Success (`200`)**: `await showHome()`, then `#status` shows `done` (`{title}`, `{days}`) with
-  kind `success` and focus moves to the home `<h1>` (`:642-646`). `showHome()` now renders that
-  heading with `tabindex="-1"` (`:370`) so it can take focus, as the history heading does (`:340`).
+  kind `success` and focus moves to the home `<h1>` (`:819-825`). `showHome()` renders that
+  heading with `tabindex="-1"` (`:546`) so it can take focus, as the history heading does (`:345`).
+  That success focus does not set `aria-describedby`.
   The list is then under "Recently deleted" (see
   [Recently Deleted Wishlists](#recently-deleted-wishlists-owner-restore)).
 - **Failure**: any rejected request except `410` (404, 409, 5xx, network) clears the status line,
   keeps the panel open, inserts `p.history-error.wishlist-delete-error[role="alert"]` with
   `failed` before the buttons, re-enables the confirm button and focuses it
-  (`:649-658`). The text is the same for every status: it never says why, so no existence or
+  (`:841-849`). The text is the same for every status: it never says why, so no existence or
   reservation detail leaks.
-- **`410` (window expired)**: the code calls `showHome()` first, which re-renders the whole
-  screen, then sets the error status `failed` (`:651`). The code after that still writes into the
-  now detached panel (`failure` alert, `yesBtn.focus()`), so the alert is not announced and
-  keyboard focus falls to `body`; the visible message comes only from `#status`. This is a known
-  defect, fixed in WISHENKA-317; do not document or rely on a focus target for this path.
-- **CSS** (`wishenka/web/static/miniapp.css:282-290`): `#app .wishlist-delete-zone` (top border
+- **`410` (window expired)**: `confirmDelete` (`:827-839`) awaits `showHome()`, which replaces
+  `#app` and returns the owner to the home screen. It then announces the existing failure:
+  `status(t('miniapp.wishlist_delete.failed'), 'error')` on `#status` (the node lives outside
+  `#app`, `role="status"`, `data-kind="error"`, `aria-live="assertive"`). `status()` clears
+  `aria-label`; this branch sets it again to that same sentence, sets `aria-describedby="status"`
+  on the home `h1`, focuses that heading, and returns. It does not insert the in-panel
+  `role="alert"` and does not call `yesBtn.focus()`. A real `410` with
+  `detail.code` `retention_expired` is an already deleted list whose window has
+  ended; the row stays deleted. The browser check forces that status while the
+  list is still active, so that fixture does not describe the server's row. The
+  server logs `wishlist_retention_expired`. This path
+  does not emit `wishlist_mutation_committed`. That event is written only after the delete action
+  returns, before the repository commit. It means the action returned. It is not evidence that
+  the commit succeeded.
+- **CSS** (`wishenka/web/static/miniapp.css:287-295`): `#app .wishlist-delete-zone` (top border
   `--border-subtle`, `min-width: 0`, `overflow-wrap: anywhere`), `.wishlist-delete-heading`,
   `#app button.wishlist-delete-open` (transparent, `--danger` border and text, wraps long text).
   The panel itself is styled by the existing `.history-confirm*` rules and `.btn-danger`; there is
   no separate `.wishlist-delete-confirm` rule (removed as a duplicate in Step 5). Hooks used by
   tests: `.wishlist-delete-zone`, `-open`, `-confirm`, `-actions`, `-error`,
   `.history-confirm-cancel`, `.history-confirm-yes`.
-- **Known accessibility smell**: "Cancel" appears twice on the owner list screen
-  (`miniapp.wishlist_settings.cancel` and `miniapp.wishlist_delete.cancel`) with the same visible
-  text; tests select by class (WISHENKA-317).
+- **Cancel names**: the delete confirmation Cancel keeps the visible
+  `miniapp.wishlist_delete.cancel` ("Cancel" / "Отмена") and has its own accessible name in both
+  languages: `aria-label` from `miniapp.wishlist_delete.cancel_name` with the list title
+  (`Cancel deleting "{title}"` / `Отменить удаление «{title}»`). An empty title uses
+  `miniapp.common.untitled_wishlist` inside that name. The Russian name does not contain the
+  visible word «Отмена»; that is the string this screen ships. The settings Cancel
+  (`settingsForm`, `:882-884`) is unchanged: only `miniapp.wishlist_settings.cancel`, no
+  `aria-label`. The two visible labels still match. Tests that must pick one button select by
+  class.
 - **Secrecy rules for texts**: the delete texts never name a reservation count, state or person,
   never promise immediate removal, and are identical for lists with and without reservations
   (`tests/test_wishlist_delete_browser.py::test_texts_are_identical_for_lists_with_and_without_reservations`).
@@ -1913,12 +1930,13 @@ The following settings configure the Mini App and web security layer:
 - **No "Delete wishlist..." in the settings**: only the owner of an `active` list gets it. Check
   `data-retention-days` on `<main id="app">`: if it is missing, zero or not an integer the zone is
   hidden on purpose.
-- **Generic failure text after confirming**: the client never shows the reason. Check the server
-  logs for `wishlist_delete_not_found` / `wishlist_delete_denied` (404),
-  `wishlist_archived_mutation_blocked` (409, the list must be unarchived first) or
-  `wishlist_retention_expired` (410 `retention_expired`; the shared window has ended)
-  and the request log. `wishlist_mutation_committed` means the handler action
-  returned. It is written before the repository commit and is not evidence that
-  the commit succeeded.
+- **Generic failure text after confirming**: the client never shows the reason. A `410`
+  (`wishlist_retention_expired`, `operation` `delete_wishlist`; the shared window has ended)
+  returns the owner to the home screen, announces the existing `miniapp.wishlist_delete.failed`,
+  and moves focus to the home heading. Any other rejection keeps the confirmation open. Check
+  `wishlist_delete_not_found` / `wishlist_delete_denied` (404) and
+  `wishlist_archived_mutation_blocked` (409, the list must be unarchived first). The expired path
+  does not emit `wishlist_mutation_committed`. That event means the handler action returned. It
+  is written before the repository commit and is not evidence that the commit succeeded.
 - **List stays visible after a success text**: reload the home screen; the list should be under
   "Recently deleted" with `days_left`.

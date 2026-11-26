@@ -423,6 +423,7 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
             "cannot be restored."
         ),
         "miniapp.wishlist_delete.cancel": "Cancel",
+        "miniapp.wishlist_delete.cancel_name": 'Cancel deleting "{title}"',
         "miniapp.wishlist_delete.confirm": "Yes, delete wishlist",
         "miniapp.wishlist_delete.pending": "Deleting...",
         "miniapp.wishlist_delete.done": (
@@ -1091,6 +1092,7 @@ CATALOG: dict[SupportedLocale, dict[str, str]] = {
             "восстановить их будет нельзя."
         ),
         "miniapp.wishlist_delete.cancel": "Отмена",
+        "miniapp.wishlist_delete.cancel_name": "Отменить удаление «{title}»",
         "miniapp.wishlist_delete.confirm": "Да, удалить вишлист",
         "miniapp.wishlist_delete.pending": "Удаление...",
         "miniapp.wishlist_delete.done": (

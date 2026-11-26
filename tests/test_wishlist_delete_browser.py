@@ -1,13 +1,10 @@
-"""Browser repro for WISHENKA-295 (Step 3): the owner deletes a wishlist from its settings.
+"""Browser checks for deleting a wishlist from its settings.
 
-Real Chromium against the real Mini App and server. Today the owner's settings have no delete
-action, so every test fails at the first interaction with ``.wishlist-delete-*``. The tests
-assert the designed behavior (``20-architecture.md`` D-3, D-5, D-6): a separated destructive
-zone outside the settings form, an inline confirmation with the exact title and the real days,
-Cancel as the default focus, a guarded single request, a clear result on the home screen, a
-failure path that keeps the panel, restoration from "Recently deleted", layout at narrow widths
-and identical texts whatever the reservations. Admin/member gating and invalid retention are
-covered by ``test_wishlist_delete_ui.py`` and ``test_wishlist_delete_api.py``.
+WISHENKA-317 checks, in Russian and English: a forced 410 returns to the home
+screen, announces the existing failure, and focuses the home heading, which
+describes that failure. The delete Cancel keeps its visible label and has its
+own accessible name, different from the settings Cancel. A successful delete
+still focuses a heading with no ``aria-describedby``.
 """
 
 from __future__ import annotations
@@ -64,7 +61,7 @@ def _fmt(locale: str, key: str, **params: object) -> str:
 
 
 def _installed_fetch(path: str, mode: str) -> str:
-    """JS that wraps ``fetch`` for ``DELETE <path>``: count calls, then hold, fail or pass."""
+    """JS that wraps ``fetch`` for ``DELETE <path>``: count calls, then hold, fail, 410, or pass."""
     return f"""(() => {{
       const real = window.fetch.bind(window);
       window.deleteCalls = 0; window.deleteMode = {json.dumps(mode)}; window.releaseDelete = null;
@@ -73,6 +70,7 @@ def _installed_fetch(path: str, mode: str) -> str:
         if ((options.method || 'GET') === 'DELETE' && url.pathname === {json.dumps(path)}) {{
           window.deleteCalls += 1;
           if (window.deleteMode === 'fail') return new Response('{{}}', {{status: 500}});
+          if (window.deleteMode === '410') return new Response('{{}}', {{status: 410}});
           if (window.deleteMode === 'network') throw new TypeError('network down');
           if (window.deleteMode === 'hold') {{
             await new Promise(resolve => {{ window.releaseDelete = resolve; }});
@@ -101,6 +99,101 @@ def _open_panel(page: CdpPage) -> None:
     scroll_to(page, OPEN)
     page.click(OPEN)
     _wait_panel(page)
+
+
+_CANCEL_NAME = {
+    "en": 'Cancel deleting "{title}"',
+    "ru": "Отменить удаление «{title}»",
+}
+
+
+def _cancel_name(locale: str, title: str) -> str:
+    return _CANCEL_NAME[locale].replace("{title}", title)
+
+
+def _wait_expired_home(page: CdpPage, locale: str) -> None:
+    title = json.dumps(_table(locale)["miniapp.home.title"])
+    page.wait_for(
+        "home after an expired delete",
+        f"document.querySelector('#app h1')?.innerText === {title} "
+        "&& document.getElementById('status')?.getAttribute('data-kind') === 'error'",
+    )
+
+
+def _ax_text(node: dict[str, Any], field: str) -> str:
+    return " ".join(str((node.get(field) or {}).get("value", "")).split())
+
+
+def _ax_focused(node: dict[str, Any]) -> bool:
+    for prop in node.get("properties") or []:
+        if prop.get("name") == "focused":
+            value = (prop.get("value") or {}).get("value")
+            return value is True or value == "true"
+    return False
+
+
+def _ax_tree(page: CdpPage) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    nodes = page._send("Accessibility.getFullAXTree")["nodes"]  # noqa: SLF001
+    by_id = {str(node["nodeId"]): node for node in nodes}
+    live = [node for node in nodes if not node.get("ignored")]
+    return live, by_id
+
+
+def _dom_backend_id(page: CdpPage, selector: str) -> int:
+    """Backend DOM id of ``selector``, or 0 when the element is not in the document."""
+    root_id = page._send("DOM.getDocument", {"depth": 0})["root"]["nodeId"]  # noqa: SLF001
+    node_id = page._send(  # noqa: SLF001
+        "DOM.querySelector", {"nodeId": root_id, "selector": selector}
+    ).get("nodeId", 0)
+    if not node_id:
+        return 0
+    backend = page._send("DOM.describeNode", {"nodeId": node_id})["node"].get(  # noqa: SLF001
+        "backendNodeId"
+    )
+    return int(backend or 0)
+
+
+def _is_button(node: dict[str, Any], backend_id: int) -> bool:
+    return (
+        int(node.get("backendDOMNodeId") or 0) == backend_id
+        and node.get("role", {}).get("value") == "button"
+        and not node.get("ignored")
+    )
+
+
+def _accessible_button_name(
+    page: CdpPage, selector: str, nodes: list[dict[str, Any]]
+) -> str | None:
+    """Computed name of the accessibility button bound to the DOM element ``selector``."""
+    backend_id = _dom_backend_id(page, selector)
+    if backend_id == 0:
+        return None
+    matched = [node for node in nodes if _is_button(node, backend_id)]
+    if len(matched) == 1:
+        return _ax_text(matched[0], "name")
+    root_id = page._send("DOM.getDocument", {"depth": 0})["root"]["nodeId"]  # noqa: SLF001
+    node_id = page._send(  # noqa: SLF001
+        "DOM.querySelector", {"nodeId": root_id, "selector": selector}
+    ).get("nodeId", 0)
+    if not node_id:
+        return None
+    partial = page._send(  # noqa: SLF001
+        "Accessibility.getPartialAXTree",
+        {"nodeId": node_id, "fetchRelatives": False},
+    )["nodes"]
+    partial_match = [node for node in partial if _is_button(node, backend_id)]
+    if len(partial_match) == 1:
+        return _ax_text(partial_match[0], "name")
+    return None
+
+
+def _subtree_text(node: dict[str, Any], by_id: dict[str, dict[str, Any]]) -> str:
+    parts = [_ax_text(node, "name")]
+    for child_id in node.get("childIds") or []:
+        child = by_id.get(str(child_id))
+        if child is not None:
+            parts.append(_subtree_text(child, by_id))
+    return " ".join(part for part in parts if part)
 
 
 def _wait_home(page: CdpPage, locale: str) -> None:
@@ -380,6 +473,9 @@ def test_confirm_sends_one_request_shows_result_on_home_and_restore_brings_it_ba
     )
     assert home["path"] == "/"
     assert home["h1Focused"], "focus must land on the home heading"
+    assert (
+        page.evaluate("document.querySelector('#app h1').getAttribute('aria-describedby')") is None
+    )
     assert home["openCards"] == 0, "the list must not stay among the active lists"
     days_left = _table(locale)["miniapp.deleted.days_left"].replace("{days}", str(RETENTION_DAYS))
     assert len(home["deleted"]) == 1
@@ -396,6 +492,150 @@ def test_confirm_sends_one_request_shows_result_on_home_and_restore_brings_it_ba
     )
     assert _status(page)["text"] == _table(locale)["miniapp.deleted.restored"]
     assert _list_status(wishlist_server, seeded) == "active"
+
+
+# --- expired return and distinct Cancel names (WISHENKA-317) --------------------------------
+
+
+@pytest.mark.parametrize("locale", ["en", "ru"])
+def test_expired_delete_focuses_the_home_heading_and_describes_the_failure(
+    locale: Literal["en", "ru"],
+    seed_wishlist: Callable[..., Seeded],
+    wishlist_server: BrowserServer,
+    open_list: OpenList,
+) -> None:
+    seeded = seed_wishlist(["Camera"])
+    path = f"/api/wishlists/{seeded.wishlist_id}"
+    page = open_list(locale)
+    _open_panel(page)
+    page.evaluate(_installed_fetch(path, "410"))
+    scroll_to(page, CONFIRM)
+    page.click(CONFIRM)
+    _wait_expired_home(page, locale)
+
+    failed = _text(locale, "failed")
+    home = _table(locale)["miniapp.home.title"]
+    state = page.evaluate(
+        """(() => {
+      const h1 = document.querySelector('#app h1');
+      const status = document.getElementById('status');
+      const app = document.getElementById('app');
+      return {
+        activeIsHeading: document.activeElement === h1,
+        activeIsBody: document.activeElement === document.body,
+        activeTag: document.activeElement ? document.activeElement.tagName : null,
+        tabindex: h1 ? h1.getAttribute('tabindex') : null,
+        describedBy: h1 ? h1.getAttribute('aria-describedby') : null,
+        statusText: status ? status.innerText : null,
+        statusRole: status ? status.getAttribute('role') : null,
+        statusLive: status ? status.getAttribute('aria-live') : null,
+        statusOutsideApp: !!(status && app && !app.contains(status)),
+        panel: !!document.querySelector('.wishlist-delete-confirm'),
+        alert: !!document.querySelector('[role="alert"]'),
+        deleteCalls: window.deleteCalls,
+      };
+    })()"""
+    )
+    problems: list[str] = []
+    if not state["activeIsHeading"] or state["activeIsBody"]:
+        problems.append(f"focus is {state['activeTag']}, not the home heading")
+    if state["tabindex"] != "-1":
+        problems.append(f"heading tabindex {state['tabindex']!r} != '-1'")
+    if state["describedBy"] != "status":
+        problems.append(f"aria-describedby {state['describedBy']!r} != 'status'")
+    if state["statusText"] != failed:
+        problems.append(f"status text {state['statusText']!r} != {failed!r}")
+    if state["statusRole"] != "status":
+        problems.append(f"status role {state['statusRole']!r} != 'status'")
+    if state["statusLive"] != "assertive":
+        problems.append(f"aria-live {state['statusLive']!r} != 'assertive'")
+    if not state["statusOutsideApp"]:
+        problems.append("#status is inside #app")
+    if state["panel"] or state["alert"]:
+        problems.append("the confirmation or an alert is still in the page")
+    if state["deleteCalls"] != 1:
+        problems.append(f"deleteCalls {state['deleteCalls']!r} != 1")
+    live, by_id = _ax_tree(page)
+    headings = [
+        node
+        for node in live
+        if node.get("role", {}).get("value") == "heading" and _ax_text(node, "name") == home
+    ]
+    focused = [node for node in headings if _ax_focused(node)]
+    if not focused:
+        problems.append("the accessibility tree does not focus the home heading")
+    heading = focused[0] if focused else (headings[0] if headings else {})
+    described = _ax_text(heading, "description")
+    if described != failed:
+        problems.append(f"heading description {described!r} != {failed!r}")
+    status_nodes = [
+        node for node in by_id.values() if node.get("role", {}).get("value") == "status"
+    ]
+    if not any(failed in _subtree_text(node, by_id) for node in status_nodes):
+        sample = [
+            (node.get("role", {}).get("value"), _subtree_text(node, by_id)[:80])
+            for node in status_nodes
+        ]
+        problems.append(f"status node does not expose the failure; status={sample}")
+    if _list_status(wishlist_server, seeded) != "active":
+        problems.append("the wishlist did not stay active")
+    assert not problems, f"{problems}\n{page.snapshot()}"
+
+
+@pytest.mark.parametrize("locale", ["en", "ru"])
+@pytest.mark.parametrize("title", [WISHLIST_TITLE, MARKUP_TITLE])
+def test_delete_and_settings_cancels_have_distinct_accessible_names(
+    locale: Literal["en", "ru"],
+    title: str,
+    seed_wishlist: Callable[..., Seeded],
+    wishlist_server: BrowserServer,
+    open_list: OpenList,
+) -> None:
+    seeded = seed_wishlist(["Camera"])
+    if title != WISHLIST_TITLE:
+        _rename(wishlist_server, seeded, title)
+    page = open_list(locale, title=title)
+    _open_panel(page)
+
+    expected = _cancel_name(locale, title)
+    visible = _text(locale, "cancel")
+    settings_name = _table(locale)["miniapp.wishlist_settings.cancel"]
+    dom = page.evaluate(
+        f"""(() => {{
+      const del = document.querySelector({json.dumps(CANCEL)});
+      const settings = document.querySelector('.settings-cancel-btn');
+      return {{
+        deleteText: del ? del.innerText : null,
+        deleteLabel: del ? del.getAttribute('aria-label') : null,
+        injected: del ? del.querySelectorAll('*').length : -1,
+        settingsText: settings ? settings.innerText : null,
+        settingsLabel: settings ? settings.getAttribute('aria-label') : null,
+      }};
+    }})()"""
+    )
+    live, _by_id = _ax_tree(page)
+    delete_name = _accessible_button_name(page, CANCEL, live)
+    settings_seen = _accessible_button_name(page, ".settings-cancel-btn", live)
+    problems: list[str] = []
+    if dom["deleteText"] != visible:
+        problems.append(f"delete innerText {dom['deleteText']!r} != {visible!r}")
+    if dom["deleteLabel"] != expected:
+        problems.append(f"delete aria-label {dom['deleteLabel']!r} != {expected!r}")
+    if dom["injected"] != 0:
+        problems.append(f"delete Cancel contains {dom['injected']} elements")
+    if title not in expected:
+        problems.append("the accessible name does not contain the title")
+    if dom["settingsText"] != settings_name:
+        problems.append(f"settings innerText {dom['settingsText']!r} != {settings_name!r}")
+    if dom["settingsLabel"] is not None:
+        problems.append(f"settings Cancel has aria-label {dom['settingsLabel']!r}")
+    if delete_name != expected:
+        problems.append(f"delete accessible name {delete_name!r} != {expected!r}")
+    if settings_seen != settings_name:
+        problems.append(f"settings accessible name {settings_seen!r} != {settings_name!r}")
+    if expected == settings_name:
+        problems.append("the two accessible names are the same")
+    assert not problems, f"{problems}\n{page.snapshot()}"
 
 
 # --- 6 failure and retry ---------------------------------------------------------------------

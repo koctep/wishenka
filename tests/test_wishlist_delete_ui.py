@@ -1,11 +1,10 @@
-"""Failing repro for WISHENKA-295 (Step 3): Mini App delete-wishlist zone in the Node harness.
+"""Mini App delete-wishlist zone in the Node harness.
 
-The real ``showList`` runs in the shared fake-DOM harness. Today no delete zone is rendered, so
-the owner assertions fail; the non-owner and invalid-retention gating cases are regression
-guards that already pass. The harness is patched (as ``test_wishlist_detail_ui`` does) with a
-``retentionDays`` dataset field, ``replaceWith`` / ``remove`` / ``removeAttribute`` / ``focus``
-on the fake element, a ``steps`` runner that clicks elements by class or exact text, and a
-``fetch`` stub for ``DELETE /api/wishlists/1``.
+WISHENKA-317 checks, in Russian and English, that a 410 focuses the home
+heading and points ``aria-describedby`` at ``#status``, and that the delete
+Cancel has its own accessible name. The harness patch teaches
+``querySelector('h1')`` to walk descendants and records whether focus is
+still connected.
 """
 
 from __future__ import annotations
@@ -45,6 +44,25 @@ _PATCHES = (
         "  return null;\n"
         "}\n"
         "function makeEl(tag) {",
+    ),
+    (
+        "    querySelector(sel) {\n"
+        "      if (sel === 'button') return "
+        "this.children.find(c => c.tagName === 'BUTTON') || null;\n",
+        "    querySelector(sel) {\n"
+        "      if (sel === 'h1') {\n"
+        "        const walk = (node) => {\n"
+        "          for (const child of (node.children || [])) {\n"
+        "            if (child.tagName === 'H1') return child;\n"
+        "            const found = walk(child);\n"
+        "            if (found) return found;\n"
+        "          }\n"
+        "          return null;\n"
+        "        };\n"
+        "        return walk(this);\n"
+        "      }\n"
+        "      if (sel === 'button') return "
+        "this.children.find(c => c.tagName === 'BUTTON') || null;\n",
     ),
     (
         "    select() {},\n    focus() {},",
@@ -107,9 +125,15 @@ _PATCHES = (
         "    out.rootText = collectText(rootEl);\n    out.tree = rootEl;\n"
         "    out.statusText = statusEl.textContent;\n"
         "    out.statusKind = statusEl.attributes['data-kind'] ?? null;\n"
+        "    out.statusLive = statusEl.attributes['aria-live'] ?? null;\n"
         "    out.fetchCalls = fetchCalls;\n"
         "    out.focusedClass = focusedEl ? (focusedEl.attributes.class || '') : '';\n"
         "    out.focusedText = focusedEl ? focusedEl.textContent : '';\n"
+        "    out.focusedConnected = !!(focusedEl && findParent(rootEl, focusedEl));\n"
+        "    out.focusedTag = focusedEl ? focusedEl.tagName : '';\n"
+        "    out.focusedTabindex = focusedEl ? (focusedEl.attributes.tabindex ?? null) : null;\n"
+        "    out.focusedDescribedBy = focusedEl\n"
+        "      ? (focusedEl.attributes['aria-describedby'] ?? null) : null;\n"
         "  } else if (scenario.action === 'public')",
     ),
 )
@@ -229,6 +253,33 @@ def _open_steps(_locale: str) -> list[dict[str, Any]]:
 
 def _confirm_text(locale: str) -> str:
     return _table(locale).get(PREFIX + "confirm", "<missing confirm key>")
+
+
+# Pin the accepted wording of miniapp.wishlist_delete.cancel_name. Reading the
+# catalog would accept whatever string is stored there.
+_CANCEL_NAME = {
+    "en": 'Cancel deleting "{title}"',
+    "ru": "Отменить удаление «{title}»",
+}
+_MARKUP_TITLE = "<b>x</b>&amp; 'quoted'"
+
+
+def _cancel_name(locale: str, title: str) -> str:
+    return _CANCEL_NAME[locale].replace("{title}", title)
+
+
+def _shown_title(locale: str, name: str) -> str:
+    if name:
+        return name
+    return _table(locale)["miniapp.common.untitled_wishlist"]
+
+
+def _buttons(tree: dict[str, Any], class_name: str) -> list[dict[str, Any]]:
+    return [
+        node
+        for node in _walk(tree)
+        if node.get("tagName") == "BUTTON" and class_name in _classes(node)
+    ]
 
 
 def test_patched_harness_clicks_existing_controls_and_serves_the_deleted_section() -> None:
@@ -405,6 +456,94 @@ def test_gone_after_retention_window_refreshes_home_with_generic_failure(locale:
     done_prefix = _fmt(locale, "done", title="Birthday", days=30).split("Birthday")[0]
     assert done_prefix not in result["statusText"]
     assert len(result["fetchCalls"]) == 1
+
+
+@pytest.mark.parametrize("locale", ["en", "ru"])
+def test_expired_delete_focuses_the_home_heading_and_announces_the_failure(locale: str) -> None:
+    """A 410 returns home, focuses that heading, and describes it with the failure."""
+    steps = [*_open_steps(locale), {"text": _confirm_text(locale)}]
+    result = _show(locale, steps=steps, reply={"status": 410, "body": {}})
+
+    home = _table(locale)["miniapp.home.title"]
+    failed = _fmt(locale, "failed")
+    headings = [node for node in _walk(result["tree"]) if node.get("tagName") == "H1"]
+    problems: list[str] = []
+    if not any(node.get("textContent") == home for node in headings):
+        problems.append(f"home title {home!r} is not in the tree")
+    if _with_class(result["tree"], "wishlist-delete-confirm"):
+        problems.append("the delete confirmation is still in the tree")
+    if result["statusText"] != failed:
+        problems.append(f"status {result['statusText']!r} != {failed!r}")
+    if result["statusKind"] != "error":
+        problems.append(f"status kind {result['statusKind']!r} != 'error'")
+    if result["statusLive"] != "assertive":
+        problems.append(f"aria-live {result['statusLive']!r} != 'assertive'")
+    done_prefix = _fmt(locale, "done", title="Birthday", days=30).split("Birthday")[0]
+    if done_prefix in result["statusText"]:
+        problems.append("the success wording is in the status")
+    calls = [(call["method"], call["url"]) for call in result["fetchCalls"]]
+    if calls != [("DELETE", "/api/wishlists/1")]:
+        problems.append(f"delete calls {calls!r}")
+    confirm = _confirm_text(locale)
+    cancel = _table(locale)[PREFIX + "cancel"]
+    if result["focusedText"] in {confirm, cancel}:
+        problems.append(f"focus text is a confirmation label: {result['focusedText']!r}")
+    if not result["focusedConnected"] or result["focusedTag"] != "H1":
+        problems.append(
+            "focus is not the connected home heading: "
+            f"connected={result['focusedConnected']} tag={result['focusedTag']!r} "
+            f"text={result['focusedText']!r}"
+        )
+    if result["focusedTabindex"] != "-1":
+        problems.append(f"heading tabindex {result['focusedTabindex']!r} != '-1'")
+    if result["focusedDescribedBy"] != "status":
+        problems.append(f"aria-describedby {result['focusedDescribedBy']!r} != 'status'")
+    assert not problems, problems
+
+
+@pytest.mark.parametrize("locale", ["en", "ru"])
+@pytest.mark.parametrize(
+    "name",
+    ["Birthday", "", _MARKUP_TITLE],
+    ids=["titled", "untitled", "markup"],
+)
+def test_delete_cancel_accessible_name_includes_the_list_title(locale: str, name: str) -> None:
+    """The delete Cancel keeps its visible label and gains a title-specific name."""
+    result = _show(locale, name=name, steps=_open_steps(locale))
+    title = _shown_title(locale, name)
+    expected = _cancel_name(locale, title)
+    visible = _table(locale)[PREFIX + "cancel"]
+    settings_text = _table(locale)["miniapp.wishlist_settings.cancel"]
+    delete_buttons = _buttons(result["tree"], "history-confirm-cancel")
+    settings = _buttons(result["tree"], "settings-cancel-btn")
+    problems: list[str] = []
+    if len(delete_buttons) != 1:
+        problems.append(f"expected one delete Cancel, found {len(delete_buttons)}")
+    else:
+        cancel = delete_buttons[0]
+        label = cancel.get("attributes", {}).get("aria-label")
+        if cancel.get("textContent") != visible:
+            problems.append(f"visible label {cancel.get('textContent')!r} != {visible!r}")
+        if label != expected:
+            problems.append(f"aria-label {label!r} != {expected!r}")
+        elements = [
+            node for node in _walk(cancel)[1:] if node.get("tagName") not in {None, "#TEXT"}
+        ]
+        if elements:
+            tags = [node.get("tagName") for node in elements]
+            problems.append(f"title was parsed into elements: {tags}")
+    if len(settings) != 1:
+        problems.append(f"expected one settings Cancel, found {len(settings)}")
+    else:
+        settings_label = settings[0].get("attributes", {}).get("aria-label")
+        if settings_label is not None:
+            problems.append(f"settings Cancel has aria-label {settings_label!r}")
+        settings_seen = settings[0].get("textContent")
+        if settings_seen != settings_text:
+            problems.append(f"settings text {settings_seen!r} != {settings_text!r}")
+    if expected == settings_text:
+        problems.append("the two accessible names are the same")
+    assert not problems, problems
 
 
 @pytest.mark.parametrize("locale", ["en", "ru"])
