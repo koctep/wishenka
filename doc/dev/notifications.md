@@ -185,7 +185,10 @@ Five Alembic revisions extend the wishlist database schema for notifications, re
      | `reservation_changes` | `reservation_confirmation` (`reservation_changed` always suppressed) | Disabled (`0`) |
 
    - Users toggle their global `reservation_changes` setting in a private bot chat with
-     `/reservation_confirmations on` and `/reservation_confirmations off`.
+     `/reservation_confirmations on` and `/reservation_confirmations off`. The handler saves
+     through `UserStore.write` with operation `reservation_confirmations`. `write` forwards to
+     `_immediate` once. A leftover lock is WARNING `user_store_busy` and `UserStoreBusyError`.
+     There is no second retry.
 4. **Two-phase live verification (`claim` + `refresh` before send):**
    - Both `NoticeStore.claim_next` / `NoticeStore.refresh_claim` and
      `claim_reminder` / `refresh_reminder` verify live database state inside `BEGIN IMMEDIATE`
@@ -253,9 +256,14 @@ Implemented in `wishenka/bot/birthdays.py` (`create_birthday_router`), mounted b
 - **Destination registration and log privacy:** Every verified private interaction upserts the user
   in `UserStore` under `_PrivateUserLogFilter` (which suppresses `wishenka.users` log records during
   the upsert so profile fields are not logged) and sets `bot_destinations.active = 1`.
+  `ensure_private_bot_user` records that chat through `UserStore.write` with operation
+  `record_private_chat`. `write` forwards to `_immediate` once. A leftover lock is WARNING
+  `user_store_busy` and `UserStoreBusyError`. There is no second retry.
 - **Listing and limits:** Lists up to 20 active (`deleted = 0`) entries owned by the authenticated
   internal `user.id`, formatted as `<label>: MM-DD`, with per-entry `Edit` (`birthday:e:<id>:<rev>`)
-  and `Delete` (`birthday:d:<id>:<rev>`) buttons and an `Add` (`birthday:add`) button.
+  and `Delete` (`birthday:d:<id>:<rev>`) buttons and an `Add` (`birthday:add`) button. `listing`
+  opens the wishlist engine with `execution_options(read_only=True)` and `begin()`, so the listener
+  emits `BEGIN`.
 - **Two-stage durable input (`birthday_input`):**
   - Clicking `Add` or `Edit` writes a row in `birthday_input` (`stage = 'label'`,
     `expires_at = now + 3600`) scoped to `(owner_id, chat_id)`.

@@ -26,7 +26,9 @@ across `wishenka/bot/entry.py`, `wishenka/bot/support.py`, `wishenka/bot/birthda
 `wishenka.bot.principal.ensure_private_bot_user(dependencies, user, chat_id, ...)` helper: it
 reads the existing `users` row first (preserving stored `language_code` without unnecessary writes),
 upserts via `upsert_from_bot` under `_private_bot_user` log suppression if absent, and activates
-their private destination in `bot_destinations`. Verified `/start` and `/help` commands also clear
+their private destination in `bot_destinations` through `UserStore.write` with operation
+`record_private_chat`. `write` forwards to `_immediate` once. A leftover lock is WARNING
+`user_store_busy` and `UserStoreBusyError`. There is no second retry. Verified `/start` and `/help` commands also clear
 any active support session (`clear_support_session`).
 
 The Create wishlist, My wishlists and Open Mini App buttons use `WebAppInfo` URLs with the

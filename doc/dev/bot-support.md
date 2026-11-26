@@ -139,7 +139,9 @@ Created by Alembic revision `add_support_channel` (`down_revision = "add_notice_
   stored `users.language_code` and profile fields are preserved without unnecessary updates), sets
   the `_private_bot_user` `ContextVar` filter on `wishenka.users` when calling `upsert_from_bot`
   for new users (preventing `user_created` and `user_updated` logs from writing Telegram IDs or
-  profile names), and activates `bot_destinations`.
+  profile names), and activates `bot_destinations` through `UserStore.write` with operation
+  `record_private_chat`. `write` forwards to `_immediate` once. A leftover lock is WARNING
+  `user_store_busy` and `UserStoreBusyError`. There is no second retry.
 
 ## API / Usage
 

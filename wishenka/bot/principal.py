@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from sqlalchemy.ext.asyncio import AsyncConnection
+
 from wishenka.bot.i18n import _private_bot_user
 from wishenka.notices.destinations import upsert_bot_destination
 from wishenka.users.models import UserRecord
@@ -48,6 +50,9 @@ async def ensure_private_bot_user(
             _private_bot_user.reset(token)
 
     effective_now = _resolve_effective_now(dependencies, now)
-    async with users.engine.begin() as conn:
+
+    async def save_destination(conn: AsyncConnection) -> None:
         await upsert_bot_destination(conn, int(record.telegram_id), chat_id, effective_now)
+
+    await users.write(save_destination, operation="record_private_chat")
     return record

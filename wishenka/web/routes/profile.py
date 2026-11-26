@@ -40,19 +40,27 @@ async def _find_active_chat_id(
     """Look up the active private Telegram chat_id for a Telegram user id, if available."""
     wishlist_store = getattr(request.app.state, "wishlist_store", None)
     engine = wishlist_store.engine if wishlist_store is not None else user_store.engine
-    async with engine.connect() as conn:
-        has_table = await conn.scalar(
-            text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='bot_destinations'")
-        )
-        if not has_table:
-            return None
-        row = (
-            await conn.execute(
-                text("SELECT chat_id FROM bot_destinations WHERE user_id = :uid AND active = 1"),
-                {"uid": telegram_id},
+    async with engine.connect() as raw_conn:
+        conn = await raw_conn.execution_options(read_only=True)
+        try:
+            await conn.begin()
+            has_table = await conn.scalar(
+                text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='bot_destinations'")
             )
-        ).first()
-        return int(row[0]) if row is not None else None
+            if not has_table:
+                return None
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT chat_id FROM bot_destinations WHERE user_id = :uid AND active = 1"
+                    ),
+                    {"uid": telegram_id},
+                )
+            ).first()
+            return int(row[0]) if row is not None else None
+        finally:
+            if conn.in_transaction():
+                await conn.rollback()
 
 
 async def _sync_bot_commands_best_effort(

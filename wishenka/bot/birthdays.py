@@ -51,20 +51,26 @@ def create_birthday_router(dependencies: Any) -> Router:
         return int(record.telegram_id) if record is not None else None
 
     async def listing(message: Message, owner: int, lang: SupportedLocale) -> None:
-        async with store.engine.connect() as conn:
-            rows = (
-                (
-                    await conn.execute(
-                        text(
-                            "SELECT id, label, month, day, revision FROM birthday_entries "
-                            "WHERE owner_id=:owner AND deleted=0 ORDER BY id LIMIT 20"
-                        ),
-                        {"owner": owner},
+        async with store.engine.connect() as raw_conn:
+            conn = await raw_conn.execution_options(read_only=True)
+            try:
+                await conn.begin()
+                rows = (
+                    (
+                        await conn.execute(
+                            text(
+                                "SELECT id, label, month, day, revision FROM birthday_entries "
+                                "WHERE owner_id=:owner AND deleted=0 ORDER BY id LIMIT 20"
+                            ),
+                            {"owner": owner},
+                        )
                     )
+                    .mappings()
+                    .all()
                 )
-                .mappings()
-                .all()
-            )
+            finally:
+                if conn.in_transaction():
+                    await conn.rollback()
         add = t("bot.birthdays.btn_add", lang)
         edit = t("bot.birthdays.btn_edit", lang)
         delete = t("bot.birthdays.btn_delete", lang)

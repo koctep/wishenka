@@ -19,6 +19,7 @@ from aiogram.types import (
     WebAppInfo,
 )
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from wishenka.bot.i18n import LocaleMiddleware, sync_user_bot_commands
 from wishenka.bot.principal import ensure_private_bot_user
@@ -251,7 +252,8 @@ def create_router(dependencies: EntryDependencies) -> Router:
             from wishenka.bot.support import clear_support_session
 
             await clear_support_session(store, int(record.telegram_id), message.chat.id)
-        async with users.engine.begin() as conn:
+
+        async def save(conn: AsyncConnection) -> None:
             await conn.execute(
                 text(
                     "INSERT INTO user_notification_settings(user_id,event_type,enabled,updated_at) "
@@ -261,6 +263,8 @@ def create_router(dependencies: EntryDependencies) -> Router:
                 ),
                 {"user": user.id, "enabled": int(value == "on")},
             )
+
+        await users.write(save, operation="reservation_confirmations")
         key = "bot.entry.confirmations_on" if value == "on" else "bot.entry.confirmations_off"
         await message.answer(t(key, lang))
 

@@ -171,7 +171,7 @@ def resolve_telegram_locale(language_code: str | None) -> SupportedLocale:
    - `PATCH /api/profile/locale` returns `{"locale": ..., "locale_source": "explicit"}` and supports `HX-Refresh: true` for instant HTMX page re-render.
 2. **Telegram Bot (`aiogram` v3)**:
    - A single outer `LocaleMiddleware` on `Dispatcher` (before `entry`, `capture`, `birthdays`, `support` routers) calls `UserStore.upsert_from_bot(event.from_user)` and injects `data["locale"]` and `data["t"]`.
-   - When switching locale via `PATCH /api/profile/locale`, if an active `Bot` and `bot_destinations.chat_id` exist, a non-blocking best-effort call updates `bot.set_my_commands(..., scope=BotCommandScopeChat(chat_id=chat_id))`.
+   - When switching locale via `PATCH /api/profile/locale`, if an active `Bot` and `bot_destinations.chat_id` exist, a non-blocking best-effort call updates `bot.set_my_commands(..., scope=BotCommandScopeChat(chat_id=chat_id))`. `_find_active_chat_id` opens the wishlist engine when that store is on the app, and the user engine otherwise, with `execution_options(read_only=True)` and `begin()`, so the listener emits `BEGIN`.
 3. **Asynchronous Notices & Reminders**:
    - `NoticeStore._eligible` (`claim_next`, `refresh_claim`) and `claim_reminder` / `refresh_reminder` switch from `u.language_code` to `u.locale` with fallback `'en'`.
    - Because `refresh_claim` and `refresh_reminder` re-read `users` right before sending to Telegram, pending outbox items queued prior to a language switch are delivered in the newly selected language.
@@ -235,6 +235,7 @@ At transaction start, the service computes `subject_hash = compute_revocation_su
     - When `UserStore` creates its own `AsyncEngine` (`connect_args={"timeout": 5}`), it registers `configure_immediate_transactions(self.engine.sync_engine)`.
     - `initialize()` configures `PRAGMA journal_mode=WAL`, `PRAGMA synchronous=NORMAL`, and `PRAGMA busy_timeout=5000` on an `isolation_level="AUTOCOMMIT"` connection (when owning its engine; mapping `SQLITE_BUSY` to `UserStoreBusyError` and other `SQLAlchemyError`s to `RuntimeError`), then delegates schema setup to `await upgrade_to_head(self.database_url)`.
     - Write methods (`upsert_user`, `upsert_from_bot`, `set_locale`, `set_birthdate`, `clear_birthdate`) execute inside `_immediate(work, operation=...)` (`BEGIN IMMEDIATE`); on `SQLITE_BUSY` after `busy_timeout`, the transaction rolls back, logs `user_store_busy`, and raises retryable `UserStoreBusyError` (other `SQLAlchemyError`s log `user_store_error` and raise `RuntimeError`).
+    - `write(work, *, operation)` forwards to `_immediate` once. `ensure_private_bot_user` uses operation `record_private_chat`. `reservation_confirmations` uses operation `reservation_confirmations`. A leftover lock is WARNING `user_store_busy` and `UserStoreBusyError`. There is no second retry.
     - Read methods (`get_by_telegram_id`, `get_by_id`) execute inside `_read(work)` with `execution_options(read_only=True)` (deferred `BEGIN`, rolled back on exit) so lookups do not acquire a write lock or block behind `BEGIN IMMEDIATE` writers.
   - `upsert_user(user: TelegramUser, *, channel: str = "miniapp") -> UserRecord` (`WISHENKA-33/34`; preserves `explicit` `locale` and `birthdate`)
   - `upsert_from_bot(tg_user: Any) -> UserRecord` (`WISHENKA-33`)

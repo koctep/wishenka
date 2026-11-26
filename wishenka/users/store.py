@@ -122,6 +122,15 @@ class UserStore:
                     await conn.rollback()
                 raise
 
+    async def write(
+        self,
+        work: Callable[[AsyncConnection], Awaitable[T]],
+        *,
+        operation: str,
+    ) -> T:
+        """Run a save through the immediate-transaction helper."""
+        return await self._immediate(work, operation=operation)
+
     async def _read(self, work: Callable[[AsyncConnection], Awaitable[T]]) -> T:
         """Run work in a read-only deferred transaction without BEGIN IMMEDIATE."""
         async with self.engine.connect() as raw_conn:
