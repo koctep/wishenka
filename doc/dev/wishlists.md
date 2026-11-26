@@ -1284,9 +1284,14 @@ as `data-retention-days`. Recently deleted and restore receive it too.
 writes no row. The record is written before the repository commit. The
 repository commits when `get_wishlist_repository()` resumes, after the
 handler has returned. The event means the action returned. It is not evidence
-that the commit succeeded. A later commit failure is `wishlist_store_error`
-from that dependency. Paths that raise before the action returns (`404`,
-`409`, `410`) do not emit the event.
+that the commit succeeded. A commit or flush failure is after `execute` has
+returned, so `execute` does not re-raise it. A busy failure is one WARNING
+`wishlist_inventory_busy` (`event` only) and `InventoryBusyError` from
+`get_wishlist_repository`, after the connection closes. A non-busy failure
+is logged by `get_wishlist_repository` as ERROR `wishlist_store_error` with
+`error_type`, then `RuntimeError("Wishlist storage operation failed")`.
+Paths that raise before the action returns (`404`, `409`, `410`) do not
+emit the event.
 
 #### `list_deleted_wishlists` & `restore_deleted_wishlist`
 
@@ -1861,12 +1866,30 @@ adapter:
   If uninitialized, logs `wishlist_store_uninitialized` and raises
   `RuntimeError("WishlistStore is not initialized on app.state")`.
 - `get_wishlist_repository(store: Annotated[WishlistStore, Depends(get_wishlist_store)]) -> AsyncIterator[WishlistRepository]`:
-  opens a connection from `store.engine.connect()`, calls `await conn.begin()`, and yields
-  `WishlistRepository(conn)`.
-  - On clean exit: commits any active transaction (`await conn.commit()`).
-  - On `SQLAlchemyError`: rolls back, logs `wishlist_store_error` (`error_type` only, no SQL
-    parameters or tokens), and raises a sanitized `RuntimeError("Wishlist storage operation failed")`.
-  - On any other `BaseException`: rolls back and re-raises.
+  opens a connection from `store.engine.connect()` and yields `WishlistRepository(conn)`.
+  The shared `busy_timeout` and `BEGIN IMMEDIATE` wait are unchanged. There is
+  no second retry. `await conn.begin()`, the work after `yield`, and
+  `await conn.commit()` sit in one `try`.
+  - On clean exit: commits when a transaction is still open (`await conn.commit()`),
+    then `repo.flush_commit_logs()`.
+  - On a busy `SQLAlchemyError` (`is_sqlite_busy`): clears commit logs only when
+    the repository exists, and rolls back only when a transaction is open. After
+    the connection closes, logs one WARNING `wishlist_inventory_busy` (`event`
+    only, no `error_type`, SQL parameters, or tokens) on `wishenka.web.dependencies`
+    and raises `InventoryBusyError`.
+  - On any other `SQLAlchemyError`: the same clear and rollback, then ERROR
+    `wishlist_store_error` (`error_type` only, no SQL parameters or tokens) and,
+    after the connection closes, `RuntimeError("Wishlist storage operation failed")`.
+  - On any other `BaseException`: clears commit logs only when the repository
+    exists, rolls back only when a transaction is open, and re-raises.
+  `wishlists.execute` re-raises only the busy case, so that path is logged once
+  in this dependency. A non-busy `SQLAlchemyError` that `execute` already caught
+  on that route is still logged by the route, and this dependency does not log
+  `wishlist_store_error` again. A non-busy commit or flush failure on the same
+  route is logged by `get_wishlist_repository` as ERROR `wishlist_store_error`
+  with `error_type`.
+  `install_inventory_busy_handler` (`wishenka/web/app.py`) returns HTTP 503 with
+  `detail` `str(exc)` and does not log.
 - `WishlistRepo = Annotated[WishlistRepository, Depends(get_wishlist_repository)]`: type alias used
   by route handlers.
 
@@ -2001,7 +2024,9 @@ relational architecture, `WishlistStore` coordinates atomic row-level persistenc
 ### 5. Observability & Security Guarantees
 
 #### Structured Persistence Logging Events
-Database operations emit structured audit logs under the `wishenka.wishlists` logger:
+Database operations emit structured audit logs under the `wishenka.wishlists` logger.
+`get_wishlist_repository` logs `wishlist_inventory_busy` on
+`wishenka.web.dependencies` with `event` only.
 
 | Event (`event`) | Level | Trigger | Key Extra Attributes |
 | --- | :---: | --- | --- |
@@ -2013,11 +2038,12 @@ Database operations emit structured audit logs under the `wishenka.wishlists` lo
 | `reservation_cabinet_busy` | `WARNING` | `SQLITE_BUSY` on cabinet read | `operation` |
 | `reservation_cabinet_error` | `ERROR` | Non-busy `SQLAlchemyError` on cabinet read | `operation`, `error_type` |
 | `wishlist_read_busy` | `WARNING` | `SQLITE_BUSY` inside `WishlistStore.execute_read` | `event` |
+| `wishlist_inventory_busy` | `WARNING` | Busy `SQLAlchemyError` after the shared `busy_timeout` | Shared repository (`wishenka.web.dependencies`): `event` only, after the connection closes. Store save (`wishenka.wishlists.store`): `event`, plus `item_id`, `reservation_id`, or `operation` when the store has them |
 | `wishlist_read_query_only_reset_failed` | `WARNING` | `PRAGMA query_only = OFF` reset failed in `execute_read` `finally` (connection invalidated) | `event`, `error_type` |
 | `wishlist_store_init_failed` | `WARNING` | `WishlistStore.initialize()` failed before/during `dispose()` | `error_type`, `has_temporary_db` |
 | `wishlist_store_temp_db_removed` | `DEBUG` | `WishlistStore.dispose()` unlinked owned `:memory:` temp DB and sidecars | `event` |
 | `wishlist_token_collision_retry` | `WARNING` | Collision retry | `attempt` |
-| `wishlist_store_error` | `ERROR` | Database error | `event` |
+| `wishlist_store_error` | `ERROR` | Non-busy database error | `event`. `get_wishlist_repository` also sends `error_type`. `wishlists.execute` logs this event for a non-busy `SQLAlchemyError` and the dependency does not log it again |
 | `wishlist_store_integrity_error` | `ERROR` | Constraint failure | `event` |
 
 All cabinet and batch-read logs omit `user_id`, item/wishlist titles, raw SQL parameters, and
@@ -2240,8 +2266,20 @@ evidence that the commit succeeded. For creation the field is
 `operation=create_wishlist`. For owner delete it is `operation=delete_wishlist`,
 including a repeat inside the window that writes no row. A storage error
 inside the handler does not emit it. A 422 or a missing session before the
-handler does not emit it. A later commit failure is `wishlist_store_error`
-from the repository dependency and can follow this record.
+handler does not emit it. A non-busy `SQLAlchemyError` inside the handler
+does not emit it.
+`execute` logs that case as ERROR `wishlist_store_error` and raises
+`RuntimeError("Wishlist storage operation failed")`. The dependency does
+not log `wishlist_store_error` again. `execute` re-raises only a busy
+`SQLAlchemyError` from the handler, so that path is logged once in
+`get_wishlist_repository` as one WARNING `wishlist_inventory_busy`
+(`event` only) and `InventoryBusyError`, and this record is not written.
+A commit or flush failure is after `execute` has returned, so `execute`
+does not re-raise it. A busy failure after this record is that same
+WARNING and `InventoryBusyError`, also from `get_wishlist_repository`.
+A non-busy failure after this record is logged by
+`get_wishlist_repository` as ERROR `wishlist_store_error` with
+`error_type`, then `RuntimeError("Wishlist storage operation failed")`.
 
 | Event (`event`) | Level | Trigger | Key Attributes |
 | --- | :---: | --- | --- |
@@ -2432,11 +2470,26 @@ WishlistError
   It does not use `favorite_deleted_wishlist_denied`.
   Details: [Viewing History Access](#viewing-history-access-wishenka-303).
 
+#### `InventoryBusyError` from `get_wishlist_repository`
+- **Root Cause**: A busy `SQLAlchemyError` after the unchanged `busy_timeout` /
+  `BEGIN IMMEDIATE` wait. Commit logs are cleared only when the repository
+  exists. Rollback runs only if a transaction is open. After the connection
+  closes, the dependency logs one WARNING `wishlist_inventory_busy` (`event`
+  only) and raises `InventoryBusyError`. There is no second retry.
+- **Resolution**: `install_inventory_busy_handler` returns HTTP 503 with
+  `detail` `str(exc)` and does not log. Repeat the request.
+  `wishlists.execute` re-raises only this busy case, so that path is logged
+  once in the dependency.
+
 #### `RuntimeError` ("Wishlist storage operation failed")
-- **Root Cause**: A locked or busy database is `InventoryBusyError`; any other storage
-  failure, including a non-token constraint violation, raises this error.
+- **Root Cause**: Any storage failure that is not a busy lock, including a
+  non-token constraint violation. A busy `SQLAlchemyError` is
+  `InventoryBusyError`, not this error.
 - **Resolution**: Verify database file permissions and health. Error traces suppress sensitive SQL
-  parameters to protect token secrecy.
+  parameters to protect token secrecy. On `wishlists.execute`, this non-busy
+  error is logged by the route as `wishlist_store_error`. The dependency logs
+  that event, with `error_type`, only when the route did not already convert
+  the `SQLAlchemyError`.
 
 #### `429 Too Many Requests` on `/share/{token}` or `/invite/{token}`
 - **Root Cause**: Client exceeded `WISHENKA_PUBLIC_RATE_LIMIT_MAX_REQUESTS` within

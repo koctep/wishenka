@@ -12,6 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from wishenka.auth.dependencies import get_current_user, get_optional_current_user, get_settings
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.config import Settings
+from wishenka.sqlite import is_sqlite_busy
 from wishenka.web.dependencies import WishlistRepo
 from wishenka.web.idempotency import compute_request_hash, parse_idempotency_key
 from wishenka.web.routes.reservations import execute as execute_reservation
@@ -115,7 +116,9 @@ async def execute[T](
                 extra={"event": "wishlist_mutation_committed", "operation": operation},
             )
         return result
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
+        if is_sqlite_busy(exc):
+            raise
         logger.error(
             "Wishlist storage operation failed due to database error",
             extra={"event": "wishlist_store_error"},

@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, status
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
@@ -41,6 +42,7 @@ from wishenka.web.routes.wishlists import router as wishlist_router
 from wishenka.web.security import BrowserSecurityMiddleware, sanitize_log_path
 from wishenka.web.unavailable import install_unavailable_page
 from wishenka.wishlists.cleanup import background_cleanup_worker
+from wishenka.wishlists.exceptions import InventoryBusyError
 from wishenka.wishlists.service import WishlistService
 from wishenka.wishlists.store import WishlistStore
 
@@ -142,6 +144,17 @@ async def _stop_notice_worker(app: FastAPI) -> None:
             await sender.close()
         notice_logger.info(
             "Notice worker stopped", extra={"event": "receipt_notice_worker_stopped"}
+        )
+
+
+def install_inventory_busy_handler(app: FastAPI) -> None:
+    """Return HTTP 503 when a shared-repository lock leaves the route uncaught."""
+
+    @app.exception_handler(InventoryBusyError)
+    async def inventory_busy(_request: Request, exc: InventoryBusyError) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": str(exc)},
         )
 
 
@@ -267,6 +280,7 @@ def create_app(
     app.include_router(wishlist_router)
     app.include_router(sharing_router)
     install_unavailable_page(app)
+    install_inventory_busy_handler(app)
 
     @app.get("/healthz")
     async def healthcheck() -> dict[str, Any]:

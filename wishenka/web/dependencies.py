@@ -9,6 +9,8 @@ from typing import Annotated
 from fastapi import Depends, Request
 from sqlalchemy.exc import SQLAlchemyError
 
+from wishenka.sqlite import is_sqlite_busy
+from wishenka.wishlists.exceptions import InventoryBusyError
 from wishenka.wishlists.repository import WishlistRepository
 from wishenka.wishlists.store import WishlistStore
 
@@ -32,28 +34,41 @@ async def get_wishlist_repository(
 ) -> AsyncIterator[WishlistRepository]:
     """Yield a transaction-scoped WishlistRepository bound to an AsyncConnection."""
     storage_failed = False
+    busy_exc: SQLAlchemyError | None = None
     async with store.engine.connect() as conn:
-        await conn.begin()
-        repo = WishlistRepository(conn)
+        repo: WishlistRepository | None = None
         try:
+            await conn.begin()
+            repo = WishlistRepository(conn)
             yield repo
             if conn.in_transaction():
                 await conn.commit()
             repo.flush_commit_logs()
         except SQLAlchemyError as exc:
-            repo.clear_commit_logs()
+            if repo is not None:
+                repo.clear_commit_logs()
             if conn.in_transaction():
                 await conn.rollback()
-            logger.error(
-                "Wishlist storage operation failed due to database error",
-                extra={"event": "wishlist_store_error", "error_type": type(exc).__name__},
-            )
-            storage_failed = True
+            if is_sqlite_busy(exc):
+                busy_exc = exc
+            else:
+                logger.error(
+                    "Wishlist storage operation failed due to database error",
+                    extra={"event": "wishlist_store_error", "error_type": type(exc).__name__},
+                )
+                storage_failed = True
         except BaseException:
-            repo.clear_commit_logs()
+            if repo is not None:
+                repo.clear_commit_logs()
             if conn.in_transaction():
                 await conn.rollback()
             raise
+    if busy_exc is not None:
+        logger.warning(
+            "Wishlist inventory change rolled back because the database was busy",
+            extra={"event": "wishlist_inventory_busy"},
+        )
+        raise InventoryBusyError() from busy_exc
     if storage_failed:
         raise RuntimeError("Wishlist storage operation failed")
 
