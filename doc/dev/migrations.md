@@ -416,6 +416,7 @@ to `add_gift_receipts` and refuses at `add_gift_receipts` with backup-restoratio
 | `tests/test_gift_receipt_migration.py` | Back-fill and normalisation, repeatable upgrade, no giver column, irreversible downgrade, cascade on purge |
 | `tests/test_wishlist_migrations_observability.py` | `started`/`completed` events, `legacy_schema_adopted` with `revision`, `failed` with re-raise, no paths in log fields |
 | `tests/test_wishlist_migration_rollback_policy.py` | `ROLLBACK_POLICY` declared on all revisions; `base_normalized` default guard and `WISHENKA_ALLOW_DESTRUCTIVE_BASELINE_DOWNGRADE=1` opt-in; one-way refusal messages and `wishlist_migration_downgrade_refused` logs (including `purge_legacy_non_member_view_history`); reversible tail from `add_share_access_and_purge_favorites` to `add_gift_receipts`; idempotent second startup; non-SQLite URL rejection; offline SQL generation (`sql=True`) |
+| `tests/test_wishenka_188_user_key_unification_repro.py` | `test_downgrade_from_unify_user_keys_restores_earlier_identity` upgrades only to `unify_user_keys_and_cascades`, downgrades to `add_receipt_delivery_fence`, and checks that the earlier identity is restored: remembered links on `users.id`, invite tokens without `wishlist_id`, and support-ticket `owner_id` |
 
 Run them with the project test target (see [infrastructure.md](infrastructure.md)), for example:
 

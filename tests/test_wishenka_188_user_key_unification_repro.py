@@ -124,6 +124,120 @@ async def test_migration_unifies_user_keys_to_telegram_id_and_enforces_fks(
                 conn.execute(stmt)
 
 
+def test_downgrade_from_unify_user_keys_restores_earlier_identity(tmp_path: Path) -> None:
+    """Downgrade restores users.id links, token-only invites, and support owner_id."""
+    db_path = tmp_path / "downgrade_keys.db"
+    db_url = f"sqlite+aiosqlite:///{db_path}"
+    config = _configured(db_url)
+    invite_token = "invite-tok-334"
+    command.upgrade(config, "add_receipt_delivery_fence")
+
+    sql_exec(
+        db_path,
+        "INSERT INTO users (id, telegram_id, first_name, is_premium, created_at, updated_at) "
+        "VALUES (42, 999001, 'Legacy', 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+    )
+    sql_exec(
+        db_path,
+        "INSERT INTO bot_destinations (user_id, chat_id, active, updated_at) "
+        "VALUES (42, 999001, 1, 100)",
+    )
+    sql_exec(
+        db_path,
+        "INSERT INTO birthday_entries (id, owner_id, label, month, day, revision, deleted) "
+        "VALUES (1, 42, 'Mom', 5, 12, 1, 0)",
+    )
+    sql_exec(
+        db_path,
+        "INSERT INTO birthday_input (owner_id, chat_id, stage, expires_at) "
+        "VALUES (42, 999001, 'label', 9999999999)",
+    )
+    sql_exec(
+        db_path,
+        "INSERT INTO support_input (owner_id, chat_id, expires_at) VALUES (42, 999001, 9999999999)",
+    )
+    sql_exec(
+        db_path,
+        "INSERT INTO support_tickets (id, ticket_ref, owner_id, telegram_id, created_at) "
+        "VALUES (1, 'SUP-LEGACY-1', 42, 999001, 100)",
+    )
+    sql_exec(
+        db_path,
+        "INSERT INTO wl_lists ("
+        "id, owner_id, owner_name, title, public_token, invite_token, created_at, updated_at"
+        ") VALUES ("
+        "7, 42, 'Legacy', 'Legacy List', 'pub-tok-334', ?, "
+        "'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        (invite_token,),
+    )
+    sql_exec(db_path, "INSERT INTO wl_invite_tokens (token) VALUES (?)", (invite_token,))
+
+    command.upgrade(config, "unify_user_keys_and_cascades")
+
+    assert sql_rows(db_path, "SELECT user_id FROM bot_destinations") == [{"user_id": 999001}]
+    assert sql_rows(db_path, "SELECT owner_id FROM birthday_entries") == [{"owner_id": 999001}]
+    assert sql_rows(db_path, "SELECT owner_id FROM birthday_input") == [{"owner_id": 999001}]
+    assert sql_rows(db_path, "SELECT owner_id FROM support_input") == [{"owner_id": 999001}]
+    assert "owner_id" not in _table_columns(db_path, "support_tickets")
+    assert sql_rows(db_path, "SELECT telegram_id FROM support_tickets") == [{"telegram_id": 999001}]
+    assert "wishlist_id" in _table_columns(db_path, "wl_invite_tokens")
+    assert sql_rows(db_path, "SELECT token, wishlist_id FROM wl_invite_tokens") == [
+        {"token": invite_token, "wishlist_id": 7}
+    ]
+
+    command.downgrade(config, "add_receipt_delivery_fence")
+
+    assert sql_rows(db_path, "SELECT version_num FROM alembic_version") == [
+        {"version_num": "add_receipt_delivery_fence"}
+    ]
+    assert sql_rows(db_path, "SELECT id, telegram_id FROM users") == [
+        {"id": 42, "telegram_id": 999001}
+    ]
+    assert sql_rows(db_path, "SELECT user_id FROM bot_destinations") == [{"user_id": 42}]
+    assert sql_rows(db_path, "SELECT owner_id FROM birthday_entries") == [{"owner_id": 42}]
+    assert sql_rows(db_path, "SELECT owner_id FROM birthday_input") == [{"owner_id": 42}]
+    assert sql_rows(db_path, "SELECT owner_id FROM support_input") == [{"owner_id": 42}]
+    assert sql_rows(
+        db_path,
+        "SELECT ticket_ref, owner_id, telegram_id, created_at FROM support_tickets",
+    ) == [
+        {
+            "ticket_ref": "SUP-LEGACY-1",
+            "owner_id": 42,
+            "telegram_id": 999001,
+            "created_at": 100,
+        }
+    ]
+    with sqlite3.connect(db_path) as conn:
+        index_columns = [
+            row[2]
+            for row in conn.execute(
+                "PRAGMA index_info('idx_support_tickets_owner_time')"
+            ).fetchall()
+        ]
+    assert index_columns == ["owner_id", "created_at"]
+    assert "wishlist_id" not in _table_columns(db_path, "wl_invite_tokens")
+    assert sql_rows(db_path, "SELECT token FROM wl_invite_tokens") == [{"token": invite_token}]
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("DELETE FROM users")
+        conn.execute("DELETE FROM wl_lists")
+
+    assert sql_rows(
+        db_path,
+        "SELECT ticket_ref, owner_id, telegram_id, created_at FROM support_tickets",
+    ) == [
+        {
+            "ticket_ref": "SUP-LEGACY-1",
+            "owner_id": 42,
+            "telegram_id": 999001,
+            "created_at": 100,
+        }
+    ]
+    assert sql_rows(db_path, "SELECT token FROM wl_invite_tokens") == [{"token": invite_token}]
+
+
 async def test_deleting_wishlist_cascades_tokens_invite_tokens_and_reminders(
     tmp_path: Path,
 ) -> None:
