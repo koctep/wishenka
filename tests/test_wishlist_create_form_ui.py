@@ -519,3 +519,79 @@ def test_retry_after_a_failure_sends_a_second_request_only_on_the_next_submit() 
     assert [json.loads(p["body"]).get("name") for p in posts] == ["Birthday", "Birthday"], (
         "one request per confirmed submit, none extra"
     )
+
+
+# --- WISHENKA-320 name contract ---------------------------------------------------------------
+
+
+INVISIBLE_NAMES = (
+    ("zwsp", "\u200b"),
+    ("word-joiner", "\u2060"),
+    ("bom", "\ufeff"),
+    ("lrm", "\u200e"),
+    ("rlm", "\u200f"),
+    ("marks-and-spaces", " \u200b \u2060 \ufeff \u200e \u200f "),
+)
+
+
+def _too_long_text(locale: str) -> str:
+    return _create_text(locale, "error_title_too_long").replace("{max}", str(MAX_TITLE))
+
+
+@pytest.mark.parametrize("locale", ["en", "ru"])
+@pytest.mark.parametrize(("label", "title"), INVISIBLE_NAMES)
+def test_invisible_only_name_uses_the_required_message_and_sends_nothing(
+    locale: Literal["en", "ru"], label: str, title: str
+) -> None:
+    result = _run(
+        locale,
+        [_open_form(), _fill("name", title), _fill("description", "keep me"), SUBMIT],
+    )
+
+    assert _creations(result) == [], f"invisible-only name {label} must not be posted"
+    assert _create_text(locale, "error_title_required") in result["rootText"]
+    assert _field(result["tree"], "name")["value"] == title
+    assert _field(result["tree"], "description")["value"] == "keep me"
+    assert _tag(result["tree"], "FORM")
+
+
+@pytest.mark.parametrize("locale", ["en", "ru"])
+def test_too_long_error_type_uses_the_too_long_catalog_string(
+    locale: Literal["en", "ru"],
+) -> None:
+    required = _create_text(locale, "error_title_required")
+    too_long = _too_long_text(locale)
+    result = _run(
+        locale,
+        [_open_form(), _fill("name", "Birthday"), SUBMIT],
+        reply={
+            "status": 422,
+            "body": {
+                "detail": [
+                    {
+                        "loc": ["body", "name"],
+                        "msg": "too long",
+                        "type": "wishlist_name_too_long",
+                        "ctx": {"max_length": MAX_TITLE},
+                    }
+                ]
+            },
+        },
+    )
+
+    assert too_long in result["rootText"], (
+        "422 type wishlist_name_too_long must use the too-long catalog string; "
+        f"required shown={required in result['rootText']}"
+    )
+    assert required not in result["rootText"]
+    assert _field(result["tree"], "name")["value"] == "Birthday"
+    assert _tag(result["tree"], "FORM"), "a refused create must not open a list"
+
+
+def test_edge_bom_stays_in_the_submitted_name() -> None:
+    """The POST name is the normalized string, not a second ``String.prototype.trim()``."""
+    raw = "  \ufeffHi  "
+    result = _run("en", [_open_form(), _fill("name", raw), SUBMIT])
+    posts = _creations(result)
+    assert len(posts) == 1, "a visible name must be submitted once"
+    assert json.loads(posts[0]["body"])["name"] == "\ufeffHi"

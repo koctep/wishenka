@@ -1,10 +1,8 @@
-"""Failing repro for WISHENKA-296 (Step 3): ``POST /api/wishlists`` requires a valid title.
+"""Create-wishlist validation, plus the shared name rule on edit.
 
-Today the route takes the permissive ``WishlistInput``: ``{}``, ``null``, blank and over-long
-titles all answer 201 and create an untitled list. These tests assert the designed contract
-(``20-architecture.md`` D-1): a creation-only model with a required, trimmed 1-255 character
-``name`` (422 with ``loc == ["body", "name"]`` otherwise), while ``PATCH`` keeps the permissive
-model and a rejected request leaves no row and no title in the logs.
+A create still requires a trimmed name of 1 to 255 characters. A rejected create leaves no row
+and no title in the logs. PATCH uses that same name rule: a blank or over-long name is refused,
+and omitting the name keeps a valid stored title.
 """
 
 from __future__ import annotations
@@ -207,11 +205,11 @@ def test_cookie_session_without_csrf_token_is_rejected_and_creates_nothing(env: 
     assert env.lists() == []
 
 
-# --- PATCH keeps the permissive model ---------------------------------------------------------
+# --- PATCH shares the name contract -----------------------------------------------------------
 
 
-def test_patch_still_accepts_blank_and_absent_names(env: Env) -> None:
-    """Regression guard: the creation-only model must not leak into PATCH (design D-1)."""
+def test_patch_keeps_a_valid_name_when_omitted_and_refuses_blank_or_long(env: Env) -> None:
+    """Omitting the name keeps a valid title. A blank or over-long name is refused."""
     created = env.create({"name": "Seed"})
     assert created.status_code == 201, "a valid creation must work (precondition)"
     path = f"/api/wishlists/{created.json()['id']}"
@@ -226,11 +224,15 @@ def test_patch_still_accepts_blank_and_absent_names(env: Env) -> None:
     assert empty.json()["name"] == "Seed"
 
     blank = env.client.patch(path, json={"name": ""}, headers=env.owner)
-    assert blank.status_code == 200
-    assert blank.json()["name"] == ""
+    assert blank.status_code == 422
+    assert blank.json()["detail"][0]["type"] == "wishlist_name_required"
+    assert blank.json()["detail"][0]["loc"][-1] == "name"
+    assert env.client.get(path, headers=env.owner).json()["name"] == "Seed"
 
     long_name = env.client.patch(path, json={"name": "b" * 300}, headers=env.owner)
-    assert long_name.status_code == 200
+    assert long_name.status_code == 422
+    assert long_name.json()["detail"][0]["type"] == "wishlist_name_too_long"
+    assert env.client.get(path, headers=env.owner).json()["name"] == "Seed"
 
 
 # --- observability -----------------------------------------------------------------------------

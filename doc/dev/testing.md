@@ -615,7 +615,7 @@ make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_settings_switch_browser.py -q'
 
 | Модуль | Тесты | Таймаут / маркер | Что проверяет |
 | --- | --- | --- | --- |
-| `tests/test_wishlist_create_validation_api.py` | 25 | `timeout(30)` | `POST /api/wishlists`: обязательное имя, обрезка пробелов, 1-255 кодовых точек, форма `422` (стандартная FastAPI), необязательные поля, неразбираемая дата, `401` и CSRF без создания, `PATCH` остаётся мягким, одиночный сигнал `wishlist_mutation_committed`, отсутствие текста пользователя в логах |
+| `tests/test_wishlist_create_validation_api.py` | 25 | `timeout(30)` | `POST /api/wishlists`: обязательное имя, обрезка пробелов, 1-255 кодовых точек, форма `422`, необязательные поля, неразбираемая дата, `401` и CSRF без создания, `PATCH` отказывает в пустом и слишком длинном имени и позволяет опустить уже годное сохранённое имя, одиночный сигнал `wishlist_mutation_committed`, отсутствие текста пользователя в логах |
 | `tests/test_wishlist_create_form_ui.py` | 27 | `timeout(20)` | реальный `showCreate` в Node-стенде (`_NODE_HARNESS`): поля и подписи, отмена, ошибки без запроса, один обрезанный `POST`, дата как UTC, сбой, ключи каталога (восемь `miniapp.create.*`) |
 | `tests/test_wishlist_create_form_browser.py` | 42 | `timeout(45)`, `browser` | настоящий Chromium: открытие формы без запроса, уход (перезагрузка, навигация, Назад) ничего не создаёт, ошибки в полях, `422` по полю и неизвестному `loc`, серия нажатий и Enter дают один `POST`, сбой и повтор, сбой загрузки списка после создания, медленная загрузка главного экрана и защита `homeRenderToken`, deep link, геометрия на узких экранах, фокус, дерево доступности, порядок Tab |
 | `tests/test_wishlist_create_observability.py` | 11 | `timeout(30)` | события по каждому пути (201, 422, 401, 403, 500) и отсутствие названий и токенов в логах |
@@ -627,8 +627,9 @@ make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_settings_switch_browser.py -q'
   экран, запись в историю не добавляется); в проверке порядка Tab подряд идущие остановки одного
   `datetime-local` схлопываются.
 - Обновлены существующие тесты: `test_home_overview_ui.py` (клик на создание открывает форму,
-  без `POST`), `test_home_overview_browser.py` (безымянный список делается через `PATCH`
-  с пустым именем), `test_cross_screen_comfort_browser.py` (серия нажатий и сбой идут через кнопку
+  без `POST`), `test_home_overview_browser.py` (уже сохранённое пустое имя записывается
+  в базу, а не очисткой через `PATCH`; открытие не переименовывает список),
+  `test_cross_screen_comfort_browser.py` (серия нажатий и сбой идут через кнопку
   «Создать» формы), `test_wishlist_api.py` и `test_wishlist_management_ui.py` (создание с именем;
   принудительная `500` сохранена).
 - Запуск: `make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_wishlist_create_validation_api.py -q'`.
@@ -638,11 +639,34 @@ make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_settings_switch_browser.py -q'
   ([WISHENKA-313](https://pypost.atlassian.net/browse/WISHENKA-313)); дублирующиеся помощники
   каталога и слабое ожидание в `tests/test_history_screen_browser.py` (500), из-за которого
   `api()` разбирает тело только для `422`
-  ([WISHENKA-321](https://pypost.atlassian.net/browse/WISHENKA-321)); правило названия для `PATCH`
-  и ошибка «слишком длинное» ([WISHENKA-320](https://pypost.atlassian.net/browse/WISHENKA-320));
+  ([WISHENKA-321](https://pypost.atlassian.net/browse/WISHENKA-321));
   идемпотентность ([WISHENKA-322](https://pypost.atlassian.net/browse/WISHENKA-322)).
 - Тесты с `caplog` падают при запуске с `-p no:logging`; настроенные запуски плагин не отключают.
 - Заведомо падающие тесты вне задачи: те же, что в разделе WISHENKA-295.
+
+### Тесты контракта имени вишлиста (WISHENKA-320)
+
+Создание и правка делят одно правило имени. Описание и название события без нового
+потолка длины; пустое или из одних пробелов значит «не задано».
+
+- `tests/test_wishlist_name_contract_api.py` (`timeout(30)`): на `POST` и `PATCH`
+  отсутствующее, пустое или составленное только из невидимых знаков имя —
+  `wishlist_name_required`, а имя длиннее 255 кодовых точек —
+  `wishlist_name_too_long`. Уже сохранённое пустое имя остаётся
+  читаемым, и следующее сохранение обязано прислать настоящее имя. Опущенное
+  сохранённое имя, которое уже длиннее 255, — отказ «слишком длинное», а не «имя
+  обязательно». Такое имя сеется через домен, не через `PATCH`.
+- `tests/test_wishlist_settings_name_contract_ui.py` (`timeout(20)`) и
+  `tests/test_wishlist_settings_name_contract_browser.py` (`timeout(45)`, `browser`):
+  форма настроек на английском и русском. Негодное имя не сохраняется. Принятое имя
+  в теле — одна нормализованная строка, и крайний U+FEFF рядом с видимым знаком в ней
+  остаётся. У описания и названия события нет `maxlength`. Пустое сохранённое имя
+  по-прежнему показывает подпись без названия.
+- Модули формы создания (`test_wishlist_create_form_ui.py`,
+  `test_wishlist_create_form_browser.py`) покрывают те же три случая на создании,
+  включая крайний U+FEFF в теле `POST` без второго `trim`.
+
+Полный набор для этой заметки не запускался.
 
 ### Тесты экрана истории просмотров (WISHENKA-292)
 

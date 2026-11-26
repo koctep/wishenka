@@ -453,7 +453,9 @@ capabilities. The application strictly adheres to the following token safety rul
   title passes the client check. Repeated taps and Enter while that request is in
   flight do not send another.
 - **Behavior**: the server creates an active personal wishlist with generated tokens and the
-  trimmed title; a missing or invalid title is rejected with `422` and nothing is created.
+  one normalized name the check accepted. A missing, blank, or invisible-only name is
+  `wishlist_name_required` and nothing is created. A name over 255 code points after the
+  shared edge trim is `wishlist_name_too_long`, not the missing-name message.
 - **UI State**: on success the client opens the new wishlist (`showList`) with the add-item entry
   point. Leaving the form (Cancel, closing the Mini App, navigating away) creates nothing.
 
@@ -463,18 +465,38 @@ Full description: [Wishlist Creation Form](#wishlist-creation-form-wishenka-296)
 
 - **Permissions**: Available only to `Owner` and `Admin` roles.
 - **Fields**:
-  - `name`: List title (string, 1-255 characters).
-  - `description`: Optional text notes.
-  - `event_title`: Optional event name (e.g., "День рождения").
+  - `name`: required. After the shared edge trim it is 1 to 255 code points, the same
+    rule as create.
+  - `description`: optional notes. No character ceiling. Empty or spaces-only means unset.
+  - `event_title`: optional event name (e.g., "День рождения"). No character ceiling.
+    Empty or spaces-only means unset.
   - `event_date`: Optional ISO-8601 UTC timestamp.
-- **Nullability**: Sending `null` or empty values clears optional event fields, allowing the list
-  to remain ongoing without an event.
+- **Nullability**: Empty or spaces-only description or event title means unset, so the list
+  can stay ongoing without an event. The name cannot be cleared: `null`, blank, or an
+  invisible-only name is the required-name failure, and a longer name is
+  `wishlist_name_too_long`.
 - **Client Handling**:
   - The form is pre-populated with current settings from `GET /api/wishlists/{id}`.
-  - Submitting sends `PATCH /api/wishlists/{id}` with the updated fields and CSRF header.
+    A stored empty name still shows `miniapp.common.untitled_wishlist` on the card and
+    in the detail title. Opening the list does not rewrite the title. The next save
+    must supply a real name.
+  - `settingsForm` runs `wishlistNameDecision` before `PATCH`. The body `name` is
+    `decision.name`, the one normalized string that check accepted, with no second trim.
+    An edge U+FEFF beside a visible character stays in the body. An invalid name is not
+    sent; the typed value stays, with `miniapp.create.error_title_required` or
+    `miniapp.create.error_title_too_long`.
+  - A save that is sent uses `PATCH /api/wishlists/{id}` with the CSRF header.
+    Description and event title are `optionalDetail` values: no ceiling, and empty or
+    spaces-only is `null`.
   - Cancelling reloads the detail from `GET /api/wishlists/{id}` without sending a settings PATCH.
     The best-effort history recording in `showList` still runs.
   - If a save fails, user inputs are preserved in the form along with an accessible error message.
+    A `422` of type `wishlist_name_too_long` uses the too-long string. Any other name
+    failure uses the required-name string.
+  - A refused save is the existing HTTP request completed log after `call_next` returns
+    and before the middleware returns the response. That log is not a commit. It does
+    not include the name, the description, or the event title
+    ([wishlists.md](wishlists.md)).
   - A failed reload after a successful save reports that the save succeeded but refresh failed.
     A failed reload after cancel retains the loading error instead of claiming cancellation.
 
@@ -598,16 +620,27 @@ and the form is enough). Product wording: `in-docs/spec.md` 4.2 and UC-01.
 
 #### Validation and Request
 
-- **Client rules** (`validate()`, `:438`): the trimmed title must not be empty
-  (`error_title_required`) and must be at most `MAX_TITLE = 255` code points (`[...title].length`,
-  `error_title_too_long`, `{max}`); the date must not be a native `badInput` and, when set,
-  parse to a year 1-9999 (`error_date_invalid`). The `datetime-local` value is treated as UTC:
-  `new Date(value + 'Z').toISOString()` (`buildPayload`, `:455`). Optional fields are trimmed
-  and sent as `null` when empty. The form is `novalidate`; errors are custom, not native bubbles.
-- **Server rules**: see [wishlists.md](wishlists.md) (`WishlistCreateInput`,
-  `wishenka/web/routes/wishlists.py:43-54`). Client and server limits are equal, so a `422` after
-  a valid client check arises only from `trim()` versus `strip()` differences on rare Unicode
-  spaces.
+- **Client rules** (`wishlistNameDecision`, shared with `settingsForm`): edge spaces are
+  the characters Python `str.isspace()` removes. The client does not call
+  `String.prototype.trim`, so U+FEFF is not treated as a space. After that trim the name
+  must include a visible character and be at most `NAME_MAX_CODE_POINTS` (255) code
+  points. Missing, blank, and invisible-only names (U+200B, U+2060, U+FEFF, U+200E,
+  U+200F, including a long run of only those marks) use
+  `miniapp.create.error_title_required`. A longer name uses
+  `miniapp.create.error_title_too_long`. Description and event title use
+  `optionalDetail`: no character ceiling, and empty or spaces-only is `null`. The date
+  must not be a native `badInput` and, when set, parse to a year 1-9999
+  (`error_date_invalid`). The `datetime-local` value is treated as UTC:
+  `new Date(value + 'Z').toISOString()` in `buildPayload`. The create form is
+  `novalidate`; errors are custom, not native bubbles.
+- **What is submitted**: `buildPayload` sends `decision.name`, the one normalized string
+  the check accepted, with no second trim. An edge U+FEFF beside a visible character
+  stays in the body. Settings sends that same string. On failure there is no name to
+  submit, and the typed value stays in the field.
+- **Server rules**: the same decision, in `wishenka/wishlists/name_contract.py`. See
+  [wishlists.md](wishlists.md). A `422` whose `detail[].type` is `wishlist_name_too_long`
+  shows the too-long catalog string. Any other name failure, including
+  `wishlist_name_required`, shows the required-name string.
 - **Submit** (form submit handler): `preventDefault`, ignored while `submitting`,
   previous errors cleared, client validation, then
   `withPending(createBtn, send, miniapp.create.pending)`.
@@ -615,11 +648,14 @@ and the form is enough). Product wording: `in-docs/spec.md` 4.2 and UC-01.
   Repeated taps and Enter while that request is in flight do not send another.
   On success, `showList(list.id)`. If that list load fails it calls `goHome()` and then
   writes `miniapp.list.load_failed` as an error (the list already exists).
-- **Errors**: `mapFailure` (`:465`) reads `err.body.detail[].loc` (last element). A `422` on
-  `name` and/or `event_date` becomes inline errors on those fields (a `422` on `name` always
-  shows `error_title_required`, even for an over-long title; follow-up WISHENKA-320). Any other
-  failure (500, network, 401, 422 without a known field) shows `miniapp.home.create_failed` in
-  `#status` as an error and keeps the form filled for retry.
+- **Errors**: `mapFailure` reads `err.body.detail`. A `422` on `name` uses
+  `nameErrorFromDetail`: type `wishlist_name_too_long` is the too-long string, and any
+  other name failure is `error_title_required`. A `422` on `event_date` is the date
+  string. Any other failure (500, network, 401, 422 without a known field) shows
+  `miniapp.home.create_failed` in `#status` as an error and keeps the form filled for
+  retry. A refused create is the existing HTTP request completed log after `call_next`
+  returns and before the middleware returns the response. That log is not a commit. It
+  does not include the name, the description, or the event title.
 - **Inline errors**: created lazily as `span.settings-field-error#create-error-<name>`
   (`role="alert"`), appended to the field label; the input gets `aria-invalid="true"` and
   `aria-describedby="create-hint-<name> create-error-<name>"`. Typing in a field removes its error
@@ -658,9 +694,12 @@ defect (WISHENKA-321); do not extend `err.body` to other statuses until it is fi
 
 - No idempotency key: a retry after a lost response or a proxy 502/504 can create a second list
   (WISHENKA-322); the owner can delete it (WISHENKA-295).
-- Invisible-only titles (zero-width characters) pass the 1-255 rule; settings editing (`PATCH`)
-  does not follow the title rule (WISHENKA-320). Lists created before this change may still have
-  an empty title; the UI shows `miniapp.common.untitled_wishlist` for them.
+- A wishlist already stored with an empty name stays readable. The UI shows
+  `miniapp.common.untitled_wishlist` when `name` is `""`. Opening the list does not
+  rewrite the title. The next save must supply a real name. A stored name that is only
+  invisible marks is left as stored until that save; the untitled fallback is not applied
+  to it. An omitted stored name that is already over 255 code points is
+  `wishlist_name_too_long` on the next save, not the required-name failure.
 - Only Chromium is exercised by the browser tests (WISHENKA-313).
 
 ### Wishlist Detail Workspace (WISHENKA-290)
@@ -1723,10 +1762,10 @@ across three Jinja2 partials with privacy, performance, and CSP-safe broken-imag
 | `/` | `GET` | No | No | Returns the Telegram Mini App HTML shell. |
 | `/api/auth/csrf` | `GET` | Yes | No | Issues session-bound CSRF token for forms. |
 | `/api/wishlists` | `GET` | Yes | No | Lists user's wishlists (owner and member). |
-| `/api/wishlists` | `POST` | Yes | Yes | Creates a personal wishlist; `name` is required (trimmed, 1-255), otherwise `422`. |
+| `/api/wishlists` | `POST` | Yes | Yes | Creates a personal wishlist. `name` is required, 1 to 255 code points after the shared edge trim; otherwise `422` (`wishlist_name_required` or `wishlist_name_too_long`). |
 | `/api/wishlists/deleted` | `GET` | Yes | No | Restorable soft-deleted lists, one shared window. |
 | `/api/wishlists/{id}` | `GET` | Yes | No | Returns wishlist details and item view. |
-| `/api/wishlists/{id}` | `PATCH` | Yes | Yes | Updates title, description, or event. |
+| `/api/wishlists/{id}` | `PATCH` | Yes | Yes | Updates details under the same name rule. Description and event title have no character ceiling; empty or spaces-only means unset. |
 | `/api/wishlists/{id}` | `DELETE` | Yes | Yes | Classifies first. 410 `retention_expired`. |
 | `/api/wishlists/{id}/restore-deleted` | `POST` | Yes | Yes | 410 `retention_expired` if ended. |
 | `/api/wishlists/{id}/members` | `GET` | Yes | No | Returns list of members and roles. |

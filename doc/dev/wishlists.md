@@ -62,21 +62,24 @@ rejected by the optional authentication dependency.
 
 - `POST /api/wishlists`: Authenticated user creates a list; returns 201. One request
   inserts one list. The body is `WishlistCreateInput`
-  (`wishenka/web/routes/wishlists.py`): `name` is required, is trimmed with `str.strip()`
-  and must be 1-255 code points after trimming; the stored title is the trimmed value.
-  `description`, `event_title` and `event_date` stay optional (inherited from
-  `WishlistInput`). A missing, `null`, blank, non-string or over-long `name` is rejected
-  with `422` and the standard pydantic body whose `detail[].loc` is `["body", "name"]`
-  (an invalid `event_date` gives `["body", "event_date"]`); nothing is created. An empty
-  `{}` body is no longer accepted (WISHENKA-296, reverses the former automatic empty
-  list). `PATCH /api/wishlists/{id}` still uses the permissive `WishlistInput`
-  (`name: str | None`), so a rename to blank or to a longer title is accepted there
-  (follow-up WISHENKA-320). After `create_wishlist` returns, `execute()` logs
-  `wishlist_mutation_committed` with `operation=create_wishlist`, before
-  `get_wishlist_repository()` commits. That record is not proof the commit succeeded.
-  The Mini App sends this request only from one deliberate confirmation of the create
-  form; opening the form does not call it
-  ([miniapp.md](miniapp.md#1-wishlist-creation)).
+  (`wishenka/web/routes/wishlists.py`). Create and edit share one name rule in
+  `wishenka/wishlists/name_contract.py`. `name` is required. After the shared edge
+  trim (`str.strip()`, the characters `str.isspace()` removes), it must be 1 to 255
+  Unicode code points. The stored title is that trimmed string. A missing, `null`,
+  blank, or invisible-only name is `422` with `detail[].type`
+  `wishlist_name_required` and `loc` ending in `name`. The invisible marks are
+  U+200B, U+2060, U+FEFF, U+200E, and U+200F; a long run of only those marks is
+  still the required-name failure. A longer name is a different failure,
+  `wishlist_name_too_long`, not the missing-name message. A non-string `name` is
+  still rejected by the type check. `description` and `event_title` have no
+  character ceiling. Empty or spaces-only means unset. An invalid `event_date`
+  is `422` with `loc` `["body", "event_date"]`. Nothing is created on `422`. An
+  empty `{}` body is not accepted (WISHENKA-296). After `create_wishlist` returns,
+  `execute()` logs `wishlist_mutation_committed` with `operation=create_wishlist`,
+  before `get_wishlist_repository()` commits. That record is not proof the commit
+  succeeded, and a refused create does not write it. The Mini App sends this
+  request only from one deliberate confirmation of the create form; opening the
+  form does not call it ([miniapp.md](miniapp.md#1-wishlist-creation)).
 
 - `GET /api/wishlists`: Lists the caller's active memberships. Set `include_archived=true` to
   include archived lists.
@@ -88,7 +91,20 @@ rejected by the optional authentication dependency.
 
 - `GET /api/wishlists/{id}`: Reads a list for a member, including archived lists.
 
-- `PATCH /api/wishlists/{id}`: Owner or admin updates an active list.
+- `PATCH /api/wishlists/{id}`: Owner or admin updates an active list. The same
+  name rule applies. A sent name goes through `normalize_wishlist_name`: `""`,
+  `null`, spaces, or an invisible-only name is `wishlist_name_required`, and a
+  name over 255 code points after the shared edge trim is `wishlist_name_too_long`.
+  Neither failure writes the row. Omitting `name` leaves a stored title that
+  already passes. Omitting `name` when the stored title is missing, blank, or
+  invisible-only is `wishlist_name_required`. Omitting a stored name that is
+  already over 255 code points is `wishlist_name_too_long`, not the required-name
+  failure. That check is `classify_stored_name` inside `update_wishlist`, before
+  any field is assigned. A stored empty name stays readable: `GET` returns
+  `name` `""`, and the next save must supply a real name. Opening a list does
+  not rewrite the title. `description` and `event_title` again have no character
+  ceiling; empty or spaces-only means unset. The domain service still accepts an
+  empty title, so an older row stays loadable. This task adds no migration.
 
 - `POST /api/wishlists/{id}/archive`: Owner or admin archives an active list.
 
@@ -140,9 +156,12 @@ rejected by the optional authentication dependency.
 
 - `Wish Items API` (`/api/wishlists/{wishlist_id}/items`): Full REST CRUD lifecycle suite for wish items, including atomic reordering (`PUT /reorder`), safe archiving (`POST /{item_id}/archive`), end-of-list restore (`POST /{item_id}/restore`), piece accounting ($1 \le Q \le 1000$), Reduction Lock invariant, collaborative member addressing, and zero-leak Surprise Invariant projections. Detailed specification, request/response models, and telemetry events are documented in [Items Domain Documentation](items.md).
 
-Create requires a non-empty `name` (trimmed, 1-255 code points via `WishlistCreateInput`) with
-optional `description`, `event_title`, and `event_date`; patch accepts optional `name`,
-`description`, `event_title`, and `event_date`. The HTTP representation includes list details and items; member responses include
+Create and edit both require a `name` of 1 to 255 code points after the shared edge
+trim (`wishenka/wishlists/name_contract.py`). An invisible-only name is
+`wishlist_name_required`. A longer name is `wishlist_name_too_long`. Description
+and event title stay optional, with no character ceiling; empty or spaces-only
+means unset. A stored empty name stays readable, and the next save must supply a
+real name. Opening a list does not rewrite the title. The HTTP representation includes list details and items; member responses include
 `role` and `members`, and owner/admin responses also include `share_token` and `invite_token`.
 The public projection uses an explicit allowlist and omits membership, tokens and
 reservation-derived fields. It is returned even when an authenticated caller uses the public URL.
@@ -859,8 +878,12 @@ async def create_wishlist(
   - `event_date`: Optional event timestamp.
   - `invite_token_expires_in`: TTL for the invite token (defaults to 7 days).
 - **Returns**: Newly created `Wishlist` aggregate.
-- **Validation**: the service itself accepts any title (including empty); the title rule (required,
-  trimmed, 1-255) is enforced only by the HTTP layer (`WishlistCreateInput`), see the route list.
+- **Validation**: the service itself accepts any title, including an empty title
+  and a title already over 255 code points. That is why a stored empty name stays
+  readable and why opening a list does not rewrite the title. The name rule
+  (required, 1 to 255 code points after the shared edge trim; invisible-only is
+  `wishlist_name_required`; a longer name is `wishlist_name_too_long`) is enforced
+  on `POST` and `PATCH` by `wishenka/wishlists/name_contract.py`. See the route list.
 
 #### `get_wishlist_by_public_token`
 
@@ -2043,12 +2066,23 @@ from the repository dependency and can follow this record.
 | `public_link_rate_limited` | `WARNING` | Public share/invite link throttled (`wishenka.web.rate_limit`). `HEAD` and `GET` on `/share/{token}` and `/invite/{token}` share one bucket; an over-limit `HEAD` is logged here before routing | `route` (`/share/{token}`, `/invite/{token}`, `/invite/{token}/join`), `method` (`GET`, `HEAD`, or `POST`), `client_ip`, `retry_after` |
 | `item_missing_parent_wishlist` | `ERROR` | `WishItem.wishlist` is `None` in `_require_item_wishlist` | `item_id`, `wishlist_id` |
 
-Creation notes (WISHENKA-296): a rejected creation (`422`) has no dedicated event; it is visible
-only in the request-completed access line with `status_code=422` (pydantic rejects before the
-handler runs, and the repository has no global `RequestValidationError` handler). The service
-`wishlist_created` record logs the user-entered `event_date` (ISO value, pre-existing); titles,
-descriptions and event titles are never logged. The paths are pinned by
-`tests/test_wishlist_create_observability.py`.
+Creation notes (WISHENKA-296): a rejected creation (`422`) has no dedicated event.
+The service `wishlist_created` record logs the user-entered `event_date` (ISO
+value, pre-existing); titles, descriptions and event titles are never logged.
+The paths are pinned by `tests/test_wishlist_create_observability.py`.
+
+A refused create or edit (WISHENKA-320) is the existing completed-request INFO
+from `RequestLoggingMiddleware` in `wishenka/web/app.py`
+(`HTTP request completed`, `extra` fields `method`, `path`, `status_code`
+`422`, `duration_ms`). The middleware writes that line after `call_next`
+returns and before it returns the response. That log is not a commit. It does
+not include the name, the description, or the event title.
+`wishlist_name_required` and `wishlist_name_too_long` stay in the HTTP body.
+A sent name that fails stops in `WishlistCreateInput` or `WishlistInput` before
+`create_wishlist` or `update_wishlist` runs. An edit that omits `name` while
+the stored title fails raises `422` inside `update_wishlist` before any field
+is assigned. Neither path writes `wishlist_mutation_committed`,
+`wishlist_created`, or `wishlist_updated`.
 
 ---
 

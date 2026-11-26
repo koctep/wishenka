@@ -53,6 +53,7 @@ class BrowserServer:
     base_url: str
     owner_token: str
     viewer_token: str
+    database_path: Path | None = None
 
 
 # --- parallel run and fast test storage (WISHENKA-166) ----------------------------------------
@@ -253,6 +254,7 @@ def wishlist_server(migrated_db_template: Path, tmp_path: Path) -> Iterator[Brow
             base_url=f"http://127.0.0.1:{port}",
             owner_token=sessions.create_token(OWNER_TELEGRAM_ID, "Owner"),
             viewer_token=sessions.create_token(VIEWER_TELEGRAM_ID, "Viewer"),
+            database_path=database,
         )
     finally:
         server.should_exit = True

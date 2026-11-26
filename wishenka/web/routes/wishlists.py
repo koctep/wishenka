@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from sqlalchemy.exc import SQLAlchemyError
 
 from wishenka.auth.dependencies import get_current_user, get_optional_current_user, get_settings
@@ -24,6 +24,12 @@ from wishenka.wishlists.exceptions import (
     WishlistRetentionExpiredError,
 )
 from wishenka.wishlists.models import Wishlist, WishlistRole, WishlistStatus
+from wishenka.wishlists.name_contract import (
+    classify_stored_name,
+    coerce_optional_detail,
+    coerce_wishlist_name,
+    stored_name_error_detail,
+)
 from wishenka.wishlists.policy import WishlistAccessPolicy
 from wishenka.wishlists.repo_ops import RepoWishlistOps
 from wishenka.wishlists.repository import WishlistRepository
@@ -50,26 +56,36 @@ RetentionDays = Annotated[int, Depends(get_retention_days)]
 
 
 class WishlistInput(BaseModel):
-    """Editable optional wishlist details."""
+    """Editable wishlist details. A present name must pass the shared contract."""
 
     name: str | None = None
     description: str | None = None
     event_title: str | None = None
     event_date: datetime | None = None
 
+    @field_validator("name", mode="before")
+    @classmethod
+    def _name(cls, value: object) -> object:
+        return coerce_wishlist_name(value)
+
+    @field_validator("description", "event_title", mode="before")
+    @classmethod
+    def _optional_text(cls, value: object) -> object:
+        return coerce_optional_detail(value)
+
 
 class WishlistCreateInput(WishlistInput):
-    """Creation payload: unlike settings edits the title is required."""
+    """Creation payload: the title is required, including when the key is absent."""
 
     name: str
 
-    @field_validator("name")
+    @model_validator(mode="before")
     @classmethod
-    def _title(cls, value: str) -> str:
-        trimmed = value.strip()
-        if not 1 <= len(trimmed) <= 255:
-            raise ValueError("title must be 1-255 characters")
-        return trimmed
+    def _missing_name_is_present(cls, data: Any) -> Any:
+        """A missing name is the required-name error, not Pydantic's missing type."""
+        if isinstance(data, dict) and "name" not in data:
+            return {**data, "name": None}
+        return data
 
 
 async def execute[T](
@@ -508,6 +524,13 @@ async def update_wishlist(
                 },
             )
             raise HTTPException(status_code=409, detail="Wishlist is archived")
+        if "name" not in body.model_fields_set:
+            failure = classify_stored_name(wl.title)
+            if failure is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=stored_name_error_detail(failure),
+                )
         before = (wl.title, wl.description, wl.event_title, wl.event_date)
         for key, value in body.model_dump(exclude_unset=True).items():
             setattr(

@@ -45,10 +45,11 @@ LIST_TITLE = "#app .list-title"
 MAX_TITLE = 255
 
 # Fetch wrapper installed before the Mini App boots: counts requests by kind and forces,
-# holds or fakes answers (modes: real | hold | 500 | 422name | 422date | 422unknown).
+# holds or fakes answers (modes: real | hold | 500 | 422name | 422tooLong | 422date | 422unknown).
 PRELOAD = """(() => {
   const real = window.fetch.bind(window);
-  const state = {counts: {create: 0, home: 0, detail: 0}, mode: {}, waiters: {}};
+  const state = {counts: {create: 0, home: 0, detail: 0}, mode: {}, waiters: {},
+    lastCreateBody: null};
   state.release = key => (state.waiters[key] || []).splice(0).forEach(resolve => resolve());
   state.errors = [];
   window.addEventListener('error', event => state.errors.push(String(event.message)));
@@ -62,16 +63,21 @@ PRELOAD = """(() => {
   };
   const invalid = loc => new Response(JSON.stringify({detail: [{loc, msg: 'bad', type: 'x'}]}),
     {status: 422, headers: {'content-type': 'application/json'}});
+  const tooLong = new Response(JSON.stringify({detail: [{loc: ['body', 'name'],
+    msg: 'too long', type: 'wishlist_name_too_long', ctx: {max_length: 255}}]}),
+    {status: 422, headers: {'content-type': 'application/json'}});
   window.fetch = async (input, options = {}) => {
     const url = new URL(typeof input === 'string' ? input : input.url, location.href);
     const key = classify((options.method || 'GET').toUpperCase(), url.pathname);
     if (!key) return real(input, options);
     state.counts[key] += 1;
+    if (key === 'create') state.lastCreateBody = options.body || null;
     const mode = state.mode[key] || 'real';
     if (mode === '500') {
       return new Response('{}', {status: 500, headers: {'content-type': 'application/json'}});
     }
     if (mode === '422name') return invalid(['body', 'name']);
+    if (mode === '422tooLong') return tooLong;
     if (mode === '422date') return invalid(['body', 'event_date']);
     if (mode === '422unknown') return invalid(['body', 'description']);
     if (mode === 'hold') {
@@ -853,3 +859,79 @@ def test_tab_order_follows_the_visual_order(open_home: OpenHome) -> None:
         "submit",
         "cancel",
     ], order
+
+
+# --- WISHENKA-320 name contract ---------------------------------------------------------------
+
+
+def _wait_name_decision(page: CdpPage) -> None:
+    page.wait_for(
+        "create name decision",
+        "!!document.getElementById('create-error-name') || window.__t.counts.create > 0",
+        timeout=WAIT,
+    )
+
+
+@pytest.mark.parametrize("locale", ["en", "ru"])
+@pytest.mark.parametrize(
+    ("label", "title"),
+    [("zwsp", "\u200b"), ("marks-and-spaces", " \u200b \u2060 \ufeff ")],
+)
+def test_invisible_only_name_shows_the_required_message_and_creates_nothing(
+    locale: Literal["en", "ru"],
+    label: str,
+    title: str,
+    open_home: OpenHome,
+    wishlist_server: BrowserServer,
+) -> None:
+    page = open_home(locale)
+    _open_form(page)
+    _set(page, "name", title)
+    _set(page, "description", "keep me")
+    page.click(SUBMIT)
+    _wait_name_decision(page)
+
+    assert _counts(page)["create"] == 0, f"invisible-only name {label} must not be posted"
+    assert _error_text(page, "name") == _create_text(locale, "error_title_required")
+    assert _values(page)["name"] == title
+    assert _values(page)["description"] == "keep me"
+    assert _lists(wishlist_server) == []
+
+
+@pytest.mark.parametrize("locale", ["en", "ru"])
+def test_too_long_error_type_uses_the_too_long_catalog_string(
+    locale: Literal["en", "ru"], open_home: OpenHome, wishlist_server: BrowserServer
+) -> None:
+    page = open_home(locale)
+    _open_form(page)
+    _set(page, "name", "Birthday")
+    _mode(page, "create", "422tooLong")
+    page.click(SUBMIT)
+    page.wait_for(
+        "inline title error", "!!document.getElementById('create-error-name')", timeout=WAIT
+    )
+
+    required = _create_text(locale, "error_title_required")
+    too_long = _create_text(locale, "error_title_too_long", max=MAX_TITLE)
+    assert _error_text(page, "name") == too_long, (
+        "422 type wishlist_name_too_long must use the too-long catalog string; "
+        f"shown={_error_text(page, 'name')!r} required={required!r}"
+    )
+    assert _values(page)["name"] == "Birthday"
+    assert page.evaluate("document.querySelector('#app .list-title')") is None
+    assert _lists(wishlist_server) == []
+
+
+def test_edge_bom_stays_in_the_submitted_name(
+    open_home: OpenHome, wishlist_server: BrowserServer
+) -> None:
+    """The POST body keeps an edge U+FEFF. A second trim would drop it."""
+    page = open_home("en")
+    _open_form(page)
+    _set(page, "name", "  \ufeffHi  ")
+    page.click(SUBMIT)
+    _wait_name_decision(page)
+
+    body = json.loads(page.evaluate("window.__t.lastCreateBody"))
+    assert body["name"] == "\ufeffHi"
+    assert [item["name"] for item in _lists(wishlist_server)] == ["\ufeffHi"]

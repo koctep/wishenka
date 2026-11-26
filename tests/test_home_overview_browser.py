@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import Any
 
 import httpx
@@ -56,14 +57,20 @@ def _seed_rich_overview(server: BrowserServer, locale: SupportedLocale) -> dict[
         )
         owned_item.raise_for_status()
 
-        # Creation requires a title (WISHENKA-296); a legacy untitled list is made by renaming.
+        # Creation requires a title. A legacy empty title is stored directly, not via PATCH.
         owned_untitled = owner_api.post("/api/wishlists", json={"name": "Temporary"})
         owned_untitled.raise_for_status()
-        cleared = owner_api.patch(
-            f"/api/wishlists/{owned_untitled.json()['id']}", json={"name": ""}
-        )
-        cleared.raise_for_status()
-        assert cleared.json()["name"] == ""
+        untitled_id = int(owned_untitled.json()["id"])
+        assert server.database_path is not None
+        with sqlite3.connect(server.database_path) as connection:
+            updated = connection.execute(
+                "UPDATE wl_lists SET title = '' WHERE id = ?", (untitled_id,)
+            )
+            connection.commit()
+            assert updated.rowcount == 1
+        stored = owner_api.get(f"/api/wishlists/{untitled_id}")
+        stored.raise_for_status()
+        assert stored.json()["name"] == ""
 
     with httpx.Client(base_url=server.base_url, headers=viewer_headers, timeout=10) as viewer_api:
         # Viewer reserves an item in owner's list (must NEVER leak on owner's Home screen).
