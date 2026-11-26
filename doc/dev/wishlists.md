@@ -719,6 +719,15 @@ flowchart TD
   passes `current_user=None` into token resolution and does not record a view.
   Opening the share link as a non-owner still writes `wl_share_access` first
   (WISHENKA-302), so the following `record_view` sees a valid grant.
+- **History success logs**: `view_history_recorded` is written once, by the
+  domain record operation, logger `wishenka.wishlists`. `view_history_listed`
+  is written once, by the domain list operation, same logger. The history
+  route does not write either event. A deleted wishlist on record uses
+  `view_history_deleted_wishlist_denied`. It does not use
+  `favorite_deleted_wishlist_denied`. `favorite_deleted_wishlist_denied` stays
+  on adding a favorite. These handler events are not `HTTP request completed`.
+  That middleware line is after `call_next` returns and before the response
+  is returned, and it is not a commit.
 - **Migration** `purge_legacy_non_member_view_history`: deletes `wl_view_history`
   rows that are not owner, member, or current-grant. `ROLLBACK_POLICY = "one-way"`.
 
@@ -785,26 +794,29 @@ Database URL and WAL settings are in
   The body is always `{"detail": "Wishlist not found"}` for a missing id, a deleted
   list, and a stranger. Check `view_history_access_denied` (`WARNING`, non-member
   without a current grant) or `view_history_deleted_wishlist_denied` (`WARNING`,
-  soft-deleted). Neither event includes the title or `public_token`. A missing id
-  raises `WishlistNotFoundError` without `view_history_access_denied`.
+  soft-deleted). A deleted wishlist on record uses
+  `view_history_deleted_wishlist_denied`. It does not use
+  `favorite_deleted_wishlist_denied`. That favorites denial stays on
+  `add_favorite`. Neither denial includes the title or `public_token`. A missing
+  id raises `WishlistNotFoundError` without `view_history_access_denied`.
 - **Share visit did not create a history row.** Anonymous
   `GET /api/public/wishlists/{token}` never records history. The caller must be
   authenticated on `GET /share/{public_token}` or
   `GET /api/public/wishlists/{token}/view`. Those routes call
-  `record_share_view_if_authenticated`, which calls `record_view` and does not
-  log success. Production `RepoWishlistOps.record_view` does not emit
-  `view_history_recorded` either. The HTML share route logs
+  `record_share_view_if_authenticated`, which calls `record_view`. The helper
+  does not write `view_history_recorded`. The domain record operation writes
+  it once, on logger `wishenka.wishlists`, after the entry is stored.
+  `WishlistService.record_view` and `RepoWishlistOps.record_view` both write
+  it. The history route does not. The HTML share route logs
   `wishlist_shared_view` (`INFO`, `wishlist_id`) before it builds the template
   response. The JSON route logs `public_entry_viewed` (`INFO`, `wishlist_id`,
-  `identified` true) inside the action, before `execute` finishes. Those events
-  establish that the route reached that success log. They do not establish that
-  the HTTP response was sent or that the transaction completed. Confirm the history
-  row with `GET /api/history`. `view_history_recorded` (`INFO`, `wishlist_id`,
-  `user_id`) is emitted by the `POST /api/history/{id}` route and by
-  `WishlistService.record_view` when that in-memory service is injected.
-  Its absence after a share visit does not mean the write failed. A refused
-  write still logs `view_history_access_denied` or
-  `view_history_deleted_wishlist_denied`. The helper swallows
+  `identified` true) inside the action, before `execute` finishes. Those
+  events establish that the route reached that success log. They do not
+  establish that the HTTP response was sent or that the transaction
+  completed. Confirm the history row with `GET /api/history`. A refused write
+  still logs `view_history_access_denied` or
+  `view_history_deleted_wishlist_denied`. A deleted wishlist does not log
+  `favorite_deleted_wishlist_denied`. The helper swallows
   `WishlistNotFoundError`, so the page can render without a history row.
 - **List vanished from `GET /api/history` after a membership or share change.**
   `remove_member` deletes the row when the user is not the owner and has no grant
@@ -824,9 +836,15 @@ Database URL and WAL settings are in
   keeps the row id and still receives a new sequence. Rows that already existed
   were filled once from the old id; the next recording replaces that value.
 - **`view_history_recorded` and `view_history_listed` do not include titles or the
-  full history.** They are not the middleware line `HTTP request completed`, and
-  not the commit. Record fields are `wishlist_id` and `user_id`. List fields are
-  `user_id` and `count`. `recorded_seq` is not on either event.
+  full history.** Each is written once by the domain operation on
+  `wishenka.wishlists`. The history route does not write them. Record fields
+  are `wishlist_id` and `user_id`. List fields are `user_id` and `count`.
+  `recorded_seq` is not on either event. These handler events are not
+  `HTTP request completed`. That middleware line is after `call_next` returns
+  and before the response is returned, and it is not a commit. A deleted
+  wishlist on record uses `view_history_deleted_wishlist_denied`. It does not
+  use `favorite_deleted_wishlist_denied`. That denial stays on adding a
+  favorite.
 - **History shows reservation or buyer data.** It must not. `GET /api/history`
   builds the allowlist in `get_history` (`wishenka/web/routes/wishlists.py`). Gift
   details stay on item and reservation endpoints, behind `is_recipient`.
@@ -1226,6 +1244,8 @@ async def remove_favorite(
     and a valid `wl_share_access` grant matching `wl.public_token` (logs `favorite_access_denied`
     at `WARNING` with `wishlist_id` and `user_id` only). Returning `404` matches missing/deleted
     wishlists to prevent wishlist ID enumeration.
+    `favorite_deleted_wishlist_denied` stays on adding a favorite. Recording a
+    view of a deleted wishlist uses `view_history_deleted_wishlist_denied`.
 - **Revocation Hooks**:
   - `remove_member`: After removing membership, deletes the user's `wl_favorites` row and
     `wl_view_history` row if they hold no valid `wl_share_access` grant for the current
@@ -1279,6 +1299,14 @@ async def record_view(
   in SQLite before that limit. `WishlistService.record_view` (in-memory) also drops
   that user's oldest rows past 20. `RepoWishlistOps.record_view` keeps older stored
   rows. SQL listing applies the limit after the access filter.
+- **Log**: `view_history_recorded` is written once, by this domain record
+  operation, on logger `wishenka.wishlists`. `POST /api/history/{wishlist_id}`
+  does not write it. A deleted wishlist uses
+  `view_history_deleted_wishlist_denied` and does not use
+  `favorite_deleted_wishlist_denied`. That favorites denial stays on
+  `add_favorite`. This event is not `HTTP request completed`. That middleware
+  line is after `call_next` returns and before the response is returned, and
+  it is not a commit.
 
 #### `get_history` & `clear_history`
 
@@ -1303,8 +1331,11 @@ async def clear_history(
   used in memory and in SQLite before the existing limit. Omits soft-deleted
   lists and lists that fail `can_view_history` (not owner,
   not member, no current share grant). `RepoWishlistOps` loads the SQL-filtered page
-  and checks the policy again. `WishlistService` filters in memory and logs
-  `view_history_listed`. The HTTP route also logs `view_history_listed` with `count`.
+  and checks the policy again. `WishlistService` filters in memory.
+  `view_history_listed` is written once, by this domain list operation, on
+  logger `wishenka.wishlists`. `GET /api/history` does not write it. The event
+  is not `HTTP request completed`. That middleware line is after `call_next`
+  returns and before the response is returned, and it is not a commit.
 - `clear_history`: Removes all viewing history entries for the authenticated user and logs
   `view_history_cleared` with `user_id` and `removed_count`. This is the only emitter: the
   `DELETE /api/history` route does not log it (WISHENKA-292). Screen:
@@ -2087,17 +2118,17 @@ from the repository dependency and can follow this record.
 | `favorite_added` | `INFO` | Favorite added | `wishlist_id`, `user_id` |
 | `favorite_removed` | `INFO` | Favorite removed | `wishlist_id`, `user_id` |
 | `favorite_own_wishlist_denied` | `WARNING` | Self-favorite blocked | `wishlist_id`, `user_id` |
-| `favorite_deleted_wishlist_denied` | `WARNING` | Deleted list blocked | `wishlist_id`, `user_id` |
+| `favorite_deleted_wishlist_denied` | `WARNING` | Adding a favorite | `wishlist_id`, `user_id` |
 | `favorite_access_denied` | `WARNING` | Non-owner lacks membership or valid `wl_share_access` grant (HTTP 404 returned) | `wishlist_id`, `user_id` |
 | `share_access_granted` | `INFO` | Authenticated non-owner resolved active share link (committed) | `wishlist_id`, `user_id` |
 | `favorite_access_revoked` | `INFO` | Removed member's favorite deleted due to no active share grant (committed) | `wishlist_id`, `user_id`, `actor_id`, `reason` (`member_removed`) |
 | `share_access_revoked` | `INFO` | Share grants, non-member favorites, and non-member view history revoked on token rotation (committed) | `wishlist_id`, `actor_id`, `reason` (`public_token_rotated` / `wishlist_restored` / `ownership_transferred`), `revoked_grants`, `revoked_favorites`, `revoked_history` |
 | `legacy_non_member_favorites_purged` | `INFO` | Legacy non-member `wl_favorites` rows purged in `add_share_access_and_purge_favorites` migration | `rows` |
 | `legacy_non_member_view_history_purged` | `INFO` | Legacy unverified non-member `wl_view_history` rows purged by `purge_legacy_non_member_view_history` | `rows` |
-| `view_history_listed` | `INFO` | History fetched | `user_id`, `count` |
-| `view_history_recorded` | `INFO` | View recorded by `POST /api/history/{id}` or `WishlistService.record_view`. Share routes and `RepoWishlistOps.record_view` do not emit it | `wishlist_id`, `user_id` |
+| `view_history_listed` | `INFO` | Once by domain list. Route does not write | `user_id`, `count` |
+| `view_history_recorded` | `INFO` | Domain record once. Route does not | `wishlist_id`, `user_id` |
 | `view_history_access_denied` | `WARNING` | Non-member without a current share grant tried to record a view (HTTP 404) | `wishlist_id`, `user_id` |
-| `view_history_deleted_wishlist_denied` | `WARNING` | Record attempted on a soft-deleted list (HTTP 404) | `wishlist_id`, `user_id` |
+| `view_history_deleted_wishlist_denied` | `WARNING` | Deleted record | `wishlist_id`, `user_id` |
 | `view_history_access_revoked` | `INFO` | Member removal deleted history because no current share grant remained (committed) | `wishlist_id`, `user_id`, `actor_id`, `reason` (`member_removed`) |
 | `view_history_cleared` | `INFO` | History cleared (once per delete) | `user_id`, `removed_count` |
 | `wishlist_store_read` | `INFO` | State read | `scoped`, `wishlist_id`, `wishlists_count`, `items_count` |
@@ -2121,9 +2152,15 @@ from the repository dependency and can follow this record.
 | `public_link_rate_limited` | `WARNING` | Public share/invite link throttled (`wishenka.web.rate_limit`). `HEAD` and `GET` on `/share/{token}` and `/invite/{token}` share one bucket; an over-limit `HEAD` is logged here before routing | `route` (`/share/{token}`, `/invite/{token}`, `/invite/{token}/join`), `method` (`GET`, `HEAD`, or `POST`), `client_ip`, `retry_after` |
 | `item_missing_parent_wishlist` | `ERROR` | `WishItem.wishlist` is `None` in `_require_item_wishlist` | `item_id`, `wishlist_id` |
 
-`view_history_recorded` and `view_history_listed` do not include titles or the
-full history. They are not the middleware line `HTTP request completed`, and
-not the commit.
+`view_history_recorded` is written once, by the domain record operation, logger
+`wishenka.wishlists`. `view_history_listed` is written once, by the domain list
+operation, same logger. The history route does not write either event. A
+deleted wishlist on record uses `view_history_deleted_wishlist_denied`. It does
+not use `favorite_deleted_wishlist_denied`. `favorite_deleted_wishlist_denied`
+stays on adding a favorite. Neither history event includes titles or the full
+history. These handler events are not `HTTP request completed`. That middleware
+line is after `call_next` returns and before the response is returned, and it
+is not a commit.
 
 Creation notes (WISHENKA-296): a rejected creation (`422`) has no dedicated event.
 The service `wishlist_created` record logs the user-entered `event_date` (ISO
@@ -2236,6 +2273,8 @@ WishlistError
   `purge_legacy_non_member_view_history` already removed legacy stranger rows.
 - **Resolution**: Open the current share link while authenticated, or rejoin by invite.
   Compare `view_history_access_denied` with a truly missing id (no such event).
+  A deleted wishlist on record uses `view_history_deleted_wishlist_denied`.
+  It does not use `favorite_deleted_wishlist_denied`.
   Details: [Viewing History Access](#viewing-history-access-wishenka-303).
 
 #### `RuntimeError` ("Wishlist storage operation failed")

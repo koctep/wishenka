@@ -1255,6 +1255,16 @@ class RepoWishlistOps:
             viewed_at=datetime.now(UTC),
         )
         await self.repo.record_view(entry)
+        logger.info(
+            "Wishlist %s view recorded for user %s",
+            wishlist_id,
+            user.telegram_id,
+            extra={
+                "event": "view_history_recorded",
+                "wishlist_id": wishlist_id,
+                "user_id": user.telegram_id,
+            },
+        )
         return entry
 
     async def get_history(
@@ -1277,6 +1287,16 @@ class RepoWishlistOps:
             )
             if WishlistAccessPolicy.can_view_history(user, wl, has_share_access=has_share):
                 results.append((wl, entry.viewed_at))
+        logger.info(
+            "Viewing history listed for user %s (count=%s)",
+            user.telegram_id,
+            len(results),
+            extra={
+                "event": "view_history_listed",
+                "user_id": user.telegram_id,
+                "count": len(results),
+            },
+        )
         return results
 
     async def clear_history(self, user: AuthenticatedUser) -> None:

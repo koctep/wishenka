@@ -138,35 +138,35 @@ def test_view_history_lifecycle_observability(
     wl_id = asyncio.run(seed())
 
     # 1. Record view -> view_history_recorded
-    with caplog.at_level(logging.INFO, logger="wishenka.web.wishlists"):
+    with caplog.at_level(logging.INFO, logger="wishenka.wishlists"):
         resp = client.post(f"/api/history/{wl_id}", headers=headers)
         assert resp.status_code == 200
 
     rec_records = [
         r
         for r in caplog.records
-        if r.name == "wishenka.web.wishlists"
+        if r.name == "wishenka.wishlists"
         and r.levelname == "INFO"
         and getattr(r, "event", None) == "view_history_recorded"
     ]
-    assert len(rec_records) >= 1
+    assert len(rec_records) == 1
     assert getattr(rec_records[0], "wishlist_id", None) == wl_id
     assert getattr(rec_records[0], "user_id", None) == 202
 
     # 2. List history -> view_history_listed
     caplog.clear()
-    with caplog.at_level(logging.INFO, logger="wishenka.web.wishlists"):
+    with caplog.at_level(logging.INFO, logger="wishenka.wishlists"):
         resp = client.get("/api/history", headers=headers)
         assert resp.status_code == 200
 
     hist_records = [
         r
         for r in caplog.records
-        if r.name == "wishenka.web.wishlists"
+        if r.name == "wishenka.wishlists"
         and r.levelname == "INFO"
         and getattr(r, "event", None) == "view_history_listed"
     ]
-    assert len(hist_records) >= 1
+    assert len(hist_records) == 1
     assert getattr(hist_records[0], "user_id", None) == 202
     assert getattr(hist_records[0], "count", None) == 1
 

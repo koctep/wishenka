@@ -1271,17 +1271,26 @@ the `purge_legacy_non_member_view_history` migration are in
 
 #### Troubleshooting
 
-- **Empty vs error**: the empty state (`.history-empty`, no alert) means `GET /api/history`
-  returned `[]` (nothing recorded, cleared, deleted, or access revoked). The error state
-  (`.history-error` with Retry) means the request failed; check the request log for
-  `GET /api/history` and the event `view_history_listed` (`count`).
-- **Entry missing after opening a list**: the background `POST /api/history/{id}` failed,
-  or the open was anonymous, or the caller is not a member and has not opened the
-  current share link while signed in (`404`). Look for `view_history_recorded` on
-  success and `view_history_access_denied` when access was refused. A deleted list
-  logs `view_history_deleted_wishlist_denied`. `view_history_recorded` and
-  `view_history_listed` do not include titles or the full history. They are not
-  the middleware line `HTTP request completed`, and not the commit.
+- **Empty vs error**: the empty state (`.history-empty`, no alert) means
+  `GET /api/history` returned `[]` (nothing recorded, cleared, deleted, or
+  access revoked). The error state (`.history-error` with Retry) means the
+  request failed. `view_history_listed` (`count`) is written once by the
+  domain list operation, logger `wishenka.wishlists`. The history route does
+  not write it. It is not `HTTP request completed`. That middleware line is
+  after `call_next` returns and before the response is returned, and it is
+  not a commit.
+- **Entry missing after opening a list**: the background `POST /api/history/{id}`
+  failed, or the open was anonymous, or the caller is not a member and has not
+  opened the current share link while signed in (`404`). Look for
+  `view_history_recorded` on success. It is written once by the domain record
+  operation, logger `wishenka.wishlists`. The history route does not write it.
+  Access refused logs `view_history_access_denied`. A deleted wishlist on
+  record uses `view_history_deleted_wishlist_denied`. It does not use
+  `favorite_deleted_wishlist_denied`. `view_history_recorded` and
+  `view_history_listed` do not include titles or the full history. These
+  handler events are not `HTTP request completed`. That middleware line is
+  after `call_next` returns and before the response is returned, and it is
+  not a commit.
 - **Clear stuck in "clearing"**: the `DELETE` never settled (slow or dropped connection). The
   buttons stay disabled by design to prevent duplicates; reload the screen. A failed request
   shows `miniapp.history.clear_failed` and re-enables the buttons.

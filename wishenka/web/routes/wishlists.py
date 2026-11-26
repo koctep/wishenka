@@ -461,16 +461,6 @@ async def get_history(request: Request, user: User, repo: WishlistRepo) -> list[
                     "role": role,
                 }
             )
-        logger.info(
-            "Viewing history listed for user %s (count=%s)",
-            user.telegram_id,
-            len(result),
-            extra={
-                "event": "view_history_listed",
-                "user_id": user.telegram_id,
-                "count": len(result),
-            },
-        )
         return result
 
     return await execute(request, action, repo=repo)
@@ -482,16 +472,6 @@ async def record_view(
 ) -> dict[str, Any]:
     async def action(service: Any) -> dict[str, Any]:
         await service.record_view(user, wishlist_id)
-        logger.info(
-            "Wishlist %s view recorded for user %s",
-            wishlist_id,
-            user.telegram_id,
-            extra={
-                "event": "view_history_recorded",
-                "wishlist_id": wishlist_id,
-                "user_id": user.telegram_id,
-            },
-        )
         return {"status": "recorded", "wishlist_id": wishlist_id}
 
     return await execute(request, action, repo=repo)
