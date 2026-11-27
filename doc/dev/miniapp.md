@@ -355,8 +355,13 @@ each action visible pending, success and error feedback. It adds no endpoint.
 - `htmx:sendError`, `htmx:timeout` and `htmx:responseError` fill `#feedback` with
   `web.common.request_failed` (from `data-i18n-request-failed` on `<body>`; English fallback in
   the script) and `data-kind="error"`.
-- **Left alone**: reservation requests, `.receipt-sheet` and answers marked `X-Reorder-Refusal` or
-  `X-Receipt-Refusal` keep their own messages; GET requests report no failure.
+- **Left alone**: reservation requests and any trigger inside `[data-own-feedback]`
+  keep their own pending and failure messages. Answers marked `X-Reorder-Refusal`
+  do too. GET requests report no failure. `app.js` does not read a receipt header
+  and does not select `.receipt-sheet`. A receipt refusal is claimed earlier in
+  `receipt.js` (`detail.skipSharedDialog`, and `stopPropagation` on
+  `htmx:responseError`). See
+  [gift-receipt.md](gift-receipt.md#why-htmxbeforeswap-is-overridden).
 - The same pending/feedback logic exists in `miniapp.js` and `app.js` (WISHENKA-310).
 
 #### Unavailable Page (`wishenka/web/unavailable.py`)
@@ -1601,8 +1606,10 @@ no globals (`toggleWishCard` is no longer a global function).
   `<script src="/static/receipt.js" defer>` after `wishlist.js` in `base.html`; IIFE, delegated
   listeners on `document`, texts via `textContent` only, no inline handler. It owns the quantity
   summary, dialog dismissal and focus, the single in-flight `htmx.ajax('POST', ...)` of the
-  receipt and the guarded `htmx:beforeSwap` override keyed on `X-Receipt-Refusal` (htmx 1.9.12
-  does not swap 4xx and 5xx). See
+  receipt and the capture-phase claim of `X-Receipt-Refusal` (htmx 1.9.12 does not
+  swap 4xx and 5xx). Any present header sets `detail.skipSharedDialog`; only
+  `REFUSAL_REASONS` also opts into the swap. A capture `htmx:responseError`
+  listener calls `stopPropagation` for that header. See
   [gift-receipt.md](gift-receipt.md#why-htmxbeforeswap-is-overridden).
 - **Tests**: behavioural browser tests drive a real headless Chromium over CDP, offline, against a
   per-test server and database: `tests/test_wishlist_cards_browser.py` (card toggle),
@@ -1687,8 +1694,11 @@ of inline JavaScript and inline `on*` event handlers from SSR templates so a str
     (`/share/{token}`) pages, `defer` script order, and zero `on*` attributes plus `data-*`
     controls on `item_edit_modal.html`, `item_archive_modal.html`, and `item_preview_card.html`.
   - `tests/test_receipt_static_script.py` enforces zero inline `<script>` elements on `base.html`
-    pages, verifies `/static/app.js` serving and `defer` order, and preserves isolation of
-    `X-Reorder-Refusal` (`wishlist.js`) and `X-Receipt-Refusal` (`receipt.js`).
+    pages, verifies `/static/app.js` serving and `defer` order, and keeps
+    `X-Reorder-Refusal` in `wishlist.js`. `X-Receipt-Refusal` is read only in
+    `receipt.js`. `test_shared_app_script_has_no_gift_receipt_reference` rejects
+    that header, `.receipt-sheet`, and the substring `receipt` in `/static/app.js`
+    (raw and comment-stripped, case-insensitive).
 
 #### 9.9. Modal CSS Layering, `htmx:beforeSwap` & OOB Error Contracts (WISHENKA-160)
 
@@ -1717,10 +1727,14 @@ of inline JavaScript and inline `on*` event handlers from SSR templates so a str
     2. `detail.elt.closest('#item-modal-container')` is truthy; or
     3. `detail.target.id === 'items-list'` and `xhr.responseText` contains an `hx-swap-oob`
        fragment for `id="item-modal-container"`.
-  - **Explicit Exclusions**: Responses carrying `X-Reorder-Refusal` (handled by `wishlist.js`
-    `htmx:responseError`), `X-Receipt-Refusal` (handled by `receipt.js` `htmx:beforeSwap`),
-    requests matching `reservationRequestPath(detail.elt)` (handled by `static/app.js`
-    `htmx:afterRequest`), and non-HTML (e.g., JSON) responses are left untouched.
+  - **Explicit Exclusions**: The listener returns without changing `shouldSwap` or
+    `isError` when `detail.skipSharedDialog` is true. `receipt.js` sets that flag
+    in the capture phase for every `X-Receipt-Refusal` value. `app.js` does not
+    read the header and does not select `.receipt-sheet`. It also returns when
+    `X-Reorder-Refusal` is present (`wishlist.js` handles that on
+    `htmx:responseError`) and when `reservationRequestPath(detail.elt)` matches.
+    Non-HTML responses are left untouched. Shared pending and `#feedback` skip a
+    trigger inside `[data-own-feedback]`.
 - **Server Error Response Contracts (`wishenka/web/routes/items_ui.py`)**:
   - **Recoverable create/edit-modal errors (`400` validation in `submit_new_item` with
     `is_edit=False` and in `submit_edit_item` with `is_edit=True`, plus `409` Reduction Lock and
@@ -1948,13 +1962,13 @@ The following settings configure the Mini App and web security layer:
   itself is ignored. After a drag, a tap within 400 ms is swallowed; tap again.
 
 ### 13. Receipt Dialog Shows Only a Generic Sentence or Nothing
-- **Cause**: htmx 1.9.12 does not swap 4xx and 5xx answers. The dialog shows a refusal only when
-  the answer carries `X-Receipt-Refusal` with a value of the closed set (`receipt.js`
-  `REFUSAL_REASONS`); an unmarked error (network, 500) gives «Не удалось сохранить отметку.
-  Повторите попытку.». The same default hides the errors of the older edit and archive modals
-  (WISHENKA-160).
+- **Cause**: htmx 1.9.12 does not swap 4xx and 5xx answers. `receipt.js` sets
+  `detail.skipSharedDialog` for every `X-Receipt-Refusal` value and opts into the
+  swap only when the value is in `REFUSAL_REASONS`. An unmarked error (network,
+  500) gives «Не удалось сохранить отметку. Повторите попытку.». Edit and archive
+  HTML errors are swapped by `app.js` only when that flag is absent (WISHENKA-160).
 - **Solution**: Check the response headers of the `/web/.../receipt` request. See
-  [gift-receipt.md](gift-receipt.md#refusals-and-the-marker-header).
+  [gift-receipt.md](gift-receipt.md#why-htmxbeforeswap-is-overridden).
 
 ### 14. External Product Thumbnail Shows Placeholder or Remains Visible Alongside It
 - **Cause**: Either the external CDN returned an error (403/404/timeout) and `handleImageError` in

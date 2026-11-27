@@ -532,7 +532,10 @@ every non-GET htmx request in `htmx:configRequest` once the token is fetched.
    `can_edit_wishlist` (member of an active list), and only while `item.remaining_quantity > 0`.
 2. The dialog is `#item-receipt-modal` (`role="dialog"`, `aria-modal="true"`,
    `aria-labelledby="receipt-title"` across `item_receipt_modal.html`, `receipt_edit_modal.html`,
-   and `receipt_cancel_modal.html`). Quantity selection in `item_receipt_modal.html` is
+   and `receipt_cancel_modal.html`). Each root carries `data-own-feedback`.
+   Shared pending and `#feedback` in `app.js` leave a trigger inside that
+   attribute alone. Edit and archive partials do not carry it.
+   Quantity selection in `item_receipt_modal.html` is
    thresholded by `RECEIPT_SELECT_MAX = 20` (`select_max` in `receipts_ui.py`):
    - `remaining == 1`: hidden field (`value="1"`), no choice;
    - `1 < remaining <= 20`: labelled `<select id="receipt-quantity" name="quantity"
@@ -631,13 +634,40 @@ the JSON route table, read-only, from `receipts._REFUSALS` (`_classify`). The se
 
 htmx 1.9.12 does not swap 4xx and 5xx responses: it fires `htmx:responseError` and drops the
 body, so the sentence and the out-of-band fragments of a refusal would never reach the page.
-`receipt.js` listens to `htmx:beforeSwap` on `document`. When the event has an `xhr` with
-`getResponseHeader` and the value of `X-Receipt-Refusal` is in `REFUSAL_REASONS`, it sets
-`detail.shouldSwap = true` and `detail.isError = false`. The key is only that header and only a
-value of the closed set, so every other error (network failure, an unmarked 500, a stale reorder
-400, any older modal) keeps the default htmx behaviour. Do not widen the condition to a status
-range. Real htmx still writes `console.error` for the unswapped 4xx of other requests; that is
-expected.
+`base.html` loads deferred `app.js` before `receipt.js`, so a bubble listener in `app.js` runs
+first. `wishenka/web/static/receipt.js` claims the response in the capture phase.
+
+On `htmx:beforeSwap`, the capture listener reads `X-Receipt-Refusal`. Any present value sets
+`detail.skipSharedDialog`. When that value is also in `REFUSAL_REASONS`, it sets
+`detail.shouldSwap = true` and `detail.isError = false`. A value outside the set, including
+`idempotency_conflict`, is claimed and is not swapped. The listener does not call
+`stopPropagation` on `htmx:beforeSwap`, so `wishlist.js` can still cancel an in-progress touch
+reorder when the swap target is `#items-list`.
+
+On `htmx:responseError`, a second capture listener calls `stopPropagation` when the same header
+is present. `stopPropagation` only covers a present `X-Receipt-Refusal` that stays an error
+(`idempotency_conflict` and any other value outside `REFUSAL_REASONS`) and keeps shared
+`#feedback` from replacing that refusal. Archive and restore `nothing_remaining` is in
+`REFUSAL_REASONS`, so the capture `htmx:beforeSwap` listener sets `detail.isError = false` and
+`detail.shouldSwap = true`. htmx 1.9.12 then does not dispatch `htmx:responseError`, and
+`stopPropagation` never runs for that reason. `#feedback` stays empty because the response is
+no longer an error.
+
+`wishenka/web/static/app.js` honors the claim and must not name this flow. Its
+`htmx:beforeSwap` listener returns when `detail.skipSharedDialog` is true. It still returns
+on `X-Reorder-Refusal` and on a reservation request. `sharedFeedbackApplies` skips a trigger
+inside `[data-own-feedback]`. The marker is on the three dialog roots
+(`partials/item_receipt_modal.html`, `partials/receipt_edit_modal.html`,
+`partials/receipt_cancel_modal.html`). Edit and archive partials do not carry it. The shared
+script, comments included, has no `receipt` substring: it does not read `X-Receipt-Refusal`
+and it does not select `.receipt-sheet`. That class stays on the dialog markup and in
+`miniapp.css`. `test_shared_app_script_has_no_gift_receipt_reference` compares raw and
+comment-stripped `/static/app.js` case-insensitively and rejects `X-Receipt-Refusal`,
+`.receipt-sheet`, and `receipt`.
+
+Do not widen the swap condition to a status range. An unmarked error (network failure, a 500
+without the header, a stale reorder 400) keeps the default htmx behaviour. Real htmx still
+writes `console.error` for the unswapped 4xx of other requests; that is expected.
 
 ### Stale states
 
@@ -722,7 +752,8 @@ expected.
   `item_archive_modal.html` uses `data-clear-target="#item-modal-container"` handled via event
   delegation in `app.js`. `tests/test_receipt_static_script.py` and
   `tests/test_csp_inline_removal_repro.py` enforce zero inline scripts/handlers and the deferred
-  load order.
+  load order. `test_shared_app_script_has_no_gift_receipt_reference` in the same receipt
+  module rejects a gift-receipt token in `/static/app.js`, comments included.
 - **Dependency on private names.** `receipts_ui.py` imports `receipts._REFUSALS`
   (`wishenka/web/routes/receipts.py`) and the private helpers `_editor_card_flags` and
   `_items_list_html` from `items_ui.py`. Its own `_execute` takes the repository the caller
@@ -979,11 +1010,14 @@ metric uses a DEBUG event, and labels never use a user, wishlist, item or giver.
   and have `is_approximate = true`.
 - **Wishes missing in the public view.** Archived and fully received wishes are hidden from
   public-link and non-member viewers by design (`projection`).
-- **Receipt dialog shows nothing after a refusal.** The answer must carry `X-Receipt-Refusal`
-  with a value of the closed set, otherwise `receipt.js` leaves htmx at its default (4xx and 5xx
-  are not swapped) and the dialog shows the generic sentence. Check the response header of the
-  `/web/.../receipt` request and that `REFUSAL_REASONS` in `receipt.js` still equals the
-  `receipts._REFUSALS` reasons plus `busy`.
+- **Receipt dialog shows nothing after a refusal.** The answer must carry
+  `X-Receipt-Refusal`. `receipt.js` sets `detail.skipSharedDialog` for every value.
+  Only a value in `REFUSAL_REASONS` also opts into the swap. Any other value,
+  including `idempotency_conflict`, is claimed and not swapped, and the dialog
+  shows the generic sentence. The capture `htmx:responseError` listener stops
+  that header from reaching shared `#feedback`. Check the response header of
+  the `/web/.../receipt` request and that `REFUSAL_REASONS` in `receipt.js`
+  still equals the `receipts._REFUSALS` reasons plus `busy`.
 - **Reorder error shows nothing, or the page reloads by itself.** The reload is the stale-order
   handler (`X-Reorder-Refusal: stale_order`, 800 ms). Any other 400 on a page action is not
   shown; that is WISHENKA-160.

@@ -1,4 +1,5 @@
 <div class="modal-backdrop receipt-backdrop" id="item-receipt-modal" data-receipt-modal
+     data-own-feedback
      {% if oob %}hx-swap-oob="outerHTML" {% endif %}role="dialog" aria-modal="true" aria-labelledby="receipt-title">
     <div class="modal-sheet receipt-sheet">
         <h2 id="receipt-title">{{ t('web.receipt.modal_title', locale|default('en')) }}</h2>

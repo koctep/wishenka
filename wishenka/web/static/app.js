@@ -2,7 +2,7 @@
  * Global application wiring: CSRF token preparation, HTMX reservation and modal
  * lifecycle hooks, wish card/cabinet refreshes, and delegated modal/preview actions.
  *
- * Classic script (loaded with `defer` after htmx and before `wishlist.js` / `receipt.js`).
+ * Classic script (loaded with `defer` after htmx and before `wishlist.js`).
  * Exposes `window.prepareCsrf` for pages (such as `/settings`) that invoke it directly.
  */
 (() => {
@@ -468,11 +468,14 @@
 
   document.addEventListener('htmx:beforeSwap', (evt) => {
     const detail = evt.detail || {};
+    if (detail.skipSharedDialog) {
+      return;
+    }
     const xhr = detail.xhr;
     if (!xhr || xhr.status < 400 || typeof xhr.getResponseHeader !== 'function') {
       return;
     }
-    if (xhr.getResponseHeader('X-Reorder-Refusal') || xhr.getResponseHeader('X-Receipt-Refusal')) {
+    if (xhr.getResponseHeader('X-Reorder-Refusal')) {
       return;
     }
     if (detail.elt && reservationRequestPath(detail.elt)) {
@@ -525,14 +528,16 @@
   }
 
   /**
-   * Whether the shared htmx feedback applies to a request. Reservation, receipt and reorder
-   * flows report their own pending and failure state and are left alone.
+   * Whether the shared htmx feedback applies to a request. Reservation requests
+   * and any trigger inside `[data-own-feedback]` report their own pending and
+   * failure state and are left alone.
    *
    * @param {Element | null} elt - Triggering element.
    * @returns {boolean} True when the shared pending/failure feedback should handle it.
    */
   function sharedFeedbackApplies(elt) {
-    return !!elt && !!elt.closest && !reservationRequestPath(elt) && !elt.closest('.receipt-sheet');
+    return !!elt && !!elt.closest && !reservationRequestPath(elt) &&
+      !elt.closest('[data-own-feedback]');
   }
 
   /**
@@ -593,7 +598,7 @@
       const detail = evt.detail || {};
       const xhr = detail.xhr;
       const marked = xhr && typeof xhr.getResponseHeader === 'function' &&
-        (xhr.getResponseHeader('X-Reorder-Refusal') || xhr.getResponseHeader('X-Receipt-Refusal'));
+        xhr.getResponseHeader('X-Reorder-Refusal');
       if (!marked && sharedFeedbackApplies(detail.elt) && reportsFailure(detail.elt, detail)) {
         showRequestFailure();
       }

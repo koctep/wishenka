@@ -411,16 +411,36 @@
     }
   });
 
+  /**
+   * Capture runs before the shared bubble listener, which is registered earlier.
+   * The flag is neutral so that listener can step aside without naming this flow.
+   * Propagation stays intact so a list swap can still cancel an in-progress touch reorder.
+   */
   document.addEventListener('htmx:beforeSwap', (event) => {
     const detail = event.detail;
     if (!detail || !detail.xhr || typeof detail.xhr.getResponseHeader !== 'function') {
       return;
     }
-    if (REFUSAL_REASONS.has(detail.xhr.getResponseHeader(REFUSAL_HEADER))) {
+    const refusal = detail.xhr.getResponseHeader(REFUSAL_HEADER);
+    if (typeof refusal !== 'string') {
+      return;
+    }
+    detail.skipSharedDialog = true;
+    if (REFUSAL_REASONS.has(refusal)) {
       detail.shouldSwap = true;
       detail.isError = false;
     }
-  });
+  }, true);
+
+  document.addEventListener('htmx:responseError', (event) => {
+    const detail = event.detail;
+    if (!detail || !detail.xhr || typeof detail.xhr.getResponseHeader !== 'function') {
+      return;
+    }
+    if (typeof detail.xhr.getResponseHeader(REFUSAL_HEADER) === 'string') {
+      event.stopPropagation();
+    }
+  }, true);
 
   document.addEventListener('htmx:afterSwap', (event) => {
     const target = event.detail && event.detail.target;

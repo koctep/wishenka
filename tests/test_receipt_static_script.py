@@ -123,6 +123,27 @@ def test_base_has_no_inline_scripts_and_loads_app_script_deferred(env: AppEnv) -
     assert "/receipt" not in app_js.lower()
 
 
+def test_shared_app_script_has_no_gift_receipt_reference(env: AppEnv) -> None:
+    """WISHENKA-214: shared ``app.js`` names no gift-receipt token.
+
+    Case-insensitive on the raw ``/static/app.js`` body and after
+    ``strip_js_comments``. Forbidden: ``X-Receipt-Refusal``, ``.receipt-sheet``,
+    and the substring ``receipt``. Comment stripping does not relax the check.
+    """
+    raw = _static(env, "app.js")
+    stripped = strip_js_comments(raw)
+    forbidden = ("X-Receipt-Refusal", ".receipt-sheet", "receipt")
+    violations: list[str] = []
+    bodies = (("raw", raw), ("comment-stripped", stripped))
+    for label, body in bodies:
+        lowered = body.lower()
+        for token in forbidden:
+            count = lowered.count(token.lower())
+            if count:
+                violations.append(f"{label} contains {token!r} x{count}")
+    assert not violations, "shared app.js still names a gift receipt: " + "; ".join(violations)
+
+
 def test_single_ajax_call_in_each_script(env: AppEnv) -> None:
     """Decision 5: ``receipt.js`` has exactly one ``htmx.ajax(`` call; ``wishlist.js`` keeps one."""
     wishlist = strip_js_comments(_static(env, "wishlist.js"))
