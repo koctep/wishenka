@@ -58,7 +58,13 @@ Revision chain (linear):
    `idx_notice_rate_second`, `idx_reminders_due` (see [notifications.md](notifications.md)).
 10. `add_notice_uncertain` - adds `requires_membership` to `reminder_outbox`, rebuilds
     `notification_outbox` with `status = 'uncertain'`, `claim_token`, and `requires_membership`,
-    and creates `notice_receipt_keys` (see [notifications.md](notifications.md)).
+    and creates `notice_receipt_keys` (see [notifications.md](notifications.md)). The copy is
+    `INSERT OR IGNORE` with only `event_type`, `receipt_id`, and `giver_user_id`
+    (`INSERT OR IGNORE INTO notice_receipt_keys (event_type, receipt_id, giver_user_id) ...`).
+    A primary-key conflict leaves the existing row, including `created_at`. A positional
+    three-value insert does not rewrite the row; it fails once `created_at` exists
+    (`table notice_receipt_keys has 4 columns but 3 values were supplied`).
+    `add_notice_retention_columns` assigns `created_at` only `WHERE created_at = 0`.
 11. `add_support_channel` - tables `support_input` and `support_tickets` with index
     `idx_support_tickets_owner_time` (see [bot-support.md](bot-support.md)).
 12. `add_idempotency_records` - table `wl_idempotency_records` and index
@@ -81,8 +87,10 @@ Revision chain (linear):
     `idx_reminder_outbox_status_updated(status, updated_at)` to `reminder_outbox`, and backfills
     `COALESCE(claimed_at, next_attempt_at)` (see [notifications.md](notifications.md)).
 19. `add_receipt_delivery_fence` - creates `receipt_delivery_fence` and
-    `receipt_delivery_fence_audit` for per-giver receipt delivery coordination and audited fence
-    resolution (see [notifications.md](notifications.md)).
+    `receipt_delivery_fence_audit` with `CREATE TABLE IF NOT EXISTS` for per-giver receipt
+    delivery coordination and audited fence resolution (see [notifications.md](notifications.md)).
+    `CREATE TABLE IF NOT EXISTS` leaves existing `receipt_delivery_fence` and
+    `receipt_delivery_fence_audit` rows in place.
 20. `unify_user_keys_and_cascades` - consolidates `users` DDL (including `birth_day`,
     `birth_month`, `birth_year`, `birthdate_source`) in Alembic, migrates `bot_destinations`,
     `birthday_entries`, `birthday_input`, `support_input`, and `support_tickets` to
@@ -355,6 +363,16 @@ database logs `started` and `completed` only. There is no alert threshold yet (W
 - **Several instances start at once.** Expected and safe: one process migrates, the others wait
   on the lock, then run a no-op `upgrade head`. Covered by
   `tests/test_wishlist_migrations_concurrency.py`.
+- **A second upgrade stops on `notice_receipt_keys` or drops fence rows.** The key copy in
+  `add_notice_uncertain` must name `event_type`, `receipt_id`, and `giver_user_id` so the later
+  `created_at` column is left alone. Both fence tables in `add_receipt_delivery_fence` must stay
+  `CREATE TABLE IF NOT EXISTS`, which leaves both tables in place.
+  `tests/test_gift_receipt_migration.py::test_upgrade_is_repeatable` compares
+  `notice_receipt_keys` (`event_type`, `receipt_id`, `giver_user_id`, `created_at`),
+  `notification_outbox` (`event_type`, `receipt_id`, `giver_user_id`, `status`), and
+  `receipt_delivery_fence` (`wish_item_id`, `user_id`, `state`). It does not read
+  `receipt_delivery_fence_audit`. On the second pass `add_notice_uncertain` still runs
+  `UPDATE notification_outbox SET requires_membership=1`, so the full outbox row can change.
 - **`Wishlist storage requires SQLite`** (`ValueError`, raised by `WishlistStore.__init__` at
   construction, not wrapped). `WISHENKA_DATABASE_URL` is not `sqlite+aiosqlite:///...`.
 - **`Wishlist migrations support only SQLite URLs`** (`ValueError`). Seen only when
@@ -431,7 +449,7 @@ to `add_gift_receipts` and refuses at `add_gift_receipts` with backup-restoratio
 | --- | --- |
 | `tests/test_wishlist_alembic_migrations.py` | Legacy database adopted at head with rows preserved; fresh and `:memory:` stores reach the same head; `dispose()` removes the temporary file; the application lifespan disposes its `:memory:` store; rejection of a legacy schema with an ascending history index and of a malformed `display_order` marker |
 | `tests/test_wishlist_migrations_concurrency.py` | Several processes start concurrently on one file, fresh and legacy `base_normalized`; the expected head is `head_revision()` |
-| `tests/test_gift_receipt_migration.py` | Back-fill and normalisation, repeatable upgrade, no giver column, irreversible downgrade, cascade on purge |
+| `tests/test_gift_receipt_migration.py` | Back-fill and normalisation, repeatable upgrade, no giver column, irreversible downgrade, cascade on purge. `test_upgrade_is_repeatable` compares `notice_receipt_keys` (`event_type`, `receipt_id`, `giver_user_id`, `created_at`), `notification_outbox` (`event_type`, `receipt_id`, `giver_user_id`, `status`), and `receipt_delivery_fence` (`wish_item_id`, `user_id`, `state`). It does not read `receipt_delivery_fence_audit`. On the second pass `add_notice_uncertain` still runs `UPDATE notification_outbox SET requires_membership=1`, so the full outbox row can change |
 | `tests/test_wishlist_migrations_observability.py` | `started`/`completed` events, `legacy_schema_adopted` with `revision`, `failed` with re-raise, no paths in log fields |
 | `tests/test_wishlist_migration_rollback_policy.py` | `ROLLBACK_POLICY` declared on all revisions; `base_normalized` default guard and `WISHENKA_ALLOW_DESTRUCTIVE_BASELINE_DOWNGRADE=1` opt-in; one-way refusal messages and `wishlist_migration_downgrade_refused` logs (including `purge_legacy_non_member_view_history`); reversible tail from `add_share_access_and_purge_favorites` to `add_gift_receipts`; idempotent second startup; non-SQLite URL rejection; offline SQL generation (`sql=True`) |
 | `tests/test_wishenka_188_user_key_unification_repro.py` | `test_downgrade_from_unify_user_keys_restores_earlier_identity` upgrades only to `unify_user_keys_and_cascades`, downgrades to `add_receipt_delivery_fence`, and checks that the earlier identity is restored: remembered links on `users.id`, invite tokens without `wishlist_id`, and support-ticket `owner_id` |

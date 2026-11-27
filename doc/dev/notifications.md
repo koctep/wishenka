@@ -105,6 +105,12 @@ Five Alembic revisions extend the wishlist database schema for notifications, re
      and populates it from existing `notification_outbox` rows so terminal-row purging in
      `notification_outbox` never allows a duplicate receipt notice for the same `(event_type,
      receipt_id, giver_user_id)`.
+   - The copy names those three columns:
+     `INSERT OR IGNORE INTO notice_receipt_keys (event_type, receipt_id, giver_user_id) SELECT event_type, receipt_id, giver_user_id FROM notification_outbox`.
+     `created_at` is not defined here; `add_notice_retention_columns` adds it later. Naming the
+     key columns keeps a second upgrade from overwriting `created_at` and from failing with a
+     column-count error once that column exists. `INSERT OR IGNORE` leaves an existing key row,
+     including its `created_at`, as stored.
 3. **`add_notice_retention_columns`** (down revision `add_deleted_session_revocations`):
    - Adds `deleted_at INTEGER` and index `idx_birthday_entries_deleted_at(deleted, deleted_at)` to
      `birthday_entries`; anonymizes legacy `deleted = 1` rows (`label = ''`, `month = 0`,
@@ -112,9 +118,10 @@ Five Alembic revisions extend the wishlist database schema for notifications, re
    - Adds `updated_at INTEGER` and index `idx_bot_destinations_active_updated(active, updated_at)` to
      `bot_destinations`; backfills `updated_at = now` where `NULL`.
    - Adds `created_at INTEGER NOT NULL DEFAULT 0` and index
-     `idx_notice_receipt_keys_created(created_at)` to `notice_receipt_keys`; backfills `created_at`
-     from matching `notification_outbox.created_at` rows (or `now` if the outbox row was already
-     purged).
+     `idx_notice_receipt_keys_created(created_at)` to `notice_receipt_keys`. The revision updates
+     `created_at` only `WHERE created_at = 0`, from the matching
+     `notification_outbox.created_at` (unix seconds) or `now` when that outbox row is already
+     gone.
 4. **`add_reminder_outbox_updated_at`** (down revision `add_bot_capture_order_retention`):
    - Adds `updated_at INTEGER` and index
      `idx_reminder_outbox_status_updated(status, updated_at)` to `reminder_outbox`, and backfills
@@ -125,9 +132,17 @@ Five Alembic revisions extend the wishlist database schema for notifications, re
      retention age is measured from the last update/settlement timestamp.
 5. **`add_receipt_delivery_fence`** (down revision `add_reminder_outbox_updated_at`):
    - Creates `receipt_delivery_fence(wish_item_id, user_id, attempt_id, queue, row_id, state CHECK(state IN ('in_flight','uncertain')), PRIMARY KEY(wish_item_id, user_id))`
-     to coordinate external receipt delivery attempts across processes and block concurrent promise completion.
+     with `CREATE TABLE IF NOT EXISTS` to coordinate external receipt delivery attempts across
+     processes and block concurrent promise completion.
    - Creates `receipt_delivery_fence_audit(id PRIMARY KEY, wish_item_id, user_id, attempt_id, operator, evidence, resolved_at DEFAULT CURRENT_TIMESTAMP)`
-     to record audited manual resolutions of unresolved fences.
+     with `CREATE TABLE IF NOT EXISTS` to record audited manual resolutions of unresolved fences.
+   - Both statements are `CREATE TABLE IF NOT EXISTS`, so a second upgrade leaves both tables in
+     place. `tests/test_gift_receipt_migration.py::test_upgrade_is_repeatable` compares
+     `notice_receipt_keys` (`event_type`, `receipt_id`, `giver_user_id`, `created_at`),
+     `notification_outbox` (`event_type`, `receipt_id`, `giver_user_id`, `status`), and
+     `receipt_delivery_fence` (`wish_item_id`, `user_id`, `state`). It does not read
+     `receipt_delivery_fence_audit`. On the second pass `add_notice_uncertain` still runs
+     `UPDATE notification_outbox SET requires_membership=1`, so the full outbox row can change.
 6. **`unify_user_keys_and_cascades`** (down revision `add_receipt_delivery_fence`, `WISHENKA-188`):
    - Migrates `bot_destinations.user_id`, `birthday_entries.owner_id`, and `birthday_input.owner_id` from `users.id` to `users(telegram_id)` with `ON DELETE CASCADE`.
    - Rebuilds `reminder_outbox` with `ON DELETE CASCADE` foreign keys on `user_id` (`users(telegram_id)`), `list_id` (`wl_lists(id)`), `item_id` (`wl_items(id)`), and `birthday_id` (`birthday_entries(id)`), cleaning any orphaned rows during rebuild.

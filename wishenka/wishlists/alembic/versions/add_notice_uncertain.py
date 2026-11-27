@@ -70,6 +70,7 @@ def upgrade() -> None:
     """)
     op.execute(
         "INSERT OR IGNORE INTO notice_receipt_keys "
+        "(event_type, receipt_id, giver_user_id) "
         "SELECT event_type,receipt_id,giver_user_id FROM notification_outbox"
     )
 

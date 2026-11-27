@@ -91,19 +91,65 @@ def test_revisions_backfill_and_normalise(tmp_path: Path, caplog: pytest.LogCapt
     assert counts == {"legacy_receipts_backfilled": 3, "legacy_archived_rows_normalised": 1}
 
 
+def _notice_history(db: Path) -> dict[str, object]:
+    """Receipts, archive flags, and notice rows a second upgrade must leave unchanged."""
+    return {
+        "receipts": receipt_rows(db),
+        "flags": _flags(db),
+        "key": sql_rows(
+            db,
+            "SELECT event_type, receipt_id, giver_user_id, created_at "
+            "FROM notice_receipt_keys ORDER BY receipt_id",
+        ),
+        "outbox": sql_rows(
+            db,
+            "SELECT event_type, receipt_id, giver_user_id, status "
+            "FROM notification_outbox ORDER BY receipt_id",
+        ),
+        "fence": sql_rows(
+            db,
+            "SELECT wish_item_id, user_id, state FROM receipt_delivery_fence ORDER BY wish_item_id",
+        ),
+    }
+
+
 def test_upgrade_is_repeatable(tmp_path: Path) -> None:
-    """Data safety: running the revisions again changes nothing."""
+    """A second upgrade keeps receipts, archive flags, and notice history."""
     db = tmp_path / "again.db"
     url = _create_legacy(db)
     upgrade_to_head_sync(url)
-    first = receipt_rows(db)
-    flags = _flags(db)
+    receipt = sql_rows(db, "SELECT id, wish_item_id FROM wl_receipts ORDER BY id LIMIT 1")[0]
+    receipt_id = int(receipt["id"])
+    wish_item_id = int(receipt["wish_item_id"])
+    sql_exec(
+        db,
+        "INSERT INTO notification_outbox "
+        "(event_type, receipt_id, wishlist_id, wish_item_id, giver_user_id, status, "
+        "ambiguous, next_attempt_at, created_at, updated_at) "
+        "VALUES ('gift_received', ?, 1, ?, 501, 'uncertain', 1, 0, ?, ?)",
+        (receipt_id, wish_item_id, _STAMP, _STAMP),
+    )
+    sql_exec(
+        db,
+        "INSERT INTO notice_receipt_keys "
+        "(event_type, receipt_id, giver_user_id, created_at) "
+        "VALUES ('gift_received', ?, 501, 1700000000)",
+        (receipt_id,),
+    )
+    outbox_id = int(sql_rows(db, "SELECT id FROM notification_outbox")[0]["id"])
+    sql_exec(
+        db,
+        "INSERT INTO receipt_delivery_fence "
+        "(wish_item_id, user_id, attempt_id, queue, row_id, state) "
+        "VALUES (?, 501, 'attempt', 'gift', ?, 'uncertain')",
+        (wish_item_id, outbox_id),
+    )
+    before = _notice_history(db)
 
     sql_exec(db, "UPDATE alembic_version SET version_num = ?", (_PREVIOUS_HEAD,))
     upgrade_to_head_sync(url)
 
-    assert receipt_rows(db) == first
-    assert _flags(db) == flags
+    assert _notice_history(db) == before
 
 
 async def test_receipt_table_has_no_giver_column_and_downgrade_is_irreversible(
