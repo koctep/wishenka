@@ -297,7 +297,11 @@ pytest.mark.browser]`, девять тестов B-1 - B-6) проверяет �
 тап не шлёт второй запрос; отказ, затем общая фраза об ошибке; `busy` оставляет диалог и
 выбранное количество; переопределение `beforeSwap` закрытое (только заголовок
 `X-Receipt-Refusal` из закрытого набора); устаревшая карточка дарителя; устаревшая перестановка
-(`X-Reorder-Refusal`); ошибка без маркера не даёт уведомления и перезагрузки (ожидание 2 с).
+(`X-Reorder-Refusal`); архив желания, которого нет в списке
+(`test_unmarked_error_neither_shows_notice_nor_reloads`, WISHENKA-220), показывает
+«Желание или вишлист больше недоступны.», закрывает диалог, оставляет тот же порядок карточек
+и не перезагружает страницу. Проверка не ждёт `htmx:responseError`: две секунды она смотрит,
+что уведомление остаётся и `window.__beforeReload` не сброшен.
 Охранный тест `test_new_browser_modules_declare_marker_and_timeout` проверяет и этот модуль
 (по маске `test_*_browser.py`), но множество `NEW_BROWSER_MODULES` по-прежнему содержит только три
 модуля WISHENKA-110.
@@ -603,9 +607,9 @@ make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_settings_switch_browser.py -q'
   (WISHENKA-313). Фокус и объявление после 410, и отдельное доступное имя Cancel, проверяют
   интерфейсный и браузерный модули на русском и английском.
 - Заведомо падающие тесты вне задачи: `tests/test_receipt_modal_browser.py`
-  (`test_stale_giver_card_is_neutral`, WISHENKA-265;
-  `test_unmarked_error_neither_shows_notice_nor_reloads`, WISHENKA-220) и остальной список в
-  `ai-tasks/WISHENKA-292/60-tech-debt.md`.
+  (`test_stale_giver_card_is_neutral`, WISHENKA-265).
+  `test_unmarked_error_neither_shows_notice_nor_reloads` теперь проходит
+  (WISHENKA-220) и не входит в известные падения.
 
 ### Тесты формы создания вишлиста (WISHENKA-296)
 
@@ -642,7 +646,10 @@ make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_settings_switch_browser.py -q'
   ([WISHENKA-321](https://pypost.atlassian.net/browse/WISHENKA-321));
   идемпотентность ([WISHENKA-322](https://pypost.atlassian.net/browse/WISHENKA-322)).
 - Тесты с `caplog` падают при запуске с `-p no:logging`; настроенные запуски плагин не отключают.
-- Заведомо падающие тесты вне задачи: те же, что в разделе WISHENKA-295.
+- Заведомо падающие тесты вне задачи: `tests/test_receipt_modal_browser.py`
+  (`test_stale_giver_card_is_neutral`, WISHENKA-265).
+  `test_unmarked_error_neither_shows_notice_nor_reloads` теперь проходит
+  (WISHENKA-220) и не входит в известные падения.
 
 ### Тесты контракта имени вишлиста (WISHENKA-320)
 

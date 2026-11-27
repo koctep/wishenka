@@ -682,7 +682,13 @@ writes `console.error` for the unswapped 4xx of other requests; that is expected
   `items_ui.py`). It is a separate namespace from `X-Receipt-Refusal`: the two never meet.
   The listener of `wishlist.js` on `htmx:responseError` checks that header, writes «Список
   изменился. Обновляем.» into `#list-notice` (when it exists) and reloads the page after
-  `STALE_RELOAD_DELAY_MS` = 800 ms. An error without the header does nothing (tested).
+  `STALE_RELOAD_DELAY_MS` = 800 ms. A `htmx:responseError` without that header does not
+  write a notice. Archiving a wish that is not on the list does not take this path:
+  `app.js` applies the 404 out-of-band body and clears `isError`, so
+  `htmx:responseError` does not fire. `#list-notice` shows
+  «Желание или вишлист больше недоступны.», the archive dialog closes, the cards stay
+  in the same order, and the page does not reload
+  (`test_unmarked_error_neither_shows_notice_nor_reloads`, WISHENKA-220).
 - **Stale archive and restore.** For a fully received wish `archive_item_ui` and
   `restore_item_ui` answer 409 with `X-Receipt-Refusal: nothing_remaining` through
   `_nothing_remaining_response`. The body is out-of-band only (every top-level element has
@@ -804,8 +810,12 @@ new `wishlist.js` code.
 `tests/test_receipt_modal_browser.py` (module mark `timeout(45)` and `browser`) has nine
 browser tests: dialog summary and dismissal, partial and full receipt on the page, no second
 request on a second tap, refusal then generic failure, busy keeps the dialog and the quantity,
-the guarded closed `beforeSwap` override, a stale giver card, a stale reorder, and an unmarked
-error that shows no notice and does not reload. The helpers are `record_receipt`,
+the guarded closed `beforeSwap` override, a stale giver card, a stale reorder, and an archive
+of a wish that is not on the list
+(`test_unmarked_error_neither_shows_notice_nor_reloads`, WISHENKA-220). That check asserts
+the Russian list notice «Желание или вишлист больше недоступны.», a closed dialog, the same
+card order, and no page reload. It does not wait for `htmx:responseError`. The helpers are
+`record_receipt`,
 `archive_item_rest`, `open_receipt_dialog`, `posts_to`, `scroll_to` in
 `tests/browser_helpers.py`. See [testing.md](testing.md).
 

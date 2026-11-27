@@ -515,32 +515,41 @@ def test_stale_reorder_keeps_list_and_shows_notice(
 def test_unmarked_error_neither_shows_notice_nor_reloads(
     seed_wishlist: SeedFactory, wishlist_page: PageFactory
 ) -> None:
-    """U-11 guard: only the ``stale_order`` marker triggers the notice and the reload.
+    """Archiving a wish that is not on the list shows the list notice and does not reload.
 
-    An htmx error that carries no ``X-Reorder-Refusal`` marker (archive of a missing wish, a plain
-    404) reaches the ``htmx:responseError`` listener but must leave ``#list-notice`` empty, keep
-    the list and must not reload the page (checked for a bounded 2 s).
+    The Russian owner page shows «Желание или вишлист больше недоступны.», the archive
+    dialog closes, and the remaining cards stay in the same order. The page does not reload.
+    The check does not listen for ``htmx:responseError``.
     """
     seeded, page = _owner_page(seed_wishlist, wishlist_page, ["A", "B"], [1, 1])
     first, second = seeded.item_ids
+    notice = "Желание или вишлист больше недоступны."
+    page.evaluate("window.__beforeReload = true")
+    confirm = f"/web/wishlists/{seeded.wishlist_id}/items/{first}/archive-confirm"
     page.evaluate(
-        "window.__beforeReload = true; window.__responseErrors = [];"
-        " document.addEventListener('htmx:responseError', (event) => {"
-        " window.__responseErrors.push([event.detail.xhr.status,"
-        " event.detail.xhr.getResponseHeader('X-Reorder-Refusal')]); });"
+        f"void window.htmx.ajax('GET', {js_str(confirm)},"
+        " {target: '#item-modal-container', swap: 'innerHTML'})"
     )
-    path = f"/web/wishlists/{seeded.wishlist_id}/items/999999/archive"
+    page.wait_for("archive confirm opened", "!!document.querySelector('#item-archive-modal')")
 
+    path = f"/web/wishlists/{seeded.wishlist_id}/items/999999/archive"
     page.evaluate(
         f"void window.htmx.ajax('POST', {js_str(path)}, {{target: '#items-list', swap: 'none'}})"
     )
+    page.wait_for(
+        "missing-wish notice and closed dialog",
+        "(() => { const notice = document.querySelector('#list-notice');"
+        " const modal = document.getElementById('item-modal-container');"
+        f" return !!notice && notice.textContent.trim() === {js_str(notice)}"
+        " && !document.querySelector('#item-archive-modal')"
+        " && !!modal && modal.innerHTML.trim() === ''; })()",
+    )
 
-    page.wait_for("the unmarked error reached the listener", "window.__responseErrors.length > 0")
-    assert page.evaluate("window.__responseErrors") == [[404, None]]
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
         assert page.evaluate("window.__beforeReload === true"), "the page must not reload"
-        assert _text(page, "#list-notice") == "", "an unmarked error must show no notice"
+        assert _text(page, "#list-notice") == notice, "the missing-wish notice must stay"
         time.sleep(0.1)
-    assert page.order() == [first, second], "the list must be intact"
+    assert page.order() == [first, second], "the list must stay in the same order"
     _no_external(page)
+    assert_clean_console(page)
