@@ -64,7 +64,7 @@
     still asserts the old silent `/view` payload and currently errors on a
     pre-existing circular import. These docs do not treat that test as
     coverage of the giver payload.
-- [ ] **COMMIT: Commit Changes**
+- [x] **COMMIT: Commit Changes**
 
 ## Status Legend
 
