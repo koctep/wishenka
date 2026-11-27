@@ -36,7 +36,7 @@ from tests.receipt_ui_support import (
     receive,
     seed_list,
 )
-from tests.test_receipt_ui_routes import _busy_execute, _patch_execute
+from tests.test_receipt_ui_routes import _busy_execute, _patch_busy_save, _patch_execute
 from wishenka.web.routes.receipts import _REFUSALS
 
 pytestmark = pytest.mark.timeout(60)
@@ -119,6 +119,7 @@ def test_full_ui_flow_log_contract(
         client.post(f"{base}/reorder", data={"item_ids": [str(mug)]}, headers=headers),
     )
     _patch_execute(monkeypatch, _busy_execute)
+    _patch_busy_save(monkeypatch, app)
     step("busy", 503, post(wish, "1"))
     step("busy open", 503, client.get(modal_url(wishlist_id, wish), headers=headers))
 

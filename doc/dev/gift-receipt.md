@@ -494,10 +494,15 @@ every non-GET htmx request in `htmx:configRequest` once the token is fetched.
   of a deleted list gets `wishlist_not_active` (404) instead of `forbidden`, because
   `get_wishlist_by_id` raises before membership can be checked.
 - **`POST /web/wishlists/{wishlist_id}/items/{item_id}/receipt`** (form field `quantity`) calls
-  `WishlistService.record_item_fulfillment(item_id, user, quantity, wishlist_id=...)` and then
-  reads the committed state in the same `_execute`. Text that is not a whole number is passed
-  as 0, so the service refuses it as `quantity_invalid` after its membership and state guards
-  (`_quantity_of`). Success is 201 with out-of-band fragments only:
+  `WishlistService.record_item_fulfillment(item_id, user, quantity, wishlist_id=...)`. Text that
+  is not a whole number is passed as 0, so the service refuses it as `quantity_invalid` after
+  its membership and state guards (`_quantity_of`). The look uses the wishlist access the
+  screen already has (`WISHENKA-324`). The hidden fallback that opened a shared repository is
+  gone. A successful save that carries `Idempotency-Key` composes the list on that save. A
+  true repeat returns the stored answer. A successful save with no key calls `execute_wish`,
+  then reads the list through `run_repository_read`. A quantity refusal, including one that
+  still carries the key, paints through `run_repository_read` after rollback. Success is 201
+  with out-of-band fragments only:
   1. `#item-modal-container` emptied (the dialog closes);
   2. `#list-notice`: «Отмечено получено: N шт. («title»)» (the text is escaped);
   3. a partial receipt: the card of the wish with `hx-swap-oob="true"` (first and last flags
@@ -512,10 +517,13 @@ every non-GET htmx request in `htmx:configRequest` once the token is fetched.
   take the save lock. Refusals return the blocked modal with `X-Receipt-Refusal`.
 - **`POST /web/wishlists/{wishlist_id}/items/{item_id}/receipts/{receipt_id}/edit`** (form field
   `quantity`) and **`POST /web/wishlists/{wishlist_id}/items/{item_id}/receipts/{receipt_id}/cancel`**
-  (WISHENKA-153): call `correct_item_receipt` or `cancel_item_receipt`, accept `Idempotency-Key`,
-  and on 200 return OOB fragments emptying `#item-modal-container` and updating `#list-notice`,
-  `#items-list`, `#gifted-items-section`, and `#archived-items-section`. `receipt.js` submits
-  both forms via `submitReceipt` (with or without a `quantity` input).
+  (WISHENKA-153): call `correct_item_receipt` or `cancel_item_receipt` and accept
+  `Idempotency-Key`. A successful save that carries the key composes the list on that save. A
+  true repeat returns the stored answer. A successful save with no key calls `execute_wish`,
+  then reads the list through `run_repository_read`. On 200 they return OOB fragments emptying
+  `#item-modal-container` and updating `#list-notice`, `#items-list`, `#gifted-items-section`,
+  and `#archived-items-section`. `receipt.js` submits both forms via `submitReceipt` (with or
+  without a `quantity` input).
 
 ### Dialog flow
 
@@ -716,8 +724,9 @@ expected.
   `tests/test_csp_inline_removal_repro.py` enforce zero inline scripts/handlers and the deferred
   load order.
 - **Dependency on private names.** `receipts_ui.py` imports `receipts._REFUSALS`
-  (`wishenka/web/routes/receipts.py`) and the private helpers `_editor_card_flags`, `_execute`,
-  `_items_list_html` from `items_ui.py`. WISHENKA-158 (receipt code split) must keep
+  (`wishenka/web/routes/receipts.py`) and the private helpers `_editor_card_flags` and
+  `_items_list_html` from `items_ui.py`. Its own `_execute` takes the repository the caller
+  passed. WISHENKA-158 (receipt code split) must keep
   `receipts._REFUSALS` importable; the rename to a public accessor is in WISHENKA-163.
 - **One record per outcome.** See the log events below.
 

@@ -121,6 +121,15 @@ def _busy_execute(_original: Callable[..., Any]) -> Callable[..., Any]:
     return busy
 
 
+def _patch_busy_save(monkeypatch: pytest.MonkeyPatch, app: FastAPI) -> None:
+    """Make the exclusive receipt save busy before it writes."""
+
+    async def busy(*_args: object, **_kwargs: object) -> None:
+        raise InventoryBusyError()
+
+    monkeypatch.setattr(app.state.wishlist_store, "execute_wish", busy)
+
+
 # --- GET: the dialog ----------------------------------------------------------------------------
 
 
@@ -561,11 +570,9 @@ def test_post_refusal_effect_read_failure_degrades(
     target_list, target_item, quantity, user_id = _refusal_request(app, case, wishlist_id, item_id)
     calls = {"count": 0}
 
-    def patched(original: Callable[..., Any]) -> Callable[..., Any]:
-        async def execute(request: Any, action: Callable[..., Any]) -> Any:
+    def patched(_original: Callable[..., Any]) -> Callable[..., Any]:
+        async def execute(*_args: object, **_kwargs: object) -> None:
             calls["count"] += 1
-            if calls["count"] == 1:
-                return await original(request, action)
             raise effect_error()
 
         return execute
@@ -577,7 +584,7 @@ def test_post_refusal_effect_read_failure_degrades(
 
     assert response.status_code == 409, response.text
     assert response.headers.get(REFUSAL_HEADER) == reason
-    assert calls["count"] >= 2, "the refusal effect must be read in a second action"
+    assert calls["count"] == 1, "the refusal effect must be read after the save rolls back"
     soup = parse(response.text)
     assert _sentence_of(soup) == SENTENCES[reason].format(n=10)
     ids = {el.get("id") for el in top_level(soup)}
@@ -603,7 +610,7 @@ def test_post_busy_is_503_and_changes_nothing(env: AppEnv, monkeypatch: pytest.M
     """U-9: busy gives 503, the marker ``busy``, the neutral sentence; nothing is stored."""
     _client, _sessions, app = env
     wishlist_id, (item_id, *_rest) = seed_list(app)
-    _patch_execute(monkeypatch, _busy_execute)
+    _patch_busy_save(monkeypatch, app)
 
     response = _post(env, wishlist_id, item_id, "1")
 
@@ -684,7 +691,7 @@ def test_ui_logging_once_per_outcome(
     receive(app, item_id, 3)
     nothing = step("nothing", lambda: _post(env, wishlist_id, item_id, "1"), 409)
     stale_open = step("stale open", lambda: _get(env, wishlist_id, item_id), 409)
-    _patch_execute(monkeypatch, _busy_execute)
+    _patch_busy_save(monkeypatch, app)
     busy = step("busy", lambda: _post(env, wishlist_id, item_id, "1"), 503)
 
     expectations: list[tuple[str, list[logging.LogRecord], str, int, str | None]] = [

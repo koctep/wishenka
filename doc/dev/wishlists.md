@@ -66,8 +66,15 @@ On failure it clears those logs. The seven one-wishlist openings forward
 through `run_repository_read` and do not take the save lock.
 
 Reservations and receipts stay on `WishlistStore.execute_wish` and
-`execute_wish_idempotent`. `receipts_ui._repo_ctx` is unchanged and stays with
-WISHENKA-324.
+`execute_wish_idempotent`. A gift-receipt look takes the wishlist repository
+the screen already has (`WISHENKA-324`). `receipts_ui._execute` builds
+`RepoWishlistOps` on that repository. The hidden fallback that opened a shared
+repository is gone. Opening a receipt, correction, or cancellation dialog
+passes the `WishlistReadRepo` that screen already received. A quantity refusal
+paints through `run_repository_read` after rollback. A successful save that
+carries the repeat key still composes the list on that save. A true repeat
+returns the stored answer. A save with no key calls `execute_wish`, then reads
+the list through `run_repository_read`.
 
 ### Architecture
 
@@ -105,8 +112,6 @@ WISHENKA-324.
   the list again on the same write repository. Public link and invite stay
   here (the share page records a view). Multi-wishlist reads stay here: the
   wishlist list, favorites list, history, and deleted wishlists.
-  `receipts_ui._execute` with no injected repository still calls
-  `get_wishlist_repository`.
 - **`_repository_forward`**: when `WishlistService._store` is set, each name in
   `_SHARED_REPOSITORY_METHODS` calls the same name on `RepoWishlistOps` inside
   `run_repository` (`BEGIN IMMEDIATE`, then commit and flush). The wrapper does
@@ -1986,8 +1991,11 @@ targeted `WishlistRepository` queries without loading unrelated wishlists:
   `WishlistStore.execute_wish` / `execute_wish_idempotent` (`BEGIN IMMEDIATE` serialization); in
   `receipts_ui.py`, single-item mutations (`_execute_receipt_mutation_ui`, `correct_receipt_ui`,
   `cancel_receipt_ui`) are separated from the receipt dialogs
-  (`WishlistReadRepo` / `RepoWishlistOps`). The `_execute` fallback with no
-  injected repository still calls `get_wishlist_repository`.
+  (`WishlistReadRepo` / `RepoWishlistOps`). Opening dialogs pass that read
+  repository into `_execute`. A quantity refusal paints through
+  `run_repository_read` after rollback. A successful save that carries the
+  repeat key still composes the list on that save. A save with no key calls
+  `execute_wish`, then reads the list through `run_repository_read`.
 
 ### 4. Concurrency & Transaction Management
 

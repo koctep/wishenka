@@ -9,8 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
-from contextlib import asynccontextmanager
-from contextvars import ContextVar
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Annotated, Any
 
@@ -22,7 +21,7 @@ from wishenka.auth.dependencies import get_current_user
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.i18n import DEFAULT_LOCALE, SupportedLocale, t
 from wishenka.i18n.dependencies import LocaleDep
-from wishenka.web.dependencies import WishlistReadRepo, get_wishlist_repository
+from wishenka.web.dependencies import WishlistReadRepo
 from wishenka.web.gifted_view import (
     RECEIPT_REFUSAL_HEADER,
     GiftedRow,
@@ -65,22 +64,16 @@ from wishenka.wishlists.service import WishlistService
 router = APIRouter(prefix="/web/wishlists/{wishlist_id}", tags=["receipts-ui"])
 logger = logging.getLogger("wishenka.web.receipts_ui")
 User = Annotated[AuthenticatedUser, Depends(get_current_user)]
-_repo_ctx: ContextVar[WishlistRepository | None] = ContextVar("_repo_ctx", default=None)
 
 
-async def _execute(request: Request, action: Any) -> Any:
-    """Run a receipt UI action via execute_wish or WishlistRepository."""
-    item_id = getattr(action, "_wish_item_id", None)
-    if item_id is not None:
-        store = request.app.state.wishlist_store
-        op_name = getattr(action, "_wish_op_name", "receipt_ui")
-        return await store.execute_wish(action, item_id=item_id, operation_name=op_name)
-    repo = _repo_ctx.get()
-    if repo is not None:
-        return await action(RepoWishlistOps(repo))
-    store = request.app.state.wishlist_store
-    async with asynccontextmanager(get_wishlist_repository)(store) as managed_repo:
-        return await action(RepoWishlistOps(managed_repo))
+async def _execute[T](
+    request: Request,
+    action: Callable[[Any], Awaitable[T]],
+    *,
+    repo: WishlistRepository,
+) -> T:
+    """Run one receipt look on the repository the caller passed."""
+    return await action(RepoWishlistOps(repo))
 
 
 BUSY = "busy"
@@ -240,51 +233,49 @@ async def get_receipt_dialog(
     repo: WishlistReadRepo,
 ) -> Response:
     """Open the receipt dialog; a stale card gets the blocked dialog with the contract status."""
-    token = _repo_ctx.set(repo)
+    ids = _ids(wishlist_id, item_id, user)
+    title = ""
+    remaining = 0
+    refusal: Exception | None
     try:
-        ids = _ids(wishlist_id, item_id, user)
-        title = ""
-        remaining = 0
-        refusal: Exception | None
-        try:
-            opened = await _execute(
+        opened = await _execute(
+            request,
+            lambda svc: _check_receipt_open(svc, wishlist_id, item_id, user),
+            repo=repo,
+        )
+        title, remaining, refusal = opened.title, opened.remaining, opened.refusal
+    except WishlistError as exc:
+        refusal = exc
+    if refusal is None:
+        _log(logging.INFO, "ui_receipt_form_opened", "Receipt dialog opened", ids)
+        return HTMLResponse(
+            _dialog_html(wishlist_id, item_id, title, remaining, selected=1, locale=locale)
+        )
+    if isinstance(refusal, InventoryBusyError):
+        http_status, reason = 503, BUSY
+    else:
+        verdict = _classify(refusal)
+        if verdict is None:
+            raise refusal
+        http_status, reason = verdict
+    _log_refusal("ui_receipt_form_refused", ids, reason, http_status, refusal)
+    extra = ""
+    if isinstance(refusal, NothingRemainingError):
+        extra = (
+            await _effect_fragments(
                 request,
-                lambda svc: _check_receipt_open(svc, wishlist_id, item_id, user),
+                user,
+                ids,
+                reason,
+                refusal,
+                title,
+                dialog_oob=False,
+                locale=locale,
+                repo=repo,
             )
-            title, remaining, refusal = opened.title, opened.remaining, opened.refusal
-        except WishlistError as exc:
-            refusal = exc
-        if refusal is None:
-            _log(logging.INFO, "ui_receipt_form_opened", "Receipt dialog opened", ids)
-            return HTMLResponse(
-                _dialog_html(wishlist_id, item_id, title, remaining, selected=1, locale=locale)
-            )
-        if isinstance(refusal, InventoryBusyError):
-            http_status, reason = 503, BUSY
-        else:
-            verdict = _classify(refusal)
-            if verdict is None:
-                raise refusal
-            http_status, reason = verdict
-        _log_refusal("ui_receipt_form_refused", ids, reason, http_status, refusal)
-        extra = ""
-        if isinstance(refusal, NothingRemainingError):
-            extra = (
-                await _effect_fragments(
-                    request,
-                    user,
-                    ids,
-                    reason,
-                    refusal,
-                    title,
-                    dialog_oob=False,
-                    locale=locale,
-                )
-                or ""
-            )
-        return _blocked_dialog(http_status, reason, ids, title, refusal, extra, locale=locale)
-    finally:
-        _repo_ctx.reset(token)
+            or ""
+        )
+    return _blocked_dialog(http_status, reason, ids, title, refusal, extra, locale=locale)
 
 
 type _View = WishItemRecipientViewDTO | WishItemGifterViewDTO
@@ -394,7 +385,7 @@ async def _effect_fragments(
     *,
     dialog_oob: bool = True,
     locale: SupportedLocale = DEFAULT_LOCALE,
-    repo: WishlistRepository | None = None,
+    repo: WishlistRepository,
 ) -> str | None:
     """Fragments that show the current state after a refusal; ``None`` degrades to the sentence.
 
@@ -403,7 +394,11 @@ async def _effect_fragments(
     """
     wishlist_id, item_id, _actor = ids
     try:
-        state = await _execute(request, lambda svc: _read_state(svc, wishlist_id, user, locale))
+        state = await _execute(
+            request,
+            lambda svc: _read_state(svc, wishlist_id, user, locale),
+            repo=repo,
+        )
     except WishlistError:
         return None
     sentence = _sentence(reason, exc, locale)
@@ -462,13 +457,11 @@ async def record_receipt_ui(
     idempotency_key = parse_idempotency_key(request)
     ids = _ids(wishlist_id, item_id, user)
     count = _quantity_of(quantity)
+    store = request.app.state.wishlist_store
 
     async def mutate(svc: Any) -> tuple[str, int]:
         item = await svc.record_item_fulfillment(item_id, user, count, wishlist_id=wishlist_id)
         return item.title, item.remaining_quantity
-
-    mutate._wish_item_id = item_id  # type: ignore[attr-defined]
-    mutate._wish_op_name = "record_receipt_ui"  # type: ignore[attr-defined]
 
     def _render_receipt_html(done: _Receipt) -> str:
         state = done.state
@@ -518,8 +511,20 @@ async def record_receipt_ui(
             )
             _log(logging.INFO, "receipt_recorded_http", "Receipt recorded", ids)
             return build_replay_response(outcome.status_code, outcome.content_type, outcome.body)
-        title_val, remaining_val = await _execute(request, mutate)
-        state = await _execute(request, lambda svc: _read_state(svc, wishlist_id, user, locale))
+        title_val, remaining_val = await store.execute_wish(
+            mutate,
+            item_id=item_id,
+            operation_name="record_receipt_ui",
+        )
+
+        async def read_list(repo: WishlistRepository) -> _State:
+            return await _execute(
+                request,
+                lambda svc: _read_state(svc, wishlist_id, user, locale),
+                repo=repo,
+            )
+
+        state = await store.run_repository_read(read_list)
         done = _Receipt(title_val, remaining_val, state)
     except InventoryBusyError:
         _log(logging.WARNING, "receipt_inventory_busy", "Receipt busy", ids)
@@ -535,10 +540,26 @@ async def record_receipt_ui(
             raise
         http_status, reason = verdict
         _log_refusal("receipt_refused", ids, reason, http_status, exc)
-        extra = None
+        extra = ""
         if isinstance(exc, _WITH_REMAINING):
-            extra = await _effect_fragments(request, user, ids, reason, exc, locale=locale)
-        return _refusal_fragment(http_status, reason, _sentence(reason, exc, locale), extra or "")
+            refused = exc
+            try:
+
+                async def paint(repo: WishlistRepository) -> str | None:
+                    return await _effect_fragments(
+                        request,
+                        user,
+                        ids,
+                        reason,
+                        refused,
+                        locale=locale,
+                        repo=repo,
+                    )
+
+                extra = await store.run_repository_read(paint) or ""
+            except WishlistError:
+                extra = ""
+        return _refusal_fragment(http_status, reason, _sentence(reason, exc, locale), extra)
     _log(logging.INFO, "receipt_recorded_http", "Receipt recorded", ids)
     return HTMLResponse(_render_receipt_html(done), status_code=status.HTTP_201_CREATED)
 
@@ -630,63 +651,60 @@ async def _open_receipt_entry_modal(
     request: Request,
     user: AuthenticatedUser,
     locale: SupportedLocale,
-    repo: WishlistRepository | None = None,
+    repo: WishlistRepository,
 ) -> Response:
-    token = _repo_ctx.set(repo)
+    ids = _ids(wishlist_id, item_id, user)
+    title = ""
+    current_quantity = 0
+    max_allowed = 0
+    refusal: Exception | None
     try:
-        ids = _ids(wishlist_id, item_id, user)
-        title = ""
-        current_quantity = 0
-        max_allowed = 0
-        refusal: Exception | None
-        try:
-            opened = await _execute(
-                request,
-                lambda svc: _check_receipt_entry_open(svc, wishlist_id, item_id, receipt_id, user),
-            )
-            title = opened.title
-            current_quantity = opened.current_quantity
-            max_allowed = opened.max_allowed
-            refusal = opened.refusal
-        except WishlistError as exc:
-            refusal = exc
-
-        ctx: dict[str, Any] = {
-            "wishlist_id": wishlist_id,
-            "item_id": item_id,
-            "receipt_id": receipt_id,
-            "item_title": title,
-            "current_quantity": current_quantity,
-            "max_allowed": max_allowed,
-            "locale": locale,
-        }
-        if refusal is None:
-            _log(
-                logging.INFO,
-                "ui_receipt_entry_form_opened",
-                "Receipt entry dialog opened",
-                ids,
-                receipt_id=receipt_id,
-            )
-            return HTMLResponse(templates.get_template(template_name).render(ctx))
-
-        if isinstance(refusal, InventoryBusyError):
-            http_status, reason = 503, BUSY
-        else:
-            verdict = _classify(refusal)
-            if verdict is None:
-                raise refusal
-            http_status, reason = verdict
-        _log_refusal("ui_receipt_entry_form_refused", ids, reason, http_status, refusal)
-        ctx["blocked"] = True
-        ctx["feedback"] = _sentence(reason, refusal, locale)
-        return HTMLResponse(
-            content=templates.get_template(template_name).render(ctx),
-            status_code=http_status,
-            headers={RECEIPT_REFUSAL_HEADER: reason},
+        opened = await _execute(
+            request,
+            lambda svc: _check_receipt_entry_open(svc, wishlist_id, item_id, receipt_id, user),
+            repo=repo,
         )
-    finally:
-        _repo_ctx.reset(token)
+        title = opened.title
+        current_quantity = opened.current_quantity
+        max_allowed = opened.max_allowed
+        refusal = opened.refusal
+    except WishlistError as exc:
+        refusal = exc
+
+    ctx: dict[str, Any] = {
+        "wishlist_id": wishlist_id,
+        "item_id": item_id,
+        "receipt_id": receipt_id,
+        "item_title": title,
+        "current_quantity": current_quantity,
+        "max_allowed": max_allowed,
+        "locale": locale,
+    }
+    if refusal is None:
+        _log(
+            logging.INFO,
+            "ui_receipt_entry_form_opened",
+            "Receipt entry dialog opened",
+            ids,
+            receipt_id=receipt_id,
+        )
+        return HTMLResponse(templates.get_template(template_name).render(ctx))
+
+    if isinstance(refusal, InventoryBusyError):
+        http_status, reason = 503, BUSY
+    else:
+        verdict = _classify(refusal)
+        if verdict is None:
+            raise refusal
+        http_status, reason = verdict
+    _log_refusal("ui_receipt_entry_form_refused", ids, reason, http_status, refusal)
+    ctx["blocked"] = True
+    ctx["feedback"] = _sentence(reason, refusal, locale)
+    return HTMLResponse(
+        content=templates.get_template(template_name).render(ctx),
+        status_code=http_status,
+        headers={RECEIPT_REFUSAL_HEADER: reason},
+    )
 
 
 async def _execute_receipt_mutation_ui(
@@ -702,10 +720,10 @@ async def _execute_receipt_mutation_ui(
     notice_fn: Any,
     locale: SupportedLocale,
     mutate: Any = None,
-    repo: WishlistRepository | None = None,
 ) -> Response:
     idempotency_key = parse_idempotency_key(request)
     ids = _ids(wishlist_id, item_id, user)
+    store = request.app.state.wishlist_store
 
     def _render_html(done: _FullMutationState) -> str:
         return _render_mutation_oob(request, wishlist_id, done, notice_fn(done.title), locale)
@@ -746,17 +764,28 @@ async def _execute_receipt_mutation_ui(
             )
             return build_replay_response(outcome.status_code, outcome.content_type, outcome.body)
         if mutate is not None:
-            mutate._wish_item_id = item_id
-            mutate._wish_op_name = operation_name
-            title_val = await _execute(request, mutate)
-            done = await _execute(
-                request,
-                lambda svc: _read_full_mutation_state(svc, wishlist_id, user, title_val, locale),
+            title_val = await store.execute_wish(
+                mutate,
+                item_id=item_id,
+                operation_name=operation_name,
             )
+
+            async def read_full(repo: WishlistRepository) -> _FullMutationState:
+                return await _execute(
+                    request,
+                    lambda svc: _read_full_mutation_state(
+                        svc, wishlist_id, user, title_val, locale
+                    ),
+                    repo=repo,
+                )
+
+            done = await store.run_repository_read(read_full)
         else:
-            action._wish_item_id = item_id
-            action._wish_op_name = operation_name
-            done = await _execute(request, action)
+            done = await store.execute_wish(
+                action,
+                item_id=item_id,
+                operation_name=operation_name,
+            )
     except InventoryBusyError:
         _log(logging.WARNING, "receipt_inventory_busy", "Receipt busy", ids)
         return _refusal_fragment(

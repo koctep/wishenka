@@ -40,7 +40,7 @@
   - Схема таблиц `wl_*` и `users` создаётся и меняется только версионными ревизиями Alembic (`wishenka/wishlists/alembic/versions/`); ad-hoc `ALTER TABLE` и дублирующего DDL `users` в коде хранилищ нет. `UserStore.initialize()` настраивает WAL-режим (для собственного движка) и делегирует миграцию схемы в `upgrade_to_head(self.database_url)` (ревизия `unify_user_keys_and_cascades`, `WISHENKA-188`, консолидирует DDL `users` и переводит все пользовательские внешние ключи на `users(telegram_id)` с `ON DELETE CASCADE`).
   - `WishlistStore.initialize()` при старте приводит БД к head: распознаёт и штампует legacy-схему без изменения данных, применяет `upgrade head`, выбирает WAL. Параллельный старт нескольких процессов сериализуется файлом `<db>.migrate.lock` (`fcntl`, только POSIX, ожидание до 60 с).
   - Для `:memory:` хранилище использует изолированный временный файл, который удаляется в `WishlistStore.dispose()`.
-  - **DI-слой веб-маршрутов (`WISHENKA-80`, `WISHENKA-323`, `WISHENKA-338`):**
+  - **DI-слой веб-маршрутов (`WISHENKA-80`, `WISHENKA-323`, `WISHENKA-324`, `WISHENKA-338`):**
     HTTP-маршруты (`wishenka/web/routes/wishlists.py`, `items.py`, `sharing.py`,
     `receipts.py`, `items_ui.py`, `receipts_ui.py`) выполняют общие действия
     вишлиста через `RepoWishlistOps`. Чистый GET одного вишлиста берёт
@@ -50,8 +50,11 @@
     Store-backed `WishlistService` пересылает семь открытий в
     `run_repository_read`, остальные общие имена — в `run_repository` (коммит и
     сброс commit-логов). Брони и получения остаются на `execute_wish` /
-    `execute_wish_idempotent`. `receipts_ui._execute` без переданного
-    репозитория по-прежнему вызывает `get_wishlist_repository`. Подробнее:
+    `execute_wish_idempotent`. Просмотр получения в `receipts_ui` берёт
+    репозиторий, который экран уже получил. `receipts_ui._execute` строит
+    `RepoWishlistOps` на этом репозитории. Скрытый запасной путь, который
+    открывал общий репозиторий, убран. Успешное сохранение с ключом повтора
+    по-прежнему собирает список на этом сохранении. Подробнее:
     [`doc/dev/wishlists.md`](wishlists.md#shared-wishlist-rule-set).
   - **Scoped-гидратация одного вишлиста (`WISHENKA-213`):**
     `_SINGLE_WISHLIST_METHODS` содержит `update_wishlist_settings` и
