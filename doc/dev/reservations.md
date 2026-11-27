@@ -378,17 +378,25 @@ described in [miniapp.md](miniapp.md#981-client-script-staticwishlistjs-wishenka
 #### Refresh
 
 `htmx:afterRequest` in
-[`base.html`](file:///home/src/wishenka/web/templates/base.html)
-runs when the control path contains `/reservations`.
+[`app.js`](../../wishenka/web/static/app.js)
+runs when the control path contains `/reservations`. The card branch
+calls `window.swapWishCard(card, markup)` when the fetched card text
+arrives. It does not call the local function. `base.html` has no inline
+script that defines the swap.
 
 - **HTTP 200 or 201.** The script requests
   `GET /wishlists/{wishlist_id}/items/{item_id}/card` with `is_first` and
   `is_last` copied from the card's data attributes, and with no `notice`.
-  `swapWishCard` replaces `#item-card-{id}` via `outerHTML`. The partial
-  always renders `.item-card-details` with `hidden`. When the swapped
-  summary had `aria-expanded="true"`, the script sets that attribute on
-  the new summary and clears `hidden` on the new details
+  A matching card still replaces `#item-card-{id}` in place. The original
+  function uses `outerHTML`. The partial always renders
+  `.item-card-details` with `hidden`. When the swapped summary had
+  `aria-expanded="true"`, the script sets that attribute on the new
+  summary and clears `hidden` on the new details
   (`nextDetails.hidden = false`). Edit, move, and archive stay visible.
+  A body that is not that card, including JSON, is not written by the
+  shared script. `wishlist.js` replaces the card with the neutral
+  paragraph «Желание больше недоступно. Обновите страницу.» The English
+  fallback is "This wish is no longer available. Please refresh the page."
 - **HTTP 409.** The same GET adds `notice=shortage` when the response
   text contains `available`, and `notice=refused` otherwise. The card
   does not echo `detail`. Shortage text is

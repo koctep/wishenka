@@ -1495,10 +1495,12 @@ drag-and-drop code that used to be inline in `base.html` and the `onclick`/`onke
 `partials/item_card.html`. It is a classic script wrapped in an IIFE with `'use strict'`; it exposes
 no globals (`toggleWishCard` is no longer a global function).
 
-- **Loading**: `base.html` has `<script src="/static/wishlist.js" defer></script>` after the htmx
-  and `json-enc` tags and before the remaining inline script. `defer` runs it after parsing, so
-  the order after htmx is kept. All listeners sit on `document` (delegation), so cards that
-  appear after an htmx swap or `swapWishCard` need no re-binding.
+- **Loading**: `base.html` loads deferred `/static/app.js`, then
+  `/static/wishlist.js`, then `/static/receipt.js`. No inline script defines
+  the card swap. `app.js` publishes `window.swapWishCard` before
+  `wishlist.js` wraps that property. `defer` keeps that order after parsing.
+  All listeners sit on `document` (delegation), so cards that appear after an
+  htmx swap or `swapWishCard` need no re-binding.
 - **Toggle**: delegated `click` and `keydown` (`Enter` or Space) on the closest
   `.item-card-summary`. The event is ignored when its target is inside
   `a, button, input, select, textarea, [data-no-toggle]`. `preventDefault()` runs only for
@@ -1596,12 +1598,18 @@ no globals (`toggleWishCard` is no longer a global function).
     from a long press on Chrome Android, pull-to-refresh and the autoscroll speed are not verified
     on real devices; the manual checklist is WISHENKA-143. Tidying of the script (long lines,
     module split, palette variables) is WISHENKA-144.
-- **Receipt additions (WISHENKA-24)**: the `swapWishCard` wrapper (a refresh that is not the same
-  `.item-card` becomes `p.item-card-unavailable` «Желание больше недоступно. Обновите
-  страницу.») and the `htmx:responseError` listener that reacts only to the header
-  `X-Reorder-Refusal: stale_order` (notice «Список изменился. Обновляем.» in `#list-notice`, then
-  `window.location.reload()` after `STALE_RELOAD_DELAY_MS` = 800 ms). Both guard a missing
-  function or `xhr`.
+- **Receipt additions (WISHENKA-24, WISHENKA-265)**: `app.js` publishes
+  `window.swapWishCard` after the local function. The card branch of
+  `htmx:afterRequest` calls `window.swapWishCard(card, markup)` when the
+  response text arrives. It does not call the local name. `wishlist.js`
+  wraps that property. A body that is not the same `.item-card` becomes
+  `p.item-card-unavailable` «Желание больше недоступно. Обновите страницу.»
+  The English fallback is "This wish is no longer available. Please refresh
+  the page." A matching card still replaces in place. The shared script does
+  not write a JSON body into the card. The `htmx:responseError` listener
+  reacts only to `X-Reorder-Refusal: stale_order` (notice «Список изменился.
+  Обновляем.» in `#list-notice`, then `window.location.reload()` after
+  `STALE_RELOAD_DELAY_MS` = 800 ms). Both guard a missing function or `xhr`.
 - **Dialog script (`static/receipt.js`, WISHENKA-24)**: a second classic script, loaded
   `<script src="/static/receipt.js" defer>` after `wishlist.js` in `base.html`; IIFE, delegated
   listeners on `document`, texts via `textContent` only, no inline handler. It owns the quantity
@@ -1652,6 +1660,15 @@ of inline JavaScript and inline `on*` event handlers from SSR templates so a str
     executes after `/static/app.js`.
   - Both `app.js` and `settings.js` are wrapped in an IIFE with `'use strict'` and JSDoc
     annotations, emitting no `console.log` or `console.debug` statements.
+- **`window.swapWishCard` bridge (WISHENKA-265)**:
+  - After the local `swapWishCard`, `app.js` assigns
+    `window.swapWishCard = swapWishCard`.
+  - The card branch of `htmx:afterRequest` calls
+    `window.swapWishCard(card, markup)` when the response text arrives. It
+    does not call the local name. `base.html` has no inline script for this.
+  - `wishlist.js` replaces the property. The same wish card still replaces
+    in place. Any other body becomes the neutral paragraph. The shared
+    script does not write a JSON body into the card.
 - **`window.prepareCsrf` bridge**:
   - `app.js` manages CSRF token fetching, 10 s timeout (`CSRF_TIMEOUT_MS = 10000`), and in-flight
     deduplication via `prepareCsrf()`, and explicitly exposes `window.prepareCsrf = prepareCsrf`.

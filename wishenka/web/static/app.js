@@ -3,7 +3,8 @@
  * lifecycle hooks, wish card/cabinet refreshes, and delegated modal/preview actions.
  *
  * Classic script (loaded with `defer` after htmx and before `wishlist.js`).
- * Exposes `window.prepareCsrf` for pages (such as `/settings`) that invoke it directly.
+ * Exposes `window.prepareCsrf` for pages (such as `/settings`) that invoke it directly,
+ * and `window.swapWishCard` so `wishlist.js` can wrap the card swap.
  */
 (() => {
   'use strict';
@@ -187,6 +188,8 @@
       }
     }
   }
+
+  window.swapWishCard = swapWishCard;
 
   /**
    * Parse an integer attribute with a fallback when missing or non-numeric.
@@ -462,7 +465,7 @@
     fetch(url, { credentials: 'same-origin', headers: { Accept: 'text/html' } })
       .then((response) => response.text())
       .then((markup) => {
-        swapWishCard(card, markup);
+        window.swapWishCard(card, markup);
       });
   });
 

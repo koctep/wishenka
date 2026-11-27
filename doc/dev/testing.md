@@ -606,8 +606,9 @@ make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_settings_switch_browser.py -q'
   `service._reservations`) (WISHENKA-319); только Chromium, без речевого движка
   (WISHENKA-313). Фокус и объявление после 410, и отдельное доступное имя Cancel, проверяют
   интерфейсный и браузерный модули на русском и английском.
-- Заведомо падающие тесты вне задачи: `tests/test_receipt_modal_browser.py`
-  (`test_stale_giver_card_is_neutral`, WISHENKA-265).
+- `tests/test_receipt_modal_browser.py::test_stale_giver_card_is_neutral`
+  теперь проходит (WISHENKA-265). Другие известные падения этой правкой
+  не закрыты.
   `test_unmarked_error_neither_shows_notice_nor_reloads` теперь проходит
   (WISHENKA-220) и не входит в известные падения.
 
@@ -646,8 +647,9 @@ make test PYTEST_JOBS=2 PYTEST_ARGS='tests/test_settings_switch_browser.py -q'
   ([WISHENKA-321](https://pypost.atlassian.net/browse/WISHENKA-321));
   идемпотентность ([WISHENKA-322](https://pypost.atlassian.net/browse/WISHENKA-322)).
 - Тесты с `caplog` падают при запуске с `-p no:logging`; настроенные запуски плагин не отключают.
-- Заведомо падающие тесты вне задачи: `tests/test_receipt_modal_browser.py`
-  (`test_stale_giver_card_is_neutral`, WISHENKA-265).
+- `tests/test_receipt_modal_browser.py::test_stale_giver_card_is_neutral`
+  теперь проходит (WISHENKA-265). Другие известные падения этой правкой
+  не закрыты.
   `test_unmarked_error_neither_shows_notice_nor_reloads` теперь проходит
   (WISHENKA-220) и не входит в известные падения.
 

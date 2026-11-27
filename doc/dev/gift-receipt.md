@@ -671,12 +671,19 @@ writes `console.error` for the unswapped 4xx of other requests; that is expected
 
 ### Stale states
 
-- **Stale card.** A giver-side refresh of a wish card goes through `window.swapWishCard`,
-  defined by the inline script of `base.html`. `wishlist.js` wraps it (only if it is a
-  function): when the answer is not an `.item-card` with the id of the card being replaced (for
-  example an error body for a wish that was fully received meanwhile), the card is replaced by
-  `p.item-card-unavailable` (`role="status"`) with the text «Желание больше недоступно.
-  Обновите страницу.». The raw answer is never shown.
+- **Stale card.** `wishenka/web/static/app.js` publishes
+  `window.swapWishCard = swapWishCard` after the local function. The card
+  branch of `htmx:afterRequest` calls `window.swapWishCard(card, markup)`
+  when the card response text arrives. It does not call the local name.
+  `base.html` does not define the swap; it only loads the deferred scripts.
+  `wishlist.js` wraps that property when it is a function. A body that is
+  the same `.item-card` (same id) still replaces in place. Any other body,
+  including JSON for a wish that was fully received, becomes
+  `p.item-card-unavailable` (`role="status"`). The text is «Желание больше
+  недоступно. Обновите страницу.» The English fallback is "This wish is no
+  longer available. Please refresh the page." The shared script does not
+  write that JSON body into the card. `test_stale_giver_card_is_neutral`
+  covers this path and passes (WISHENKA-265).
 - **Stale reorder.** The reorder route answers 400 `Invalid item order` (JSON body unchanged)
   and now adds the header `X-Reorder-Refusal: stale_order` (`REORDER_REFUSAL_HEADER` in
   `items_ui.py`). It is a separate namespace from `X-Receipt-Refusal`: the two never meet.
