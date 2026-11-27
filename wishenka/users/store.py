@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -131,16 +132,47 @@ class UserStore:
         """Run a save through the immediate-transaction helper."""
         return await self._immediate(work, operation=operation)
 
-    async def _read(self, work: Callable[[AsyncConnection], Awaitable[T]]) -> T:
-        """Run work in a read-only deferred transaction without BEGIN IMMEDIATE."""
+    async def _read(
+        self,
+        work: Callable[[AsyncConnection], Awaitable[T]],
+        *,
+        operation: str,
+    ) -> T:
+        """Run work in a deferred read that refuses writes and maps a busy database."""
         async with self.engine.connect() as raw_conn:
             conn = await raw_conn.execution_options(read_only=True)
             try:
                 await conn.begin()
+                await conn.exec_driver_sql("PRAGMA query_only = ON")
                 return await work(conn)
+            except SQLAlchemyError as exc:
+                if is_sqlite_busy(exc):
+                    logger.warning(
+                        "User store operation rolled back because the database was busy",
+                        extra={"event": "user_store_busy", "operation": operation},
+                    )
+                    raise UserStoreBusyError(
+                        "User service is temporarily busy; please retry"
+                    ) from exc
+                raise
             finally:
+                has_active_exc = sys.exc_info()[1] is not None
                 if conn.in_transaction():
                     await conn.rollback()
+                try:
+                    autocommit_conn = await raw_conn.execution_options(isolation_level="AUTOCOMMIT")
+                    await autocommit_conn.exec_driver_sql("PRAGMA query_only = OFF")
+                except BaseException as exc:
+                    logger.warning(
+                        "Failed to reset query_only after user read; invalidating connection",
+                        extra={
+                            "event": "user_store_query_only_reset_failed",
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                    await raw_conn.invalidate()
+                    if not has_active_exc:
+                        raise
 
     async def initialize(self) -> None:
         """Delegate schema migrations to Alembic and configure WAL mode idempotently."""
@@ -481,7 +513,7 @@ class UserStore:
             row = result.first()
             return self._row_to_record(row) if row is not None else None
 
-        return await self._read(_work)
+        return await self._read(_work, operation="get_by_telegram_id")
 
     async def get_by_id(self, user_id: int) -> UserRecord | None:
         """Find user by internal database primary key."""
@@ -493,7 +525,7 @@ class UserStore:
             row = result.first()
             return self._row_to_record(row) if row is not None else None
 
-        return await self._read(_work)
+        return await self._read(_work, operation="get_by_id")
 
     async def dispose(self) -> None:
         """Cleanly close connection pools."""
