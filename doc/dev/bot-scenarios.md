@@ -77,7 +77,12 @@ schemes are kept in the draft for correction without a preview request. At save,
 `image_url` must be absolute HTTP(S) URLs. The user can edit or clear optional fields, inspect full
 values across bounded Telegram messages, choose an eligible wishlist, and explicitly save or cancel.
 With one eligible list it is selected automatically; several lists use paginated inline buttons.
-When no list is available the menu offers Mini App navigation. Access is rechecked on save.
+The offer loads those lists with `list_accessible_wishlist_ids`, then
+`get_wishlist_headers_by_ids` and this person's membership
+(`list_user_memberships_by_wishlist_ids`). It does not read `wl_items` or
+`wl_reservations`. A successful header load adds no new log. Saving the chosen
+list stays on the existing wish write. When no list is available the menu
+offers Mini App navigation. Access is rechecked on save.
 
 The migrations `add_bot_drafts`, `add_bot_capture_order`, and `add_bot_capture_order_retention`
 create durable SQLite state. An active draft and message-order watermark (`bot_capture_order`) are

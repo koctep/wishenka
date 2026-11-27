@@ -521,10 +521,10 @@ class WishlistRepository:
         """Alias for list_by_owner."""
         return await self.list_by_owner(owner_id)
 
-    async def list_accessible_wishlists(
+    async def list_accessible_wishlist_ids(
         self, user_id: int, *, include_archived: bool = False
-    ) -> list[Wishlist]:
-        """List non-deleted wishlists where the user is owner or member."""
+    ) -> list[int]:
+        """Active, or non-deleted, lists this person owns or belongs to, by id."""
         status_clause = "l.status != 'deleted'" if include_archived else "l.status = 'active'"
         stmt = text(
             "SELECT DISTINCT l.id FROM wl_lists l "
@@ -533,25 +533,49 @@ class WishlistRepository:
             "ORDER BY l.id ASC"
         )
         ids = (await self.conn.execute(stmt, {"user_id": user_id})).scalars().all()
+        return [int(wishlist_id) for wishlist_id in ids]
+
+    async def list_accessible_wishlists(
+        self, user_id: int, *, include_archived: bool = False
+    ) -> list[Wishlist]:
+        """List non-deleted wishlists where the user is owner or member."""
+        ids = await self.list_accessible_wishlist_ids(user_id, include_archived=include_archived)
         results: list[Wishlist] = []
-        for wl_id in ids:
-            wl = await self.get_wishlist(wl_id)
-            if wl is not None:
-                results.append(wl)
+        for wishlist_id in ids:
+            wishlist = await self.get_wishlist(wishlist_id)
+            if wishlist is not None:
+                results.append(wishlist)
         return results
 
-    async def list_deleted_by_owner(self, owner_id: int) -> list[Wishlist]:
-        """List soft-deleted wishlists owned by the specified user."""
+    async def list_deleted_owner_moments(self, owner_id: int) -> list[tuple[int, datetime]]:
+        """Deleted lists this owner has, as id and updated_at, newest first."""
         stmt = text(
-            "SELECT id FROM wl_lists WHERE owner_id = :owner_id AND status = 'deleted' "
+            "SELECT id, updated_at FROM wl_lists "
+            "WHERE owner_id = :owner_id AND status = 'deleted' "
             "ORDER BY updated_at DESC, id ASC"
         )
-        ids = (await self.conn.execute(stmt, {"owner_id": owner_id})).scalars().all()
+        rows = (await self.conn.execute(stmt, {"owner_id": owner_id})).all()
+        moments: list[tuple[int, datetime]] = []
+        for row in rows:
+            updated_at = _parse_dt(row.updated_at)
+            if updated_at is None:
+                continue
+            moments.append((int(row.id), updated_at))
+        return moments
+
+    async def list_deleted_by_owner(self, owner_id: int) -> list[Wishlist]:
+        """List soft-deleted wishlist headers owned by the specified user."""
+        moments = await self.list_deleted_owner_moments(owner_id)
+        if not moments:
+            return []
+        headers = await self.get_wishlist_headers_by_ids(
+            [wishlist_id for wishlist_id, _updated_at in moments]
+        )
         results: list[Wishlist] = []
-        for wl_id in ids:
-            wl = await self.get_wishlist(wl_id)
-            if wl is not None:
-                results.append(wl)
+        for wishlist_id, _updated_at in moments:
+            wishlist = headers.get(wishlist_id)
+            if wishlist is not None:
+                results.append(wishlist)
         return results
 
     async def upsert_member(self, member: WishlistMember) -> WishlistMember:
@@ -993,8 +1017,8 @@ class WishlistRepository:
         )
         return {int(wl_id) for wl_id in rows}
 
-    async def list_favorite_wishlists(self, user_id: int) -> list[Wishlist]:
-        """List accessible non-deleted wishlists bookmarked by the user in most-recent order."""
+    async def list_favorite_wishlist_ids(self, user_id: int) -> list[int]:
+        """Bookmark ids this person may still open, newest bookmark first."""
         stmt = text(
             "SELECT f.wishlist_id FROM wl_favorites f "
             "JOIN wl_lists l ON l.id = f.wishlist_id "
@@ -1011,11 +1035,25 @@ class WishlistRepository:
             "ORDER BY f.created_at DESC"
         )
         ids = (await self.conn.execute(stmt, {"uid": user_id})).scalars().all()
+        return [int(wishlist_id) for wishlist_id in ids]
+
+    async def list_favorite_wishlists(self, user_id: int) -> list[Wishlist]:
+        """List accessible non-deleted wishlist headers bookmarked by the user, newest first."""
+        ids = await self.list_favorite_wishlist_ids(user_id)
+        if not ids:
+            return []
+        headers = await self.get_wishlist_headers_by_ids(ids)
+        memberships = await self.list_user_memberships_by_wishlist_ids(user_id, ids)
         results: list[Wishlist] = []
-        for wl_id in ids:
-            wl = await self.get_wishlist(wl_id)
-            if wl is not None:
-                results.append(wl)
+        for wishlist_id in ids:
+            wishlist = headers.get(wishlist_id)
+            if wishlist is None:
+                continue
+            member = memberships.get(wishlist.id)
+            if member is not None and member not in wishlist.members:
+                member.wishlist = wishlist
+                wishlist.members.append(member)
+            results.append(wishlist)
         return results
 
     async def save_item(self, item: WishItem) -> None:

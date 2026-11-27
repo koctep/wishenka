@@ -110,14 +110,25 @@ def _now(deps: Any) -> datetime:
 
 async def _allowed(repo: WishlistRepository, actor: AuthenticatedUser) -> list[Any]:
     """Active lists the actor may edit, in the order capture already shows."""
-    lists = await repo.list_accessible_wishlists(actor.telegram_id)
-    return [
-        wl
-        for wl in lists
+    ids = await repo.list_accessible_wishlist_ids(actor.telegram_id)
+    if not ids:
+        return []
+    headers = await repo.get_wishlist_headers_by_ids(ids)
+    memberships = await repo.list_user_memberships_by_wishlist_ids(actor.telegram_id, ids)
+    editable: list[Any] = []
+    for wishlist_id in ids:
+        wishlist = headers.get(wishlist_id)
+        if wishlist is None:
+            continue
+        member = memberships.get(wishlist.id)
+        if member is not None and member not in wishlist.members:
+            member.wishlist = wishlist
+            wishlist.members.append(member)
         if WishlistAccessPolicy.can_add_or_edit_item(
-            WishlistAccessPolicy.resolve_context(actor, wl), wl
-        )
-    ]
+            WishlistAccessPolicy.resolve_context(actor, wishlist), wishlist
+        ):
+            editable.append(wishlist)
+    return editable
 
 
 def _keyboard(

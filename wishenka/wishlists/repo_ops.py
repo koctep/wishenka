@@ -544,17 +544,27 @@ class RepoWishlistOps:
     ) -> list[tuple[Wishlist, datetime, int]]:
         """List owner's soft-deleted wishlists that are still within the retention window."""
         effective_now = now if now is not None else datetime.now(UTC)
+        moments = await self.repo.list_deleted_owner_moments(actor.telegram_id)
+        survivors = [
+            wishlist_id
+            for wishlist_id, updated_at in moments
+            if not retention.is_retention_expired(updated_at, retention_days, effective_now)
+        ]
+        headers: dict[int, Wishlist] = {}
+        if survivors:
+            headers = await self.repo.get_wishlist_headers_by_ids(survivors)
         results: list[tuple[Wishlist, datetime, int]] = []
-        for wl in await self.repo.list_deleted_by_owner(actor.telegram_id):
-            ctx = WishlistAccessPolicy.resolve_context(actor, wl)
-            if not WishlistAccessPolicy.can_restore_deleted(ctx, wl):
+        for wishlist_id in survivors:
+            wishlist = headers.get(wishlist_id)
+            if wishlist is None:
                 continue
-            if retention.is_retention_expired(wl.updated_at, retention_days, effective_now):
+            ctx = WishlistAccessPolicy.resolve_context(actor, wishlist)
+            if not WishlistAccessPolicy.can_restore_deleted(ctx, wishlist):
                 continue
-            deleted_at = retention.deletion_moment(wl.updated_at)
+            deleted_at = retention.deletion_moment(wishlist.updated_at)
             expires_at = deleted_at + timedelta(days=retention_days)
-            days_left = retention.days_remaining(wl.updated_at, retention_days, effective_now)
-            results.append((wl, expires_at, days_left))
+            days_left = retention.days_remaining(wishlist.updated_at, retention_days, effective_now)
+            results.append((wishlist, expires_at, days_left))
         results.sort(key=lambda entry: entry[0].updated_at, reverse=True)
         logger.info(
             "Listed %s deleted wishlists for actor %s",
@@ -1225,12 +1235,27 @@ class RepoWishlistOps:
         await self.repo.delete_favorite(user.telegram_id, wishlist_id)
 
     async def list_favorites(self, user: AuthenticatedUser) -> list[Wishlist]:
-        """List user's favorited wishlists in reverse-chronological order."""
-        return await self.repo.list_favorite_wishlists(user.telegram_id)
+        """List user's favorited wishlist headers in reverse-chronological order."""
+        ids = await self.repo.list_favorite_wishlist_ids(user.telegram_id)
+        if not ids:
+            return []
+        headers = await self.repo.get_wishlist_headers_by_ids(ids)
+        memberships = await self.repo.list_user_memberships_by_wishlist_ids(user.telegram_id, ids)
+        results: list[Wishlist] = []
+        for wishlist_id in ids:
+            wishlist = headers.get(wishlist_id)
+            if wishlist is None:
+                continue
+            member = memberships.get(wishlist.id)
+            if member is not None and member not in wishlist.members:
+                member.wishlist = wishlist
+                wishlist.members.append(member)
+            results.append(wishlist)
+        return results
 
     async def record_view(self, user: AuthenticatedUser, wishlist_id: int) -> ViewHistoryEntry:
         """Record or update a wishlist view event for user."""
-        wl = await self.repo.get_wishlist(wishlist_id)
+        wl = await self.repo.get_wishlist_header(wishlist_id)
         if wl is None or wl.status == WishlistStatus.DELETED:
             if wl is not None and wl.status == WishlistStatus.DELETED:
                 logger.warning(
@@ -1243,6 +1268,13 @@ class RepoWishlistOps:
                     },
                 )
             raise WishlistNotFoundError(f"Wishlist {wishlist_id} not found")
+        memberships = await self.repo.list_user_memberships_by_wishlist_ids(
+            user.telegram_id, [wishlist_id]
+        )
+        member = memberships.get(wl.id)
+        if member is not None and member not in wl.members:
+            member.wishlist = wl
+            wl.members.append(member)
         has_share = await self.repo.has_valid_share_access(
             user.telegram_id, wishlist_id, wl.public_token
         )

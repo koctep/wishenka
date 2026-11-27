@@ -110,8 +110,12 @@ the list through `run_repository_read`.
   restore of a deleted wishlist reads `repo.is_favorite` after the save, inside
   that write transaction. Member removal, item archive, and item restore read
   the list again on the same write repository. Public link and invite stay
-  here (the share page records a view). Multi-wishlist reads stay here: the
-  wishlist list, favorites list, history, and deleted wishlists.
+  here (the share page records a view). Multi-wishlist reads stay on this
+  write transaction. `GET /api/wishlists` (`list_accessible_wishlists`) still
+  opens each list in full. Favorites, recently deleted lists, and recording
+  a visit load list headers on that same transaction and do not read
+  `wl_items` or `wl_reservations`. History listing and clearing stay on the
+  existing visit-and-summary path.
 - **`_repository_forward`**: when `WishlistService._store` is set, each name in
   `_SHARED_REPOSITORY_METHODS` calls the same name on `RepoWishlistOps` inside
   `run_repository` (`BEGIN IMMEDIATE`, then commit and flush). The wrapper does
@@ -227,12 +231,15 @@ rejected by the optional authentication dependency.
   form does not call it ([miniapp.md](miniapp.md#1-wishlist-creation)).
 
 - `GET /api/wishlists`: Lists the caller's active memberships. Set `include_archived=true` to
-  include archived lists.
+  include archived lists. `list_accessible_wishlists` still opens each list in
+  full (`get_wishlist`: members, items, and reservations).
 
 - `GET /api/wishlists/deleted`: Lists the caller's own soft-deleted wishlists that
   `is_retention_expired` still treats as restorable. The period is the shared
   `wishlist_retention_days` (usual value 30). Sorted by `updated_at` descending
-  with `deleted_at`, `expires_at`, and `days_remaining`.
+  with `deleted_at`, `expires_at`, and `days_remaining`. Lists still inside the
+  window load through `get_wishlist_headers_by_ids`. That read does not load
+  membership, `wl_items`, or `wl_reservations`.
 
 - `GET /api/wishlists/{id}`: Reads a list for a member, including archived lists.
   The handler is `get_wishlist` on `WishlistReadRepo`. The favorite mark in that
@@ -285,7 +292,12 @@ rejected by the optional authentication dependency.
 
 - `GET /api/public/wishlists/{token}/view`: Reads the role-specific public projection (`anonymous_safe` for unauthenticated callers, `recipient_safe` for recipients, `gifter` for authenticated non-recipients) without membership or invite secrets. An authenticated caller also records Viewing History for that list (`record_share_view_if_authenticated`). Anonymous callers do not.
 
-- `GET /api/favorites`: Lists the caller's favorited wishlists in reverse-chronological order, filtered to non-deleted, non-owned lists where the caller is an active collaborator (`wl_members`) or holds an active share-link grant (`wl_share_access` matching `public_token`).
+- `GET /api/favorites`: Lists the caller's favorited wishlists in reverse-chronological
+  order, filtered to non-deleted, non-owned lists where the caller is an active
+  collaborator (`wl_members`) or holds an active share-link grant
+  (`wl_share_access` matching `public_token`). Headers come from
+  `get_wishlist_headers_by_ids`, plus this person's membership row where the
+  role needs it. The listing does not read `wl_items` or `wl_reservations`.
 
 - `POST /api/favorites/{id}`: Adds a wishlist to caller's favorites (requires non-owner, non-deleted list, and either active membership or valid `wl_share_access` grant; unauthorized or inaccessible non-owner lists return uniform `404` (`WishlistNotFoundError`, anti-enumeration), whereas attempting to favorite one's own wishlist raises `ValueError` and the route maps it to `400 Bad Request` so API consumers can distinguish self-favoriting from non-owner anti-enumeration).
 
@@ -298,8 +310,12 @@ rejected by the optional authentication dependency.
   Reservation counts and buyer identities are not included.
 
 - `POST /api/history/{id}`: Records or updates a view when `can_view_history` allows
-  it. A missing, deleted, or inaccessible id returns `404` with
-  `detail` `"Wishlist not found"`.
+  it. The write transaction loads `get_wishlist_header` (the `wl_lists` row
+  only). That read writes nothing. A missing or deleted list does not load
+  membership. A non-deleted list loads this person's membership before the
+  permission check. Neither path reads `wl_items` or `wl_reservations`. A
+  successful header load adds no new log. A missing, deleted, or inaccessible
+  id returns `404` with `detail` `"Wishlist not found"`.
 
 - `DELETE /api/history`: Clears all viewing history rows for the caller.
 
@@ -836,7 +852,8 @@ flowchart TD
     postHist["POST /api/history/{id}"] --> recordView["record_view"]
     getHist["GET /api/history"] --> getHistory["get_history"]
     recordHelper --> recordView
-    recordView --> policy["WishlistAccessPolicy.can_view_history"]
+    recordView --> oneHeader["get_wishlist_header"]
+    oneHeader --> policy["WishlistAccessPolicy.can_view_history"]
     getHistory --> policy
     recordView --> repo["WishlistRepository.record_view"]
     getHistory --> listSql["WishlistRepository.list_view_history"]
@@ -858,7 +875,12 @@ flowchart TD
 - **`RepoWishlistOps`**: enforces the policy in `record_view` and `get_history`.
   HTTP routes call that adapter on the request repository. A store-backed
   `WishlistService` forwards the same names through `run_repository`. An
-  in-memory service fail-closes those names.
+  in-memory service fail-closes those names. `record_view` loads
+  `get_wishlist_header` on that write transaction. The header read writes
+  nothing. A missing or deleted list does not load membership. A non-deleted
+  list loads this person's membership before the permission check. Neither
+  path reads `wl_items` or `wl_reservations`. A successful header load adds
+  no new log. Listing and clearing stay on the visit-and-summary path above.
 - **Opening history (WISHENKA-325)**: `RepoWishlistOps.get_history` loads the
   capped visit list with `list_view_history`. When that list is empty it
   writes `view_history_listed` and returns without either batch. Otherwise
@@ -1383,6 +1405,12 @@ async def restore_deleted_wishlist(
   `DEFAULT_WISHLIST_RETENTION_DAYS` (30) when a caller omits the period.
 - **Listing output**: Returns `(wishlist, expires_at, days_remaining)` sorted by `updated_at`
   descending, with `days_remaining = max(1, math.ceil(remaining_seconds / 86400))`.
+- **Load**: `list_deleted_owner_moments`, then drop moments
+  `is_retention_expired` already rejects. Survivors load through
+  `get_wishlist_headers_by_ids` (`items` stay empty). This listing does not
+  read `wl_items`, `wl_reservations`, or this person's membership. An empty
+  survivor list skips the header batch. A successful header load adds no new
+  log. The existing `wishlist_repo_batch_read` line is unchanged.
 - **Token rotation & state**: Restoring a `DELETED` list transitions it to `WishlistStatus.ACTIVE`,
   rotates both `public_token` and `invite_token` to fresh values distinct from prior tokens, and
   resets `invite_token_expires_at = effective_now + self._default_invite_ttl`. Calling
@@ -1477,6 +1505,12 @@ async def list_favorites(
   when they were added. Soft-deleted lists, owned lists, and any legacy rows lacking active
   membership (`wl_members`) or a token-matched `wl_share_access` grant (`sa.public_token = l.public_token`)
   are automatically filtered out.
+- **Load**: `list_favorite_wishlist_ids`, then, when that id list is non-empty,
+  `get_wishlist_headers_by_ids` and this person's
+  `list_user_memberships_by_wishlist_ids`. Each returned list keeps `items`
+  empty and carries this person's membership when that row exists. The read
+  does not touch `wl_items` or `wl_reservations`. An empty id list skips both
+  batches. A successful header load adds no new log.
 
 #### `record_view`
 
@@ -1492,6 +1526,13 @@ async def record_view(
 
 - **Access**: Same rule as [Viewing History Access](#viewing-history-access-wishenka-303).
   Denied calls raise `WishlistNotFoundError` and do not upsert.
+- **Load**: Stays on the write transaction. `get_wishlist_header` reads the
+  `wl_lists` row only, writes nothing, and logs nothing. A missing or deleted
+  list does not load membership. A non-deleted list loads this person's
+  membership (`list_user_memberships_by_wishlist_ids`) before
+  `has_valid_share_access` and `can_view_history`, because the permission
+  needs that row. The read does not touch `wl_items` or `wl_reservations`.
+  A successful header load adds no new log.
 - **Deduplication**: A previous row for this user and wishlist keeps its id,
   updates `viewed_at`, and receives a new `recorded_seq`, so the repeat is the
   newest recording.
@@ -1826,6 +1867,12 @@ granular async operations over an active SQLAlchemy `AsyncConnection`.
 - `get_wishlist(wishlist_id: int) -> Wishlist | None`: Loads a specific wishlist aggregate
   along with its active members, items, and item reservations in targeted parameter-bound queries
   (`WHERE id = :id` and `WHERE wish_item_id IN (...)`).
+  `list_accessible_wishlists` still calls this once per id for
+  `GET /api/wishlists`. Favorites, recently deleted lists, the bot list offer,
+  and recording a visit do not.
+- `get_wishlist_header(wishlist_id: int) -> Wishlist | None`: One `wl_lists`
+  row, with `members=[]` and `items=[]`. Writes nothing and logs nothing. It
+  does not read `wl_items` or `wl_reservations`. Recording a visit uses it.
 - `get_by_public_token(token: str) -> Wishlist | None`: O(1) indexed lookup by public capability.
 - `get_by_invite_token(token: str) -> Wishlist | None`: O(1) indexed lookup by invite capability.
 - `list_by_owner(owner_id: int) -> list[Wishlist]`: Indexed fetch of wishlists owned by user.
@@ -1846,7 +1893,11 @@ granular async operations over an active SQLAlchemy `AsyncConnection`.
   this user is absent. An empty id list returns `{}` and does not log. A completed read logs
   `wishlist_repo_batch_read` (`DEBUG`, `entity` `wishlist_member`). Opening history calls this
   once after the header batch and appends each membership onto that header. An empty visit
-  list does not call it. See [Viewing History Access](#viewing-history-access-wishenka-303).
+  list does not call it. Favorites and the bot list offer call it after their
+  header batch when the id list is non-empty. A non-deleted visit calls it
+  because the permission needs this person's row. Recently deleted lists, and a
+  missing or deleted visit, do not. See
+  [Viewing History Access](#viewing-history-access-wishenka-303).
 - `list_user_reservations(user_id: int) -> list[Reservation]`: Fetches active/purchased reservations
   created by the specified user.
 - `list_favorites(user_id: int) -> list[WishlistFavorite]`: Ordered bookmarks for caller.
