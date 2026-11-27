@@ -17,19 +17,23 @@ and `ALTER TABLE` code in `WishlistStore` is removed.
   `wl_view_history` rows, on upgrade to head.
 - Concurrent startup of several processes on one database file is serialized by a lock file.
 - The `users` table of `UserStore` is also managed by Alembic (`unify_user_keys_and_cascades`):
-  `UserStore.initialize()` delegates schema setup to `upgrade_to_head(self.database_url)` instead of
-  maintaining duplicate DDL (see [users.md](users.md)).
+  `UserStore.initialize()` delegates schema setup to
+  `wishenka.db.migrations.upgrade_to_head(self.database_url)` instead of
+  maintaining duplicate DDL (see [users.md](users.md)). `WishlistStore.initialize()`
+  calls the same function. The wishlist history stays in `wishenka.wishlists`.
 
 ## Architecture
 
 | Component | Location | Role |
 | --- | --- | --- |
-| Migration runner | `wishenka/wishlists/migrations.py` | Adoption of legacy schema, `alembic upgrade head`, WAL selection, lock, logging |
+| Apply procedure | `wishenka/db/migrations.py` | Lock, `upgrade head`, WAL, logs |
+| Product history | `wishenka/wishlists/migrations.py` | Tree, legacy adoption, wrappers |
 | Alembic environment | `wishenka/wishlists/alembic/env.py` | Online mode on a short-lived synchronous connection (`NullPool`); offline mode emits SQL |
 | Revisions | `wishenka/wishlists/alembic/versions/` | Ordered schema revisions |
 | Revision template | `wishenka/wishlists/alembic/script.py.mako` | Template for `alembic revision` |
 | Config | `alembic.ini` (repository root) | `script_location`, default `sqlalchemy.url` |
-| Store | `wishenka/wishlists/store.py` | `WishlistStore.initialize()` calls the runner; `dispose()` cleans up |
+| Wishlist store | `wishenka/wishlists/store.py` | Calls shared `upgrade_to_head` |
+| Person store | `wishenka/users/store.py` | Engine prep, then shared `upgrade_to_head` |
 
 Revision chain (linear):
 
@@ -113,8 +117,9 @@ The legacy-adoption map (`_REVISIONS`) still stops at `add_item_order_index`; ad
 revision and `upgrade head` then applies every later revision, including
 `purge_legacy_non_member_view_history` and `add_view_history_recorded_seq`.
 
-`head_revision(database_url=...)` in `migrations.py` returns the head id from the script
-directory without opening a database (the URL only builds the config, default in-memory). Tests
+`head_revision(database_url=...)` in `wishenka/wishlists/migrations.py`
+returns the head id from the script directory without opening a database
+(the URL only builds the config, default in-memory). Tests
 derive the expected head from it instead of a literal.
 
 Column convention: after `upgrade_to_head()` every column above is guaranteed to exist, so the
@@ -124,8 +129,10 @@ column is a schema bug and surfaces as an `AttributeError` (HTTP 500), not as a 
 Keep `None` guards for values that are nullable in the database. A new column goes in through a new
 revision, see [Adding a new revision](#adding-a-new-revision).
 
-Startup flow (`WishlistStore.initialize()` -> `upgrade_to_head()` -> `upgrade_to_head_sync()`,
-run in `asyncio.to_thread` so the event loop is not blocked):
+Startup flow. `WishlistStore.initialize()` and `UserStore.initialize()` call
+`wishenka.db.migrations.upgrade_to_head`. That runs `upgrade_to_head_sync` in
+`asyncio.to_thread` so the event loop is not blocked. The sync function applies
+`PRODUCT_HISTORY` from `wishenka.wishlists.migrations` through `apply_history_sync`:
 
 1. Log `wishlist_migration_started`.
 2. Acquire the cross-process lock (file databases only; a `:memory:` store is backed by a temporary
@@ -165,7 +172,8 @@ skips both (the lock needs a path and the WAL step is guarded by `path is not No
 
 ### Migration lock
 
-Several service copies may start against one database file. `_migration_lock` takes an exclusive
+Several service copies may start against one database file. `_migration_lock` in
+`wishenka.db.migrations` takes an exclusive
 `fcntl.flock` on the sidecar `<db>.migrate.lock` (next to the database, mode `0600`, ignored by
 git via `*.migrate.lock`) and holds it for adoption, upgrade and WAL selection together. A late
 process re-reads the state after acquiring the lock, sees `alembic_version` and runs a no-op
@@ -173,11 +181,14 @@ process re-reads the state after acquiring the lock, sees `alembic_version` and 
 
 - The wait is bounded: polling every 50 ms for at most 60 s, then a `TimeoutError`
   ("Timed out waiting for another process to finish wishlist migration").
-- The lock relies on `fcntl`, so it is POSIX-only. The module imports `fcntl` at import time, so
-  the wishlist package does not load on Windows.
+- The lock relies on `fcntl`, so it is POSIX-only. `wishenka.db.migrations` imports
+  `fcntl` at import time. `wishenka.wishlists.migrations` imports that module, so
+  loading the wishlist migration module on Windows fails the same way.
 - `:memory:` stores are locked too: `WishlistStore.__init__` rewrites the URL to a temporary file
   path. Only a direct `upgrade_to_head_sync("sqlite+aiosqlite:///:memory:")` call uses no lock.
 - The sidecar file is not deleted for file databases; it is harmless.
+  `WishlistStore.dispose()` removes it for a temporary database. The path
+  comes from `wishenka.db.migrations.migration_lock_path`.
 
 ## Usage
 
@@ -188,8 +199,9 @@ selects the database; the application migrates it on start. Only SQLite URLs of 
 `sqlite+aiosqlite:///<path>` are supported. Any other URL makes `WishlistStore.__init__` raise
 `ValueError("Wishlist storage requires SQLite")` at construction, before `initialize()` and
 without the "Unable to initialize wishlist storage" wrapper. The migrations-level
-`ValueError("Wishlist migrations support only SQLite URLs")` is reachable only by calling
-`upgrade_to_head_sync` or `upgrade_to_head` directly.
+`ValueError("Wishlist migrations support only SQLite URLs")` is reachable only
+by calling `wishenka.db.migrations.upgrade_to_head_sync` or `upgrade_to_head`
+directly.
 
 ### Adding a new revision
 
@@ -223,9 +235,13 @@ To apply the revisions to a database without starting the application, use the s
 as the store:
 
 ```bash
-python -c "from wishenka.wishlists.migrations import upgrade_to_head_sync; \
+python -c "from wishenka.db.migrations import upgrade_to_head_sync; \
 upgrade_to_head_sync('sqlite+aiosqlite:///data/wishenka.db')"
 ```
+
+`wishenka.wishlists.migrations` still exposes `upgrade_to_head` and
+`upgrade_to_head_sync`. Those names apply the same product history. The stores
+call the database package.
 
 This is the supported way: it takes the lock, adopts legacy files and selects WAL. The plain
 `alembic upgrade` CLI is not equivalent: `alembic.ini` carries only the placeholder
@@ -272,7 +288,8 @@ known historical shape exactly:
   `idx_wl_view_history_user_time` key).
 
 After stamping, `upgrade head` applies the remaining revisions. A rejected database is not
-stamped and not modified; the runner logs `wishlist_migration_failed` and the store raises.
+stamped and not modified; the apply procedure logs `wishlist_migration_failed` and the
+store raises.
 A database that already has `alembic_version`, or no wishlist tables, is not adopted.
 
 Behaviour change: the old store dropped and recreated all `wl_*` tables when `wl_lists` had a
@@ -284,16 +301,17 @@ an unsupported schema.
 | Setting | Where | Value |
 | --- | --- | --- |
 | `WISHENKA_DATABASE_URL` (`Settings.database_url`) | environment | `sqlite+aiosqlite:///<path>`; default `sqlite+aiosqlite:///data/wishenka.db` |
-| `script_location` | set programmatically by `migrations._configured` | `wishenka/wishlists/alembic` (absolute path of the package directory) |
+| `script_location` | `configured` in `wishenka.db.migrations` | `wishenka/wishlists/alembic` |
 | `sqlalchemy.url` | set programmatically | the application URL with `sqlite+aiosqlite://` replaced by `sqlite://` |
-| Lock file | constant `_LOCK_SUFFIX` | `<db>.migrate.lock` |
-| Lock wait | constants `_LOCK_TIMEOUT_SECONDS`, `_LOCK_POLL_SECONDS` | 60 s, polled every 0.05 s |
+| Lock file | `_LOCK_SUFFIX` in `wishenka.db.migrations` | `<db>.migrate.lock` |
+| Lock wait | `wishenka.db.migrations` | 60 s, polled every 0.05 s |
 | `busy_timeout`, `foreign_keys` | store connection hook | `5000` ms, `ON` |
 | `journal_mode` | migration startup | `WAL` (file databases; a `:memory:` store is a temporary file and gets it too) |
 | `WISHENKA_ALLOW_DESTRUCTIVE_BASELINE_DOWNGRADE` | environment | Set to `"1"` to allow `base_normalized.downgrade()` to drop the 9 baseline tables (disposable/test databases only; refused by default) |
 
-The runner locates `alembic.ini` as `<repository root>/alembic.ini` (`Path(__file__).parents[2]`),
-so it works from a source checkout only (WISHENKA-130).
+The apply procedure locates `alembic.ini` as `<repository root>/alembic.ini`
+(`Path(__file__).parents[2]` in `wishenka/db/migrations.py`), so it works from a
+source checkout only (WISHENKA-130).
 
 ## Observability
 
@@ -302,7 +320,7 @@ Database paths and URLs are never logged.
 
 | Event | Level | Extra fields | When |
 | --- | --- | --- | --- |
-| `wishlist_migration_started` | INFO | - | Start of `upgrade_to_head_sync` |
+| `wishlist_migration_started` | INFO | - | Start of `wishenka.db.migrations.upgrade_to_head_sync` |
 | `wishlist_migration_legacy_schema_adopted` | INFO | `revision` | A recognized legacy database was stamped |
 | `wishlist_migration_completed` | INFO | `duration_ms` | Adoption, upgrade and WAL selection finished (message: `Wishlist database migration completed in N ms`) |
 | `wishlist_migration_failed` | ERROR (with traceback) | - | Any exception; it is re-raised after logging |
@@ -340,8 +358,8 @@ database logs `started` and `completed` only. There is no alert threshold yet (W
 - **`Wishlist storage requires SQLite`** (`ValueError`, raised by `WishlistStore.__init__` at
   construction, not wrapped). `WISHENKA_DATABASE_URL` is not `sqlite+aiosqlite:///...`.
 - **`Wishlist migrations support only SQLite URLs`** (`ValueError`). Seen only when
-  `upgrade_to_head_sync` or `upgrade_to_head` is called directly with a non-SQLite URL; the store
-  rejects such URLs earlier.
+  `wishenka.db.migrations.upgrade_to_head_sync` or `upgrade_to_head` is called
+  directly with a non-SQLite URL; the store rejects such URLs earlier.
 - **Temporary `wishenka-*.sqlite` files accumulate in the temp directory.** A `:memory:`
   store was not disposed. Call `await store.dispose()`.
 - **Import error for `fcntl` on Windows.** Windows is not supported; see the lock section.

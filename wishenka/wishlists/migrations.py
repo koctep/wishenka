@@ -1,16 +1,15 @@
-"""Controlled Alembic upgrades and safe adoption of known legacy SQLite schemas."""
+"""Product migration history and safe adoption of known legacy SQLite schemas.
+
+Applying a history lives in ``wishenka.db.migrations``. This module owns the
+wishlist Alembic tree, older-wishlist recognition, and compatibility wrappers
+for existing imports.
+"""
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
-import fcntl
 import importlib
 import logging
-import os
 import sqlite3
-import time
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -18,11 +17,15 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
-logger = logging.getLogger(__name__)
+from wishenka.db.migrations import (
+    MigrationHistory,
+    apply_history,
+    apply_history_sync,
+    configured,
+)
+from wishenka.db.migrations import migration_lock_path as migration_lock_path
 
-_LOCK_SUFFIX = ".migrate.lock"
-_LOCK_TIMEOUT_SECONDS = 60.0
-_LOCK_POLL_SECONDS = 0.05
+logger = logging.getLogger(__name__)
 
 _REVISIONS = {
     (False, False, False): "base_normalized",
@@ -43,11 +46,6 @@ _TABLES = {
 }
 
 
-def _sqlite_url(database_url: str) -> str:
-    """Convert the async application URL to Alembic's synchronous SQLite URL."""
-    return database_url.replace("sqlite+aiosqlite://", "sqlite://", 1)
-
-
 def _database_path(database_url: str) -> Path | None:
     prefix = "sqlite+aiosqlite:///"
     if not database_url.startswith(prefix):
@@ -57,10 +55,7 @@ def _database_path(database_url: str) -> Path | None:
 
 
 def _configured(database_url: str) -> Config:
-    config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
-    config.set_main_option("script_location", str(Path(__file__).with_name("alembic")))
-    config.set_main_option("sqlalchemy.url", _sqlite_url(database_url))
-    return config
+    return configured(database_url, script_location=PRODUCT_HISTORY.script_location)
 
 
 def head_revision(database_url: str = "sqlite+aiosqlite:///:memory:") -> str:
@@ -219,77 +214,26 @@ def _adopt_known_schema(database_url: str) -> None:
     )
 
 
-def migration_lock_path(path: Path) -> Path:
-    """Return the sidecar lock file that serializes migrations of ``path``."""
-    return path.with_name(path.name + _LOCK_SUFFIX)
-
-
-@contextlib.contextmanager
-def _migration_lock(path: Path | None, timeout: float = _LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
-    """Serialize adoption, upgrade and WAL selection across processes (bounded wait)."""
-    if path is None:
-        yield
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(migration_lock_path(path), os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        "Timed out waiting for another process to finish wishlist migration"
-                    ) from None
-                time.sleep(_LOCK_POLL_SECONDS)
-        try:
-            yield
-        finally:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-    finally:
-        os.close(descriptor)
+PRODUCT_HISTORY = MigrationHistory(
+    script_location=Path(__file__).with_name("alembic"),
+    adopt=_adopt_known_schema,
+    log=logger,
+    unsupported_url_message="Wishlist migrations support only SQLite URLs",
+    lock_timeout_message="Timed out waiting for another process to finish wishlist migration",
+    started_event="wishlist_migration_started",
+    started_message="Starting wishlist database migration",
+    failed_event="wishlist_migration_failed",
+    failed_message="Wishlist database migration failed",
+    completed_event="wishlist_migration_completed",
+    completed_message="Wishlist database migration completed in %d ms",
+)
 
 
 def upgrade_to_head_sync(database_url: str) -> None:
     """Adopt a recognized legacy database, then apply ordered Alembic revisions."""
-    start = time.perf_counter()
-    logger.info(
-        "Starting wishlist database migration",
-        extra={"event": "wishlist_migration_started"},
-    )
-    try:
-        path = _database_path(database_url)
-        # The lock is held for the whole sequence; state is re-read after acquiring it,
-        # so a late process sees alembic_version and ``upgrade head`` is a no-op.
-        with _migration_lock(path):
-            _adopt_known_schema(database_url)
-            command.upgrade(_configured(database_url), "head")
-            if path is not None:
-                # Journal mode is persistent database state.  Set it once while startup
-                # owns schema migration, rather than on every pooled connection where
-                # two workers can contend for SQLite's exclusive mode-change lock.
-                connection = sqlite3.connect(path)
-                try:
-                    connection.execute("PRAGMA journal_mode=WAL")
-                finally:
-                    connection.close()
-    except Exception:
-        logger.exception(
-            "Wishlist database migration failed",
-            extra={"event": "wishlist_migration_failed"},
-        )
-        raise
-    else:
-        duration_ms = round((time.perf_counter() - start) * 1000)
-        logger.info(
-            "Wishlist database migration completed in %d ms",
-            duration_ms,
-            extra={"event": "wishlist_migration_completed", "duration_ms": duration_ms},
-        )
+    apply_history_sync(database_url, PRODUCT_HISTORY)
 
 
 async def upgrade_to_head(database_url: str) -> None:
     """Run the synchronous Alembic API without blocking the async application loop."""
-    await asyncio.to_thread(upgrade_to_head_sync, database_url)
+    await apply_history(database_url, PRODUCT_HISTORY)

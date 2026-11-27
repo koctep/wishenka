@@ -13,7 +13,10 @@
 - **Telegram Bot:** aiogram v3 (асинхронный бот)
 - **Интерфейс Mini App (TMA):** Server-Side Rendering (FastAPI + Jinja2 + HTMX / Alpine.js) + Telegram WebApp JS script
 - **СУБД:** Встраиваемая SQLite с `aiosqlite`
-  - `PRAGMA journal_mode = WAL;` (параллельное чтение без блокировки писателей) — постоянное состояние файла БД: выбирается один раз при старте миграций вишлистов, а не на каждом соединении
+  - `PRAGMA journal_mode = WAL;` (параллельное чтение без блокировки
+    писателей) — постоянное состояние файла БД: выбирается один раз общей
+    процедурой применения миграций (`wishenka.db.migrations`), а не на
+    каждом соединении
   - `PRAGMA foreign_keys = ON;` (каскадная целостность; задаётся на каждом соединении)
   - `PRAGMA busy_timeout = 5000;` (на каждом соединении)
   - общая настройка транзакций вынесена в `wishenka/sqlite.py`:
@@ -37,8 +40,19 @@
     запрос, который ещё пишет, остаются на `BEGIN IMMEDIATE`
 - **ORM и миграции:** SQLAlchemy 2.0 (Async) + Alembic
   - Схема таблиц `wl_*` хранилища вишлистов создаётся и меняется только версионными ревизиями Alembic (`wishenka/wishlists/alembic/versions/`); ad-hoc `ALTER TABLE` в коде хранилища нет.
-  - Схема таблиц `wl_*` и `users` создаётся и меняется только версионными ревизиями Alembic (`wishenka/wishlists/alembic/versions/`); ad-hoc `ALTER TABLE` и дублирующего DDL `users` в коде хранилищ нет. `UserStore.initialize()` настраивает WAL-режим (для собственного движка) и делегирует миграцию схемы в `upgrade_to_head(self.database_url)` (ревизия `unify_user_keys_and_cascades`, `WISHENKA-188`, консолидирует DDL `users` и переводит все пользовательские внешние ключи на `users(telegram_id)` с `ON DELETE CASCADE`).
-  - `WishlistStore.initialize()` при старте приводит БД к head: распознаёт и штампует legacy-схему без изменения данных, применяет `upgrade head`, выбирает WAL. Параллельный старт нескольких процессов сериализуется файлом `<db>.migrate.lock` (`fcntl`, только POSIX, ожидание до 60 с).
+  - Схема таблиц `wl_*` и `users` создаётся и меняется только версионными
+    ревизиями Alembic (`wishenka/wishlists/alembic/versions/`); ad-hoc
+    `ALTER TABLE` и дублирующего DDL `users` в коде хранилищ нет. История
+    продукта остаётся в `wishenka.wishlists`. Общая процедура применения
+    живёт в `wishenka.db.migrations`. `WishlistStore.initialize()` и
+    `UserStore.initialize()` вызывают `upgrade_to_head` оттуда.
+    `UserStore.initialize()` по-прежнему настраивает WAL для собственного
+    движка до этого вызова (ревизия `unify_user_keys_and_cascades`,
+    `WISHENKA-188`, консолидирует DDL `users` и переводит пользовательские
+    внешние ключи на `users(telegram_id)` с `ON DELETE CASCADE`).
+  - Процедура берёт блокировку `<db>.migrate.lock` (`fcntl`, только POSIX,
+    ожидание до 60 с), вызывает усыновление legacy-схемы вишлистов,
+    применяет `upgrade head` и выбирает WAL.
   - Для `:memory:` хранилище использует изолированный временный файл, который удаляется в `WishlistStore.dispose()`.
   - **DI-слой веб-маршрутов (`WISHENKA-80`, `WISHENKA-323`, `WISHENKA-324`, `WISHENKA-338`):**
     HTTP-маршруты (`wishenka/web/routes/wishlists.py`, `items.py`, `sharing.py`,
@@ -220,7 +234,11 @@ CRUD настроек `user_notification_settings` / `wl_list_notification_setti
   Surprise Invariant и личный кабинет дарителя «Мои бронирования». Исключение записи —
   wish-scoped транзакция SQLite, а не `asyncio.Lock` (плюс `delivery_lock` для координации
   завершения с отправкой уведомлений о получении).
-- [`doc/dev/migrations.md`](migrations.md) — Миграции БД вишлистов (Alembic): ревизии, усыновление legacy-схемы, межпроцессная блокировка, выбор WAL, журналирование, диагностика и ограничения (WISHENKA-111).
+- [`doc/dev/migrations.md`](migrations.md) — Миграции БД вишлистов
+  (Alembic): ревизии и усыновление legacy-схемы остаются в
+  `wishenka.wishlists`; общая процедура применения — в
+  `wishenka.db.migrations` (блокировка, `upgrade head`, WAL),
+  журналирование, диагностика и ограничения (WISHENKA-111).
 - [`doc/dev/items.md`](items.md) — Домен элементов желаний: универсальный ввод (текст, ссылки, шеринг), каскадный парсинг метаданных (JSON-LD, OpenGraph, Microdata), защита от SSRF и DNS rebinding с in-memory TTL/LRU кэшированием DNS (`DNSCache`, single-flight coalescing), graceful fallback при антибот-защите (включая русскоязычные заглушки Яндекс SmartCaptcha, Авито, Ozon, Wildberries, Мегамаркет), VCR-совместимый стенд сетевых кассет маркетплейсов (`wishenka.items.cassettes`, `tests/cassettes/marketplaces/`, CLI `python -m wishenka.items.cassettes`), штучный учет и wish-scoped запись инвентаря.
 - [`doc/dev/auth.md`](auth.md) — Аутентификация Telegram Mini App, валидация initData и
   сессионные токены.

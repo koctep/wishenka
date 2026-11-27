@@ -12,6 +12,7 @@ from sqlalchemy import Row, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
+from wishenka.db.migrations import upgrade_to_head as upgrade_to_head
 from wishenka.i18n.locale import (
     LocaleSource,
     SupportedLocale,
@@ -20,7 +21,6 @@ from wishenka.i18n.locale import (
 )
 from wishenka.sqlite import configure_immediate_transactions, is_sqlite_busy
 from wishenka.users.models import BirthdateSource, UserRecord
-from wishenka.wishlists.migrations import upgrade_to_head
 
 if TYPE_CHECKING:
     from wishenka.auth.models import TelegramUser

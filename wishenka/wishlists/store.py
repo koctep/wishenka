@@ -18,6 +18,8 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from wishenka.currency import DEFAULT_CURRENCY
+from wishenka.db.migrations import migration_lock_path
+from wishenka.db.migrations import upgrade_to_head as upgrade_to_head
 from wishenka.items.models import ItemPriority
 from wishenka.notices.events import EventProducer
 from wishenka.notices.models import (
@@ -40,7 +42,6 @@ from wishenka.wishlists.exceptions import (
     WishlistError,
     WishlistNotFoundError,
 )
-from wishenka.wishlists.migrations import migration_lock_path, upgrade_to_head
 from wishenka.wishlists.models import (
     ReceiptRecord,
     Reservation,
@@ -2091,4 +2092,4 @@ class WishlistStore:
         return removed
 
 
-__all__ = ["TokenCollision", "WishlistRepository", "WishlistStore"]
+__all__ = ["TokenCollision", "WishlistRepository", "WishlistStore", "upgrade_to_head"]
