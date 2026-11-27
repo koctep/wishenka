@@ -720,6 +720,28 @@ def test_anonymous_share_shows_availability_without_a_book_control(
     assert problems == [], problems
 
 
+def test_anonymous_share_shows_booked_without_a_book_control(
+    test_app: tuple[TestClient, SessionTokenService, FastAPI],
+) -> None:
+    """A fully booked anonymous share says it is booked and offers no book control."""
+    client, sessions, app = test_app
+    seeded = seed_personal(app.state.domain_service, quantity=1)
+    friend = auth_header(sessions, _FRIEND_ID, "Bob")
+    create_promise(client, seeded.wishlist_id, seeded.item_id, friend)
+    card = card_tag(share_html(client, seeded.public_token), seeded.item_id)
+    summary = visible_text(region(card, "item-card-summary"))
+    problems: list[str] = []
+    if "Забронировано" not in summary:
+        problems.append("summary missing «Забронировано»")
+    if "Забронировать" in summary:
+        problems.append("anonymous summary has «Забронировать»")
+    if "Забронировано вами" in summary:
+        problems.append("anonymous summary has «Забронировано вами»")
+    if "Куплено" in summary:
+        problems.append("anonymous summary has «Куплено»")
+    assert problems == [], problems
+
+
 def test_shortage_leaves_the_last_promise(
     test_app: tuple[TestClient, SessionTokenService, FastAPI],
 ) -> None:

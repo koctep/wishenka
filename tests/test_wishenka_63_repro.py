@@ -2,16 +2,16 @@
 
 Verifies:
 1. Anonymous `get_wishlist_by_public_token(..., current_user=None)` returns
-   `WishItemRecipientViewDTO` without reservation availability fields.
-2. Anonymous `GET /share/{public_token}` does not render reservation counts or
-   availability status in the HTML.
+   the giver view: shared remainder, `is_recipient` false, empty personal fields.
+2. Anonymous `GET /share/{public_token}` shows the availability line and no
+   book control.
 3. `WishlistService()` and `WishlistService(store=None)` raise `ValueError`,
    while `WishlistService.in_memory()` constructs an isolated test instance.
-4. Public JSON endpoints (`/api/public/wishlists/{token}` and
-   `/api/public/wishlists/{token}/view`) enforce recipient-safe views for
-   anonymous and recipient callers while preserving gifter views.
-5. Collaborative wishlist owners, admins, and item recipients never see
-   reservation data across authenticated or public-token lookups.
+4. The legacy public list omits the remainder. `/view` returns the giver
+   projection for an anonymous caller, a recipient-safe view for the recipient,
+   and the filled giver view for an identified gifter.
+5. On a collaborative list, the item recipient never sees reservation data.
+   An anonymous public-token lookup sees the shared remainder.
 6. Structured observability logs record public projection modes without
    leaking public or invite capability tokens.
 """
@@ -69,7 +69,7 @@ async def _stored(
 
 
 def test_public_token_anonymous_returns_recipient_dto(tmp_path: Path) -> None:
-    """Anonymous get_wishlist_by_public_token must return WishItemRecipientViewDTO."""
+    """Anonymous public-token lookup returns the giver view with an empty promise."""
     store = WishlistStore(f"sqlite+aiosqlite:///{tmp_path / 'repro_service.db'}")
     service = WishlistService(store=store)
     owner = _make_user(101, "Alice")
@@ -93,10 +93,14 @@ def test_public_token_anonymous_returns_recipient_dto(tmp_path: Path) -> None:
             )
             assert len(view.items) == 1
             projected = view.items[0]
-            assert isinstance(projected, WishItemRecipientViewDTO)
-            assert projected.is_recipient is True
-            assert not hasattr(projected, "available_quantity")
-            assert not hasattr(projected, "is_fully_reserved")
+            assert isinstance(projected, WishItemGifterViewDTO)
+            assert projected.is_recipient is False
+            assert projected.available_quantity == 1
+            assert projected.is_fully_reserved is False
+            assert projected.is_reserved_by_me is False
+            assert projected.my_reserved_quantity == 0
+            assert projected.my_reservation_id is None
+            assert projected.my_reservation_status is None
         finally:
             await store.dispose()
 
@@ -104,7 +108,7 @@ def test_public_token_anonymous_returns_recipient_dto(tmp_path: Path) -> None:
 
 
 def test_public_share_html_anonymous_hides_reservation_availability(tmp_path: Path) -> None:
-    """Anonymous GET /share/{public_token} must not disclose reservation availability."""
+    """Anonymous share shows the free remainder and offers no book control."""
     settings = Settings(
         database_url=f"sqlite+aiosqlite:///{tmp_path / 'repro_share.db'}",
         secret_key="repro-share-secret",
@@ -128,12 +132,16 @@ def test_public_share_html_anonymous_hides_reservation_availability(tmp_path: Pa
             return str(wl.public_token)
 
         public_token = asyncio.run(seed())
-        response = client.get(f"/share/{public_token}")
+        response = client.get(
+            f"/share/{public_token}",
+            headers={"Accept-Language": "ru"},
+        )
         assert response.status_code == 200
         html = response.text
         assert "Board Game" in html
-        assert "giver-available" not in html
-        assert "item-giver" not in html
+        assert "Доступно: 1 из 2" in html
+        assert "Забронировать" not in html
+        assert "Забронировано вами" not in html
 
 
 def test_wishlist_service_requires_store_unless_in_memory(
@@ -213,9 +221,10 @@ def test_public_api_endpoints_anonymous_recipient_and_gifter_views(tmp_path: Pat
         assert anon_data["identified"] is False
         assert len(anon_data["items"]) == 1
         anon_item = anon_data["items"][0]
-        assert anon_item["is_recipient"] is True
-        assert "available_quantity" not in anon_item
-        assert "is_fully_reserved" not in anon_item
+        assert anon_item["is_recipient"] is False
+        assert anon_item["available_quantity"] == 1
+        assert anon_item["is_fully_reserved"] is False
+        assert anon_item["is_reserved_by_me"] is False
 
         # 3. Recipient /api/public/wishlists/{token}/view
         rec_resp = client.get(f"/api/public/wishlists/{token}/view", headers=owner_headers)
@@ -282,7 +291,12 @@ async def _collaborative_views(
     await service.create_reservation(item_id=item_for_admin.id, user=gifter, quantity=1)
 
     anon_view = await service.get_wishlist_by_public_token(str(wl.public_token), None)
-    assert isinstance(anon_view.items[0], WishItemRecipientViewDTO)
+    anon_item = anon_view.items[0]
+    assert isinstance(anon_item, WishItemGifterViewDTO)
+    assert anon_item.is_recipient is False
+    assert anon_item.available_quantity == 0
+    assert anon_item.is_fully_reserved is True
+    assert anon_item.is_reserved_by_me is False
 
     admin_auth_view = await service.get_wishlist_view(wl.id, admin)
     admin_pub_view = await service.get_wishlist_by_public_token(str(wl.public_token), admin)
@@ -351,7 +365,7 @@ def _assert_projection_logs(
         r for r in caplog.records if getattr(r, "event", None) == "public_wishlist_resolved"
     ]
     assert [getattr(r, "projection_mode", None) for r in resolved_records] == [
-        "anonymous_safe",
+        "anonymous_gifter",
         "recipient_safe",
         "gifter",
     ]

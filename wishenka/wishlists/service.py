@@ -310,8 +310,12 @@ def project_wish_item(
     item: WishItem,
     current_user: AuthenticatedUser | None = None,
 ) -> WishItemRecipientViewDTO | WishItemGifterViewDTO:
-    """Project a WishItem into Recipient or Gifter view based on Surprise Invariant."""
-    if current_user is None or WishlistAccessPolicy.is_recipient(current_user, item):
+    """Project a WishItem into Recipient or Gifter view based on Surprise Invariant.
+
+    A missing caller is not the recipient. That visitor gets the giver view
+    with the shared remainder and an empty personal promise.
+    """
+    if WishlistAccessPolicy.is_recipient(current_user, item):
         return recipient_view(item)
 
     active_or_purchased = [
@@ -321,17 +325,22 @@ def project_wish_item(
     ]
     reserved_qty = sum(r.quantity for r in active_or_purchased)
     available_qty = max(0, item.quantity - item.received_quantity - reserved_qty)
-    user_reservations = [r for r in active_or_purchased if r.user_id == current_user.telegram_id]
-    my_reserved_qty = sum(r.quantity for r in user_reservations)
-    my_occupying_count = len(user_reservations)
+    my_reserved_qty = 0
+    my_occupying_count = 0
     my_reservation_status: ReservationStatus | None = None
     my_reservation_id: int | None = None
     my_latest_quantity = 0
-    if user_reservations:
-        my_res = user_reservations[-1]
-        my_reservation_status = my_res.status
-        my_reservation_id = my_res.id
-        my_latest_quantity = my_res.quantity
+    if current_user is not None:
+        user_reservations = [
+            r for r in active_or_purchased if r.user_id == current_user.telegram_id
+        ]
+        my_reserved_qty = sum(r.quantity for r in user_reservations)
+        my_occupying_count = len(user_reservations)
+        if user_reservations:
+            my_res = user_reservations[-1]
+            my_reservation_status = my_res.status
+            my_reservation_id = my_res.id
+            my_latest_quantity = my_res.quantity
     return WishItemGifterViewDTO(
         id=item.id,
         title=item.title,

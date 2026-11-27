@@ -272,11 +272,10 @@ class RepoWishlistOps:
         has_gifter_view = any(isinstance(item, WishItemGifterViewDTO) for item in view.items) or (
             not view.items and view.user_role is None
         )
-        projection_mode = (
-            "anonymous_safe"
-            if current_user is None
-            else ("gifter" if has_gifter_view else "recipient_safe")
-        )
+        if current_user is None:
+            projection_mode = "anonymous_gifter" if has_gifter_view else "anonymous_safe"
+        else:
+            projection_mode = "gifter" if has_gifter_view else "recipient_safe"
         logger.info(
             "Public wishlist resolved: wishlist_id=%s identified=%s projection_mode=%s",
             wl.id,

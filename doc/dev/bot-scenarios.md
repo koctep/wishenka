@@ -44,18 +44,25 @@ Malformed bot payloads receive a generic unavailable message and the normal menu
 
 `wishenka/web/static/miniapp.js` accepts `p_<token>` public links and `i_<token>` collaborator
 invitations. The latter opens a preview and requires explicit confirmation to join. A public
-link resolves via `GET /api/public/wishlists/{token}/view`: an authenticated user receives a
-role-specific projection, while an anonymous visitor receives recipient-safe item data. An
-eligible authenticated giver can reserve through
+link resolves via `GET /api/public/wishlists/{token}/view`. The handler dumps each projected
+item (`model_dump`). An anonymous caller is not the recipient.
+`project_wish_item(item, None)` returns `WishItemGifterViewDTO`: the free remainder
+(`available_quantity`, `is_fully_reserved`) and an empty personal promise. An identified
+non-recipient gets that giver view with their own promise filled in. A recipient gets
+`WishItemRecipientViewDTO`, which has no availability fields. An eligible authenticated giver
+can reserve through
 `POST /api/public/wishlists/{token}/items/{item_id}/reservations`; the service resolves the
 capability and creates the reservation in the same storage operation. Missing, invalid or revoked
 public links produce a generic Mini App recovery view. Authentication and CSRF requirements are
 explained in [Authentication](auth.md).
 
-The older HTML `/share/{token}` route is separate from this Mini App view. Its anonymous
-projection can expose availability; [WISHENKA-63](https://pypost.atlassian.net/browse/WISHENKA-63)
-tracks that pre-existing privacy issue. Do not treat the Mini App projection as a fix for the
-legacy route.
+`GET /api/public/wishlists/{token}` is a different body. It always resolves with
+`current_user=None`, then copies an allowlist that omits `available_quantity`.
+
+The HTML `/share/{token}` page uses the same giver projection for a missing viewer. The card
+shows «Доступно» when `available_quantity` is at least one, and «Забронировано» when the free
+remainder is zero. «Забронировать» is rendered only for an identified viewer, so an anonymous
+share hides that control.
 
 ## Capturing a wish in chat
 
@@ -172,7 +179,7 @@ make test PYTEST_JOBS=0 PYTEST_ARGS='tests/test_bot_support_repro.py tests/test_
 make test-serial PYTEST_ARGS='tests/test_bot_menu_miniapp_e2e_browser.py'
 ```
 
-They exercise a fake Telegram transport and Mini App browser behavior. In particular,
+They exercise a fake Telegram transport and Mini App browser behavior.
 `tests/test_bot_menu_miniapp_e2e_browser.py` dispatches `/start` through
 `wishenka.bot.entry.create_router`, opens the generated `startapp` targets (`create`,
 `collection`, `home`) in headless Chromium via `tests/browser_cdp.py` for both `en` and `ru`,
@@ -180,6 +187,11 @@ verifies localized rendering, button focus on `create`, zero implicit wishlist c
 recovery for invalid `startapp` values without leaking existing wishlist data. Observability tests
 also check dispatcher error handling and actual Uvicorn access output. The full quality gate is
 `make check PYTEST_JOBS=4`.
+
+`tests/test_bot_entry_repro.py::test_anonymous_public_api_does_not_disclose_reservations`
+still asserts the old `/view` body: no `available_quantity`. That test currently errors on a
+pre-existing circular import (`WishlistStore` while `wishenka.wishlists.store` is loading).
+It does not assert the giver payload.
 
 ## Troubleshooting
 

@@ -288,9 +288,21 @@ rejected by the optional authentication dependency.
 
 - `POST /api/invitations/accept`: Authenticated user joins wishlist via `X-Invite-Token` header.
 
-- `GET /api/public/wishlists/{token}`: Reads the anonymous-safe public projection, including archived lists.
+- `GET /api/public/wishlists/{token}`: Allowlisted public payload, including
+  archived lists. Resolution always uses `current_user=None`. The item
+  allowlist omits `available_quantity`. Membership and invite secrets stay
+  off the body.
 
-- `GET /api/public/wishlists/{token}/view`: Reads the role-specific public projection (`anonymous_safe` for unauthenticated callers, `recipient_safe` for recipients, `gifter` for authenticated non-recipients) without membership or invite secrets. An authenticated caller also records Viewing History for that list (`record_share_view_if_authenticated`). Anonymous callers do not.
+- `GET /api/public/wishlists/{token}/view`: Dumps each projected item
+  (`model_dump`) without membership or invite secrets. A missing caller is
+  not the recipient and receives the giver view, so the body includes
+  aggregate availability (`available_quantity`, `is_fully_reserved`) and
+  empty personal promise fields. An identified recipient gets the silent
+  card. An identified non-recipient gets the giver view with their own
+  promise. The resolve log names that missing caller `anonymous_gifter`
+  (`public_wishlist_resolved`). An authenticated caller also records
+  Viewing History (`record_share_view_if_authenticated`). Anonymous callers
+  do not.
 
 - `GET /api/favorites`: Lists the caller's favorited wishlists in reverse-chronological
   order, filtered to non-deleted, non-owned lists where the caller is an active
@@ -332,8 +344,13 @@ and event title stay optional, with no character ceiling; empty or spaces-only
 means unset. A stored empty name stays readable, and the next save must supply a
 real name. Opening a list does not rewrite the title. The HTTP representation includes list details and items; member responses include
 `role` and `members`, and owner/admin responses also include `share_token` and `invite_token`.
-The public projection uses an explicit allowlist and omits membership, tokens and
-reservation-derived fields. It is returned even when an authenticated caller uses the public URL.
+`GET /api/public/wishlists/{token}` uses an explicit allowlist and omits
+membership, tokens, and `available_quantity`. The handler passes
+`current_user=None` even when the HTTP caller is authenticated.
+`GET /api/public/wishlists/{token}/view` does not use that allowlist. It
+dumps each projected item, so an anonymous caller sees aggregate
+availability.
+
 Projections for `/api/favorites` and `/api/history` strictly enforce the Surprise Invariant: they
 return sanitized list metadata with roles and omit all reservation records, item availability
 counts, and buyer details.
@@ -357,10 +374,16 @@ All public-link entry points — `GET /share/{public_token}`, `GET /api/public/w
 request `WishlistRepository`. `sharing.py` builds that object in `_get_service`. `wishlists.py`
 passes it from `execute`.
 
-At the domain layer, `project_wish_item(item, None)` delegates directly to `recipient_view(item)`,
-returning `WishItemRecipientViewDTO` so anonymous callers never receive reservation or giver fields.
-Authenticated non-recipient callers receive `WishItemGifterViewDTO`, while recipients (personal
-owners or collaborative item recipients) continue to receive `WishItemRecipientViewDTO`.
+At the domain layer, `project_wish_item(item, None)` returns
+`WishItemGifterViewDTO`. A missing caller is not the recipient.
+`available_quantity` is the free remainder
+`max(0, quantity - received_quantity - occupied)`. Personal promise fields
+stay empty (`is_reserved_by_me` is false, `my_reserved_quantity` is 0, and
+there is no reservation id). `recipient_view` runs only when
+`WishlistAccessPolicy.is_recipient` is true, and that check is false for a
+missing user. An identified non-recipient gets the same giver view with
+their own occupying promise filled in. A recipient (personal owner or
+collaborative item recipient) still receives `WishItemRecipientViewDTO`.
 
 ### Storage and configuration
 
@@ -438,11 +461,16 @@ member management, and token rotation without client-side JavaScript SPA framewo
   - **Description**: Renders the complete HTML page (`share_wishlist.html`) for a public wishlist.
   - **Authentication**: Optional session (`get_optional_current_user`). Resolves via
     `RepoWishlistOps.get_wishlist_by_public_token(public_token, current_user)` on the request
-    repository. Unauthenticated guests receive `WishItemRecipientViewDTO` (via
-    `project_wish_item(item, None)` -> `recipient_view(item)`),
-    concealing reservation status. Authenticated non-recipient callers receive `WishItemGifterViewDTO`
-    and can view availability and reservation controls. If accessed by the list recipient or owner,
-    the Surprise Invariant strictly conceals all reservations.
+    repository. `project_wish_item(item, None)` returns the giver view. A
+    missing caller is not the recipient. The card shows «Доступно» when
+    `available_quantity >= 1` and «Забронировано» when the free remainder is
+    zero. «Забронировать» renders only when `viewer_identified` is true, the
+    list is active, the item is neither archived nor fully received, the
+    caller holds nothing, and a unit is free. An unidentified viewer
+    therefore sees availability and no book control. An identified
+    non-recipient sees availability and, when
+    units are free, the book control. A recipient still gets
+    `WishItemRecipientViewDTO`, and the card omits `.item-giver`.
   - **Parameters**: `public_token` (str) — 16-byte URL-safe public sharing token.
   - **Responses**:
     - `200 OK`: Full HTML view with wishlist details, owner name, and list of items.
@@ -697,6 +725,12 @@ layer, providing defense-in-depth against data leakage:
      `Забронировано вами (N)` next to `Забронировано`. ` · Куплено` is added only when the
      latest occupying promise is bought and it is the only one. The full control and refresh
      contract is in [Wish-card giver controls](reservations.md#6-wish-card-giver-controls).
+   - A missing caller has `is_recipient` false, so the summary still shows
+     `web.item.available_of` («Доступно: {available} из {quantity}») or
+     `web.item.reserved_status` («Забронировано»). `can_promise` also requires
+     `viewer_identified`. The share page sets that flag from the optional
+     session, so «Забронировать» (`web.item.reserve_btn`) is absent for an
+     anonymous viewer.
 
 3. **Bearer Token Isolation**:
    - The private collaborator `invite_token` is strictly isolated to owner administrative views
@@ -1080,6 +1114,9 @@ an item has been booked, how many units remain, or who reserved it.
      (`my_reserved_quantity`), the latest occupying row (`my_reservation_id`,
      `my_reservation_status`, `my_latest_reservation_quantity`), and
      `my_occupying_reservation_count`.
+   - A missing caller is not a recipient, so `project_wish_item(item, None)`
+     is this giver view: the free remainder, with personal promise fields
+     empty.
 3. **Self-Reservation Guard**: Any attempt by a recipient to invoke `create_reservation` raises
    `SelfReservationError` and emits a warning audit log.
 4. **Template Presentation Guard**: Server-rendered Jinja2 templates (`item_card.html`) wrap
@@ -1163,14 +1200,23 @@ async def get_wishlist_by_public_token(
 ```
 
 - **Raises**: `WishlistNotFoundError`, `WishlistDeletedError`.
-- **Consolidated Projection**: `GET /share/{public_token}`, `GET /api/public/wishlists/{token}`,
-  and `GET /api/public/wishlists/{token}/view` call this name on `RepoWishlistOps` for the
-  request repository. Because `project_wish_item(item, None)` returns
-  `recipient_view(item)` (`WishItemRecipientViewDTO`), anonymous callers (`current_user=None`)
-  never receive reservation or giver fields.
-- **Observability**: Emits `public_wishlist_resolved` (`INFO`) with `wishlist_id`, `identified`,
-  `user_id`, `projection_mode` (`"anonymous_safe"`, `"recipient_safe"`, or `"gifter"`), and
-  `items_count`, without logging `public_token`.
+- **Consolidated Projection**: `GET /share/{public_token}`,
+  `GET /api/public/wishlists/{token}`, and
+  `GET /api/public/wishlists/{token}/view` call this name on `RepoWishlistOps`
+  for the request repository. `project_wish_item(item, None)` returns the
+  giver view, not `recipient_view`. The list route then copies an allowlist
+  and drops `available_quantity`. The `/view` route dumps the projected
+  items, so an anonymous caller sees aggregate availability and empty
+  personal fields. The share page renders those giver fields as «Доступно»
+  or «Забронировано» and hides «Забронировать» when the viewer is not
+  identified.
+- **Observability**: Emits `public_wishlist_resolved` (`INFO`) with
+  `wishlist_id`, `identified`, `user_id`, `projection_mode`, and
+  `items_count`, without logging `public_token`. For a missing caller the
+  mode is `anonymous_gifter` (giver projection, including an empty active
+  list). `anonymous_safe` remains only for a missing caller who was served
+  no giver view; current `project_wish_item` does not take that path. An
+  identified caller is `gifter` or `recipient_safe`.
 
 #### `get_wishlist_view`
 
