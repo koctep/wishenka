@@ -71,6 +71,7 @@
       clearTimeout(timer);
       if (generation === csrfGeneration) {
         csrfToken = token;
+        window.csrfToken = token;
       }
       csrfPending = null;
       return token;
@@ -427,6 +428,7 @@
       }
       if (rejection.detail === 'Invalid CSRF token') {
         csrfToken = '';
+        window.csrfToken = '';
         csrfGeneration += 1;
         giverPreparationError(card);
         return;

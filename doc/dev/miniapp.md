@@ -1672,6 +1672,10 @@ of inline JavaScript and inline `on*` event handlers from SSR templates so a str
 - **`window.prepareCsrf` bridge**:
   - `app.js` manages CSRF token fetching, 10 s timeout (`CSRF_TIMEOUT_MS = 10000`), and in-flight
     deduplication via `prepareCsrf()`, and explicitly exposes `window.prepareCsrf = prepareCsrf`.
+  - When the in-flight generation still matches, `prepareCsrf` stores the fetched string on the
+    local `csrfToken` and assigns that same string to `window.csrfToken`. The wishlist move
+    browser check reads `Boolean(window.csrfToken)` and keeps its 5 second wait. A wish-card
+    response whose `detail` is `Invalid CSRF token` clears the local and `window.csrfToken`.
   - `settings.js` (`settingsFetch()`) calls `window.prepareCsrf()` before `PATCH`/`PUT`/`POST`
     requests on `/settings` and attaches `X-CSRF-Token`. Because both scripts load with `defer`
     in order and `settingsFetch()` runs inside user-triggered event handlers, `window.prepareCsrf`

@@ -426,7 +426,10 @@ to records that already exist: `reservation_action_completed` (200 or
 Cookie mutations need `Origin` and `X-CSRF-Token`
 ([`BrowserSecurityMiddleware`](../../wishenka/web/security.py)). When `body` has
 `data-viewer-identified`, `base.html` starts `GET /api/auth/csrf` on `DOMContentLoaded`.
-The token is held in JavaScript memory and is not embedded in HTML. Concurrent preparation
+The token is stored in the script-local `csrfToken` and on `window.csrfToken`. It is not
+embedded in HTML. `prepareCsrf` assigns `window.csrfToken` to the same string it stores
+locally when the fetch generation still matches. The wishlist move browser check reads
+`Boolean(window.csrfToken)` inside its existing 5 second wait. Concurrent preparation
 requests share one pending fetch, with a 10-second timeout. An empty, malformed, failed, or
 expired response leaves the token unavailable; a later click starts another fetch.
 
@@ -442,8 +445,8 @@ Bearer API requests do not require the CSRF header. For HTMX, the guard recogniz
 `Authorization: Bearer ...` header in the actual request configuration; a bearer credential hidden
 from HTMX is not assumed to exist. Even an explicit bearer card action may wait for the pending
 CSRF preparation before dispatch. If a card response is HTTP 403 with
-`detail` equal to `Invalid CSRF token`, the cached token is invalidated and the card asks for a
-retry without refreshing as a refused booking. Other well-formed 403 responses keep the existing
+`detail` equal to `Invalid CSRF token`, the local cache and `window.csrfToken` are cleared
+and the card asks for a retry without refreshing as a refused booking. Other well-formed 403 responses keep the existing
 `notice=refused` refresh. An unparseable or missing 403 detail also shows the retry message.
 
 Run the browser coverage, including local HTMX 1.9.12 and real SQLite persistence, with:
@@ -1207,8 +1210,8 @@ Key metrics derived from structured log events:
 
 - **Symptom**: The card displays `Не удалось подготовить запрос. Повторите попытку.`
 - **Cause**: Token preparation failed, timed out, or returned no usable token; the request was
-  cancelled before dispatch. An invalid-token 403 also invalidates the cached token and shows
-  this message instead of a booking refusal.
+  cancelled before dispatch. An invalid-token 403 also clears the local cache and
+  `window.csrfToken`, and shows this message instead of a booking refusal.
 - **Resolution**: Check the session, network, `GET /api/auth/csrf`, and server CSRF settings;
   then retry the control. Check that the action does not suppress request headers. See
   [Cookie CSRF on the card](#cookie-csrf-on-the-card).
