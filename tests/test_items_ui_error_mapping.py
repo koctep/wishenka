@@ -15,12 +15,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from bs4 import BeautifulSoup
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from wishenka.auth.models import AuthenticatedUser
 from wishenka.auth.session import SessionTokenService
 from wishenka.config import Settings
+from wishenka.i18n import t
 from wishenka.web.app import create_app
 from wishenka.wishlists.service import WishlistService
 
@@ -126,57 +128,82 @@ def _events(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [getattr(r, "event", "") for r in caplog.records if r.name == _LOGGER]
 
 
+def _request_headers(
+    sessions: SessionTokenService,
+    user_id: int,
+    send: _Send,
+    name: str = "User",
+) -> dict[str, str]:
+    """Bearer session; archive actions also select the Russian catalog via Accept-Language."""
+    headers = auth_header(sessions, user_id, name)
+    if send in (_archive_confirm, _archive):
+        headers["Accept-Language"] = "ru"
+    return headers
+
+
+def _assert_refusal(resp: Any, send: _Send, status: int, detail: str, catalog_key: str) -> None:
+    """JSON detail for reorder, move, and restore; HTML list notice for both archive actions."""
+    assert resp.status_code == status
+    if send not in (_archive_confirm, _archive):
+        assert resp.json()["detail"] == detail
+        return
+    assert "text/html" in resp.headers.get("content-type", "")
+    soup = BeautifulSoup(resp.text, "html.parser")
+    notice = soup.select_one("#list-notice[hx-swap-oob]")
+    modal = soup.select_one("#item-modal-container[hx-swap-oob]")
+    assert notice is not None
+    assert notice.get_text() == t(catalog_key, "ru")
+    assert modal is not None
+    assert modal.get_text() == ""
+
+
 @pytest.mark.parametrize("send", _ROUTES)
 def test_archived_wishlist_gives_409(test_app: _Env, send: _Send) -> None:
-    """Archived wishlist -> 409 with the fixed detail on every mapped route."""
+    """Archived wishlist -> 409 HTML catalog notice for archive, JSON detail otherwise."""
     client, sessions, app = test_app
     owner = make_user(101, "Alice")
     wl, ids = _seed(app, owner)
     asyncio.run(app.state.domain_service.archive_wishlist(wishlist_id=wl, actor=owner))
 
-    resp = send(client, wl, ids[0], auth_header(sessions, 101))
+    resp = send(client, wl, ids[0], _request_headers(sessions, 101, send))
 
-    assert resp.status_code == 409
-    assert resp.json()["detail"] == "Wishlist is archived"
+    _assert_refusal(resp, send, 409, "Wishlist is archived", "web.item.archived_wishlist_error")
 
 
 @pytest.mark.parametrize("send", _ROUTES)
 def test_unknown_wishlist_gives_404(test_app: _Env, send: _Send) -> None:
-    """Unknown wishlist id -> 404 with the generic detail."""
+    """Unknown wishlist -> 404 HTML catalog notice for archive, JSON detail otherwise."""
     client, sessions, app = test_app
     owner = make_user(101, "Alice")
     _wl, ids = _seed(app, owner)
 
-    resp = send(client, _MISSING_ID, ids[0], auth_header(sessions, 101))
+    resp = send(client, _MISSING_ID, ids[0], _request_headers(sessions, 101, send))
 
-    assert resp.status_code == 404
-    assert resp.json()["detail"] == "Resource not found"
+    _assert_refusal(resp, send, 404, "Resource not found", "web.item.resource_not_found")
 
 
 @pytest.mark.parametrize("send", _ROUTES)
 def test_non_member_gives_404(test_app: _Env, send: _Send) -> None:
-    """Authenticated non-member -> 404, indistinguishable from a missing resource."""
+    """Non-member -> 404 HTML catalog notice for archive, JSON detail otherwise."""
     client, sessions, app = test_app
     owner = make_user(101, "Alice")
     wl, ids = _seed(app, owner)
 
-    resp = send(client, wl, ids[0], auth_header(sessions, 999, "Stranger"))
+    resp = send(client, wl, ids[0], _request_headers(sessions, 999, send, "Stranger"))
 
-    assert resp.status_code == 404
-    assert resp.json()["detail"] == "Resource not found"
+    _assert_refusal(resp, send, 404, "Resource not found", "web.item.resource_not_found")
 
 
 @pytest.mark.parametrize("send", _ITEM_ROUTES)
 def test_unknown_item_gives_404(test_app: _Env, send: _Send) -> None:
-    """Unknown item id for move / archive-confirm / archive / restore -> 404."""
+    """Unknown item -> 404 HTML catalog notice for archive, JSON detail otherwise."""
     client, sessions, app = test_app
     owner = make_user(101, "Alice")
     wl, _ids = _seed(app, owner)
 
-    resp = send(client, wl, _MISSING_ID, auth_header(sessions, 101))
+    resp = send(client, wl, _MISSING_ID, _request_headers(sessions, 101, send))
 
-    assert resp.status_code == 404
-    assert resp.json()["detail"] == "Resource not found"
+    _assert_refusal(resp, send, 404, "Resource not found", "web.item.resource_not_found")
 
 
 def test_invalid_permutation_gives_400_event_and_keeps_order(
