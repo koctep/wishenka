@@ -91,7 +91,7 @@ async def test_cleanup_cycle_survives_a_failing_notice_purge(
     """Design 10: a failed purge is a WARNING with the class name; the cycle still completes."""
 
     class _Broken:
-        async def purge_finished(self, threshold: datetime) -> int:
+        async def purge_finished(self, threshold: datetime, **_extra: object) -> int:
             raise RuntimeError("secret detail")
 
     async with _store_env(tmp_path) as env:

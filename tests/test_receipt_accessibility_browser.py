@@ -24,8 +24,7 @@ from tests.browser_helpers import (
     title,
 )
 from tests.conftest import BrowserServer
-from tests.receipt_support import attr_of
-from tests.receipt_ui_support import SENTENCES, ui_module
+from tests.receipt_ui_support import SENTENCES
 from wishenka.wishlists.exceptions import InventoryBusyError
 from wishenka.wishlists.service import WishlistService
 
@@ -157,22 +156,33 @@ def test_focus_return_partial_full_and_refusal(
     assert page.evaluate("document.querySelector('#items-list').inert") is False
 
     # 2. In-dialog refusal (503 busy, then 409 quantity_above_remaining) keeps focus on feedback
-    module = ui_module()
-    original = attr_of(module, "_execute")
+    original = WishlistService.record_item_fulfillment
     state = {"busy": True}
 
-    async def flaky(request: object, action: object) -> object:
+    async def flaky(
+        self: WishlistService,
+        item_id: int,
+        actor: object,
+        received_quantity: int,
+        *,
+        wishlist_id: int | None = None,
+    ) -> object:
         if state["busy"]:
             state["busy"] = False
             raise InventoryBusyError()
-        result: object = await original(request, action)
-        return result
+        return await original(
+            self,
+            item_id,
+            actor,  # type: ignore[arg-type]
+            received_quantity,
+            wishlist_id=wishlist_id,
+        )
 
     page.click(title(kettle))
     page.click(f"#item-card-{kettle} .btn-receipt-item")
     open_receipt_dialog(page, seeded, kettle)
 
-    monkeypatch.setattr(module, "_execute", flaky)
+    monkeypatch.setattr(WishlistService, "record_item_fulfillment", flaky)
     _click(page, CONFIRM)
     page.wait_for(
         "busy refusal shown",

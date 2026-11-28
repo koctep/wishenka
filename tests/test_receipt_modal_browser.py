@@ -32,15 +32,14 @@ from tests.browser_helpers import (
     title,
 )
 from tests.conftest import BrowserServer
-from tests.receipt_support import attr_of
 from tests.receipt_ui_support import (
     GENERIC_FAILURE,
     REORDER_NOTICE,
     SENTENCES,
     STALE_CARD_TEXT,
-    ui_module,
 )
 from wishenka.wishlists.exceptions import InventoryBusyError
+from wishenka.wishlists.service import WishlistService
 
 pytestmark = [pytest.mark.timeout(45), pytest.mark.browser]
 
@@ -333,18 +332,29 @@ def test_busy_keeps_dialog_and_chosen_quantity(
     item = seeded.item_ids[0]
     open_receipt_dialog(page, seeded, item)
     _choose(page, 3)
-    module = ui_module()
-    original = attr_of(module, "_execute")
+    original = WishlistService.record_item_fulfillment
     state = {"busy": True}
 
-    async def flaky(request: object, action: object) -> object:
+    async def flaky(
+        self: WishlistService,
+        item_id: int,
+        actor: object,
+        received_quantity: int,
+        *,
+        wishlist_id: int | None = None,
+    ) -> object:
         if state["busy"]:
             state["busy"] = False
             raise InventoryBusyError()
-        result: object = await original(request, action)
-        return result
+        return await original(
+            self,
+            item_id,
+            actor,  # type: ignore[arg-type]
+            received_quantity,
+            wishlist_id=wishlist_id,
+        )
 
-    monkeypatch.setattr(module, "_execute", flaky)
+    monkeypatch.setattr(WishlistService, "record_item_fulfillment", flaky)
 
     _click(page, CONFIRM)
     page.wait_for(

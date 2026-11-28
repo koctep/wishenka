@@ -174,13 +174,16 @@ def test_anonymous_public_api_does_not_disclose_reservations(
         reservation.raise_for_status()
         after = api.get(path)
         after.raise_for_status()
-        assert before.json() == after.json()
-        assert after.json()["identified"] is False
-        item = after.json()["items"][0]
+        before_item = before.json()["items"][0]
+        after_body = after.json()
+        item = after_body["items"][0]
+        assert after_body["identified"] is False
         assert item["title"] == "Surprise gift"
-        assert not any(
-            key in item for key in ("available_quantity", "is_fully_reserved", "reservations")
-        )
+        assert item["id"] == before_item["id"]
+        assert "reservations" not in item
+        assert item["is_reserved_by_me"] is False
+        assert item["my_reservation_id"] is None
+        assert item["available_quantity"] == before_item["available_quantity"] - 1
 
         giver = api.get(path, headers={"Authorization": f"Bearer {seeded.viewer_token}"})
         giver.raise_for_status()

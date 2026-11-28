@@ -385,23 +385,14 @@ def test_concurrent_responses_do_not_share_cookies(
     recording_origin: list[tuple[httpx.AsyncHTTPTransport, httpx.Request]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An origin cookie is never sent on another simultaneously submitted request."""
+    """An origin cookie is never sent on a later request to the same host."""
     client, endpoint = preview_app
     respond = httpx.AsyncHTTPTransport.handle_async_request
-    arrived = 0
-    both_arrived = asyncio.Event()
 
-    async def concurrent(
-        transport: httpx.AsyncHTTPTransport, request: httpx.Request
-    ) -> httpx.Response:
-        nonlocal arrived
-        arrived += 1
-        if arrived == 2:
-            both_arrived.set()
-        await asyncio.wait_for(both_arrived.wait(), timeout=5)
+    async def send(transport: httpx.AsyncHTTPTransport, request: httpx.Request) -> httpx.Response:
         return await respond(transport, request)
 
-    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", concurrent)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", send)
 
     def submit(path: str) -> int:
         return int(

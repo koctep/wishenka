@@ -843,12 +843,14 @@ def test_control_opening_an_entry_moves_it_to_the_top_and_navigation_works(
     _assert_seeded(wishlist_server, token, names)
     page = _history_screen(chromium_browser, _browser_pages, wishlist_server, "en", 2, timeout=45)
     assert page.evaluate(ROW_TITLES_JS) == ["Newer list", "Older list"]
-    opened = page.evaluate(f"""(() => {{
-      const row = document.querySelectorAll({json.dumps(ROWS)})[1];
-      const control = row.querySelector('.history-open') || row.querySelector('button');
+    opened = page.evaluate("""(() => {
+      const row = Array.from(document.querySelectorAll('li.history-card'))
+        .find(card => card.querySelector('h2')?.innerText.trim() === 'Older list');
+      const control = row?.querySelector('button.history-open');
+      if (!control) return false;
       control.click();
       return true;
-    }})()""")
+    })()""")
     assert opened
     page.wait_for(
         "opened list",

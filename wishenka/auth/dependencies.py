@@ -1,7 +1,7 @@
 """FastAPI security dependencies for resolving authentication context."""
 
 import logging
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import text
@@ -15,9 +15,15 @@ from wishenka.auth.models import (
 from wishenka.auth.session import SessionTokenService, compute_revocation_subject_hash
 from wishenka.config import Settings
 from wishenka.users.store import UserStore
-from wishenka.wishlists.store import WishlistStore
 
 logger = logging.getLogger("wishenka.auth")
+
+
+def _wishlist_store_type() -> Any:
+    """Load WishlistStore after its module has finished initializing."""
+    from wishenka.wishlists.store import WishlistStore
+
+    return WishlistStore
 
 
 def get_settings(request: Request) -> Settings:
@@ -48,7 +54,7 @@ async def _is_session_active(
     if not isinstance(engine, AsyncEngine):
         return True
 
-    if isinstance(wishlist_store, WishlistStore):
+    if isinstance(wishlist_store, _wishlist_store_type()):
         async with wishlist_store.read_transaction() as conn:
             return await _session_row_active(conn, settings, claims)
 
