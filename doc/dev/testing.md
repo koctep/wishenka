@@ -762,12 +762,21 @@ make test-serial PYTEST_ARGS="tests/test_unavailable_page_observability.py -q"
 - Тяжёлые браузерные наборы параллельно запускайте осторожно: под нагрузкой воркеров растут
   таймауты, а не число ошибок поведения. Эталонный прогон: `make test-serial PYTEST_ARGS="<файлы>
   -q"`. Переменная `TESTS=` игнорируется, файлы передаёт только `PYTEST_ARGS`.
-- Известные тесты, чувствительные к нагрузке (падают только параллельно, поодиночке и
-  последовательно проходят): `test_cross_screen_comfort_browser.py::
-  test_htmx_pending_request_marks_the_form_busy` (ожидание `WAIT = 3.0` с) и
-  `test_history_screen_browser.py::
-  test_control_opening_an_entry_moves_it_to_the_top_and_navigation_works`. Стабилизация:
-  [WISHENKA-311](https://pypost.atlassian.net/browse/WISHENKA-311).
+- Список известных тестов, которые падают только под параллельной нагрузкой, пуст.
+  Две проверки теперь дожидаются условия (WISHENKA-311). Проверка
+  `test_htmx_pending_request_marks_the_form_busy` в
+  `tests/test_cross_screen_comfort_browser.py` удерживает запрос быстрого
+  добавления, читает занятое состояние и опрашивает его с `timeout=45`
+  (существующий модульный маркер). `WAIT = 3.0` остаётся для остальных проверок
+  этого модуля. Проверка
+  `test_control_opening_an_entry_moves_it_to_the_top_and_navigation_works` в
+  `tests/test_history_screen_browser.py` опрашивает условие с `timeout=45`.
+  Общие помощники по-прежнему ждут 5 с по умолчанию. Прогретый параллельный
+  прогон обоих модулей и
+  `tests/test_receipt_modal_browser.py::test_stale_giver_card_is_neutral`
+  прошёл 81 пункт. Полный набор для этой заметки не запускался.
+  [WISHENKA-357](https://pypost.atlassian.net/browse/WISHENKA-357) и
+  [WISHENKA-285](https://pypost.atlassian.net/browse/WISHENKA-285) этой правкой не закрыты.
 - Ограничения набора: контрольный тест D4 пропускает неточно подобранные «подозреваемые»
   селекторы (`D4_SUSPECTS`, WISHENKA-308); защита кнопки создания и утверждение A6 после
   WISHENKA-296 относятся к кнопке «Создать» формы (тесты в

@@ -157,16 +157,21 @@ def _hx(page: CdpPage, **settings: Any) -> None:
     page.evaluate(f"Object.assign(window.__hx, {json.dumps(settings)})")
 
 
-def _go_history(page: CdpPage, locale: SupportedLocale) -> None:
+def _go_history(page: CdpPage, locale: SupportedLocale, *, timeout: float = 5.0) -> None:
     page.click(NAV_HISTORY)
     title = json.dumps(t("miniapp.history.title", locale))
-    page.wait_for("history screen", f"document.querySelector('#app h1')?.innerText === {title}")
+    page.wait_for(
+        "history screen",
+        f"document.querySelector('#app h1')?.innerText === {title}",
+        timeout=timeout,
+    )
 
 
-def _wait_rows(page: CdpPage, count: int) -> None:
+def _wait_rows(page: CdpPage, count: int, *, timeout: float = 5.0) -> None:
     page.wait_for(
         f"{count} history rows",
         f"document.querySelectorAll({json.dumps(ROWS)}).length === {count}",
+        timeout=timeout,
     )
 
 
@@ -178,10 +183,11 @@ def _history_screen(
     rows: int,
     *,
     viewport: tuple[int, int] = (412, 800),
+    timeout: float = 5.0,
 ) -> CdpPage:
     page = _home(browser, pages, server, locale, viewport=viewport)
-    _go_history(page, locale)
-    _wait_rows(page, rows)
+    _go_history(page, locale, timeout=timeout)
+    _wait_rows(page, rows, timeout=timeout)
     return page
 
 
@@ -835,7 +841,7 @@ def test_control_opening_an_entry_moves_it_to_the_top_and_navigation_works(
     token = wishlist_server.owner_token
     _seed_history(wishlist_server, token, names)
     _assert_seeded(wishlist_server, token, names)
-    page = _history_screen(chromium_browser, _browser_pages, wishlist_server, "en", 2)
+    page = _history_screen(chromium_browser, _browser_pages, wishlist_server, "en", 2, timeout=45)
     assert page.evaluate(ROW_TITLES_JS) == ["Newer list", "Older list"]
     opened = page.evaluate(f"""(() => {{
       const row = document.querySelectorAll({json.dumps(ROWS)})[1];
@@ -844,18 +850,28 @@ def test_control_opening_an_entry_moves_it_to_the_top_and_navigation_works(
       return true;
     }})()""")
     assert opened
-    page.wait_for("opened list", "document.querySelector('#app h1')?.innerText === 'Older list'")
-    _wait_until(
-        "view recorded", lambda: _history(wishlist_server, token)[0]["name"] == "Older list"
+    page.wait_for(
+        "opened list",
+        "document.querySelector('#app h1')?.innerText === 'Older list'",
+        timeout=45,
     )
+
+    def _older_list_is_first() -> bool:
+        try:
+            name = _history(wishlist_server, token)[0]["name"]
+        except httpx.HTTPError:
+            return False
+        return bool(name == "Older list")
+
+    _wait_until("view recorded", _older_list_is_first, timeout=45)
     page.navigate(f"{wishlist_server.base_url}/")
-    _go_history(page, "en")
-    _wait_rows(page, 2)
+    _go_history(page, "en", timeout=45)
+    _wait_rows(page, 2, timeout=45)
     assert page.evaluate(ROW_TITLES_JS) == ["Older list", "Newer list"]
     page.evaluate("""Array.from(document.querySelectorAll('#app button'))
       .find(b => b.innerText.trim() === 'Back').click()""")
     home = json.dumps(t("miniapp.home.title", "en"))
-    page.wait_for("home", f"document.querySelector('#app h1')?.innerText === {home}")
+    page.wait_for("home", f"document.querySelector('#app h1')?.innerText === {home}", timeout=45)
     assert_clean_console(page)
 
 

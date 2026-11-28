@@ -869,6 +869,8 @@ def _quick_add_page(
     pages: list[CdpPage],
     data: ComfortData,
     mode: str,
+    *,
+    timeout: float = WAIT,
 ) -> CdpPage:
     """Detail page with real htmx and the XHR wrapper in ``mode``; the field holds a title."""
     page = open_path(
@@ -880,7 +882,7 @@ def _quick_add_page(
         viewport=(390, VIEWPORT_HEIGHT),
         real_htmx=True,
     )
-    page.wait_for("real htmx loaded", "typeof window.htmx === 'object'", timeout=WAIT)
+    page.wait_for("real htmx loaded", "typeof window.htmx === 'object'", timeout=timeout)
     page.evaluate(XHR_WRAPPER)
     page.evaluate(f"window.__x.mode = {json.dumps(mode)}")
     page.evaluate(f"document.querySelector({json.dumps(QUICK_INPUT)}).value = 'Gift'")
@@ -931,9 +933,11 @@ def test_htmx_pending_request_marks_the_form_busy(
 ) -> None:
     """D9 (A10): while quick add waits for the server the form is busy, then it recovers."""
     data = _seed(wishlist_server, "ru")
-    page = _quick_add_page(wishlist_server, chromium_browser, _browser_pages, data, "hold")
+    page = _quick_add_page(
+        wishlist_server, chromium_browser, _browser_pages, data, "hold", timeout=45
+    )
     page.click(QUICK_BUTTON)
-    page.wait_for("request held", "window.__x.held.length === 1", timeout=WAIT)
+    page.wait_for("request held", "window.__x.held.length === 1", timeout=45)
     pending = page.evaluate(
         f"""({{busy: document.querySelector({json.dumps(QUICK_FORM)}).getAttribute('aria-busy'),
           disabled: document.querySelector({json.dumps(QUICK_BUTTON)}).disabled}})"""
@@ -945,7 +949,7 @@ def test_htmx_pending_request_marks_the_form_busy(
     page.wait_for(
         "new item rendered",
         "document.querySelectorAll('#items-list .item-card').length === 4",
-        timeout=WAIT,
+        timeout=45,
     )
     after = page.evaluate(
         f"""({{busy: document.querySelector({json.dumps(QUICK_FORM)}).getAttribute('aria-busy'),
